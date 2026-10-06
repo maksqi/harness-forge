@@ -214,7 +214,7 @@ describe('backups', () => {
       { kind: 'agent', name: 'fits', content: '---\nname: fits\ndescription: Fits.\n---\nBody.', enabled: true },
       { kind: 'agent', name: 'over', content: '---\nname: over\ndescription: Over.\n---\nBody.', enabled: true },
     ])
-    expect(result).toEqual({ imported: 1, skipped: 0, failed: 1, warnings: ['The personal agent "over" was not restored: the limit of 200 personal agents is reached.'] })
+    expect(result).toEqual({ imported: 1, skipped: 0, failed: 1, turnedOff: 0, warnings: ['The personal agent "over" was not restored: the limit of 200 personal agents is reached.'] })
   })
 })
 

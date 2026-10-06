@@ -11,6 +11,11 @@
 // rows are saved, then they go with the chat); deleting a version is also refused (`409 run-active`) while a background
 // task of the chat runs (`deps.runs.hasTasks`; it may write files journaled under a message of the chat); a version
 // switch stays allowed (the tasks keep running and deliver into the active path).
+// Phase 12 (C44 call site, ADR-057; W12.5 implements the runner, W12.6 owns this route in P12-A): `DELETE /chats/:id`
+// reads the chat row before the delete and, once the chat is deleted, hands it to `deps.hooks.sessionEnd(chat)`
+// (`SessionEnd`, `reason: 'other'`; detached: the answer never waits for it, a failure never fails the delete). Only a
+// single chat delete ends a session: delete-all, a project delete and shutdown never call it.
+import type { SessionEndChat } from '../../services/hooks/types.ts'
 import type { AppDeps } from '../../types.ts'
 import type { AppEnv } from '../types.ts'
 import {
@@ -28,6 +33,20 @@ import { backgroundConflict } from '../../chat/background/busy.ts'
 import { runConflict } from '../../chat/runs.ts'
 import { contentDisposition } from '../../services/files/names.ts'
 import { validate } from '../validate.ts'
+
+/**
+ * Hands a deleted chat to the `SessionEnd` hooks (`HookService.sessionEnd`; detached: never awaited, and a throw or a
+ * rejection, which the contract excludes, never reaches the route).
+ */
+export function endChatSession(deps: Pick<AppDeps, 'hooks' | 'logger'>, chat: SessionEndChat): void {
+  const failed = (error: unknown): void => deps.logger.warn('the SessionEnd hooks failed', { chatId: chat.id, err: error })
+  try {
+    void deps.hooks.sessionEnd(chat).catch(failed)
+  }
+  catch (error) {
+    failed(error)
+  }
+}
 
 export function createChatsRoutes(deps: AppDeps): Hono<AppEnv> {
   const app = new Hono<AppEnv>()
@@ -54,7 +73,11 @@ export function createChatsRoutes(deps: AppDeps): Hono<AppEnv> {
     // manager on `chat.deleted`), then the run.
     await deps.runs.stopTasks(id)
     await deps.runs.stop(id)
+    // Phase 12: the row `SessionEnd` describes (its project and settings), read before it is gone.
+    const chat = await deps.chats.find(id)
     await deps.chats.remove(id)
+    if (chat !== null)
+      endChatSession(deps, chat)
     return c.body(null, 204)
   })
 

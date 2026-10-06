@@ -207,3 +207,12 @@ describe('hooks store', () => {
     await expect(store.runs()).resolves.toEqual({ items: [] })
   })
 })
+
+describe('hooks store: project hooks (Phase 12, C46)', () => {
+  it('declares saveProjectHook (W12.12 implements it; P12-0b answers not_implemented)', async () => {
+    const store = useHooksStore()
+    const target = { projectId: projectId(1), path: '.claude/settings.json', event: 'PreToolUse' as const, groupIndex: null, handlerIndex: null }
+    await expect(store.saveProjectHook(projectId(1), target, null)).rejects.toMatchObject({ code: 'not_implemented' })
+    expect(api.projectDefinitions.write).not.toHaveBeenCalled()
+  })
+})

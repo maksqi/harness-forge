@@ -1,8 +1,10 @@
 <script setup lang="ts">
 // The card grid of the list page (docs/UI.md 8.2): one column, two from md, three from xl, 12px gaps; six skeleton
-// cards while the list loads. Card events are forwarded with their plugin.
+// cards while the list loads. Card events are forwarded with their plugin. Phase 12 (ADR-054): each card gets the update
+// a marketplace offers for it (`useMarketplacesStore().updateOf`).
 import type { PluginSummary } from '@harness-forge/shared'
 import { Skeleton } from '@/components/ui/skeleton'
+import { useMarketplacesStore } from '~/stores/marketplaces'
 import PluginCard from './PluginCard.vue'
 
 withDefaults(defineProps<{ plugins: readonly PluginSummary[], loading?: boolean }>(), { loading: false })
@@ -14,6 +16,8 @@ const emit = defineEmits<{
 }>()
 
 const GRID = 'grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3'
+
+const marketplaces = useMarketplacesStore()
 </script>
 
 <template>
@@ -41,6 +45,7 @@ const GRID = 'grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3'
     <div v-for="plugin in plugins" :key="plugin.id" role="listitem" class="flex min-w-0">
       <PluginCard
         :plugin="plugin"
+        :update="marketplaces.updateOf(plugin.id)"
         class="flex-1"
         @update:enabled="value => emit('update:enabled', plugin, value)"
         @view-logs="emit('viewLogs', plugin)"

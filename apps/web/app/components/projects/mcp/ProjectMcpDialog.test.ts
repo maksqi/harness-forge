@@ -13,7 +13,7 @@ import { useAuthStore } from '~/stores/auth'
 import { useProjectMcpStore } from '~/stores/project-mcp'
 import { useProjectsStore } from '~/stores/projects'
 import { testIds } from '~/utils/testids'
-import { authStatus, projectId, projectMcpList, projectMcpServer, projectSummary, projectTrustList, trustMcpItem, trustSha } from '~/utils/testing/fixtures'
+import { authStatus, projectDefinitionFile, projectId, projectMcpList, projectMcpServer, projectSummary, projectTrustList, trustMcpItem, trustSha } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import ProjectMcpDialog from './ProjectMcpDialog.vue'
 
@@ -252,5 +252,31 @@ describe('projectMcpDialog', () => {
     await click([...alert.querySelectorAll('button')].find(button => button.textContent?.trim() === 'Retry')!)
     expect(byTestId(testIds.projectMcpError)).toBeNull()
     expect(row('memory')).toBeDefined()
+  })
+})
+
+describe('projectMcpDialog: Edit .mcp.json… (Phase 12, C46-T7)', () => {
+  it('opens the project file editor on .mcp.json from the footer', async () => {
+    api.projectDefinitions.read.mockResolvedValue(projectDefinitionFile({ path: '.mcp.json', kind: 'mcp', content: '{ "mcpServers": {} }' }))
+    await mountDialog()
+    const edit = byTestId(testIds.projectMcpDialog)!.querySelector<HTMLElement>('[data-action="edit-mcp-json"]')!
+    expect(edit.textContent?.trim()).toBe('Edit .mcp.json…')
+    edit.click()
+    await flushPromises()
+    await nextTick()
+    expect(byTestId(testIds.projectFileEditor)?.dataset).toMatchObject({ kind: 'mcp', path: '.mcp.json', mode: 'edit' })
+    expect(api.projectDefinitions.read).toHaveBeenCalledWith({ params: { id: P1 }, query: { path: '.mcp.json' } })
+  })
+
+  it('offers it in the empty state, where it creates the file', async () => {
+    api.projectDefinitions.read.mockResolvedValue(projectDefinitionFile({ path: '.mcp.json', kind: 'mcp', exists: false, content: null, sha256: null }))
+    await mountDialog(projectMcpList({ items: [], variables: [] }))
+    expect(byTestId(testIds.projectMcpEmpty)).not.toBeNull()
+    const edit = byTestId(testIds.projectMcpDialog)!.querySelectorAll<HTMLElement>('[data-action="edit-mcp-json"]')
+    expect(edit).toHaveLength(1)
+    edit[0]!.click()
+    await flushPromises()
+    await nextTick()
+    expect(byTestId(testIds.projectFileEditor)?.dataset.mode).toBe('new')
   })
 })

@@ -4,7 +4,11 @@
 // Phase 11 (plugin API 1.5.0, W11.8): the commands a manifest runs ("Runs these commands": every command hook and every
 // `!` span of a command template, read with the shared `readHooksConfig` / `planCommandExpansion`) and the summary's
 // hooks and output styles.
+// Phase 12 (ADR-053 / ADR-054; C46 declares, W12.9 implements; frozen from Gate P12-0b): the GitHub tab (`github`, the
+// draft's `githubRepo` / `githubRef` / `githubPath`, `parseGithubSpec` over the shared `parseMarketplaceShorthand`), the
+// Claude Code preview (`claudePreview`) and the executables of a Claude Code plugin in `runCommands`.
 import type {
+  ClaudePluginInfo,
   PluginContributions,
   PluginInspection,
   PluginInstallBody,
@@ -13,20 +17,24 @@ import type {
   PluginPermission,
   PluginSource,
 } from '@harness-forge/shared'
-import { LIMITS, planCommandExpansion, pluginInspectBodySchema, readHooksConfig } from '@harness-forge/shared'
+import { LIMITS, parseMarketplaceShorthand, planCommandExpansion, pluginInspectBodySchema, readHooksConfig } from '@harness-forge/shared'
 import { formatBytes } from '~/components/common/format'
 import { toHarnessError } from '~/utils/errors'
 
-/** Source tabs of the install dialog (`ui.installSource`). */
-export type InstallTab = 'zip' | 'npm' | 'url' | 'folder'
-export const INSTALL_TABS: readonly InstallTab[] = ['zip', 'npm', 'url', 'folder']
+/** Source tabs of the install dialog (`ui.installSource`); + Phase 12: `github` (between URL and Local folder). */
+export type InstallTab = 'zip' | 'npm' | 'url' | 'github' | 'folder'
+export const INSTALL_TABS: readonly InstallTab[] = ['zip', 'npm', 'url', 'github', 'folder']
 
 export const TAB_LABELS: Record<InstallTab, string> = {
   zip: 'Zip',
   npm: 'npm',
   url: 'URL',
+  github: 'GitHub',
   folder: 'Local folder',
 }
+
+/** The GitHub tab's hint (docs/UI.md 8.3). */
+export const GITHUB_HINT = 'Downloads an archive of the exact commit over HTTPS. Nothing runs before you review it.'
 
 /** Exact trust warning of docs/PLUGINS.md section 13 ("Trust warning"). */
 export const TRUST_WARNING_TEXT = 'Runs code on your server with harness-forge\'s permissions. It can read API keys and conversations and make network requests. Only install plugins from sources you trust.'
@@ -54,16 +62,25 @@ export interface InstallDraft {
   integrity: string
   folderPath: string
   folderMode: 'link' | 'copy'
+  /** + Phase 12: the GitHub tab's Repository (`owner/repo`, `owner/repo#ref`, `owner/repo@ref` or a github.com URL). */
+  githubRepo: string
+  /** + Phase 12: "Branch, tag or commit (optional)". */
+  githubRef: string
+  /** + Phase 12: "Folder in the repository (optional)". */
+  githubPath: string
 }
 
-export type DraftField = 'file' | 'npmName' | 'npmVersion' | 'url' | 'integrity' | 'folderPath'
+export type DraftField = 'file' | 'npmName' | 'npmVersion' | 'url' | 'integrity' | 'folderPath' | 'githubRepo' | 'githubRef' | 'githubPath'
 export type FieldErrors = Partial<Record<DraftField, string>>
 
 export function emptyDraft(): InstallDraft {
-  return { file: null, npmName: '', npmVersion: '', url: '', integrity: '', folderPath: '', folderMode: 'link' }
+  return { file: null, npmName: '', npmVersion: '', url: '', integrity: '', folderPath: '', folderMode: 'link', githubRepo: '', githubRef: '', githubPath: '' }
 }
 
-/** What an inspect / install call sends: the zip as multipart, every other source as JSON. */
+/**
+ * What an inspect / install call sends: the zip as multipart, every other source as JSON (+ Phase 12: `PluginInstallSource`
+ * also holds `{ source: 'github', repo, ref?, path? }` and `{ source: 'marketplace', marketplaceId, plugin }`).
+ */
 export type InstallRequest
   = | { kind: 'zip', file: File }
     | { kind: 'json', source: PluginInstallSource }
@@ -78,7 +95,20 @@ const ISSUE_FIELDS: Record<InstallTab, Record<string, DraftField>> = {
   zip: { file: 'file' },
   npm: { spec: 'npmName' },
   url: { url: 'url', integrity: 'integrity' },
+  github: { repo: 'githubRepo', ref: 'githubRef', path: 'githubPath' },
   folder: { path: 'folderPath', mode: 'folderPath' },
+}
+
+/**
+ * Splits a GitHub repository spec (`owner/repo`, `owner/repo#ref`, `owner/repo@ref`, `https://github.com/owner/repo`,
+ * `…/tree/<ref>`) with the shared `parseMarketplaceShorthand`; null for anything else (another host, a URL of a file, a
+ * folder).
+ */
+export function parseGithubSpec(text: string): { repo: string, ref?: string } | null {
+  const parsed = parseMarketplaceShorthand(text)
+  if (parsed?.kind !== 'github')
+    return null
+  return parsed.ref === undefined ? { repo: parsed.repo } : { repo: parsed.repo, ref: parsed.ref }
 }
 
 /** npm spec of the two inputs (`name` + optional version / range / tag). */
@@ -127,6 +157,26 @@ export function buildRequest(tab: InstallTab, draft: InstallDraft): DraftCheck {
     }
     case 'url': {
       const { source, errors } = schemaErrors(tab, { source: 'url', url: draft.url.trim(), integrity: draft.integrity.trim() })
+      return { request: source ? { kind: 'json', source } : null, errors }
+    }
+    case 'github': {
+      const text = draft.githubRepo.trim()
+      if (text === '')
+        return { request: null, errors: { githubRepo: 'Enter a repository as owner/repo.' } }
+      const spec = parseGithubSpec(text)
+      if (!spec)
+        return { request: null, errors: { githubRepo: 'Enter a GitHub repository as owner/repo or a github.com URL.' } }
+      const typedRef = draft.githubRef.trim()
+      if (typedRef !== '' && spec.ref !== undefined && spec.ref !== typedRef)
+        return { request: null, errors: { githubRef: 'The repository already names a branch, tag or commit: clear one of them.' } }
+      const ref = typedRef || spec.ref
+      const path = draft.githubPath.trim().replace(/^\/+|\/+$/g, '')
+      const { source, errors } = schemaErrors(tab, {
+        source: 'github',
+        repo: spec.repo,
+        ...(ref ? { ref } : {}),
+        ...(path === '' ? {} : { path }),
+      })
       return { request: source ? { kind: 'json', source } : null, errors }
     }
     case 'folder': {
@@ -284,9 +334,12 @@ export interface ManifestRunCommand {
 /**
  * Shell commands a manifest runs (plugin API 1.5.0, docs/PLUGINS.md 13 "Runs these commands"): the command of every
  * command hook (`contributes.hooks`, read with the shared `readHooksConfig`) and every `` !`cmd` `` span of a command
- * template (scanned with the shared `planCommandExpansion`), in manifest order.
+ * template (scanned with the shared `planCommandExpansion`), in manifest order. + Phase 12 (ADR-053): a Claude Code
+ * plugin (`claude` given) lists its `executables` instead (the server's list is what trust approves).
  */
-export function runCommands(manifest: PluginManifest): ManifestRunCommand[] {
+export function runCommands(manifest: PluginManifest, claude?: ClaudePluginInfo | null): ManifestRunCommand[] {
+  if (claude)
+    return claude.executables.map(executable => ({ source: executable.label, command: executable.command }))
   const hooks = readHooksConfig(manifest.contributes?.hooks, { source: 'plugin' }).items.map(hook => ({ source: `${hook.event} hook`, command: hook.command }))
   const spans = (manifest.contributes?.commands ?? [])
     .flatMap(command => (command.template.includes('!`') ? planCommandExpansion(command.template).shellCommands : [])
@@ -329,6 +382,26 @@ export function manifestIcon(icon: string | undefined): { color?: string, mono?:
   const slug = icon.slice('lobe:'.length)
   const base = slug.endsWith('-color') ? slug.slice(0, -'-color'.length) : slug
   return { color: `/api/icons/lobe/${encodeURIComponent(`${base}-color`)}`, mono: `/api/icons/lobe/${encodeURIComponent(base)}` }
+}
+
+// ---------- Claude Code preview (Phase 12) ----------
+
+/**
+ * The Claude Code lines of the preview (docs/UI.md 8.13): the namespace of its qualified names, "Asks for:" (the
+ * `userConfig` titles, "(secret)" / "(required)" after them), the ignored parts with their reasons and the resolved
+ * commit of a GitHub source (from `sourceRef` `owner/repo@<sha>`); null for a harness plugin.
+ */
+export function claudePreview(inspection: PluginInspection): { namespace: string | null, asksFor: string[], ignored: string[], commit: string | null } | null {
+  const claude = inspection.claude
+  if (inspection.format !== 'claude' || !claude)
+    return null
+  const asksFor = claude.userConfig.map((option) => {
+    const notes = [option.sensitive ? '(secret)' : null, option.required ? '(required)' : null].filter(Boolean)
+    return [option.title || option.key, ...notes].join(' ')
+  })
+  const ignored = claude.unsupported.map(part => (part.reason ? `${part.component}: ${part.reason}` : part.component))
+  const commit = inspection.sourceRef?.match(/@([\da-f]{7,40})(?:\/|$)/)?.[1] ?? null
+  return { namespace: claude.namespace, asksFor, ignored, commit }
 }
 
 // ---------- stale review ----------

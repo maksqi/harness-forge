@@ -11,6 +11,7 @@ import { createFakeHookSnapshot, fakeHookRecord, fakeHookResult } from '../testi
 import { runScopeOf } from '../workspace/run-scope.ts'
 import {
   applyHookDecision,
+  applyPermissionRequest,
   BLOCKED_BY_HOOK,
   blockedByHookReason,
   createToolApproval,
@@ -650,5 +651,163 @@ describe('createToolApproval: PreToolUse command hooks (Phase 11, C37-T2)', () =
       throw new Error('broken')
     } } })
     expect(await createToolApproval(context({ toolMode: 'auto', hooks: broken.hooks }))(call)).toBe('user-approval')
+  })
+})
+
+describe('createToolApproval: PermissionRequest and the allow record (Phase 12, C44-T2)', () => {
+  const MODES_WITH_TOOLS: ToolMode[] = ['ask', 'edits', 'plan', 'auto']
+  const STATIC_POLICIES = ['safe', 'ask', 'always'] as const
+
+  function hooked(options: Parameters<typeof createFakeHookSnapshot>[0], continued: HarnessUIMessage | null = null) {
+    const snapshot = createFakeHookSnapshot(options)
+    const injected: HookData[] = []
+    const hooks = createRunHooks({
+      snapshot,
+      host: { stepNumber: 0, inject: chunk => (chunk.type === 'data-hook' ? injected.push(chunk.data) : 0), writeTransient: () => {} },
+      continued,
+      messageId: 'msg_a000000000000001',
+      logger: createSilentLogger(),
+    })
+    const requests = () => snapshot.calls.filter(entry => entry.event === 'PermissionRequest').length
+    return { snapshot, hooks, injected, requests }
+  }
+
+  /** What the approval answers without hooks (the harness result). */
+  function harnessOutcome(mode: ToolMode, policy: EffectivePolicy, access: ToolWorkspaceAccess | null): ApprovalOutcome {
+    return resolveApproval({ override: null, hookDecision: undefined, toolMode: mode, policy, workspace: access }).outcome
+  }
+
+  it('applyPermissionRequest: only a user-approval result changes; deny denies, allow passes the PreToolUse gate', () => {
+    const ask = { outcome: 'user-approval' as const }
+    expect(applyPermissionRequest(ask, { decision: 'deny', reason: 'not now' }, null, 'ask', 'ask')).toEqual({ outcome: 'denied', reason: 'Blocked by hook: not now' })
+    expect(applyPermissionRequest(ask, { decision: 'deny', reason: null }, null, 'ask', 'ask')).toEqual({ outcome: 'denied', reason: BLOCKED_BY_HOOK })
+    expect(applyPermissionRequest(ask, { decision: 'allow', reason: null }, 'write', 'ask', 'edits')).toEqual({ outcome: 'approved' })
+    expect(applyPermissionRequest(ask, { decision: 'allow', reason: null }, 'execute', 'ask', 'ask')).toBe(ask)
+    expect(applyPermissionRequest(ask, { decision: 'allow', reason: null }, null, 'always', 'ask')).toBe(ask)
+    expect(applyPermissionRequest(ask, { decision: 'allow', reason: null }, null, 'ask', 'plan')).toBe(ask)
+    expect(applyPermissionRequest(ask, { decision: null, reason: 'x' }, null, 'ask', 'ask')).toBe(ask)
+    expect(applyPermissionRequest(ask, null, null, 'ask', 'ask')).toBe(ask)
+    const approved = { outcome: 'approved' as const }
+    expect(applyPermissionRequest(approved, { decision: 'deny', reason: 'x' }, null, 'ask', 'ask')).toBe(approved)
+  })
+
+  it('each decision × mode × access × policy: runs only when the call would ask; allow through the gate, deny blocks', async () => {
+    for (const mode of MODES_WITH_TOOLS) {
+      for (const access of [undefined, 'read', 'write', 'execute'] as const) {
+        for (const policy of STATIC_POLICIES) {
+          const tool = { pluginId: 'demo', definition: definition(policy, access) }
+          const before = harnessOutcome(mode, policy, access ?? null)
+          for (const decision of ['allow', 'deny', null] as const) {
+            const result = decision === null ? fakeHookResult() : fakeHookResult({ decision, block: decision === 'deny', reason: decision === 'deny' ? 'no' : null })
+            const h = hooked({ results: { PermissionRequest: result } })
+            const status = await createToolApproval(context({ tool, toolMode: mode, hooks: h.hooks }))(call)
+            const label = `${mode} ${access ?? 'none'} ${policy} ${decision ?? 'none'}`
+            if (before !== 'user-approval') {
+              expect(h.requests(), label).toBe(0)
+              expect(status, label).toBe(before)
+              continue
+            }
+            expect(h.requests(), label).toBe(1)
+            if (decision === 'deny')
+              expect(status, label).toEqual({ type: 'denied', reason: 'Blocked by hook: no' })
+            else if (decision === 'allow' && mode !== 'plan' && access !== 'execute' && policy !== 'always')
+              expect(status, label).toBe('approved')
+            else
+              expect(status, label).toBe('user-approval')
+          }
+        }
+      }
+    }
+  })
+
+  it('runs after a PreToolUse ask, never after a PreToolUse deny or allow that decided, and evaluates a policy function once', async () => {
+    let evaluated = 0
+    const tool: ApprovalTool = { pluginId: 'demo', definition: definition(() => {
+      evaluated += 1
+      return 'ask' as const
+    }) }
+    const askThenAllow = hooked({ results: { PreToolUse: fakeHookResult({ decision: 'ask' }), PermissionRequest: fakeHookResult({ decision: 'allow' }) } })
+    expect(await createToolApproval(context({ tool, toolMode: 'auto', hooks: askThenAllow.hooks }))(call)).toBe('approved')
+    expect(askThenAllow.requests()).toBe(1)
+    const deny = hooked({ results: { PreToolUse: fakeHookResult({ decision: 'deny' }), PermissionRequest: fakeHookResult({ decision: 'allow' }) } })
+    expect(await createToolApproval(context({ tool, hooks: deny.hooks }))(call)).toEqual({ type: 'denied', reason: BLOCKED_BY_HOOK })
+    expect(deny.requests()).toBe(0)
+    evaluated = 0
+    const allow = hooked({ results: { PreToolUse: fakeHookResult({ decision: 'allow' }), PermissionRequest: fakeHookResult({ decision: 'deny' }) } })
+    expect(await createToolApproval(context({ tool, hooks: allow.hooks }))(call)).toBe('approved')
+    expect(allow.requests()).toBe(0)
+    expect(evaluated).toBe(1)
+    // An `ask` override: the policy is evaluated for the PermissionRequest allow, once.
+    evaluated = 0
+    const overridden = hooked({ results: { PermissionRequest: fakeHookResult({ decision: 'allow' }) } })
+    const askOverride = new Map([['demo_tool', { enabled: true, override: 'ask' as const }]])
+    expect(await createToolApproval(context({ tool, prefs: askOverride, hooks: overridden.hooks }))(call)).toBe('approved')
+    expect(evaluated).toBe(1)
+    // The plan card never runs it.
+    const plan: ApprovalTool = { pluginId: 'core-agent', definition: { ...definition('always'), name: 'exit_plan_mode' } }
+    const planHooks = hooked({ results: { PermissionRequest: fakeHookResult({ decision: 'allow' }) } })
+    expect(await createToolApproval(context({ toolMode: 'plan', tool: plan, hooks: planHooks.hooks }))({ toolCall: { toolName: 'exit_plan_mode', toolCallId: 'p', input: {} }, messages: [] })).toBe('user-approval')
+    expect(planHooks.requests()).toBe(0)
+  })
+
+  it('an approving allow applies its updatedInput; a deny or an allow the gate refuses does not run the call', async () => {
+    const h = hooked({ results: { PermissionRequest: fakeHookResult({ decision: 'allow', updatedInput: { safe: true } }) } })
+    expect(await createToolApproval(context({ hooks: h.hooks }))(call)).toBe('approved')
+    expect(h.hooks.updatedInput('call_1')).toEqual({ input: { safe: true } })
+  })
+
+  it('children never run it: a child asks nothing and its approval turns the card into the sub-agent denial', async () => {
+    const h = hooked({ results: { PermissionRequest: fakeHookResult({ decision: 'allow' }) } })
+    const approve = createToolApproval(context({ hooks: h.hooks.forChild('call_t/') }))
+    expect(denyUserApproval(await approve(call))).toEqual({ type: 'denied', reason: SUBAGENT_APPROVAL_DENIED_TEXT })
+    expect(h.requests()).toBe(0)
+  })
+
+  it('runs exactly once across a request and its approved continuation', async () => {
+    const record = fakeHookRecord('PermissionRequest', 'context', { toolCallId: 'call_1', toolName: 'demo_tool', context: 'noted' })
+    const first = hooked({ results: { PermissionRequest: fakeHookResult({ context: 'noted', record }) } })
+    expect(await createToolApproval(context({ hooks: first.hooks }))(call)).toBe('user-approval')
+    expect(first.requests()).toBe(1)
+    expect(first.injected).toEqual([record])
+    const continued: HarnessUIMessage = {
+      id: 'msg_a000000000000001',
+      role: 'assistant',
+      parts: [
+        { type: 'tool-demo_tool', toolCallId: 'call_1', state: 'approval-responded', input: {}, approval: { id: 'ap_1', approved: true } } as unknown as HarnessUIMessage['parts'][number],
+        { type: 'data-hook', data: record },
+      ],
+    }
+    const second = hooked({ results: { PermissionRequest: fakeHookResult({ decision: 'deny', reason: 'would deny now' }) } }, continued)
+    expect(await createToolApproval(context({ hooks: second.hooks }))(call)).toBe('user-approval')
+    expect(second.requests()).toBe(0)
+    expect(second.injected).toEqual([])
+  })
+
+  it('settles every call: harnessAsked on a PreToolUse allow the harness still asks for, in order with the PermissionRequest record', async () => {
+    const allowedRecord = () => fakeHookRecord('PreToolUse', 'allowed', { toolCallId: 'call_1', toolName: 'demo_tool' })
+    // Plan mode: the allow keeps the card.
+    const plan = hooked({ results: { PreToolUse: fakeHookResult({ decision: 'allow', record: allowedRecord() }) } })
+    expect(await createToolApproval(context({ toolMode: 'plan', hooks: plan.hooks }))(call)).toBe('user-approval')
+    expect(plan.injected).toHaveLength(1)
+    expect(plan.injected[0]).toMatchObject({ event: 'PreToolUse', outcome: 'allowed', harnessAsked: true })
+    // An execute tool: the card stays, the PermissionRequest record follows the PreToolUse one.
+    const request = fakeHookRecord('PermissionRequest', 'error', { toolCallId: 'call_1', toolName: 'demo_tool' })
+    const execute = hooked({ results: { PreToolUse: fakeHookResult({ decision: 'allow', record: allowedRecord() }), PermissionRequest: fakeHookResult({ decision: 'allow', record: request }) } })
+    expect(await createToolApproval(context({ tool: { pluginId: 'demo', definition: definition('ask', 'execute') }, hooks: execute.hooks }))(call)).toBe('user-approval')
+    expect(execute.injected.map(data => [data.event, data.harnessAsked ?? false])).toEqual([['PreToolUse', true], ['PermissionRequest', false]])
+    // An allow that approves, or a PermissionRequest deny: no flag.
+    const approved = hooked({ results: { PreToolUse: fakeHookResult({ decision: 'allow', record: allowedRecord() }) } })
+    expect(await createToolApproval(context({ hooks: approved.hooks }))(call)).toBe('approved')
+    expect(approved.injected[0]).not.toHaveProperty('harnessAsked')
+    const denied = hooked({ results: { PreToolUse: fakeHookResult({ decision: 'allow', record: allowedRecord() }), PermissionRequest: fakeHookResult({ decision: 'deny', block: true }) } })
+    expect(await createToolApproval(context({ tool: { pluginId: 'demo', definition: definition('always') }, hooks: denied.hooks }))(call)).toEqual({ type: 'denied', reason: BLOCKED_BY_HOOK })
+    expect(denied.injected[0]).not.toHaveProperty('harnessAsked')
+    // The catch path settles too: a failing PermissionRequest asks the user, the allowed record is stored with the flag.
+    const failing = hooked({ results: { PreToolUse: fakeHookResult({ decision: 'allow', record: allowedRecord() }), PermissionRequest: () => {
+      throw new Error('broken')
+    } } })
+    expect(await createToolApproval(context({ tool: { pluginId: 'demo', definition: definition('always') }, hooks: failing.hooks }))(call)).toBe('user-approval')
+    expect(failing.injected).toHaveLength(1)
+    expect(failing.injected[0]).toMatchObject({ harnessAsked: true })
   })
 })

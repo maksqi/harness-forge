@@ -393,6 +393,9 @@ describe('examples in the plugin host', () => {
       root,
       hooks: [{ event: 'PostToolUse', matcher: 'Write|Edit|MultiEdit', command: 'sh "$HARNESS_PLUGIN_ROOT/scripts/remind-tests.sh"', timeoutSec: 10, position: [0, 0] }],
       diagnostics: [],
+      // Phase 12 (ADR-053 / ADR-057): no extra plugin variables and no prompt hooks for a harness plugin.
+      env: {},
+      prompts: [],
     })
     expect(t.deps.registry.styles.get('reviewer')).toEqual({
       pluginId: 'hook-pack',

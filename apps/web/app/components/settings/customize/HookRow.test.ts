@@ -5,11 +5,12 @@ import type { VueWrapper } from '@vue/test-utils'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { defineComponent, h, nextTick } from 'vue'
+import { computed, defineComponent, h, nextTick, provide } from 'vue'
 import { usePluginsStore } from '~/stores/plugins'
 import { testIds } from '~/utils/testids'
 import { codeHookEntry, hookEntry, hookId, pluginSummary, trustSha } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
+import { HOOK_ROW_CONTEXT } from './customize-context'
 import HookRow from './HookRow.vue'
 
 vi.mock('~/composables/useApi', () => ({ useApi: () => createMockApi() }))
@@ -160,5 +161,37 @@ describe('hookRow', () => {
     expect(code.row().querySelector('[data-slot="hook-row-command"]')).toBeNull()
     await openMenu(code.row())
     expect(menuItems()).toEqual(['Open plugin'])
+  })
+})
+
+describe('hookRow: Phase 12 (C46-T7)', () => {
+  it('offers Review plugin… for the hook of a plugin that is not trusted', async () => {
+    const pending = mountRow(hookEntry({ key: 'plugin:hook-pack:0', source: 'plugin', id: undefined, pluginId: 'hook-pack', state: 'pending' }))
+    await openMenu(pending.row())
+    expect(menuItems()).toEqual(['Review plugin…', 'Open plugin', 'Copy as JSON'])
+    await choose(document.body.querySelector<HTMLElement>('[data-action="trust-plugin"]'))
+    expect(pending.actions).toEqual(['trust-plugin'])
+  })
+
+  it('offers Edit… on a project row when the panel allows it, and marks prompt rows', async () => {
+    const actions: string[] = []
+    const entry = hookEntry({ source: 'project', id: undefined, state: 'pending', path: '.claude/settings.json', sha256: trustSha(1) })
+    const Host = defineComponent({
+      setup() {
+        provide(HOOK_ROW_CONTEXT, { editProjectHooks: computed(() => true) })
+        return () => h('ul', null, [h(HookRow, { entry, onAction: (action: string) => actions.push(action) })])
+      },
+    })
+    wrapper = mount(Host, { attachTo: document.body })
+    const row = document.body.querySelector<HTMLElement>(`[data-testid="${testIds.hookRow}"]`)!
+    await openMenu(row)
+    expect(menuItems()).toEqual(['Edit…', 'Review…', 'Copy to personal', 'Copy as JSON'])
+    await choose(byTestId(testIds.hookEdit))
+    expect(actions).toEqual(['edit'])
+    wrapper.unmount()
+    wrapper = null
+
+    const prompt = mountRow(hookEntry({ type: 'prompt', command: '', prompt: 'Did the tests pass?' }))
+    expect(prompt.row().dataset.kind).toBe('prompt')
   })
 })

@@ -136,6 +136,9 @@ describe('plugin command hooks and output styles in the plugin host', () => {
       root: realpathSync(h.pluginDir('hooky')),
       hooks: [{ event: 'PostToolUse', matcher: 'Write|Edit', command: AFTER_EDIT, timeoutSec: 10, position: [0, 0] }],
       diagnostics: [],
+      // Phase 12 (C43): no extra environment, no prompt handlers.
+      env: {},
+      prompts: [],
     })
     expect((await host.get('hooky')).contributions).toMatchObject({ commandHooks: 1, outputStyles: ['reviewer'] })
     const listed = (await h.t.client.plugins.list()).items.find(plugin => plugin.id === 'hooky')

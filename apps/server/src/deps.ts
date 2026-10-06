@@ -6,6 +6,8 @@
 // runs (`const { db, events } = deps`) regardless of declaration order; `createDeps` then instantiates all of them
 // eagerly (in `SERVICE_NAMES` order) so a failing factory fails the boot. A factory that needs itself through another
 // service's factory (a construction cycle) throws; defer such calls to the service methods or `start()`.
+import type { Env } from './env.ts'
+import type { SafeFetch } from './security/types.ts'
 import type { AppBase, AppDeps, AppServices, ServiceName } from './types.ts'
 import { createModelCatalog } from './catalog/index.ts'
 import { createChatRunner } from './chat/index.ts'
@@ -15,7 +17,8 @@ import { createProjectMcpManager } from './mcp/project.ts'
 import { createToolService } from './mcp/tools.ts'
 import { createPluginDrafts } from './plugins/drafts/index.ts'
 import { createPluginHost } from './plugins/host.ts'
-import { createPluginInstaller } from './plugins/install/index.ts'
+import { createInstaller } from './plugins/install/index.ts'
+import { createMarketplaceService } from './plugins/marketplaces/index.ts'
 import { createPluginFiles } from './plugins/scaffold/index.ts'
 import { createIconService } from './providers/icons.ts'
 import { createProviderService } from './providers/index.ts'
@@ -23,9 +26,11 @@ import { createRegistry } from './registry/index.ts'
 import { createKeyring } from './security/keyring.ts'
 import { createPasswordService } from './security/password.ts'
 import { createSessionService } from './security/session.ts'
+import { createPluginSourceFetch } from './security/ssrf.ts'
 import { createAudioService } from './services/audio/index.ts'
 import { createChatsService } from './services/chats/index.ts'
 import { createCheckpointService } from './services/checkpoints/index.ts'
+import { createClaudeImportService } from './services/claude-import/index.ts'
 import { createCustomizationService } from './services/customizations/index.ts'
 import { createDataService } from './services/data/index.ts'
 import { createEventBus } from './services/events/index.ts'
@@ -35,6 +40,7 @@ import { createImageService } from './services/images/index.ts'
 import { createKeyService } from './services/keys/index.ts'
 import { createMaintenanceService } from './services/maintenance/index.ts'
 import { createProjectConfigService } from './services/project-config/index.ts'
+import { createProjectDefinitionsService } from './services/project-definitions/index.ts'
 import { createProjectFileService } from './services/project-files/index.ts'
 import { createProjectTrustService } from './services/project-trust/index.ts'
 import { createProjectService } from './services/projects/index.ts'
@@ -45,6 +51,26 @@ import { createShareService } from './services/shares/index.ts'
 import { createShellRuleService } from './services/shell-rules/index.ts'
 
 export type ServiceFactories = { readonly [K in ServiceName]: (deps: AppDeps) => AppServices[K] }
+
+/**
+ * The `SafeFetch` of plugin sources and marketplaces (Phase 12, ADR-054): `createPluginSourceFetch` of `security/ssrf.ts`
+ * (https only), rerouted to the loopback fake remote when the test-only `HF_TEST_REMOTE_URL` is honored
+ * (`env.testRemoteUrl`, only with `HF_MOCK_PROVIDER=1`). Used by the installer (URL, GitHub and marketplace sources) and
+ * the marketplace service.
+ */
+export function pluginSourceFetch(env: Pick<Env, 'testRemoteUrl'>): SafeFetch {
+  return createPluginSourceFetch({ testRemoteUrl: env.testRemoteUrl })
+}
+
+/** The production installer (W3.2) with the plugin-source fetch (Phase 12: `createInstaller(deps, { safeFetch })`). */
+export function createPluginSourceInstaller(deps: AppDeps): AppServices['installer'] {
+  return createInstaller(deps, { safeFetch: pluginSourceFetch(deps.env) })
+}
+
+/** The production marketplace service (Phase 12) with the plugin-source fetch. */
+export function createPluginSourceMarketplaces(deps: AppDeps): AppServices['marketplaces'] {
+  return createMarketplaceService(deps, { safeFetch: pluginSourceFetch(deps.env) })
+}
 
 /** The production factory of every service. */
 export const SERVICE_FACTORIES: ServiceFactories = {
@@ -60,7 +86,8 @@ export const SERVICE_FACTORIES: ServiceFactories = {
   catalog: createModelCatalog,
   providers: createProviderService,
   plugins: createPluginHost,
-  installer: createPluginInstaller,
+  // Phase 12: the installer's URL, GitHub and marketplace sources use the plugin-source fetch (`HF_TEST_REMOTE_URL`).
+  installer: createPluginSourceInstaller,
   drafts: createPluginDrafts,
   pluginFiles: createPluginFiles,
   chats: createChatsService,
@@ -89,6 +116,11 @@ export const SERVICE_FACTORIES: ServiceFactories = {
   projectTrust: createProjectTrustService,
   hooks: createHookService,
   projectMcp: createProjectMcpManager,
+  // Phase 12 (P12-0b): marketplaces (C43 stub, W12.2), the home-folder import (C43 stub with a real `home()`, W12.3) and
+  // the project definition file editor (C43 stub, W12.4). All lazy: no boot step.
+  marketplaces: createPluginSourceMarketplaces,
+  claudeImport: createClaudeImportService,
+  projectDefinitions: createProjectDefinitionsService,
 }
 
 /** Instantiation order (dependencies first; construction-time access to later services still works lazily). */
@@ -152,8 +184,9 @@ export type BootStep = typeof BOOT_STEPS[number]
  * data service last (Phase 8: the automatic file sweep timer, ADR-039). A broken plugin never fails the boot. The
  * environment warnings (`envBootWarnings`) are logged first. The customization catalog has no boot step (built lazily,
  * Phase 10); neither have the Phase 11 services (hook snapshots, the project config reader, project trust and the
- * project MCP runtimes are lazy; `<dataDir>/hooks` is created on the first hook run). Frozen order (Phase 10, confirmed
- * in Phase 11): `BOOT_STEPS`.
+ * project MCP runtimes are lazy; `<dataDir>/hooks` is created on the first hook run), nor have the Phase 12 services
+ * (marketplaces, the home-folder import and the project definition editor are lazy; `<dataDir>/transcripts` is created
+ * on the first hook that needs a transcript). Frozen order (Phase 10, confirmed in Phase 11 and Phase 12): `BOOT_STEPS`.
  */
 export async function startDeps(deps: AppDeps): Promise<void> {
   for (const warning of envBootWarnings(deps.env))
@@ -174,24 +207,43 @@ export async function startDeps(deps: AppDeps): Promise<void> {
 }
 
 /** The steps of `stopDeps`, in order (each named by its service). */
-export const SHUTDOWN_STEPS = ['data', 'runs', 'hooks', 'projectMcp', 'customizations', 'projectConfig', 'projectFiles', 'checkpoints', 'plugins', 'mcp', 'catalog', 'events'] as const
+export const SHUTDOWN_STEPS = [
+  'claudeImport',
+  'data',
+  'runs',
+  'hooks',
+  'projectMcp',
+  'customizations',
+  'projectConfig',
+  'projectFiles',
+  'checkpoints',
+  'marketplaces',
+  'plugins',
+  'mcp',
+  'catalog',
+  'events',
+] as const
 export type ShutdownStep = typeof SHUTDOWN_STEPS[number]
 
 /**
- * Shutdown (ARCHITECTURE.md 5): stop the automatic file sweep first (Phase 8: its timer, and a sweep in flight is
+ * Shutdown (ARCHITECTURE.md 5): drop the import plans first (Phase 12, `claudeImport.stop()`: the plans with their
+ * payloads; a scan in flight is aborted) -> stop the automatic file sweep (Phase 8: its timer, and a sweep in flight is
  * aborted) -> the runs (`runs.stopAll()`; Phase 9: every chat's steer queue cleared first, so no queued message starts
  * a new turn; Phase 10: then every background task aborted, awaited at most 5 s, its row saved; then every run aborted
  * and persisted as `aborted`, its sub-agents through the run's signal) -> kill the running hook processes (Phase 11,
- * `hooks.stop()`: the hook process groups first) -> stop the project MCP runtimes (Phase 11, `projectMcp.stop()`: the
- * stdio process groups) -> drop the customization catalog caches (Phase 10, `customizations.stop()`) -> drop the
- * project config caches (Phase 11, `projectConfig.stop()`; project trust keeps no state to stop) -> drop the mention
- * file index (Phase 9, `projectFiles.stop()`) -> stop the checkpoint store (Phase 8: the prune timer, after the runs so
- * no journal write is cut off) -> dispose plugins -> close MCP clients -> stop catalog timers -> close SSE streams. Every
- * step runs even when an earlier one fails (failures are logged). The caller closes the HTTP server before and the
- * database after. Frozen order (Phase 11): `SHUTDOWN_STEPS`.
+ * `hooks.stop()`: the hook process groups first; Phase 12: also the `async` hook processes, the `SessionEnd` runs and
+ * the transcript writer) -> stop the project MCP runtimes (Phase 11, `projectMcp.stop()`: the stdio process groups) ->
+ * drop the customization catalog caches (Phase 10, `customizations.stop()`) -> drop the project config caches (Phase
+ * 11, `projectConfig.stop()`; project trust keeps no state to stop) -> drop the mention file index (Phase 9,
+ * `projectFiles.stop()`) -> stop the checkpoint store (Phase 8: the prune timer, after the runs so no journal write is
+ * cut off) -> abort the marketplace fetches in flight (Phase 12, `marketplaces.stop()`, before the plugins) -> dispose
+ * plugins -> close MCP clients -> stop catalog timers -> close SSE streams. Every step runs even when an earlier one
+ * fails (failures are logged). The caller closes the HTTP server before and the database after. The project definition
+ * editor keeps no state (no step). Frozen order (Phase 12): `SHUTDOWN_STEPS`.
  */
 export async function stopDeps(deps: AppDeps): Promise<void> {
   const steps: Array<[ShutdownStep, () => Promise<void>]> = [
+    ['claudeImport', () => deps.claudeImport.stop()],
     ['data', () => deps.data.stop()],
     ['runs', () => deps.runs.stopAll()],
     ['hooks', () => deps.hooks.stop()],
@@ -200,6 +252,7 @@ export async function stopDeps(deps: AppDeps): Promise<void> {
     ['projectConfig', async () => deps.projectConfig.stop()],
     ['projectFiles', async () => deps.projectFiles.stop()],
     ['checkpoints', () => deps.checkpoints.stop()],
+    ['marketplaces', () => deps.marketplaces.stop()],
     ['plugins', () => deps.plugins.stop()],
     ['mcp', () => deps.mcp.stop()],
     ['catalog', () => deps.catalog.stop()],

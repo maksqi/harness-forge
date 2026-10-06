@@ -81,9 +81,9 @@ const POST_FEEDBACK = hook({ event: 'PostToolUse', outcome: 'blocked', toolName:
 // ---------- definitions ----------
 
 describe('mock:hooks definitions', () => {
-  it('is the 17th language model', () => {
-    expect(MOCK_MODEL_IDS).toHaveLength(17)
-    expect(MOCK_MODEL_IDS.at(-1)).toBe('hooks')
+  it('is the 17th language model (followed by prompt-hook since Phase 12)', () => {
+    expect(MOCK_MODEL_IDS.indexOf('hooks')).toBe(16)
+    expect(MOCK_MODEL_IDS.slice(16)).toEqual(['hooks', 'prompt-hook'])
   })
 
   it('style? reads the texts the server writes: the style header, the workspace rule and TODO_HINT', () => {

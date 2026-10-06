@@ -24,17 +24,25 @@
 // again on the loaded fields) is only for the user (`/name`): `loadSkill` refuses it (`forbidden`, "only the user can
 // run it"), and the available skills an error lists, like the skills block of the instructions, are the model-invocable
 // ones only (`modelInvocableSkills`); a catalog without any rejects with `SKILLS_UNAVAILABLE_TEXT`.
+//
+// Phase 12 (C44 stubs, ADR-058 / open point 10; W12.7 implements behind them): `loadSkill(context, name, signal,
+// options?)` takes the `skill` call's options (`LoadSkillOptions` of `agent-scope.ts`: a plugin skill's `file`, the
+// call's `toolCallId` for a fork skill), ignored until W12.7; the body goes through `argumentOptions` (`commands.ts`:
+// the `${CLAUDE_SKILL_DIR}` / `${CLAUDE_PROJECT_DIR}` / `${CLAUDE_SESSION_ID}` variables), whose stub leaves it as it
+// is. Qualified names pass through unchanged (resolution is W12.7's, open point 8).
 import type { CustomizationEntry, SkillOutput } from '@harness-forge/shared'
 import type { Logger } from '../logger.ts'
 import type { CustomizationCatalog } from '../services/customizations/types.ts'
 import type { OpenWorkspace } from '../services/projects/types.ts'
 import type { AppDeps } from '../types.ts'
+import type { LoadSkillOptions } from './agent-scope.ts'
 import { Buffer } from 'node:buffer'
 import { posix, resolve } from 'node:path'
-import { HarnessError, isHarnessError, LIMITS, skillInvocation } from '@harness-forge/shared'
+import { expandArguments, HarnessError, isHarnessError, LIMITS, skillInvocation } from '@harness-forge/shared'
 import { resolveWorkspacePath, toWorkspaceRel } from '../workspace/paths.ts'
 import { isHiddenWorkspacePath, isSecretLookingPath } from '../workspace/sensitive.ts'
 import { walkWorkspace } from '../workspace/walk.ts'
+import { argumentOptions } from './commands.ts'
 import { isAbortError } from './errors.ts'
 
 /** The error of a run whose catalog has no active skill (the `skill` tool is not offered then). */
@@ -169,8 +177,20 @@ export async function listSkillFiles(root: string, baseDir: string, skillFile: s
   return files
 }
 
-/** Loads one skill of the run's catalog (see the module comment). */
-export async function loadSkill(context: SkillLoadContext, name: string, signal: AbortSignal): Promise<SkillOutput> {
+/**
+ * The body of a loaded skill as the model reads it (Phase 12): through `argumentOptions` (no input: the model loads a
+ * skill without arguments); the stub's undefined leaves the body as it is.
+ */
+export function skillBody(content: string, names: readonly string[] | null | undefined, vars: Readonly<Record<string, string>>): string {
+  const options = argumentOptions({ body: content, names: names ?? null, vars })
+  return options === undefined ? content : expandArguments(content, '', options).text
+}
+
+/**
+ * Loads one skill of the run's catalog (see the module comment). `_options` (Phase 12, `LoadSkillOptions`) are read by
+ * W12.7 (the `file` read, the fork skill's child).
+ */
+export async function loadSkill(context: SkillLoadContext, name: string, signal: AbortSignal, _options?: LoadSkillOptions): Promise<SkillOutput> {
   const { catalog, logger } = context
   signal.throwIfAborted()
   const wanted = typeof name === 'string' ? name.trim().toLowerCase() : ''
@@ -208,7 +228,7 @@ export async function loadSkill(context: SkillLoadContext, name: string, signal:
     throw userOnlySkill(catalog, entry.name)
   }
 
-  const body = capUtf8(definition.fields.content, LIMITS.customizationContentBytes)
+  const body = capUtf8(skillBody(definition.fields.content, definition.fields.arguments, {}), LIMITS.customizationContentBytes)
   const description = (definition.fields.description || entry.description).slice(0, LIMITS.customizationDescriptionMaxChars)
   const output: SkillOutput = { name: entry.name, description, source: entry.source, content: body.text, truncated: body.truncated }
 

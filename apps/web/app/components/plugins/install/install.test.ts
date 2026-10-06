@@ -1,19 +1,25 @@
 import { HarnessError, LIMITS, pluginInstallBodySchema, pluginInstallFormSchema } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
+import { claudePluginInfo } from '~/utils/testing/fixtures'
 import {
   buildRequest,
+  claudePreview,
   contributionSummary,
   emptyDraft,
   filesSummary,
   inspectionSourceLabel,
+  INSTALL_TABS,
   installBody,
   isStaleReview,
   manifestIcon,
   npmSpec,
+  parseGithubSpec,
   permissionLabel,
   pluginSourceLabel,
   requestSourceLabel,
+  runCommands,
   serverFieldErrors,
+  TAB_LABELS,
   zipForm,
 } from './install'
 
@@ -132,5 +138,52 @@ describe('labels', () => {
     expect(inspectionSourceLabel({ sourceRef: 'pkg@1.4.2' }, npm)).toBe('pkg@1.4.2')
     expect(inspectionSourceLabel({ sourceRef: undefined }, npm)).toBe('pkg@latest')
     expect(inspectionSourceLabel({ sourceRef: '  ' }, { kind: 'zip', file: file('dice.zip', 1) })).toBe('dice.zip')
+  })
+})
+
+describe('phase 12 additions (C46)', () => {
+  it('has a GitHub tab between URL and Local folder', () => {
+    expect(INSTALL_TABS).toEqual(['zip', 'npm', 'url', 'github', 'folder'])
+    expect(TAB_LABELS.github).toBe('GitHub')
+    expect(emptyDraft()).toMatchObject({ githubRepo: '', githubRef: '', githubPath: '' })
+  })
+
+  it.each([
+    ['anthropics/review-kit', { repo: 'anthropics/review-kit' }],
+    ['anthropics/review-kit#v1.2.0', { repo: 'anthropics/review-kit', ref: 'v1.2.0' }],
+    ['anthropics/review-kit@main', { repo: 'anthropics/review-kit', ref: 'main' }],
+    ['https://github.com/anthropics/review-kit', { repo: 'anthropics/review-kit' }],
+    ['https://gitlab.com/acme/tools', null],
+    ['/srv/plugins/x', null],
+    ['', null],
+  ])('splits the GitHub spec %j', (text, expected) => {
+    expect(parseGithubSpec(text)).toEqual(expected)
+  })
+
+  it('builds a GitHub request from the tab', () => {
+    const draft = { ...emptyDraft(), githubRepo: 'anthropics/review-kit#v1', githubPath: '/plugins/review-kit/' }
+    expect(buildRequest('github', draft).request).toEqual({ kind: 'json', source: { source: 'github', repo: 'anthropics/review-kit', ref: 'v1', path: 'plugins/review-kit' } })
+    expect(buildRequest('github', { ...draft, githubRef: 'v2' }).errors.githubRef).toContain('clear one of them')
+    expect(buildRequest('github', emptyDraft()).errors.githubRepo).toBe('Enter a repository as owner/repo.')
+    expect(buildRequest('github', { ...emptyDraft(), githubRepo: 'not a repo' }).errors.githubRepo).toContain('owner/repo')
+  })
+
+  it('reads the Claude Code preview and the executables of a Claude Code plugin', () => {
+    const inspection = {
+      format: 'claude' as const,
+      sourceRef: 'anthropics/review-kit@0123456789ab/plugins/review-kit',
+      claude: claudePluginInfo(),
+    }
+    expect(claudePreview(inspection as never)).toEqual({
+      namespace: 'review-kit',
+      asksFor: ['API token (secret) (required)'],
+      ignored: ['.lsp.json: LSP servers are not supported.'],
+      commit: '0123456789ab',
+    })
+    expect(claudePreview({ format: 'harness', claude: null } as never)).toBeNull()
+    expect(runCommands({ manifestVersion: 1, id: 'review-kit', name: 'Review kit', version: '1.2.0', engines: { harness: '^1.0.0' } }, claudePluginInfo())).toEqual([
+      { source: 'PostToolUse Write|Edit', command: 'sh "$CLAUDE_PLUGIN_ROOT/hooks/format.sh"' },
+      { source: 'review-kit', command: 'node server.mjs' },
+    ])
   })
 })

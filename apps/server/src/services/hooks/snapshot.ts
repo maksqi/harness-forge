@@ -389,6 +389,8 @@ export function createSnapshot(runtime: SnapshotRuntime, sources: SnapshotSource
     scope,
     has: (event: HookEvent) => present.has(event),
     run: (event: HookEvent, input: HookRunInput, options: HookRunOptions) => run(event, input, options),
+    // Phase 12 (C43 compile fix): the activity labels of the handlers land with W12.5.
+    statusMessage: (_event: HookEvent, _target?: string) => null,
   })
 }
 

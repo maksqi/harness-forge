@@ -18,7 +18,8 @@
  *   slashes collapsed). Distinct paths after the tenth stay text (`too-many-files`).
  * - Only the first `SCAN_MAX_CHARS` characters are scanned; the rest is text.
  */
-import { expandArguments } from './arguments.ts'
+import type { ExpandArgumentsOptions } from './arguments.ts'
+import { argumentBase, expandArguments } from './arguments.ts'
 import { parseMentions } from './mentions.ts'
 
 /** Mirrored by the Phase 11 group of `LIMITS`. */
@@ -384,8 +385,17 @@ export function renderCommandExpansion(
   plan: CommandTemplatePlan,
   results: { readonly shell: readonly ShellSpanResult[], readonly files: readonly (FileBlock | null)[] },
   input: string,
+  options?: ExpandArgumentsOptions,
 ): RenderedCommand {
   const parts = typeof plan === 'object' && plan !== null && Array.isArray(plan.parts) ? plan.parts : []
+  // Phase 12 (ADR-058): with options, the argument base is computed once from every text part of the body (a `$0` in
+  // one part makes the whole body 0-based), so the parts between spans agree; without options, Phase 10 behavior.
+  const partOptions: ExpandArgumentsOptions | undefined = options === undefined
+    ? undefined
+    : {
+        ...options,
+        base: options.base ?? argumentBase(parts.filter(part => part.kind === 'text').map(part => part.text).join(''), options.names),
+      }
   const filePaths = typeof plan === 'object' && plan !== null && Array.isArray(plan.filePaths) ? plan.filePaths : []
   const shell = typeof results === 'object' && results !== null && Array.isArray(results.shell) ? results.shell : []
   const files = typeof results === 'object' && results !== null && Array.isArray(results.files) ? results.files : []
@@ -394,7 +404,7 @@ export function renderCommandExpansion(
   let text = ''
   for (const part of parts) {
     if (part.kind === 'text') {
-      const expanded = expandArguments(part.text, trimmed)
+      const expanded = expandArguments(part.text, trimmed, partOptions)
       if (expanded.usedPlaceholder) {
         usedPlaceholder = true
         text += expanded.text

@@ -1,12 +1,14 @@
 import type { IncomingMessage, Server, ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
+import type { FakeRemote } from '../testing/fake-remote.ts'
 import type { AddressClass, SafeFetchConfig } from './ssrf.ts'
 import { Buffer } from 'node:buffer'
 import { createServer } from 'node:http'
 import { brotliCompressSync, deflateSync, gzipSync } from 'node:zlib'
-import { HarnessError } from '@harness-forge/shared'
+import { HarnessError, LIMITS } from '@harness-forge/shared'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
-import { classifyAddress, createSafeFetch, isBlockedAddress, safeFetch } from './ssrf.ts'
+import { startFakeRemote } from '../testing/fake-remote.ts'
+import { classifyAddress, createPluginSourceFetch, createSafeFetch, isBlockedAddress, parseTestRemoteUrl, PLUGIN_SOURCE_PROTOCOLS, safeFetch, testRemoteUrlFor } from './ssrf.ts'
 
 interface SeenRequest {
   method: string
@@ -482,5 +484,110 @@ describe('limits', () => {
     const aborted = new AbortController()
     aborted.abort()
     await expect(loopback(`${origin()}/ok`, { maxBytes: 1024, signal: aborted.signal })).rejects.toMatchObject({ name: 'AbortError' })
+  })
+})
+
+// ---------- Phase 12 (C45-T3): the plugin-source fetch and the HF_TEST_REMOTE_URL routing ----------
+
+describe('createPluginSourceFetch', () => {
+  let remote: FakeRemote
+  let sha: string
+
+  beforeAll(async () => {
+    remote = await startFakeRemote()
+    sha = remote.routes.commit('acme/tools', { 'README.md': 'tools\n' })
+    remote.routes.serve('https://downloads.example.com/old.zip', { status: 302, headers: { location: 'https://cdn.example.com/tools.zip' } })
+    remote.routes.serve('https://cdn.example.com/tools.zip', 'zip bytes')
+    remote.routes.serve('https://downloads.example.com/escape', { status: 302, headers: { location: `${remote.url}/cdn.example.com/tools.zip` } })
+    remote.routes.serve('https://downloads.example.com/private', { status: 302, headers: { location: 'https://10.0.0.1/x' } })
+    remote.routes.commit('acme/huge', { 'a.txt': 'a' }, { variant: 'oversize' })
+  })
+
+  beforeEach(() => {
+    remote.routes.requests.length = 0
+  })
+
+  afterAll(async () => {
+    await remote.close()
+  })
+
+  it('parses only http://127.0.0.1:<port> as a test remote and maps https URLs below it', () => {
+    expect(parseTestRemoteUrl('http://127.0.0.1:8080')).toBe('http://127.0.0.1:8080')
+    expect(parseTestRemoteUrl(' http://127.0.0.1:65535/ ')).toBe('http://127.0.0.1:65535')
+    for (const value of ['', 'http://127.0.0.1', 'http://127.0.0.1:0', 'http://127.0.0.1:65536', 'https://127.0.0.1:8080', 'http://localhost:8080', 'http://127.0.0.2:8080', 'http://[::1]:8080', 'http://127.0.0.1:8080/x', 'http://example.com'])
+      expect(parseTestRemoteUrl(value), value).toBeNull()
+    expect(testRemoteUrlFor('http://127.0.0.1:9/', 'https://api.github.com/repos/o/r/commits/main?x=1#frag')).toBe('http://127.0.0.1:9/api.github.com/repos/o/r/commits/main?x=1')
+    expect(testRemoteUrlFor('http://127.0.0.1:9', 'https://registry.npmjs.org')).toBe('http://127.0.0.1:9/registry.npmjs.org/')
+    expect(PLUGIN_SOURCE_PROTOCOLS).toEqual(['https:'])
+  })
+
+  it('throws for an invalid test remote URL', () => {
+    for (const value of ['http://localhost:1', 'https://127.0.0.1:1', 'http://127.0.0.1:1/x', 'http://example.com'])
+      expect(() => createPluginSourceFetch({ testRemoteUrl: value }), value).toThrow(TypeError)
+  })
+
+  it('without the variable: the normal guard, https only, no rewrite (nothing reaches the fake)', async () => {
+    for (const testRemoteUrl of [undefined, null, ''] as const) {
+      const fetchSource = createPluginSourceFetch({ testRemoteUrl, lookup })
+      expect((await failure(fetchSource(`${origin()}/ok`, { maxBytes: 1024, protocols: ['http:', 'https:'] }))).message).toContain('only https URLs are allowed')
+      expect((await failure(fetchSource('https://loop.test/ok', { maxBytes: 1024 }))).message).toContain('loopback')
+      expect((await failure(fetchSource(`https://127.0.0.1:${remote.port}/api.github.com/repos/acme/tools/commits/main`, { maxBytes: 1024 }))).message).toContain('loopback')
+      expect((await failure(fetchSource('https://api.github.example/x', { maxBytes: 1024 }))).code).toBe('provider_unreachable')
+    }
+    expect(seen).toEqual([])
+    expect(remote.requests).toEqual([])
+  })
+
+  it('with the variable: a rewritten request reaches the fake (no DNS), the result keeps the logical URL', async () => {
+    const fetchSource = createPluginSourceFetch({ testRemoteUrl: remote.url, lookup: forbiddenLookup })
+    const result = await fetchSource('https://api.github.com/repos/acme/tools/commits/main', { maxBytes: 1024, headers: { accept: 'application/vnd.github.sha' } })
+    expect([result.status, decode(result.body), result.url]).toEqual([200, sha, 'https://api.github.com/repos/acme/tools/commits/main'])
+    const raw = await fetchSource(`https://raw.githubusercontent.com/acme/tools/${sha}/README.md`, { maxBytes: 1024 })
+    expect(decode(raw.body)).toBe('tools\n')
+    expect(remote.requests).toEqual([
+      { method: 'GET', host: 'api.github.com', path: '/repos/acme/tools/commits/main', status: 200 },
+      { method: 'GET', host: 'raw.githubusercontent.com', path: `/acme/tools/${sha}/README.md`, status: 200 },
+    ])
+  })
+
+  it('with the variable: plain http (the base itself included), loopback, private and localhost hosts are still refused', async () => {
+    const fetchSource = createPluginSourceFetch({ testRemoteUrl: `${remote.url}/`, lookup: forbiddenLookup })
+    const refused = [
+      `${remote.url}/api.github.com/repos/acme/tools/commits/main`,
+      `http://127.0.0.1:${port}/ok`,
+      'http://api.github.com/repos/acme/tools/commits/main',
+      'https://127.0.0.1/x',
+      `https://127.0.0.1:${remote.port}/api.github.com/x`,
+      'https://[::1]/x',
+      'https://localhost/x',
+      'https://10.0.0.1/x',
+      'https://169.254.169.254/latest/meta-data',
+      'https://[::ffff:192.168.0.1]/x',
+      'https://user:pw@api.github.com/x',
+    ]
+    for (const url of refused)
+      expect((await failure(fetchSource(url, { maxBytes: 1024, protocols: ['http:', 'https:'] }))).code, url).toBe('validation_error')
+    expect(seen).toEqual([])
+    expect(remote.requests).toEqual([])
+  })
+
+  it('with the variable: redirects are rerouted and re-checked (no hop may leave https or reach another address)', async () => {
+    const fetchSource = createPluginSourceFetch({ testRemoteUrl: remote.url, lookup: forbiddenLookup })
+    const followed = await fetchSource('https://downloads.example.com/old.zip', { maxBytes: 1024 })
+    expect([followed.url, decode(followed.body)]).toEqual(['https://cdn.example.com/tools.zip', 'zip bytes'])
+    expect(remote.requests.map(request => [request.host, request.path, request.status])).toEqual([
+      ['downloads.example.com', '/old.zip', 302],
+      ['cdn.example.com', '/tools.zip', 200],
+    ])
+    expect((await failure(fetchSource('https://downloads.example.com/old.zip', { maxBytes: 1024, maxRedirects: 0 }))).message).toContain('Too many redirects')
+    expect((await failure(fetchSource('https://downloads.example.com/escape', { maxBytes: 1024 }))).message).toContain('only https URLs are allowed')
+    expect((await failure(fetchSource('https://downloads.example.com/private', { maxBytes: 1024 }))).message).toContain('private network')
+  })
+
+  it('with the variable: the size cap still applies (an oversize codeload archive is payload_too_large)', async () => {
+    const fetchSource = createPluginSourceFetch({ testRemoteUrl: remote.url, lookup: forbiddenLookup })
+    const huge = remote.routes.resolve('acme/huge', 'main')
+    const error = await failure(fetchSource(`https://codeload.github.com/acme/huge/zip/${huge}`, { maxBytes: LIMITS.repoArchiveBytes, maxRedirects: 0 }))
+    expect(error).toMatchObject({ code: 'payload_too_large', details: { limitBytes: LIMITS.repoArchiveBytes } })
   })
 })

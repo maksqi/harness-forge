@@ -2,7 +2,7 @@
 // rules, create and edit through useFreshAuth (prompt first; an edit that only turns the hook off asks nothing), the
 // server's matcher refusal on the field, other errors in `hook-error`, Mod+Enter and the discard confirmation.
 import type { VueWrapper } from '@vue/test-utils'
-import type { HookDraft } from './hooks'
+import type { HookDraft, ProjectHookTarget } from './hooks'
 import type { MockApi } from '~/utils/testing/mock-api'
 import { HarnessError } from '@harness-forge/shared'
 import { flushPromises, mount } from '@vue/test-utils'
@@ -12,7 +12,7 @@ import { nextTick } from 'vue'
 import { useAuthStore } from '~/stores/auth'
 import { usePluginsStore } from '~/stores/plugins'
 import { testIds } from '~/utils/testids'
-import { authStatus, hookId, personalHook, toolSummary } from '~/utils/testing/fixtures'
+import { authStatus, hookId, personalHook, projectId, toolSummary } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import HookEditor from './HookEditor.vue'
 
@@ -53,13 +53,14 @@ afterEach(() => {
   document.body.replaceChildren()
 })
 
-async function mountEditor(props: { mode: 'new' | 'edit' | 'copy', hook?: ReturnType<typeof personalHook> | null, draft?: HookDraft | null }) {
+async function mountEditor(props: { mode: 'new' | 'edit' | 'copy' | 'project', hook?: ReturnType<typeof personalHook> | null, draft?: HookDraft | null, target?: ProjectHookTarget | null }) {
   const wrapper = mount(HookEditor, {
     props: {
       'open': true,
       'mode': props.mode,
       'hook': props.hook ?? null,
       'draft': props.draft ?? null,
+      'target': props.target ?? null,
       'onUpdate:open': (value: boolean) => wrapper.setProps({ open: value }),
     },
     attachTo: document.body,
@@ -243,5 +244,22 @@ describe('hookEditor', () => {
     wrappers.push(wrapper)
     await flushPromises()
     expect(byTestId(testIds.hookEditor)).toBeNull()
+  })
+})
+
+describe('hookEditor: project mode (Phase 12, C46-T6)', () => {
+  it('edits a project hook without a password through saveProjectHook', async () => {
+    useAuthStore().status = passwordSet
+    const target: ProjectHookTarget = { projectId: projectId(1), path: '.claude/settings.json', event: 'PostToolUse', groupIndex: null, handlerIndex: null }
+    await mountEditor({ mode: 'project', target, draft: { event: 'PostToolUse', matcher: 'Write|Edit', command: 'sh format.sh', timeout: null, enabled: true } })
+    const sheet = byTestId(testIds.hookEditor)!
+    expect(sheet.dataset.mode).toBe('project')
+    expect(sheet.textContent).toContain('Edit project hook')
+    expect(byTestId<HTMLTextAreaElement>(testIds.hookCommand)!.value).toBe('sh format.sh')
+    await save()
+    // P12-0b: the store answers not_implemented (W12.12 writes the settings file); no password was asked.
+    expect(byTestId(testIds.hookError)?.dataset.code).toBe('not_implemented')
+    expect(byTestId(testIds.confirmPasswordDialog)).toBeNull()
+    expect(api.hooks.create).not.toHaveBeenCalled()
   })
 })

@@ -285,3 +285,15 @@ export function canReconnect(server: ProjectMcpServer): boolean {
 export function mcpServerCommand(trust: TrustItem | null): string | null {
   return trust?.kind === 'mcp' ? trustCommandText(trust) : null
 }
+
+/**
+ * Phase 12 (ADR-057; C46 declares, W12.13 owns): the state of a group's Select all (docs/UI.md 7.34): every pending item
+ * of the group selected (true), none (false) or some ('indeterminate', reka's mixed state).
+ */
+export function selectAllState(items: readonly TrustItem[], selected: ReadonlySet<string>): boolean | 'indeterminate' {
+  const pending = items.filter(item => item.state === 'pending')
+  const count = pending.filter(item => selected.has(item.sha256)).length
+  if (count === 0)
+    return false
+  return count === pending.length ? true : 'indeterminate'
+}

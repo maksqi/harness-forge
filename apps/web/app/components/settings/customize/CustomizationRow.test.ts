@@ -227,3 +227,15 @@ describe('customizationRow', () => {
     })
   })
 })
+
+describe('customizationRow: project files (Phase 12, C46-T7)', () => {
+  it('offers Edit… on project rows (after Review…) and emits edit', async () => {
+    const { row, actions } = mountRow(customizationEntry({ name: 'reviewer', source: 'project', path: '.claude/agents/reviewer.md' }))
+    await openMenu(row())
+    const edit = byTestId(testIds.customizationEdit)!
+    expect(edit.textContent?.trim()).toBe('Edit…')
+    expect(edit.dataset.source).toBe('project')
+    await choose(testIds.customizationEdit)
+    expect(actions).toEqual(['edit'])
+  })
+})

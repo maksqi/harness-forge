@@ -151,6 +151,20 @@ describe('renderCommandExpansion', () => {
     expect(rendered).toEqual({ text: 'Status: M $ARGUMENTS.ts for x; ($ARGUMENTS)'.replace('($ARGUMENTS)', '(x; touch pwned)'), usedPlaceholder: true })
   })
 
+  it('computes one argument base for the whole body when options are given (Phase 12)', () => {
+    // `$0` sits before the span, `$1` after it: with options both parts count from 0 (Claude Code's indexing).
+    const plan = planCommandExpansion('First $0 !`echo hi` second $1')
+    const rendered = renderCommandExpansion(plan, { shell: [ok('hi')], files: [] }, 'alpha beta', {})
+    expect(rendered).toEqual({ text: 'First alpha hi second beta', usedPlaceholder: true })
+    // Without options the Phase 10 meaning stays: `$1` is the first word.
+    expect(renderCommandExpansion(planCommandExpansion('Only $1 !`echo hi`'), { shell: [ok('hi')], files: [] }, 'alpha beta'))
+      .toEqual({ text: 'Only alpha hi', usedPlaceholder: true })
+    // Named arguments make the body 0-based too; an explicit base wins.
+    const named = planCommandExpansion('Deploy $env !`echo ok` as $1')
+    expect(renderCommandExpansion(named, { shell: [ok('ok')], files: [] }, 'prod web', { names: ['env'] }).text).toBe('Deploy prod ok as web')
+    expect(renderCommandExpansion(named, { shell: [ok('ok')], files: [] }, 'prod web', { names: ['env'], base: 1 }).text).toBe('Deploy prod ok as prod')
+  })
+
   it('appends the input when no text part used a placeholder', () => {
     const plan = planCommandExpansion('Branch: !`git branch --show-current $ARGUMENTS`')
     expect(renderCommandExpansion(plan, { shell: [ok('main')], files: [] }, ' release ')).toEqual({ text: 'Branch: main\n\nrelease', usedPlaceholder: false })

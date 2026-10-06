@@ -31,6 +31,13 @@
 //   \`projects\` ADD \`output_style\`` (no index, no rebuild: foreign keys are on), both new tables start empty,
 //   `output_style` is null on every project, every row survives, deleting a project cascades into its `project_trust`
 //   rows and a second (project, sha256) is a primary-key violation.
+// - v1.7 -> v1.8 through migration 0009 (C43-T7, ADR-053 / ADR-054 / ADR-057): a database with `0000` ... `0008`,
+//   plugins (a builtin, a pinned zip plugin, a linked folder), personal hooks, a project with approvals, personal
+//   definitions, chats and messages (with a `data-hook` part) is migrated with the real folder; 0009 must be exactly one
+//   `CREATE TABLE`, one `CREATE UNIQUE INDEX` and six `ALTER TABLE … ADD` (two on `plugins`, four on `hooks`; no
+//   rebuild, no data change: foreign keys are on), `marketplaces` starts empty, every plugin row is `format = 'harness'`
+//   with a null `origin`, every hook row is `type = 'command'` with null `prompt` / `model` / `options`, every row
+//   survives, and a second marketplace of the same name is a unique violation.
 import type { Database } from './client.ts'
 import { copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -69,6 +76,7 @@ const CHECKPOINTS = JOURNAL.entries.find(entry => entry.tag.startsWith('0005_'))
 const SHELL_UNIQUE = JOURNAL.entries.find(entry => entry.tag.startsWith('0006_'))
 const CUSTOMIZATIONS = JOURNAL.entries.find(entry => entry.tag.startsWith('0007_'))
 const HOOKS_TRUST = JOURNAL.entries.find(entry => entry.tag.startsWith('0008_'))
+const CLAUDE_ECOSYSTEM = JOURNAL.entries.find(entry => entry.tag.startsWith('0009_'))
 
 const opened: Database[] = []
 const tempDirs: string[] = []
@@ -800,9 +808,9 @@ describe('upgrade of a v1.2 database through migration 0004 (projects)', () => {
     expect(applied.rows.map(row => Number(row.created_at))).toEqual(JOURNAL.entries.map(entry => entry.when))
     const shape = await schemaShape(database)
     expect(shape.tables).toEqual([...TABLE_NAMES].sort())
-    // 16 tables of v1.3 plus the two of 0005 (Phase 8), the two of 0007 (Phase 10) and the two of 0008 (Phase 11),
-    // applied by the same run.
-    expect(shape.tables).toHaveLength(22)
+    // 16 tables of v1.3 plus the two of 0005 (Phase 8), the two of 0007 (Phase 10), the two of 0008 (Phase 11) and the
+    // one of 0009 (Phase 12), applied by the same run.
+    expect(shape.tables).toHaveLength(23)
     expect(shape.indexes.projects_path_idx).toEqual(['path'])
     expect(shape.indexes.chats_project_idx).toEqual(['project_id', 'archived', 'updated_at', 'id'])
     const fresh = await open(':memory:')
@@ -970,11 +978,11 @@ describe('upgrade of a v1.3 database through migration 0005 (workspace checkpoin
 
     const applied = await database.client.execute('SELECT created_at FROM __drizzle_migrations ORDER BY created_at')
     expect(applied.rows.map(row => Number(row.created_at))).toEqual(JOURNAL.entries.map(entry => entry.when))
-    // 0005 and every later migration (Phase 9: 0006; Phase 10: 0007; Phase 11: 0008).
-    expect(applied.rows).toHaveLength(9)
+    // 0005 and every later migration (Phase 9: 0006; Phase 10: 0007; Phase 11: 0008; Phase 12: 0009).
+    expect(applied.rows).toHaveLength(10)
     const shape = await schemaShape(database)
     expect(shape.tables).toEqual([...TABLE_NAMES].sort())
-    expect(shape.tables).toHaveLength(22)
+    expect(shape.tables).toHaveLength(23)
     const fresh = await open(':memory:')
     await migrateDatabase(fresh.db)
     expect(shape).toEqual(await schemaShape(fresh))
@@ -1250,10 +1258,10 @@ describe('upgrade of a v1.4 database through migration 0006 (unique shell rules)
 
     const applied = await database.client.execute('SELECT created_at FROM __drizzle_migrations ORDER BY created_at')
     expect(applied.rows.map(row => Number(row.created_at))).toEqual(JOURNAL.entries.map(entry => entry.when))
-    // 0006 and every later migration (Phase 10: 0007; Phase 11: 0008).
-    expect(applied.rows).toHaveLength(9)
+    // 0006 and every later migration (Phase 10: 0007; Phase 11: 0008; Phase 12: 0009).
+    expect(applied.rows).toHaveLength(10)
     const shape = await schemaShape(database)
-    expect(shape.tables).toHaveLength(22)
+    expect(shape.tables).toHaveLength(23)
     const fresh = await open(':memory:')
     await migrateDatabase(fresh.db)
     expect(shape).toEqual(await schemaShape(fresh))
@@ -1436,11 +1444,11 @@ describe('upgrade of a v1.5 database through migration 0007 (customizations, bac
 
     const applied = await database.client.execute('SELECT created_at FROM __drizzle_migrations ORDER BY created_at')
     expect(applied.rows.map(row => Number(row.created_at))).toEqual(JOURNAL.entries.map(entry => entry.when))
-    // 0007 and every later migration (Phase 11: 0008).
-    expect(applied.rows).toHaveLength(9)
+    // 0007 and every later migration (Phase 11: 0008; Phase 12: 0009).
+    expect(applied.rows).toHaveLength(10)
     const shape = await schemaShape(database)
     expect(shape.tables).toEqual([...TABLE_NAMES].sort())
-    expect(shape.tables).toHaveLength(22)
+    expect(shape.tables).toHaveLength(23)
     const fresh = await open(':memory:')
     await migrateDatabase(fresh.db)
     expect(shape).toEqual(await schemaShape(fresh))
@@ -1663,10 +1671,11 @@ describe('upgrade of a v1.6 database through migration 0008 (hooks, project trus
 
     const applied = await database.client.execute('SELECT created_at FROM __drizzle_migrations ORDER BY created_at')
     expect(applied.rows.map(row => Number(row.created_at))).toEqual(JOURNAL.entries.map(entry => entry.when))
-    expect(applied.rows).toHaveLength(9)
+    // 0008 and every later migration (Phase 12: 0009).
+    expect(applied.rows).toHaveLength(10)
     const shape = await schemaShape(database)
     expect(shape.tables).toEqual([...TABLE_NAMES].sort())
-    expect(shape.tables).toHaveLength(22)
+    expect(shape.tables).toHaveLength(23)
     const fresh = await open(':memory:')
     await migrateDatabase(fresh.db)
     expect(shape).toEqual(await schemaShape(fresh))
@@ -1730,6 +1739,238 @@ describe('upgrade of a v1.6 database through migration 0008 (hooks, project trus
       // The Phase 11 stubs answer empty: nothing was approved, nothing runs.
       expect(await t.deps.projectTrust.approved(V16_PROJECT)).toEqual(new Set())
       expect((await t.deps.hooks.list({})).items).toEqual([])
+    }
+    finally {
+      await t.close()
+    }
+  })
+})
+
+/** A migrations folder holding 0000 - 0008 (their SQL + a nine-entry journal): the schema of a v1.7 data directory. */
+function v17Folder(): string {
+  const entries = [INITIAL, TREE, REMEMBERED, REFRESH, PROJECTS, CHECKPOINTS, SHELL_UNIQUE, CUSTOMIZATIONS, HOOKS_TRUST]
+  if (entries.includes(undefined))
+    throw new Error('a migration of 0000 - 0008 is missing from the journal')
+  const dir = tempDir()
+  mkdirSync(join(dir, 'meta'))
+  for (const entry of entries as JournalEntry[])
+    copyFileSync(join(REAL_FOLDER, `${entry.tag}.sql`), join(dir, `${entry.tag}.sql`))
+  writeFileSync(join(dir, 'meta', '_journal.json'), JSON.stringify({ ...JOURNAL, entries }))
+  return dir
+}
+
+/** The statements of migration 0009 without comments and blank lines (split like `migrate()` does). */
+function claudeEcosystemStatements(): string[] {
+  if (CLAUDE_ECOSYSTEM === undefined)
+    throw new Error('migration 0009 is missing from the journal')
+  return readFileSync(join(REAL_FOLDER, `${CLAUDE_ECOSYSTEM.tag}.sql`), 'utf8')
+    .split('--> statement-breakpoint')
+    .map(statement => statement.replace(/^--.*$/gm, '').trim())
+    .filter(Boolean)
+}
+
+const V17_PROJECT = 'prj_v17project000001'
+const CHAT_U1 = '0199a8f0-0000-7000-8000-0000000001b1'
+const CHAT_U2 = '0199a8f0-0000-7000-8000-0000000001b2'
+const V17_PIN = 'c'.repeat(64)
+
+type V17Table = 'plugins' | 'hooks' | 'projects' | 'project_trust' | 'customizations' | 'chats' | 'messages' | 'usage' | 'settings'
+
+/** The `data-hook` record of a v1.7 `UserPromptSubmit` hook (stored on the user message). */
+const V17_HOOK_PART = {
+  type: 'data-hook',
+  id: 'hev_v17hookrecord001',
+  data: {
+    id: 'hev_v17hookrecord001',
+    event: 'UserPromptSubmit',
+    outcome: 'context',
+    createdAt: 30,
+    hooks: [{ source: 'personal', label: 'sh .claude/hooks/context.sh', exitCode: 0, durationMs: 12 }],
+    context: 'lint ok',
+  },
+}
+
+/**
+ * Creates a v1.7 database file (0000 - 0008) with plugins (a builtin, a pinned zip plugin, a linked folder with a path
+ * pin and an error), two personal hooks (one off), a project with two approvals, a personal command with a `!` span, a
+ * project chat whose user message holds a `data-hook` part, a chat without a project, a usage row and a setting; returns
+ * every row of those tables.
+ */
+async function seedV17Database(path: string): Promise<Record<V17Table, Record<string, unknown>[]>> {
+  const database = await open(path)
+  await migrateDatabase(database.db, { migrationsFolder: v17Folder() })
+  const before = await database.client.execute(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'marketplaces'`)
+  expect(before.rows).toHaveLength(0)
+  const pluginRows: Array<[string, string, string | null, string, number, string | null, string | null]> = [
+    ['core-tools', 'builtin', null, '1.7.0', 1, null, null],
+    ['acme-zip', 'zip', 'acme-zip.zip', '2.1.0', 1, V17_PIN, null],
+    ['hook-pack', 'link', '/srv/plugins/hook-pack', '0.3.0', 0, `path:${'d'.repeat(64)}`, JSON.stringify({ code: 'plugin_error', message: 'The plugin failed to load.' })],
+  ]
+  for (const [id, source, sourceRef, version, enabled, trustedHash, lastError] of pluginRows) {
+    await database.client.execute({
+      sql: 'INSERT INTO plugins (id, source, source_ref, version, enabled, trusted_hash, loading_since, last_error, installed_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, 50, 60)',
+      args: [id, source, sourceRef, version, enabled, trustedHash, lastError],
+    })
+  }
+  await database.client.execute(`INSERT INTO hooks (id, event, matcher, command, timeout, enabled, created_at, updated_at) VALUES ('hok_v17hook000000001', 'PreToolUse', 'Bash|Write', 'sh .claude/hooks/guard.sh', 30, 1, 70, 71)`)
+  await database.client.execute(`INSERT INTO hooks (id, event, matcher, command, timeout, enabled, created_at, updated_at) VALUES ('hok_v17hook000000002', 'Stop', NULL, 'sh check.sh', NULL, 0, 72, 73)`)
+  await database.client.execute({
+    sql: 'INSERT INTO projects (id, name, path, instructions, output_style, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 100, 200)',
+    args: [V17_PROJECT, 'hooks-demo', '/srv/projects/hooks-demo', 'Use pnpm.', 'explanatory'],
+  })
+  for (const [sha256, kind, label] of [['a'.repeat(64), 'hook', 'sh .claude/hooks/guard.sh'], ['b'.repeat(64), 'mcp', 'github']] as const) {
+    await database.client.execute({ sql: 'INSERT INTO project_trust (project_id, sha256, kind, label, created_at) VALUES (?, ?, ?, ?, 80)', args: [V17_PROJECT, sha256, kind, label] })
+  }
+  await database.client.execute({
+    sql: 'INSERT INTO customizations (id, kind, name, description, content, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 0, 10, 11)',
+    args: ['cus_v17custom0000001', 'command', 'status', 'Show the status.', '---\nname: status\ndescription: Show the status.\n---\nRun !`git status --short`: $ARGUMENTS'],
+  })
+  const turns: Array<[string, string | null, Array<['user' | 'assistant', unknown[], Record<string, unknown>]>]> = [
+    [CHAT_U1, V17_PROJECT, [
+      ['user', [{ type: 'text', text: 'Check the code' }, V17_HOOK_PART], {}],
+      ['assistant', [{ type: 'text', text: 'Lint is fine.' }], { modelRef: 'mock:hooks', startedAt: 31 }],
+    ]],
+    [CHAT_U2, null, [
+      ['user', [{ type: 'text', text: 'Hello' }], {}],
+      ['assistant', [{ type: 'text', text: 'Hi.' }], { modelRef: 'mock:echo', startedAt: 4 }],
+    ]],
+  ]
+  for (const [index, [chatId, projectId, messages]] of turns.entries()) {
+    const ids = messages.map((_, seq) => `msg_u${index + 1}${String(seq).padStart(14, '0')}`)
+    await database.client.execute({
+      sql: 'INSERT INTO chats (id, title, title_source, model_ref, settings, pinned, archived, pending_approval, active_leaf_id, project_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?)',
+      args: [chatId, `Chat ${index}`, 'user', 'mock:hooks', '{"toolMode":"ask"}', ids[ids.length - 1] ?? null, projectId, 1000 + index, 2000 + index],
+    })
+    for (const [seq, [role, parts, metadata]] of messages.entries()) {
+      await database.client.execute({
+        sql: 'INSERT INTO messages (id, chat_id, parent_id, selected_child_id, seq, role, parts, metadata, search_text, created_at, updated_at) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)',
+        args: [ids[seq] ?? null, chatId, seq === 0 ? null : (ids[seq - 1] ?? null), seq, role, JSON.stringify(parts), JSON.stringify(metadata), `${role} ${seq}`, 3000 + seq, 4000 + seq],
+      })
+    }
+  }
+  await database.client.execute({
+    sql: 'INSERT INTO usage (chat_id, message_id, purpose, provider_id, model_id, input, output, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    args: [CHAT_U1, 'msg_u100000000000001', 'chat', 'mock', 'hooks', 3, 4, 5000],
+  })
+  await database.client.execute({ sql: 'INSERT INTO settings (key, value, updated_at) VALUES (?, ?, 90)', args: ['hooksEnabled', 'true'] })
+  const seeded = {
+    plugins: await rows(database, 'plugins', 'id'),
+    hooks: await rows(database, 'hooks', 'id'),
+    projects: await rows(database, 'projects', 'id'),
+    project_trust: await rows(database, 'project_trust', 'project_id, sha256'),
+    customizations: await rows(database, 'customizations', 'id'),
+    chats: await rows(database, 'chats', 'id'),
+    messages: await rows(database, 'messages', 'chat_id, seq'),
+    usage: await rows(database, 'usage', 'id'),
+    settings: await rows(database, 'settings', 'key'),
+  }
+  database.close()
+  return seeded
+}
+
+describe('upgrade of a v1.7 database through migration 0009 (marketplaces, plugin format and origin, hook handler fields)', () => {
+  it('0009 is one CREATE TABLE, one CREATE UNIQUE INDEX and six ALTER TABLE … ADD, never a rebuild or a data change', () => {
+    const statements = claudeEcosystemStatements()
+    expect(statements).toHaveLength(8)
+    const tables = statements.filter(statement => statement.startsWith('CREATE TABLE '))
+    expect(tables.map(statement => statement.match(/^CREATE TABLE `(\w+)`/)?.[1])).toEqual(['marketplaces'])
+    const indexes = statements.filter(statement => /^CREATE\s+(?:UNIQUE\s+)?INDEX/i.test(statement))
+    expect(indexes).toEqual(['CREATE UNIQUE INDEX `marketplaces_name_unique` ON `marketplaces` (`name`);'])
+    const alters = statements.filter(statement => /^ALTER\s+TABLE/i.test(statement))
+    expect(alters.sort()).toEqual([
+      'ALTER TABLE `hooks` ADD `model` text;',
+      'ALTER TABLE `hooks` ADD `options` text;',
+      'ALTER TABLE `hooks` ADD `prompt` text;',
+      'ALTER TABLE `hooks` ADD `type` text DEFAULT \'command\' NOT NULL;',
+      'ALTER TABLE `plugins` ADD `format` text DEFAULT \'harness\' NOT NULL;',
+      'ALTER TABLE `plugins` ADD `origin` text;',
+    ])
+    expect(tables.length + indexes.length + alters.length).toBe(statements.length)
+    const sql = statements.join('\n')
+    for (const forbidden of [/DROP\s+/i, /__new_/i, /PRAGMA/i, /\bDELETE\b/i, /\bUPDATE\b/i, /\bINSERT\b/i, /FOREIGN KEY/i, /ALTER\s+TABLE\s+`?\w+`?\s+(?:RENAME|DROP)/i])
+      expect(sql, String(forbidden)).not.toMatch(forbidden)
+    expect(JOURNAL.entries.slice(0, 10)).toEqual([INITIAL, TREE, REMEMBERED, REFRESH, PROJECTS, CHECKPOINTS, SHELL_UNIQUE, CUSTOMIZATIONS, HOOKS_TRUST, CLAUDE_ECOSYSTEM])
+    expect(CLAUDE_ECOSYSTEM?.tag).toBe('0009_claude_ecosystem')
+  })
+
+  it('marketplaces exists and is empty; plugins are harness without an origin; hooks are command hooks; every row survives', async () => {
+    const path = join(tempDir(), 'harness.db')
+    const before = await seedV17Database(path)
+    const database = await open(path)
+    await migrateDatabase(database.db)
+
+    expect(await scalar(database, 'SELECT count(*) AS n FROM marketplaces')).toBe(0)
+    expect(await scalar(database, `SELECT count(*) AS n FROM plugins WHERE format <> 'harness' OR origin IS NOT NULL`)).toBe(0)
+    expect(await scalar(database, `SELECT count(*) AS n FROM hooks WHERE type <> 'command' OR prompt IS NOT NULL OR model IS NOT NULL OR options IS NOT NULL`)).toBe(0)
+    expect(await rows(database, 'plugins', 'id')).toEqual(before.plugins.map(row => ({ ...row, format: 'harness', origin: null })))
+    expect(await rows(database, 'hooks', 'id')).toEqual(before.hooks.map(row => ({ ...row, type: 'command', prompt: null, model: null, options: null })))
+    expect(await rows(database, 'projects', 'id')).toEqual(before.projects)
+    expect(await rows(database, 'project_trust', 'project_id, sha256')).toEqual(before.project_trust)
+    expect(await rows(database, 'customizations', 'id')).toEqual(before.customizations)
+    expect(await rows(database, 'chats', 'id')).toEqual(before.chats)
+    expect(await rows(database, 'messages', 'chat_id, seq')).toEqual(before.messages)
+    expect(await rows(database, 'usage', 'id')).toEqual(before.usage)
+    expect(await rows(database, 'settings', 'key')).toEqual(before.settings)
+
+    const applied = await database.client.execute('SELECT created_at FROM __drizzle_migrations ORDER BY created_at')
+    expect(applied.rows.map(row => Number(row.created_at))).toEqual(JOURNAL.entries.map(entry => entry.when))
+    expect(applied.rows).toHaveLength(10)
+    const shape = await schemaShape(database)
+    expect(shape.tables).toEqual([...TABLE_NAMES].sort())
+    expect(shape.tables).toHaveLength(23)
+    const fresh = await open(':memory:')
+    await migrateDatabase(fresh.db)
+    expect(shape).toEqual(await schemaShape(fresh))
+    expect(shape.indexes.marketplaces_name_unique).toEqual(['name'])
+    expect(shape.foreignKeys.marketplaces).toEqual([])
+    expect((await database.client.execute('PRAGMA foreign_key_check')).rows).toEqual([])
+    expect((await database.client.execute('PRAGMA integrity_check')).rows.map(row => String(row.integrity_check))).toEqual(['ok'])
+
+    // Idempotent: migrating again applies nothing.
+    await migrateDatabase(database.db)
+    expect(await scalar(database, 'SELECT count(*) AS n FROM __drizzle_migrations')).toBe(JOURNAL.entries.length)
+  })
+
+  it('a second marketplace with the same name fails on the unique index; new rows take the column defaults', async () => {
+    const path = join(tempDir(), 'harness.db')
+    await seedV17Database(path)
+    const database = await open(path)
+    await migrateDatabase(database.db)
+
+    const add = (id: string, name: string): Promise<unknown> => database.client.execute({
+      sql: 'INSERT INTO marketplaces (id, name, source, created_at, updated_at) VALUES (?, ?, ?, 1, 1)',
+      args: [id, name, JSON.stringify({ type: 'github', repo: 'acme/tools' })],
+    })
+    await add('mkt_v17market000001', 'acme')
+    await add('mkt_v17market000002', 'other')
+    expect(await uniqueViolation(add('mkt_v17market000003', 'acme'))).toBe('UNIQUE constraint failed: marketplaces.name')
+    expect((await rows(database, 'marketplaces', 'id')).map(row => [row.id, row.name, row.resolved_ref, row.catalog, row.fetched_at, row.last_error]))
+      .toEqual([['mkt_v17market000001', 'acme', null, null, null, null], ['mkt_v17market000002', 'other', null, null, null, null]])
+    // A plugin or hook written the v1.7 way (without the new columns) takes the defaults.
+    await database.client.execute(`INSERT INTO plugins (id, source, version, enabled, installed_at, updated_at) VALUES ('legacy', 'zip', '1.0.0', 1, 1, 1)`)
+    await database.client.execute(`INSERT INTO hooks (id, event, command, enabled, created_at, updated_at) VALUES ('hok_v17hook000000003', 'Stop', 'sh stop.sh', 1, 1, 1)`)
+    expect(await rows(database, 'plugins', 'id').then(list => list.find(row => row.id === 'legacy'))).toMatchObject({ format: 'harness', origin: null })
+    expect(await rows(database, 'hooks', 'id').then(list => list.find(row => row.id === 'hok_v17hook000000003'))).toMatchObject({ type: 'command', prompt: null, model: null, options: null })
+  })
+
+  it('boots on the upgraded database: plugins read as harness, personal hooks as command hooks, chats unchanged, no marketplace', async () => {
+    const dataDir = tempDir()
+    const databasePath = join(dataDir, 'harness.db')
+    const before = await seedV17Database(databasePath)
+    const t = await createTestApp({ dataDir, databasePath, start: false })
+    try {
+      for (const id of ['core-tools', 'acme-zip', 'hook-pack'])
+        expect(await t.deps.plugins.record(id), id).toMatchObject({ format: 'harness', origin: null })
+      expect(await t.deps.plugins.record('acme-zip')).toMatchObject({ source: 'zip', trustedHash: V17_PIN, version: '2.1.0' })
+      const hooks = await t.deps.hooks.list({})
+      expect(hooks.items.filter(item => item.kind === 'command').map(item => [item.id, item.state])).toEqual([['hok_v17hook000000001', 'active'], ['hok_v17hook000000002', 'off']])
+      expect((await t.deps.marketplaces.list()).items).toEqual([])
+      const detail = chatDetailSchema.parse(await (await t.request(`/api/chats/${CHAT_U1}`)).json())
+      const stored = before.messages.filter(row => row.chat_id === CHAT_U1)
+      expect(detail.messages.map(message => message.parts)).toEqual(stored.map(row => JSON.parse(String(row.parts))))
+      expect(detail.messages[0]?.parts[1]).toEqual(V17_HOOK_PART)
+      const list = cursorPageSchema(chatSummarySchema).parse(await (await t.request('/api/chats')).json())
+      expect(list.items.map(chat => [chat.id, chat.projectId]).sort()).toEqual([[CHAT_U1, V17_PROJECT], [CHAT_U2, null]])
     }
     finally {
       await t.close()

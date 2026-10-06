@@ -1,24 +1,19 @@
 <script setup lang="ts">
 // Install dialog (docs/UI.md 8.3; docs/PLUGINS.md 12-13; docs/API.md 5.16), mounted once by pages/plugins.vue.
-// 1. Source: tabs Zip / npm / URL / Local folder -> Inspect (`POST /api/plugins/inspect`, nothing is installed).
-// 2. Preview (InspectPreview) of the returned `PluginInspection`.
-// 3. Trust, for code plugins and stdio MCP servers: TrustWarning + the required "I trust {source}" checkbox and, when
-//    a password is set and the session is not fresh (ADR-017), the "Confirm your password" field.
-// 4. Install: logs in first when the password field is shown (useFreshAuth `login()`), then `POST /api/plugins/install`
-//    with the same source, `trust` and the reviewed `sha256`, through `run(send, { required })`: if the server still
-//    asks for a fresh login (403 + action `login`), ConfirmPasswordDialog asks for the password and the install runs
-//    once more; the "Log in" action of the error alert opens the same prompt (`confirm()`) and submits again. When the
-//    package changed since the preview (409 `conflict`, reason `stale`), the dialog inspects again, shows what changed
+// 1. Source: tabs Zip / npm / URL / GitHub (Phase 12) / Local folder -> Inspect (`POST /api/plugins/inspect`, nothing is
+//    installed).
+// 2.-4. Preview, trust and install: InstallReview (Phase 12, C46: extracted unchanged, shared with
+//    MarketplaceInstallDialog so the fresh-auth flow exists once). When the package changed since the preview (409
+//    `conflict`, reason `stale`), the review emits `stale`: the dialog inspects again and the review shows what changed
 //    and asks for a new review. Success: toast, `installed(id)`, close.
 // "I trust {source}" names the source the server resolved (`sourceRef`, e.g. `name@1.2.3`) when it sent one.
 // "Back" returns to the source step keeping the inputs; closing discards everything.
 import type { PluginDetail, PluginInspection } from '@harness-forge/shared'
 import type { DraftField, FieldErrors, InstallDraft, InstallRequest, InstallTab } from './install'
 import type { HarnessErrorUiAction } from '~/components/common/harness-error'
-import { FileArchiveIcon, RefreshCwIcon } from '@lucide/vue'
-import { computed, nextTick, reactive, ref, useId, useTemplateRef, watch } from 'vue'
+import { FileArchiveIcon } from '@lucide/vue'
+import { computed, reactive, ref, useId, useTemplateRef, watch } from 'vue'
 import { toast } from 'vue-sonner'
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -37,25 +32,22 @@ import ConfirmPasswordDialog from '~/components/common/ConfirmPasswordDialog.vue
 import { formatBytes } from '~/components/common/format'
 import HarnessErrorAlert from '~/components/common/HarnessErrorAlert.vue'
 import { useApi } from '~/composables/useApi'
-import { isFreshAuthCancelled, useFreshAuth } from '~/composables/useFreshAuth'
+import { useFreshAuth } from '~/composables/useFreshAuth'
 import { useAuthStore } from '~/stores/auth'
 import { usePluginsStore } from '~/stores/plugins'
 import { toHarnessError, withHarnessErrors } from '~/utils/errors'
 import { testIds } from '~/utils/testids'
-import InspectPreview from './InspectPreview.vue'
 import {
   buildRequest,
   emptyDraft,
+  GITHUB_HINT,
   inspectionSourceLabel,
   INSTALL_TABS,
-  installBody,
-  isStaleReview,
   serverFieldErrors,
   TAB_LABELS,
   zipForm,
 } from './install'
-import TrustConsent from './TrustConsent.vue'
-import TrustWarning from './TrustWarning.vue'
+import InstallReview from './InstallReview.vue'
 
 // Attributes go to the dialog content, not to the renderless dialog root.
 defineOptions({ inheritAttrs: false })
@@ -77,7 +69,7 @@ const emit = defineEmits<{
 const URL_PLACEHOLDER = 'https://example.com/my-plugin.zip'
 
 type Step = 'source' | 'preview'
-type Phase = 'idle' | 'inspecting' | 'installing'
+type Phase = 'idle' | 'inspecting'
 
 const api = useApi()
 const auth = useAuthStore()
@@ -88,6 +80,7 @@ const TAB_TEST_IDS: Record<InstallTab, string> = {
   zip: testIds.installTabZip,
   npm: testIds.installTabNpm,
   url: testIds.installTabUrl,
+  github: testIds.installTabGithub,
   folder: testIds.installTabFolder,
 }
 
@@ -99,6 +92,9 @@ const ids = {
   integrity: useId(),
   folder: useId(),
   zipError: useId(),
+  githubRepo: useId(),
+  githubRef: useId(),
+  githubPath: useId(),
 }
 
 const step = ref<Step>('source')
@@ -109,33 +105,14 @@ const error = ref<unknown>(null)
 const phase = ref<Phase>('idle')
 const inspection = ref<PluginInspection | null>(null)
 const inspected = ref<InstallRequest | null>(null)
-const trustChecked = ref(false)
-const password = ref('')
-const passwordError = ref<string | null>(null)
 const dragging = ref(false)
-/** The package changed since the user reviewed it: the preview shows the new inspection. */
-const staleReview = ref(false)
-const formElement = useTemplateRef<HTMLFormElement>('form')
+const review = useTemplateRef<InstanceType<typeof InstallReview>>('review')
 const fileInput = ref<HTMLInputElement | null>(null)
 // Bumped on every open and close, so a request that outlives its dialog session cannot touch the next one.
 let session = 0
 
 const busy = computed(() => phase.value !== 'idle' || freshAuth.pending.value)
-const requiresTrust = computed(() => inspection.value?.requiresTrust === true)
-const needsPassword = computed(() => requiresTrust.value && auth.status?.enabled === true && !auth.fresh)
 const sourceLabel = computed(() => (inspection.value && inspected.value ? inspectionSourceLabel(inspection.value, inspected.value) : ''))
-const sourceConflict = computed(() => {
-  const current = inspection.value
-  return current !== null && current.existing !== null && current.existing.source !== current.source
-})
-const canInstall = computed(() => {
-  const current = inspection.value
-  if (!current || busy.value || !current.compatible || sourceConflict.value)
-    return false
-  if (current.requiresTrust && !trustChecked.value)
-    return false
-  return !(needsPassword.value && password.value === '')
-})
 
 function reset() {
   step.value = 'source'
@@ -146,13 +123,9 @@ function reset() {
   phase.value = 'idle'
   inspection.value = null
   inspected.value = null
-  trustChecked.value = false
-  password.value = ''
-  passwordError.value = null
   // A waiting password prompt belongs to the dialog session that ends here.
   freshAuth.cancel()
   dragging.value = false
-  staleReview.value = false
   if (fileInput.value)
     fileInput.value.value = ''
 }
@@ -172,6 +145,9 @@ const FIELD_OF_DRAFT: Partial<Record<keyof InstallDraft, DraftField>> = {
   url: 'url',
   integrity: 'integrity',
   folderPath: 'folderPath',
+  githubRepo: 'githubRepo',
+  githubRef: 'githubRef',
+  githubPath: 'githubPath',
 }
 for (const key of Object.keys(FIELD_OF_DRAFT) as Array<keyof InstallDraft>) {
   watch(() => draft[key], () => {
@@ -186,12 +162,9 @@ for (const key of Object.keys(FIELD_OF_DRAFT) as Array<keyof InstallDraft>) {
 watch(tab, () => {
   error.value = null
 })
-watch(password, () => {
-  passwordError.value = null
-})
 
 function onOpenChange(value: boolean) {
-  if (!value && phase.value === 'installing')
+  if (!value && review.value?.installing)
     return
   emit('update:open', value)
 }
@@ -256,10 +229,6 @@ async function inspect() {
       return
     inspection.value = result
     inspected.value = request
-    trustChecked.value = false
-    password.value = ''
-    passwordError.value = null
-    staleReview.value = false
     step.value = 'preview'
   }
   catch (failure) {
@@ -272,83 +241,32 @@ async function inspect() {
   }
 }
 
-/** Installs exactly what the preview showed: the server refuses with `409 conflict` (`stale`) when it changed. */
-function sendInstall(): Promise<PluginDetail> {
-  const request = inspected.value
-  const reviewed = inspection.value
-  if (!request || !reviewed)
-    return Promise.reject(new Error('Nothing to install.'))
-  const options = { trust: requiresTrust.value && trustChecked.value, sha256: reviewed.sha256 }
-  if (request.kind === 'zip')
-    return withHarnessErrors(api.pluginInstall.install({ form: zipForm(request.file, options) }))
-  return withHarnessErrors(api.pluginInstall.install({ body: installBody(request.source, options) }))
-}
-
-function finish(detail: PluginDetail) {
+function onInstalled(detail: PluginDetail) {
   toast.success(`Installed ${detail.name}`)
   void plugins.fetchOne(detail.id).catch(() => {})
   emit('installed', detail.id)
   emit('update:open', false)
 }
 
-async function install() {
-  if (!canInstall.value)
+/**
+ * The review's install was refused as stale (409 `stale`: a moved npm tag, a changed folder): inspect the same request
+ * again; the review shows the new inspection with a notice and a fresh consent. When this fails too, the review keeps the
+ * error, which already tells the user to inspect again.
+ */
+async function reinspect() {
+  const request = inspected.value
+  if (!request)
     return
   const current = session
-  error.value = null
-  passwordError.value = null
-  staleReview.value = false
-  phase.value = 'installing'
-  try {
-    if (needsPassword.value) {
-      const failed = await freshAuth.login(password.value)
-      if (failed !== null) {
-        if (current === session)
-          passwordError.value = failed
-        return
-      }
-    }
-    const detail = await freshAuth.run(sendInstall, { required: requiresTrust.value })
-    if (current === session)
-      finish(detail)
-  }
-  catch (failure) {
-    if (current !== session || isFreshAuthCancelled(failure))
-      return
-    await installFailed(failure, current)
-  }
-  finally {
-    if (current === session)
-      phase.value = 'idle'
-  }
-}
-
-/**
- * Shows an install failure. When the package changed since it was reviewed (409 `stale`: a moved npm tag, a changed
- * folder), the preview is refreshed with a new inspection, a notice says why, and the trust consent starts over.
- */
-async function installFailed(failure: unknown, current: number) {
-  showError(failure)
-  const request = inspected.value
-  if (!isStaleReview(failure) || !request)
-    return
   try {
     const result = await withHarnessErrors(request.kind === 'zip'
       ? api.pluginInstall.inspect({ form: zipForm(request.file) })
       : api.pluginInstall.inspect({ body: request.source }))
-    if (current !== session)
-      return
-    inspection.value = result
-    trustChecked.value = false
-    password.value = ''
-    error.value = null
-    staleReview.value = true
-    // The notice sits above the preview; the user was looking at the Install button at the bottom.
-    await nextTick()
-    formElement.value?.scrollTo({ top: 0 })
+    if (current === session)
+      inspection.value = result
   }
   catch {
-    // The error above already tells the user to inspect again.
+    // The review's error stays.
   }
 }
 
@@ -359,16 +277,11 @@ function back() {
   inspection.value = null
   inspected.value = null
   error.value = null
-  staleReview.value = false
-  trustChecked.value = false
-  password.value = ''
 }
 
 function onSubmit() {
   if (step.value === 'source')
     void inspect()
-  else
-    void install()
 }
 
 /** "Log in" of the error alert: the password prompt now, then the step is submitted again. */
@@ -410,8 +323,8 @@ function onErrorAction(action: HarnessErrorUiAction) {
         </DialogDescription>
       </DialogHeader>
 
-      <form :id="formId" ref="form" class="-mx-1 grid min-h-0 gap-4 overflow-y-auto px-1" novalidate @submit.prevent="onSubmit">
-        <Tabs v-if="step === 'source'" :model-value="tab" class="gap-4" @update:model-value="onTabChange">
+      <form v-if="step === 'source'" :id="formId" class="-mx-1 grid min-h-0 gap-4 overflow-y-auto px-1" novalidate @submit.prevent="onSubmit">
+        <Tabs :model-value="tab" class="gap-4" @update:model-value="onTabChange">
           <TabsList class="w-full">
             <TabsTrigger
               v-for="value in INSTALL_TABS"
@@ -541,6 +454,65 @@ function onErrorAction(action: HarnessErrorUiAction) {
             </p>
           </TabsContent>
 
+          <TabsContent value="github" class="grid gap-3">
+            <div class="grid gap-1.5">
+              <Label :for="ids.githubRepo">Repository</Label>
+              <Input
+                :id="ids.githubRepo"
+                v-model="draft.githubRepo"
+                placeholder="owner/repo"
+                autocomplete="off"
+                spellcheck="false"
+                class="font-mono"
+                :disabled="busy"
+                :aria-invalid="fieldErrors.githubRepo ? true : undefined"
+                :data-testid="testIds.installGithubRepo"
+              />
+              <p v-if="fieldErrors.githubRepo" role="alert" class="text-sm text-destructive">
+                {{ fieldErrors.githubRepo }}
+              </p>
+            </div>
+            <div class="grid gap-3 sm:grid-cols-2">
+              <div class="grid gap-1.5">
+                <Label :for="ids.githubRef">Branch, tag or commit <span class="font-normal text-muted-foreground">(optional)</span></Label>
+                <Input
+                  :id="ids.githubRef"
+                  v-model="draft.githubRef"
+                  placeholder="main"
+                  autocomplete="off"
+                  spellcheck="false"
+                  class="font-mono"
+                  :disabled="busy"
+                  :aria-invalid="fieldErrors.githubRef ? true : undefined"
+                  :data-testid="testIds.installGithubRef"
+                />
+                <p v-if="fieldErrors.githubRef" role="alert" class="text-sm text-destructive">
+                  {{ fieldErrors.githubRef }}
+                </p>
+              </div>
+              <div class="grid gap-1.5">
+                <Label :for="ids.githubPath">Folder in the repository <span class="font-normal text-muted-foreground">(optional)</span></Label>
+                <Input
+                  :id="ids.githubPath"
+                  v-model="draft.githubPath"
+                  placeholder="plugins/my-plugin"
+                  autocomplete="off"
+                  spellcheck="false"
+                  class="font-mono"
+                  :disabled="busy"
+                  :aria-invalid="fieldErrors.githubPath ? true : undefined"
+                  :data-testid="testIds.installGithubPath"
+                />
+                <p v-if="fieldErrors.githubPath" role="alert" class="text-sm text-destructive">
+                  {{ fieldErrors.githubPath }}
+                </p>
+              </div>
+            </div>
+            <p class="text-xs text-muted-foreground">
+              {{ GITHUB_HINT }}
+            </p>
+          </TabsContent>
+
           <TabsContent value="folder" class="grid gap-3">
             <div class="grid gap-1.5">
               <Label :for="ids.folder">Folder on the server</Label>
@@ -586,32 +558,6 @@ function onErrorAction(action: HarnessErrorUiAction) {
           </TabsContent>
         </Tabs>
 
-        <template v-else-if="inspection">
-          <Alert
-            v-if="staleReview"
-            :data-testid="testIds.installStale"
-            class="border-warning/40 bg-warning/5 *:data-[slot=alert-description]:text-foreground/80 dark:bg-warning/10 *:[svg]:text-warning"
-          >
-            <RefreshCwIcon aria-hidden="true" />
-            <AlertTitle>This plugin changed since you reviewed it</AlertTitle>
-            <AlertDescription>
-              The preview now shows the current version. Review it again before you install.
-            </AlertDescription>
-          </Alert>
-          <InspectPreview :inspection="inspection" :source-label="sourceLabel" />
-          <template v-if="inspection.requiresTrust">
-            <TrustWarning :inspection="inspection" />
-            <TrustConsent
-              v-model:checked="trustChecked"
-              v-model:password="password"
-              :source="sourceLabel"
-              :needs-password="needsPassword"
-              :password-error="passwordError"
-              :disabled="busy"
-            />
-          </template>
-        </template>
-
         <HarnessErrorAlert
           v-if="error"
           :error="error"
@@ -620,38 +566,32 @@ function onErrorAction(action: HarnessErrorUiAction) {
         />
       </form>
 
-      <DialogFooter>
-        <template v-if="step === 'source'">
-          <Button type="button" variant="outline" :disabled="busy" @click="onOpenChange(false)">
-            Cancel
-          </Button>
-          <Button
-            type="submit"
-            :form="formId"
-            :disabled="busy"
-            :aria-busy="phase === 'inspecting' || undefined"
-            :data-testid="testIds.installInspect"
-          >
-            <Spinner v-if="phase === 'inspecting'" data-icon="inline-start" />
-            Inspect
-          </Button>
-        </template>
-        <template v-else>
-          <Button type="button" variant="outline" :disabled="busy" :data-testid="testIds.installBack" @click="back">
-            Back
-          </Button>
-          <Button
-            type="submit"
-            :form="formId"
-            :disabled="!canInstall"
-            :aria-busy="phase === 'installing' || undefined"
-            :data-testid="testIds.installSubmit"
-          >
-            <Spinner v-if="phase === 'installing'" data-icon="inline-start" />
-            Install
-          </Button>
-        </template>
+      <DialogFooter v-if="step === 'source'">
+        <Button type="button" variant="outline" :disabled="busy" @click="onOpenChange(false)">
+          Cancel
+        </Button>
+        <Button
+          type="submit"
+          :form="formId"
+          :disabled="busy"
+          :aria-busy="phase === 'inspecting' || undefined"
+          :data-testid="testIds.installInspect"
+        >
+          <Spinner v-if="phase === 'inspecting'" data-icon="inline-start" />
+          Inspect
+        </Button>
       </DialogFooter>
+
+      <InstallReview
+        v-else-if="inspection && inspected"
+        ref="review"
+        :inspection="inspection"
+        :request="inspected"
+        :source-label="sourceLabel"
+        @back="back"
+        @installed="onInstalled"
+        @stale="reinspect"
+      />
     </DialogContent>
 
     <ConfirmPasswordDialog

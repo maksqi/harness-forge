@@ -9,8 +9,11 @@ import type {
   HarnessErrorInit,
   HarnessUIMessage,
   HookEvent,
+  HookHandlerType,
+  MarketplaceSource,
   MessageMetadata,
   ModelInfo,
+  PluginFormat,
   PluginSource,
   ProviderStatus,
   RunOrigin,
@@ -24,6 +27,15 @@ import type {
 } from '@harness-forge/shared'
 import { relations, sql } from 'drizzle-orm'
 import { blob, index, integer, primaryKey, real, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core'
+
+/** Claude handler fields of a personal hook (Phase 12, ADR-057; column `hooks.options`). */
+export interface PersonalHookOptions {
+  readonly continueOnBlock?: boolean
+  readonly args?: readonly string[]
+  readonly async?: boolean
+  readonly if?: string
+  readonly statusMessage?: string
+}
 
 function timestamp(name: string) {
   return integer(name, { mode: 'number' })
@@ -50,9 +62,10 @@ export type MessageRole = HarnessUIMessage['role']
 
 /**
  * Purpose of a usage row: a chat run, a title generation, an image generation (image turn or the `generate_image`
- * tool, ADR-028) or a voice request (ADR-029: dictation = `transcription`, read-aloud = `speech`).
+ * tool, ADR-028) or a voice request (ADR-029: dictation = `transcription`, read-aloud = `speech`); Phase 12: `hook` = a
+ * prompt hook's model call (ADR-057). A type only: the column is plain text.
  */
-export type UsagePurpose = 'chat' | 'title' | 'image' | 'transcription' | 'speech' | 'compact' | 'subagent'
+export type UsagePurpose = 'chat' | 'title' | 'image' | 'transcription' | 'speech' | 'compact' | 'subagent' | 'hook'
 
 /**
  * `mcp_servers.transport`: only header / env NAMES are stored; their values are secrets (scope `mcp:<id>`, names
@@ -230,6 +243,13 @@ export const plugins = sqliteTable('plugins', {
   lastError: json<HarnessErrorInit>('last_error'),
   installedAt: timestamp('installed_at').notNull().$defaultFn(() => Date.now()),
   updatedAt: updatedAt(),
+  /** Phase 12 (ADR-053): `harness` (a `plugin.json` plugin) or `claude` (a Claude Code plugin read in place). */
+  format: text('format').$type<PluginFormat>().notNull().default('harness'),
+  /**
+   * Phase 12 (ADR-054): where a GitHub or marketplace install came from (`StoredPluginOrigin` of `S/plugins/types.ts`:
+   * marketplace + entry + commit / archive sha256 + the entry overlay, or a GitHub repo + commit); null otherwise.
+   */
+  origin: json<Record<string, unknown>>('origin'),
 })
 
 /**
@@ -449,12 +469,42 @@ export const hooks = sqliteTable('hooks', {
   matcher: text('matcher'),
   /** The shell command (run through `runShellCommand`). */
   command: text('command').notNull(),
-  /** Seconds (1 – 600); null = the default 60 s. */
+  /** Seconds (1 – 600); null = the default 60 s (prompt hooks: 30 s). */
   timeout: integer('timeout', { mode: 'number' }),
   enabled: bool('enabled').notNull().default(true),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
+  /** Phase 12 (ADR-057): `command` or `prompt` (a prompt hook stores `command = ''`). */
+  type: text('type').$type<HookHandlerType>().notNull().default('command'),
+  /** The prompt of a prompt hook (`$ARGUMENTS` = the hook input); null for command hooks. */
+  prompt: text('prompt'),
+  /** A prompt hook's model (a model ref or a Claude alias); null = the `hookModelRef` setting, then the fallbacks. */
+  model: text('model'),
+  /** Claude handler fields: `{ continueOnBlock?, args?, async?, if?, statusMessage? }`; null = none. */
+  options: json<PersonalHookOptions>('options'),
 })
+
+/**
+ * Marketplaces (Phase 12, ADR-054): a Claude Code `marketplace.json` added from a GitHub repository, a URL or a server
+ * folder. Refreshed only on request; never in backups; kept by delete-all.
+ */
+export const marketplaces = sqliteTable('marketplaces', {
+  /** `mkt_` + 16 chars. */
+  id: text('id').primaryKey(),
+  /** The `marketplace.json` name (unique). */
+  name: text('name').notNull(),
+  source: json<MarketplaceSource>('source').notNull(),
+  /** The resolved 40-hex commit (github), the sha256 of the fetched JSON (url) or null (path). */
+  resolvedRef: text('resolved_ref'),
+  /** The validated, normalized catalog (≤ 1 MiB); null before the first successful fetch. */
+  catalog: json<Record<string, unknown>>('catalog'),
+  fetchedAt: timestamp('fetched_at'),
+  lastError: json<HarnessErrorInit>('last_error'),
+  createdAt: createdAt(),
+  updatedAt: updatedAt(),
+}, table => [
+  uniqueIndex('marketplaces_name_unique').on(table.name),
+])
 
 /**
  * Project trust (Phase 11, ADR-049): the sha256 of every approved executable item of a project folder (a hook, a
@@ -492,7 +542,7 @@ export const usageRelations = relations(usage, ({ one }) => ({
   chat: one(chats, { fields: [usage.chatId], references: [chats.id] }),
 }))
 
-/** Every table name (the 22 tables of DECISIONS.md "Database tables"). */
+/** Every table name (the 23 tables of DECISIONS.md "Database tables"). */
 export const TABLE_NAMES = [
   'settings',
   'secrets',
@@ -516,6 +566,7 @@ export const TABLE_NAMES = [
   'background_tasks',
   'hooks',
   'project_trust',
+  'marketplaces',
 ] as const
 
 // ---------- row types ----------
@@ -528,6 +579,7 @@ export type ModelPrefRow = typeof modelPrefs.$inferSelect
 export type ChatRow = typeof chats.$inferSelect
 export type MessageRow = typeof messages.$inferSelect
 export type CustomizationRow = typeof customizations.$inferSelect
+export type MarketplaceRow = typeof marketplaces.$inferSelect
 export type BackgroundTaskRow = typeof backgroundTasks.$inferSelect
 export type UsageRow = typeof usage.$inferSelect
 export type PluginRow = typeof plugins.$inferSelect

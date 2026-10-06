@@ -146,6 +146,11 @@ export function createPersonalHookStore(deps: Pick<AppDeps, 'db'>, options: Pers
         enabled: parsed.data.enabled ?? true,
         createdAt: at,
         updatedAt: at,
+        // Phase 12 columns (`0009`): prompt hooks and the Claude handler fields land in P12-A (W12.5).
+        type: 'command',
+        prompt: null,
+        model: null,
+        options: null,
       }
       await guardDb(() => db.insert(hooks).values(row))
       changed()

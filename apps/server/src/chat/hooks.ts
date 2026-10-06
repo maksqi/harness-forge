@@ -32,22 +32,142 @@
 //   record placed next to the compaction marker. `Notification` (`notification`): `pipeline.ts` fires it (tracked,
 //   fire-and-forget, never stored) once a run is released waiting for an approval (`permission_prompt`, the message
 //   naming the tools, `permissionPromptMessage`).
-// - Transient activity: `data-activity { kind: 'hooks', event, toolCallId? }` while the hooks of an event run, then
-//   `{ kind: 'idle' }` (chat runs only).
+// - Transient activity: `data-activity { kind: 'hooks', event, toolCallId?, label? }` while the hooks of an event run,
+//   then `{ kind: 'idle' }` (chat runs only).
 // Every event is free without hooks (`snapshot.has(event)` false: no payload, no process). Payloads, outputs and
 // contexts are never logged.
+//
+// Phase 12 (C44, ADR-057; COMPLETE and FROZEN after P12-0b):
+// - `PermissionRequest` (`permissionRequest(call, signal)`, `approval.ts`): runs once per call, for the main agent only
+//   (a `ChildHooks` answers null without running anything), when the combined approval result asks the user and the
+//   call is not answered in the continued message (so a request and its approved continuation run it exactly once).
+//   The tool input it sees is the one `PreToolUse` rewrote, if any. Its decision is `allow` (an `updatedInput` it sets
+//   becomes the call's input, like a `PreToolUse` rewrite: the call can only run in this run when the allow approved
+//   it), `deny` (a block) or none; `continue: false` (`interrupt`) asks the run to stop. `approval.ts` decides what an
+//   `allow` may approve (`allowApproves`).
+// - Records of a tool call (`PreToolUse`, `PermissionRequest`) stay pending until `approval.ts` settles the call
+//   (`settle(callId, { harnessAsked })`, also from its catch path): the `PreToolUse` record of an `allowed` call the
+//   harness still asks for gets `harnessAsked: true` (the web shows "Allowed by hook · still asks"); the replay map
+//   `OUTCOME_DECISIONS` is unchanged. Records still pending at the next step boundary are stored as they are.
+// - `PostToolUseFailure` (`postToolUseFailure(call, error, signal)`, `tools.ts`, the catch paths of a call that failed
+//   after its approval; never on an abort): like `PostToolUse`, the model text of its record is queued for the next step
+//   (its `context`; a block reason through `hookModelText`) and `continue: false` asks the run to stop. `error` is cut
+//   to `LIMITS.hookErrorBytes` by the caller and to `HOOK_LIMITS.errorMaxChars` here.
+// - `PostCompact` (`RunHooks.postCompact`, `compaction/{guard,stream}.ts`): observe only, right after the compaction
+//   marker, its record placed after the marker (`trigger: 'auto' | 'manual'`).
+// - `SubagentStart` (`ChildHooks.subagentStart(agent, signal)`, `subagent/index.ts` before the child's step 0): matched
+//   on the agent type (`target`, `aliases` = `hookAgentNames`: the Claude Code names too); answers the
+//   `additionalContext` for the child's first user message (`childFirstMessage`, `subagent/host.ts`). The child keeps
+//   the agent (`{ id: <parent task call id>, type }`, `ChildHooks.agent`): its later tool events carry it (`agent_id` /
+//   `agent_type`); `SubagentStop` carries it and is matched on its type when the runner passes it
+//   (`SubagentStopInput.agent`, W12.6).
+// - The MCP server names hook matchers also see (`RunHooksInput.mcpServerNames`, `hookMcpServerNames`): the name a
+//   project server has in `.mcp.json`, and the Claude name of a plugin server (`RegisteredMcpServer.claudeName`,
+//   `plugin_<name>_<server>`), so `mcp__plugin_<name>_<server>__*` matches.
+// - The activity label (open point 1): the `statusMessage` of the first matching handler (`HookSnapshot.statusMessage(
+//   event, target)`), at most 200 characters; absent when there is none.
 import type { HarnessUIMessage, HookData, HookEvent, HookPermissionDecision, RunOrigin } from '@harness-forge/shared'
 import type { ModelMessage, StopCondition, ToolSet } from 'ai'
 import type { Logger } from '../logger.ts'
+import type { Registry } from '../registry/types.ts'
 import type { HookEventResult, HookRunInput, HookRunOptions, HookScope, HookSnapshot } from '../services/hooks/types.ts'
 import type { HarnessUIMessageChunk } from './generated-files.ts'
 import type { HarnessDataChunk } from './pipeline.ts'
 import type { StepPiece } from './steps.ts'
 import type { RunReleaseFollowUp } from './types.ts'
-import { claudeToolName, createHookRecordId, HOOK_PART_TYPE, hookChainLength, hookDataSchema, hookModelText, hookTargetNames, LIMITS } from '@harness-forge/shared'
+import {
+  claudeToolName,
+  createHookRecordId,
+  HOOK_LIMITS,
+  HOOK_MATCHER_SUBJECTS,
+  HOOK_PART_TYPE,
+  hookAgentNames,
+  hookChainLength,
+  hookDataSchema,
+  hookModelText,
+  hookTargetNames,
+  LIMITS,
+} from '@harness-forge/shared'
 import { isAbortError } from './errors.ts'
 import { isToolPart } from './history.ts'
 import { NOTICES } from './notices.ts'
+
+/** The sub-agent of an event (Phase 12): `agent_id` (the parent's `task` call id) and `agent_type` of the payload. */
+export interface SubagentIdentity {
+  readonly id: string
+  /** The resolved agent type (`explore`, `general`, a custom agent's name). */
+  readonly type: string
+}
+
+/** `text` cut to at most `max` UTF-16 units without splitting a surrogate pair (the shared schemas count units). */
+export function cutUnits(text: string, max: number): string {
+  if (text.length <= max)
+    return text
+  const cut = text.slice(0, Math.max(0, max))
+  return /[\uD800-\uDBFF]$/.test(cut) ? cut.slice(0, -1) : cut
+}
+
+/** The target the matchers of `event` are tested against (the activity label's target; see `HOOK_MATCHER_SUBJECTS`). */
+export function hookMatcherTarget(event: HookEvent, input: HookRunInput, options: Pick<HookRunOptions, 'target'>): string | undefined {
+  if (typeof options.target === 'string')
+    return options.target
+  switch (HOOK_MATCHER_SUBJECTS[event]) {
+    case 'tool':
+      return input.tool?.name
+    case 'trigger':
+      return input.trigger
+    case 'notification':
+      return input.notificationType
+    case 'agent':
+      return input.agent?.type
+    case 'source':
+      return input.sessionSource
+    case 'reason':
+      return input.sessionEndReason ?? 'other'
+    default:
+      return undefined
+  }
+}
+
+/**
+ * The activity label of `event` (open point 1): the snapshot's `statusMessage(event, target)` trimmed and cut to
+ * `HOOK_LIMITS.statusMessageMaxChars` characters, or undefined (none, empty, or a failing snapshot). Never throws.
+ */
+export function hookActivityLabel(snapshot: HookSnapshot, event: HookEvent, target: string | undefined): string | undefined {
+  try {
+    const label: unknown = snapshot.statusMessage(event, target)
+    if (typeof label !== 'string')
+      return undefined
+    const trimmed = label.trim()
+    return trimmed === '' ? undefined : cutUnits(trimmed, HOOK_LIMITS.statusMessageMaxChars)
+  }
+  catch {
+    return undefined
+  }
+}
+
+/**
+ * The MCP server names hook matchers also see (Phase 12): the Claude name of every plugin MCP server that has one
+ * (`RegisteredMcpServer.claudeName`, `plugin_<name>_<server>`), then the project servers' names as written in
+ * `.mcp.json` (`ProjectMcpTools.names`; a project server wins its id). Server id → name. Never throws.
+ */
+export function hookMcpServerNames(registry: Pick<Registry, 'mcpServers'> | null, projectNames?: ReadonlyMap<string, string>): Map<string, string> {
+  const names = new Map<string, string>()
+  try {
+    for (const entry of registry?.mcpServers.list() ?? []) {
+      const claudeName = entry.claudeName
+      const id = entry.decl.id
+      if (typeof claudeName === 'string' && claudeName !== '' && typeof id === 'string')
+        names.set(id, claudeName)
+    }
+  }
+  catch {
+    // A registry that cannot list its servers adds no name.
+  }
+  for (const [id, name] of projectNames ?? [])
+    names.set(id, name)
+  return names
+}
 
 /** The result of an event for which no hook ran. */
 export const NO_HOOK_RESULT: HookEventResult = Object.freeze({
@@ -61,7 +181,10 @@ export const NO_HOOK_RESULT: HookEventResult = Object.freeze({
   record: null,
 })
 
-/** A snapshot without any hook (`has()` false for every event, `run()` answers `NO_HOOK_RESULT`). */
+/**
+ * A snapshot without any hook (`has()` false for every event, `run()` answers `NO_HOOK_RESULT`, `statusMessage()`
+ * null).
+ */
 export function noHookSnapshot(scope: HookScope): HookSnapshot {
   return Object.freeze({
     scope,
@@ -70,6 +193,7 @@ export function noHookSnapshot(scope: HookScope): HookSnapshot {
       options.signal.throwIfAborted()
       return NO_HOOK_RESULT
     },
+    statusMessage: (_event: HookEvent, _target?: string): string | null => null,
   })
 }
 
@@ -101,17 +225,57 @@ export interface PreToolUseDecision {
   readonly updatedInput?: unknown
 }
 
+/** What `PermissionRequest` decided for one call (Phase 12). */
+export interface PermissionRequestDecision {
+  /** `allow` or `deny` (a block); null = the hooks ran but decided nothing. */
+  readonly decision: Extract<HookPermissionDecision, 'allow' | 'deny'> | null
+  /** The deny `message` (or the reasons joined); null = none. */
+  readonly reason: string | null
+  /** `allow` only: the input the tool runs with (applied through `updatedInput(toolCallId)`); absent = unchanged. */
+  readonly updatedInput?: unknown
+}
+
+/** How `approval.ts` settled one call (Phase 12, `ToolHooks.settle`). */
+export interface ToolCallSettlement {
+  /**
+   * A `PreToolUse` hook allowed the call (`allow`) and the harness still asks the user (plan mode, an `execute` tool,
+   * an `always` policy, a sub-agent rule): its pending record is stored with `harnessAsked: true`.
+   */
+  readonly harnessAsked: boolean
+}
+
 /**
- * The hook seams of one tool set: `createToolApproval` calls `preToolUse`, the tool wrapper `updatedInput` and
- * `postToolUse` (a run's `RunHooks`, or a sub-agent's `ChildHooks`).
+ * The hook seams of one tool set: `createToolApproval` calls `preToolUse`, `permissionRequest` and `settle`, the tool
+ * wrapper `updatedInput`, `postToolUse` and `postToolUseFailure` (a run's `RunHooks`, or a sub-agent's `ChildHooks`).
  */
 export interface ToolHooks {
-  /** Runs `PreToolUse` once per call, or replays the stored decision; null = no hook applies. Rejects on abort. */
+  /**
+   * Runs `PreToolUse` once per call, or replays the stored decision; null = no hook applies. Rejects on abort. Its
+   * record stays pending until `settle(toolCallId, …)` (Phase 12).
+   */
   readonly preToolUse: (call: HookToolCall, signal: AbortSignal) => Promise<PreToolUseDecision | null>
-  /** The input a `PreToolUse` hook rewrote for the call, or null. Synchronous. */
+  /** The input a `PreToolUse` (or an approving `PermissionRequest`) hook rewrote for the call, or null. Synchronous. */
   readonly updatedInput: (toolCallId: string) => { readonly input: unknown } | null
   /** Runs `PostToolUse` for a successful call (queues the model text, may ask the run to stop). Never rejects. */
   readonly postToolUse: (result: HookToolResult, signal: AbortSignal) => Promise<void>
+  /**
+   * Phase 12: runs `PermissionRequest` once for a call the approval would ask the user about (see the module comment);
+   * null = nothing ran (no such hooks, a call answered in the continued message, a sub-agent). Its record stays pending
+   * until `settle`. Rejects on abort.
+   */
+  readonly permissionRequest: (call: HookToolCall, signal: AbortSignal) => Promise<PermissionRequestDecision | null>
+  /**
+   * Phase 12: runs `PostToolUseFailure` for a call that failed after its approval (`input` = the input it ran with,
+   * `error` = the error text the model reads); queues the model text of its record for the next step, may ask the run
+   * to stop. Never called for an abort; never rejects.
+   */
+  readonly postToolUseFailure: (call: HookToolCall, error: string, signal: AbortSignal) => Promise<void>
+  /**
+   * Phase 12: stores the pending records of the call (`PreToolUse`, then `PermissionRequest`), the `PreToolUse` one
+   * with `harnessAsked: true` when `settlement.harnessAsked` and its outcome is `allowed`. A call without pending
+   * records is a no-op. Synchronous; never throws.
+   */
+  readonly settle: (toolCallId: string, settlement: ToolCallSettlement) => void
 }
 
 /** What `RunHooks` needs of its run (`RunSession` satisfies it). */
@@ -169,12 +333,22 @@ export interface SubagentStopInput {
   readonly stopHookActive: boolean
   /** The child's `task` call: `callId`, `input` (the task input with its `type`), `output` (the report). */
   readonly task?: { readonly callId: string, readonly input: unknown, readonly output?: unknown }
+  /**
+   * Phase 12: the sub-agent (`agent_id` / `agent_type`; the matchers test its type), e.g. `ChildHooks.agent`; absent =
+   * the v1.7 input (no agent, no agent matching).
+   */
+  readonly agent?: SubagentIdentity
 }
 
 /** The `PreCompact` input of a compaction (`trigger`; `custom_instructions` = the `/compact` focus). */
 export interface PreCompactInput {
   readonly trigger: 'manual' | 'auto'
   readonly customInstructions: string | null
+}
+
+/** The `PostCompact` input of a compaction (Phase 12; the payload carries `trigger`). */
+export interface PostCompactInput {
+  readonly trigger: 'manual' | 'auto'
 }
 
 /** The `Notification` input of a run waiting for an approval. */
@@ -277,7 +451,7 @@ export function hookModelMessage(text: string): ModelMessage {
 /** What a runtime does with records and activity (a chat run places them; a child drops them). */
 interface RuntimeSink {
   readonly record: (data: HookData) => void
-  readonly activity: (event: HookEvent, toolCallId?: string) => void
+  readonly activity: (event: HookEvent, toolCallId?: string, label?: string) => void
   readonly idle: () => void
 }
 
@@ -289,6 +463,8 @@ interface RuntimeInput {
   readonly answered: ReadonlySet<string>
   readonly decisions: Map<string, PreToolUseDecision>
   readonly sink: RuntimeSink
+  /** Phase 12: `PermissionRequest` runs (the main agent only). */
+  readonly permissionRequests: boolean
 }
 
 /** The tool hooks, the queued model texts and the stop request shared by a run and its children. */
@@ -300,6 +476,11 @@ class ToolHookRuntime implements ToolHooks {
   readonly #answered: ReadonlySet<string>
   readonly #decisions: Map<string, PreToolUseDecision>
   readonly #sink: RuntimeSink
+  readonly #permissionRequests: boolean
+  /** Phase 12: the records of a call held until `settle` (in run order), by tool call id. */
+  readonly #pending = new Map<string, HookData[]>()
+  /** Phase 12: the `PermissionRequest` decision of every call it ran for (at most once per call). */
+  readonly #requested = new Map<string, PermissionRequestDecision>()
   #queued: ModelMessage[] = []
   #stop: { readonly reason: string | null } | null = null
 
@@ -311,6 +492,7 @@ class ToolHookRuntime implements ToolHooks {
     this.#answered = input.answered
     this.#decisions = input.decisions
     this.#sink = input.sink
+    this.#permissionRequests = input.permissionRequests
   }
 
   /** The snapshot has hooks of `event` (matchers not applied). */
@@ -365,15 +547,36 @@ class ToolHookRuntime implements ToolHooks {
     return queued
   }
 
-  /** Runs `event` with the activity around it; rejects like `snapshot.run` (an abort). */
+  /** The input of one event: `input` plus what the runtime adds (a child: its agent, Phase 12). */
+  protected eventInput(_event: HookEvent, input: HookRunInput): HookRunInput {
+    return input
+  }
+
+  /** Runs `event` with the activity around it (Phase 12: with its label); rejects like `snapshot.run` (an abort). */
   protected async runEvent(event: HookEvent, input: HookRunInput, options: HookRunOptions, toolCallId?: string): Promise<HookEventResult> {
-    this.#sink.activity(event, toolCallId)
+    const full = this.eventInput(event, input)
+    this.#sink.activity(event, toolCallId, hookActivityLabel(this.snapshot, event, hookMatcherTarget(event, full, options)))
     try {
-      return await this.snapshot.run(event, input, options)
+      return await this.snapshot.run(event, full, options)
     }
     finally {
       this.#sink.idle()
     }
+  }
+
+  /** Holds a record of a tool call until `settle` (Phase 12). */
+  #hold(toolCallId: string, data: HookData): void {
+    const held = this.#pending.get(toolCallId)
+    if (held === undefined)
+      this.#pending.set(toolCallId, [data])
+    else
+      held.push(data)
+  }
+
+  /** Stores the records still pending (a call nobody settled), as they are; called at every step boundary. */
+  protected flushPending(): void {
+    for (const toolCallId of [...this.#pending.keys()])
+      this.settle(toolCallId, { harnessAsked: false })
   }
 
   async preToolUse(call: HookToolCall, signal: AbortSignal): Promise<PreToolUseDecision | null> {
@@ -390,8 +593,9 @@ class ToolHookRuntime implements ToolHooks {
       { signal, target: call.toolName, aliases: this.aliases(call.toolName) },
       id,
     )
+    // Phase 12: held until `approval.ts` settles the call (`harnessAsked`).
     if (result.record !== null)
-      this.record(result.record)
+      this.#hold(id, result.record)
     if (!result.continue)
       this.requestStop(result.stopReason)
     const decision: HookPermissionDecision | null = result.block ? 'deny' : result.decision
@@ -404,6 +608,56 @@ class ToolHookRuntime implements ToolHooks {
   updatedInput(toolCallId: string): { readonly input: unknown } | null {
     const decided = this.#decisions.get(toolCallId)
     return decided !== undefined && Object.hasOwn(decided, 'updatedInput') ? { input: decided.updatedInput } : null
+  }
+
+  async permissionRequest(call: HookToolCall, signal: AbortSignal): Promise<PermissionRequestDecision | null> {
+    const id = call.toolCallId
+    if (!this.#permissionRequests)
+      return null
+    const known = this.#requested.get(id)
+    if (known !== undefined)
+      return known
+    if (this.#answered.has(id) || !this.has('PermissionRequest'))
+      return null
+    const rewrite = this.updatedInput(id)
+    const input = rewrite === null ? call.input : rewrite.input
+    const result = await this.runEvent(
+      'PermissionRequest',
+      { messageId: this.messageId, tool: { name: call.toolName, callId: id, input } },
+      { signal, target: call.toolName, aliases: this.aliases(call.toolName) },
+      id,
+    )
+    if (result.record !== null)
+      this.#hold(id, result.record)
+    // `interrupt: true` of a deny.
+    if (!result.continue)
+      this.requestStop(result.stopReason)
+    const decision = result.block || result.decision === 'deny' ? 'deny' : result.decision === 'allow' ? 'allow' : null
+    const rewritten = decision === 'allow' && result.updatedInput !== undefined
+    const decided: PermissionRequestDecision = { decision, reason: result.reason, ...(rewritten ? { updatedInput: result.updatedInput } : {}) }
+    this.#requested.set(id, decided)
+    if (rewritten) {
+      // Applied like a `PreToolUse` rewrite: the call runs in this run only when the allow approved it.
+      const before = this.#decisions.get(id)
+      this.#decisions.set(id, { decision: before?.decision ?? null, reason: before?.reason ?? null, updatedInput: result.updatedInput })
+    }
+    return decided
+  }
+
+  settle(toolCallId: string, settlement: ToolCallSettlement): void {
+    const held = this.#pending.get(toolCallId)
+    if (held === undefined)
+      return
+    this.#pending.delete(toolCallId)
+    for (const data of held) {
+      try {
+        const asked = settlement.harnessAsked === true && data.event === 'PreToolUse' && data.outcome === 'allowed'
+        this.record(asked ? { ...data, harnessAsked: true } : data)
+      }
+      catch (error) {
+        this.logger.warn('a hook record could not be stored', { event: data.event, err: error })
+      }
+    }
   }
 
   async postToolUse(result: HookToolResult, signal: AbortSignal): Promise<void> {
@@ -424,6 +678,32 @@ class ToolHookRuntime implements ToolHooks {
         this.logger.warn('the PostToolUse hooks failed; the tool result goes on without them', { tool: result.toolName, err: error })
       return
     }
+    this.feedBack(outcome)
+  }
+
+  async postToolUseFailure(call: HookToolCall, error: string, signal: AbortSignal): Promise<void> {
+    if (!this.has('PostToolUseFailure'))
+      return
+    const text = typeof error === 'string' ? cutUnits(error, HOOK_LIMITS.errorMaxChars) : ''
+    let outcome: HookEventResult
+    try {
+      outcome = await this.runEvent(
+        'PostToolUseFailure',
+        { messageId: this.messageId, tool: { name: call.toolName, callId: call.toolCallId, input: call.input }, error: text },
+        { signal, target: call.toolName, aliases: this.aliases(call.toolName) },
+        call.toolCallId,
+      )
+    }
+    catch (failure) {
+      if (!(signal.aborted && isAbortError(failure)))
+        this.logger.warn('the PostToolUseFailure hooks failed; the tool error goes on without them', { tool: call.toolName, err: failure })
+      return
+    }
+    this.feedBack(outcome)
+  }
+
+  /** `PostToolUse` / `PostToolUseFailure`: stores the record, queues its model text, records a stop request. */
+  private feedBack(outcome: HookEventResult): void {
     if (outcome.record !== null) {
       this.record(outcome.record)
       const text = hookModelText(outcome.record, 'assistant')
@@ -455,19 +735,39 @@ class ToolHookRuntime implements ToolHooks {
       this.queue(text)
   }
 
-  /** The composer piece of a child: appends the queued model texts (a chat run's piece also records the step). */
+  /**
+   * The composer piece of a child: stores the records still pending (Phase 12), then appends the queued model texts (a
+   * chat run's piece also records the step).
+   */
   stepPiece(): StepPiece {
     return ({ messages }) => {
+      this.flushPending()
       const queued = this.takeQueued()
       return queued.length === 0 ? undefined : { messages: [...messages, ...queued] }
     }
   }
 }
 
+/** The sub-agent of a child with a trimmed id and type, or null when either is empty. */
+function identityOf(agent: SubagentIdentity | null | undefined): SubagentIdentity | null {
+  if (typeof agent !== 'object' || agent === null)
+    return null
+  const id = typeof agent.id === 'string' ? agent.id.trim() : ''
+  const type = typeof agent.type === 'string' ? agent.type.trim() : ''
+  return id === '' || type === '' ? null : { id, type }
+}
+
+/** The matcher target of a sub-agent's event: its type, and its Claude Code names (`hookAgentNames`). */
+function agentTarget(agent: SubagentIdentity | null): Pick<HookRunOptions, 'target' | 'aliases'> {
+  return agent === null ? {} : { target: agent.type, aliases: hookAgentNames(agent.type) }
+}
+
 /** The hooks of one sub-agent (see the module comment): nothing is stored, no activity is written. */
 export class ChildHooks extends ToolHookRuntime {
   /** The child's call id prefix (`<parent task call id>/`). */
   readonly callIdPrefix: string
+  /** Phase 12: the sub-agent `subagentStart` named (every later event of the child carries it). */
+  #agent: SubagentIdentity | null = null
 
   constructor(input: { snapshot: HookSnapshot, messageId: string, mcpServerNames: ReadonlyMap<string, string>, logger: Logger, callIdPrefix: string }) {
     super({
@@ -482,24 +782,69 @@ export class ChildHooks extends ToolHookRuntime {
         activity: () => {},
         idle: () => {},
       },
+      // Phase 12: `PermissionRequest` runs for the main agent only (a child never asks the user).
+      permissionRequests: false,
     })
     this.callIdPrefix = input.callIdPrefix
   }
 
+  /** The sub-agent of this child (Phase 12; null before `subagentStart`). */
+  get agent(): SubagentIdentity | null {
+    return this.#agent
+  }
+
+  /** The child's agent joins the input of its tool events (`SubagentStop` names it only when asked, `input.agent`). */
+  protected override eventInput(event: HookEvent, input: HookRunInput): HookRunInput {
+    if (this.#agent === null || input.agent !== undefined || event === 'SubagentStop')
+      return input
+    return { ...input, agent: this.#agent }
+  }
+
+  /**
+   * Phase 12 (ADR-057): names the child's agent (`agent_id` / `agent_type` of every later event of the child), then runs
+   * `SubagentStart` before the child's step 0, matched on the agent type (its Claude Code names too). Answers the
+   * `additionalContext` for the child's first user message (trimmed, at most `LIMITS.hookContextMaxChars`), or null
+   * (no such hooks, no context, a failing hook: logged). Nothing is stored. Rejects only on abort.
+   */
+  async subagentStart(agent: SubagentIdentity, signal: AbortSignal): Promise<string | null> {
+    const identity = identityOf(agent)
+    if (identity !== null)
+      this.#agent = identity
+    if (identity === null || !this.has('SubagentStart'))
+      return null
+    let result: HookEventResult
+    try {
+      result = await this.runEvent('SubagentStart', { messageId: this.messageId, agent: identity }, { signal, ...agentTarget(identity) })
+    }
+    catch (error) {
+      if (signal.aborted)
+        throw error
+      this.logger.warn('the SubagentStart hooks failed; the sub-agent starts without them', { err: error })
+      return null
+    }
+    if (result.record !== null)
+      this.record(result.record)
+    const context = typeof result.context === 'string' ? result.context.trim() : ''
+    return context === '' ? null : cutUnits(context, LIMITS.hookContextMaxChars)
+  }
+
   /**
    * Runs `SubagentStop` when the child would complete (W11.2 decides the extra rounds: a block continues the child with
-   * the reason, at most `LIMITS.subagentStopContinuationsMax` times). `NO_HOOK_RESULT` without such hooks; rejects only
-   * on abort.
+   * the reason, at most `LIMITS.subagentStopContinuationsMax` times). Phase 12: with `input.agent` (W12.6 passes the
+   * child's `agent`) the payload carries `agent_id` / `agent_type` and the matchers test its type; without it the v1.7
+   * input. `NO_HOOK_RESULT` without such hooks; rejects only on abort.
    */
   async subagentStop(input: SubagentStopInput, signal: AbortSignal): Promise<HookEventResult> {
     if (!this.has('SubagentStop'))
       return NO_HOOK_RESULT
     const task = input.task
+    const agent = identityOf(input.agent)
     return this.runEvent('SubagentStop', {
       messageId: this.messageId,
       stopHookActive: input.stopHookActive,
       ...(task === undefined ? {} : { tool: { name: 'task', callId: task.callId, input: task.input, ...(task.output === undefined ? {} : { output: task.output }) } }),
-    }, { signal })
+      ...(agent === null ? {} : { agent }),
+    }, { signal, ...agentTarget(agent) })
   }
 }
 
@@ -520,17 +865,25 @@ export class RunHooks extends ToolHookRuntime implements ChildHooksSource {
       decisions: storedDecisions(input.continued),
       sink: {
         record: data => host.inject({ type: 'data-hook', data }, host.stepNumber + 1),
-        activity: (event, toolCallId) => host.writeTransient({ type: 'data-activity', data: { kind: 'hooks', event, ...(toolCallId === undefined ? {} : { toolCallId }) } }),
+        activity: (event, toolCallId, label) => host.writeTransient({
+          type: 'data-activity',
+          data: { kind: 'hooks', event, ...(toolCallId === undefined ? {} : { toolCallId }), ...(label === undefined ? {} : { label }) },
+        }),
         idle: () => host.writeTransient({ type: 'data-activity', data: { kind: 'idle' } }),
       },
+      permissionRequests: true,
     })
     this.#host = host
     this.#mcpNames = mcpServerNames
   }
 
-  /** The hooks piece of the step composer: records the step number, then appends the queued model texts. */
+  /**
+   * The hooks piece of the step composer: stores the records still pending (Phase 12; for the step about to run),
+   * records the step number, then appends the queued model texts.
+   */
   override stepPiece(): StepPiece {
     return ({ stepNumber, messages }) => {
+      this.flushPending()
       this.#host.stepNumber = stepNumber
       const queued = this.takeQueued()
       return queued.length === 0 ? undefined : { messages: [...messages, ...queued] }
@@ -551,6 +904,21 @@ export class RunHooks extends ToolHookRuntime implements ChildHooksSource {
     if (!this.has('PreCompact'))
       return NO_HOOK_RESULT
     const result = await this.runEvent('PreCompact', { messageId: this.messageId, trigger: input.trigger, customInstructions: input.customInstructions }, { signal })
+    if (result.record !== null)
+      this.record(result.record)
+    return result
+  }
+
+  /**
+   * Phase 12 (ADR-057): `PostCompact` right after the compaction marker of this run (`compaction/guard.ts`, `trigger:
+   * 'auto'`) or of a `/compact` reply (`compaction/stream.ts`, `manual`): observe only (`continue: false` changes
+   * nothing); the record is placed after the marker (for the next step boundary, or straight into the reply).
+   * `NO_HOOK_RESULT` without such hooks; rejects only on abort.
+   */
+  async postCompact(input: PostCompactInput, signal: AbortSignal): Promise<HookEventResult> {
+    if (!this.has('PostCompact'))
+      return NO_HOOK_RESULT
+    const result = await this.runEvent('PostCompact', { messageId: this.messageId, trigger: input.trigger }, { signal })
     if (result.record !== null)
       this.record(result.record)
     return result

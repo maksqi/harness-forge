@@ -54,12 +54,21 @@ const MAX_CONCURRENT_STAGING = 2
 export interface InstallerOptions {
   /** Fetch of the npm source (default `globalThis.fetch`; tests pass a fake registry). */
   fetch?: typeof globalThis.fetch
-  /** SSRF-guarded fetch of URL installs (default `security/ssrf.ts`). */
+  /**
+   * SSRF-guarded fetch of URL installs (default `security/ssrf.ts`); Phase 12: also of the `github` and `marketplace`
+   * sources (production: the plugin-source fetch of `deps.ts`, `createPluginSourceFetch`; tests: `createFakeSafeFetch`).
+   */
   safeFetch?: SafeFetch
   /** npm registry base URL (default `https://registry.npmjs.org`). */
   npmRegistry?: string
   /** Limit overrides (tests). */
   limits?: Partial<InstallLimits>
+  /** Phase 12 (C43): base URL of the GitHub API (tests; default `GITHUB_API_BASE` of `plugins/marketplaces/types.ts`). */
+  githubApi?: string
+  /** Phase 12: base URL of raw GitHub files (tests; default `GITHUB_RAW_BASE`). */
+  githubRaw?: string
+  /** Phase 12: base URL of GitHub repository zips (tests; default `GITHUB_CODELOAD_BASE`). */
+  githubCodeload?: string
 }
 
 /** A plugin ready to be examined: a staging directory, or a linked folder used in place. */

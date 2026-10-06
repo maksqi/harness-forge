@@ -26,6 +26,9 @@
 // `project.changed` to the three stores (a deleted project is dropped); a reconnect refreshes the loaded lists of the
 // three stores. `run.started` with `origin: 'hook'` (a turn the server started after a Stop hook blocked) reaches the
 // chat's session through `on()`, like a task-started turn.
+// Phase 12 (ADR-054; C46 wires it, complete from P12-0b, no P12-A owner): `marketplace.changed` goes to the marketplaces
+// store (the summary is replaced or dropped), `plugin.changed` also to the marketplaces store (installed and update
+// states), and a reconnect refreshes its loaded list and details (`marketplaces.refreshLoaded()`).
 import type { ServerEvent, ServerEventOf, ServerEventType } from '@harness-forge/shared'
 import type { Ref } from 'vue'
 import type { EventStreamStatus } from '~/utils/event-stream'
@@ -38,6 +41,7 @@ import { useChatQueueStore } from '~/stores/chat-queue'
 import { useChatsStore } from '~/stores/chats'
 import { useCustomizationsStore } from '~/stores/customizations'
 import { useHooksStore } from '~/stores/hooks'
+import { useMarketplacesStore } from '~/stores/marketplaces'
 import { useModelsStore } from '~/stores/models'
 import { usePluginsStore } from '~/stores/plugins'
 import { useProjectMcpStore } from '~/stores/project-mcp'
@@ -132,7 +136,8 @@ function applyKeyRotated(): void {
  * `chat.deleted` -> chat queue (Phase 9); `task.changed` / `chat.deleted` -> background tasks, `customization.changed` /
  * `plugin.changed` -> customizations (Phase 10); `hooks.changed` -> hooks, `project-trust.changed` -> project trust + hooks +
  * project MCP, `project-mcp.changed` -> project MCP, `plugin.changed` / `customization.changed` / `project.changed` -> hooks
- * (and `project.changed` -> project trust + project MCP) (Phase 11). Then leaves `/chat/<id>` when the open chat was deleted, and notifies
+ * (and `project.changed` -> project trust + project MCP) (Phase 11); `marketplace.changed` / `plugin.changed` ->
+ * marketplaces (Phase 12). Then leaves `/chat/<id>` when the open chat was deleted, and notifies
  * `useServerEvents().on()` subscribers (the chat sessions listed by `key.rotated` reload their path there).
  */
 export function dispatchServerEvent(event: ServerEvent, options: DispatchOptions = {}): void {
@@ -165,6 +170,7 @@ export function dispatchServerEvent(event: ServerEvent, options: DispatchOptions
       safely(() => useModelsStore().applyEvent(event))
       safely(() => useCustomizationsStore().applyEvent(event))
       safely(() => useHooksStore().applyEvent(event))
+      safely(() => useMarketplacesStore().applyEvent(event))
       break
     case 'plugin.log':
       safely(() => usePluginsStore().applyEvent(event))
@@ -206,6 +212,9 @@ export function dispatchServerEvent(event: ServerEvent, options: DispatchOptions
     case 'project-mcp.changed':
       safely(() => useProjectMcpStore().applyEvent(event))
       break
+    case 'marketplace.changed':
+      safely(() => useMarketplacesStore().applyEvent(event))
+      break
   }
   if (event.type === 'chat.deleted' && options.navigate && useUiStore().activeChatId === event.data.id)
     safely(() => void options.navigate?.('/'))
@@ -221,7 +230,8 @@ export function dispatchServerEvent(event: ServerEvent, options: DispatchOptions
  * loaded entries of the changes panel (`workspace.refreshLoaded()`), the loaded chat queues
  * (`chatQueue.refreshLoaded()`, Phase 9), and the loaded background task lists and customization lists
  * (`backgroundTasks.refreshLoaded()`, `customizations.refreshLoaded()`, Phase 10), and the loaded hook listings, project
- * trust lists and project MCP lists (`hooks`, `projectTrust`, `projectMcp` `.refreshLoaded()`, Phase 11).
+ * trust lists and project MCP lists (`hooks`, `projectTrust`, `projectMcp` `.refreshLoaded()`, Phase 11), and the
+ * loaded marketplace list and details (`marketplaces.refreshLoaded()`, Phase 12).
  */
 export async function refetchLoadedStores(): Promise<void> {
   const auth = useAuthStore()
@@ -239,6 +249,7 @@ export async function refetchLoadedStores(): Promise<void> {
   const hooks = useHooksStore()
   const projectTrust = useProjectTrustStore()
   const projectMcp = useProjectMcpStore()
+  const marketplaces = useMarketplacesStore()
   const tasks: Array<Promise<unknown>> = [
     auth.fetchStatus(),
     settings.fetch(),
@@ -250,6 +261,7 @@ export async function refetchLoadedStores(): Promise<void> {
     hooks.refreshLoaded(),
     projectTrust.refreshLoaded(),
     projectMcp.refreshLoaded(),
+    marketplaces.refreshLoaded(),
   ]
   if (providers.loaded)
     tasks.push(providers.fetchAll())

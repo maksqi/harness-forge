@@ -21,13 +21,25 @@
 // model text goes into the child's own composer) and `SubagentStop` (W11.2); never `UserPromptSubmit`, `SessionStart` or
 // `Stop`, and nothing of a child's hooks is stored. Absent or null = no hooks (every v1.6 host). It lives on the host,
 // never on the `ToolCallContext`, so no plugin can reach it.
+// Phase 12 (C44, ADR-057 / ADR-058; COMPLETE and FROZEN after P12-0b):
+// - `SubagentStart`: before a child's step 0 (foreground and background) the runner calls
+//   `ChildHooks.subagentStart({ id: <parent task call id>, type: <agent type> }, signal)` (`hooks.ts`; matched on the
+//   agent type and its Claude Code names); the context it answers goes into the child's first user message
+//   (`childFirstMessage`: a `<hook-context event="SubagentStart">` text part after the prompt), and the child's later
+//   events carry the agent (`agent_id` / `agent_type`). Without hooks the first message is the prompt alone (v1.7).
+// - The child spec (`ChildAgentSpec`): what an agent definition adds to its child (`maxTurns` → the child's step limit
+//   `childMaxSteps`, the preloaded `skills` text → the child's instructions, `disallowedTools` → removed from its tools
+//   before the definition's `tools`). W12.6 computes it from the definition; `DEFAULT_CHILD_SPEC` keeps the v1.7 child.
+// - `HostHooks.postCompact`: `PostCompact` right after the context guard's automatic compaction marker.
 import type { HarnessUIMessage, ReasoningEffort, Settings } from '@harness-forge/shared'
+import type { ModelMessage } from 'ai'
 import type { Logger } from '../../logger.ts'
 import type { ChatRecord } from '../../services/chats/types.ts'
 import type { HookEventResult } from '../../services/hooks/types.ts'
 import type { AppDeps } from '../../types.ts'
-import type { ChildHooksSource, PreCompactInput } from '../hooks.ts'
+import type { ChildHooksSource, PostCompactInput, PreCompactInput } from '../hooks.ts'
 import type { HarnessDataChunk } from '../pipeline.ts'
+import { hookModelText, LIMITS } from '@harness-forge/shared'
 
 /** What a child reads of the run it belongs to (`RunContext.prepared` of a chat run fits). */
 export interface ChildHostRun {
@@ -75,11 +87,60 @@ export interface ChildSession {
 
 /**
  * The hooks of a chat run's host (Phase 11, `RunHooks`): the children's handle plus `PreCompact` for the context guard's
- * automatic compaction (W11.2).
+ * automatic compaction (W11.2) and (Phase 12) `PostCompact` after it.
  */
 export interface HostHooks extends ChildHooksSource {
   /** Runs `PreCompact` (observe only; the record is placed next to the compaction marker); rejects only on abort. */
   readonly preCompact: (input: PreCompactInput, signal: AbortSignal) => Promise<HookEventResult>
+  /** Phase 12: runs `PostCompact` (observe only; the record is placed after the compaction marker); rejects only on abort. */
+  readonly postCompact: (input: PostCompactInput, signal: AbortSignal) => Promise<HookEventResult>
+}
+
+/**
+ * What an agent definition adds to its child (Phase 12, ADR-058; see the module comment). W12.6 computes it from the
+ * loaded definition (`maxTurns`, `skills` through `customizations.load`, `disallowedTools`); null fields change nothing.
+ */
+export interface ChildAgentSpec {
+  /** `maxTurns` (1 … `LIMITS.agentMaxTurnsMax`): the child's steps are `min(subagentMaxSteps, maxTurns)`; null = none. */
+  readonly maxTurns: number | null
+  /**
+   * The preloaded `skills` bodies (≤ `LIMITS.agentSkillsPreloadMax` skills, ≤ `LIMITS.agentSkillsPreloadBytes`), added
+   * to the child's instructions after the agent's body; null = none.
+   */
+  readonly skillsText: string | null
+  /**
+   * `disallowedTools` (harness tool names, `mcp__server__*` prefixes): removed from the child's tools before the
+   * definition's `tools` narrows them (restrict-only); null = none.
+   */
+  readonly disallowedTools: readonly string[] | null
+}
+
+/** The spec of a child whose definition adds nothing (every builtin, every v1.7 agent). */
+export const DEFAULT_CHILD_SPEC: ChildAgentSpec = Object.freeze({ maxTurns: null, skillsText: null, disallowedTools: null })
+
+/**
+ * The step limit of a child (Phase 12): `subagentMaxSteps`, lowered to the spec's `maxTurns` when that is a whole
+ * number from 1 to `LIMITS.agentMaxTurnsMax` (anything else is ignored); at least 1.
+ */
+export function childMaxSteps(subagentMaxSteps: number, spec: Pick<ChildAgentSpec, 'maxTurns'>): number {
+  const base = Math.max(1, Math.floor(subagentMaxSteps))
+  const turns = spec.maxTurns
+  if (typeof turns !== 'number' || !Number.isInteger(turns) || turns < 1 || turns > LIMITS.agentMaxTurnsMax)
+    return base
+  return Math.min(base, turns)
+}
+
+/**
+ * The child's first user message (Phase 12): the task prompt, then the `SubagentStart` context as a second text part
+ * (`<hook-context event="SubagentStart">`, `hookModelText`); the prompt alone without a context (the v1.7 message).
+ */
+export function childFirstMessage(prompt: string, startContext: string | null): ModelMessage {
+  const context = typeof startContext === 'string' ? startContext.trim() : ''
+  const text = context === '' ? null : hookModelText({ event: 'SubagentStart', outcome: 'context', context }, 'user')
+  return {
+    role: 'user',
+    content: [{ type: 'text', text: prompt }, ...(text === null ? [] : [{ type: 'text' as const, text }])],
+  }
 }
 
 /** A host that also places step-boundary and transient chunks (a chat run: `RunSession`); the non-silent context guard. */

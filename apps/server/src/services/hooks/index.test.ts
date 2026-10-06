@@ -132,6 +132,9 @@ function pluginHooks(h: Harness, root: string, specs: ReadonlyArray<Partial<Hook
     root,
     hooks: specs.map((spec, index) => ({ matcher: null, timeoutSec: null, position: [0, index] as const, ...spec })),
     diagnostics: [],
+    // Phase 12 (C43 compile fix): no extra environment, no prompt handlers.
+    env: {},
+    prompts: [],
   }
   vi.spyOn(h.t.deps.registry.hookCommands, 'list').mockReturnValue([registration])
 }
@@ -662,6 +665,8 @@ describe('hook service: list', () => {
         { level: 'info', code: 'ignored-field', message: 'The field "x" is ignored.', event: 'PostToolUse', position: [0, 0] },
         { level: 'info', code: 'unknown-event', message: 'The event "Other" is not supported; its hooks are ignored.' },
       ],
+      env: {},
+      prompts: [],
     }])
     const code = h.t.deps.registry.hooks.on('mock', 'run.stop', () => {})
     cleanups.push(() => code.dispose())

@@ -1,6 +1,9 @@
 // Test helpers of the installer (not app code): archive builders (fflate zips, hand-written tar and stored zips for
 // malformed cases), plugin file sets, a fake npm registry behind a fake `fetch`, a fake `SafeFetch`, and an in-process
-// app whose installer uses them. Nothing here touches the network.
+// app whose installer uses them. Nothing here touches the network. Phase 12 (C45-T2, FROZEN after Gate P12-0b):
+// `githubZipOf` (a codeload-style zip: top folder `<repo>-<sha>/`, Unix modes, the zip comment = the sha) lives in the
+// light `testing/fake-remote.ts` (probes import it without the app) and is re-exported here next to `zipOf`; the GitHub
+// and archive-host `SafeFetch` of unit tests is `createFakeSafeFetch` of that module (the one below maps fixed URLs).
 import type { ZipOptions, Zippable } from 'fflate'
 import type { SafeFetch, SafeFetchOptions } from '../../security/types.ts'
 import type { TestApp } from '../../testing/create-test-app.ts'
@@ -94,6 +97,9 @@ export function zipOf(files: ZipInput): Uint8Array {
 export function unixMode(mode: number): ZipOptions {
   return { os: 3, attrs: (mode << 16) >>> 0 }
 }
+
+export { githubZipOf } from '../../testing/fake-remote.ts'
+export type { FakeArchiveVariant, FakeFiles, GithubZipOptions } from '../../testing/fake-remote.ts'
 
 interface CentralRecord {
   offset: number

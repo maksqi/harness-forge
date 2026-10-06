@@ -14,9 +14,13 @@
 // dialog opens on the focused server's toggle (`focusServerId`), else the first row's, and returns focus to its opener.
 // Data from `useProjectMcpStore()` (fetched on every open) and the trust items from `useProjectTrustStore()`. Mounted
 // like ProjectTrustDialog. Props, emits and the root test id are frozen from Gate P11-0b (C39); W11.9.
+// Phase 12 (ADR-056; C46, W12.13 owns it in P12-A): Edit .mcp.json… (`data-action="edit-mcp-json"`, in the footer and
+// in the empty state, where it creates the file) opens the project file editor (ProjectFileEditor, mounted here) with
+// kind `mcp`; its `review` opens ProjectTrustDialog. A saved server stays pending until it is approved here.
 import type { ProjectMcpList, ProjectMcpServer, TrustItem } from '@harness-forge/shared'
-import { LIMITS } from '@harness-forge/shared'
-import { ChevronRightIcon, CircleAlertIcon, VariableIcon } from '@lucide/vue'
+import type { ProjectFileTarget } from '~/components/settings/customize/customize'
+import { LIMITS, PROJECT_MCP_JSON_PATH } from '@harness-forge/shared'
+import { ChevronRightIcon, CircleAlertIcon, FileJsonIcon, VariableIcon } from '@lucide/vue'
 import { computed, nextTick, ref, shallowRef, useId, useTemplateRef, watch } from 'vue'
 import { toast } from 'vue-sonner'
 import { Alert, AlertDescription } from '@/components/ui/alert'
@@ -27,6 +31,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Spinner } from '@/components/ui/spinner'
 import { cn } from '@/lib/utils'
 import ConfirmPasswordDialog from '~/components/common/ConfirmPasswordDialog.vue'
+import ProjectFileEditor from '~/components/settings/customize/ProjectFileEditor.vue'
 import { isFreshAuthCancelled, useFreshAuth } from '~/composables/useFreshAuth'
 import { useProjectMcpStore } from '~/stores/project-mcp'
 import { useProjectTrustStore } from '~/stores/project-trust'
@@ -74,6 +79,9 @@ const list = computed<ProjectMcpList | null>(() => (props.projectId ? mcp.byProj
 const servers = computed<readonly ProjectMcpServer[]>(() => list.value?.items ?? [])
 const variables = computed<readonly ProjectMcpVariable[]>(() => list.value?.variables ?? [])
 const error = computed(() => actionError.value ?? (list.value ? null : loadError.value))
+/** + Phase 12: the project file editor on `.mcp.json`. */
+const fileOpen = ref(false)
+const fileTarget = computed<ProjectFileTarget>(() => ({ path: PROJECT_MCP_JSON_PATH, kind: 'mcp', name: null, create: servers.value.length === 0 }))
 
 /** The request body of Save variables: typed values set, cleared ones without a new value are removed. */
 const changes = computed<Record<string, string | null>>(() => {
@@ -220,6 +228,15 @@ function openReview(server: ProjectMcpServer): void {
   review.value = { open: true, focusKey: server.sha256 }
 }
 
+/** + Phase 12: Edit .mcp.json… (creates the file from the empty state). */
+function editMcpJson(): void {
+  fileOpen.value = true
+}
+
+function onFileReview(sha256?: string): void {
+  review.value = { open: true, focusKey: sha256 ?? null }
+}
+
 async function saveVariables(): Promise<void> {
   const projectId = props.projectId
   const values = changes.value
@@ -314,9 +331,15 @@ function onOpenChange(value: boolean): void {
           </div>
 
           <template v-else-if="list">
-            <p v-if="servers.length === 0" :data-testid="testIds.projectMcpEmpty" class="text-sm text-muted-foreground">
-              This project has no .mcp.json.
-            </p>
+            <div v-if="servers.length === 0" class="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <p :data-testid="testIds.projectMcpEmpty" class="text-sm text-muted-foreground">
+                This project has no .mcp.json.
+              </p>
+              <Button type="button" variant="outline" size="sm" data-action="edit-mcp-json" class="pointer-coarse:h-10" @click="editMcpJson">
+                <FileJsonIcon aria-hidden="true" data-icon="inline-start" />
+                Edit .mcp.json…
+              </Button>
+            </div>
 
             <div v-else class="grid min-w-0 divide-y" role="list" aria-label="Servers">
               <div v-for="server in servers" :key="server.id" role="listitem" class="min-w-0">
@@ -425,6 +448,17 @@ function onOpenChange(value: boolean): void {
 
         <div class="flex shrink-0 items-center justify-end gap-2 border-t bg-popover px-4 py-3 sm:px-6">
           <Button
+            v-if="list && servers.length > 0"
+            type="button"
+            variant="ghost"
+            data-action="edit-mcp-json"
+            class="mr-auto pointer-coarse:h-10"
+            @click="editMcpJson"
+          >
+            <FileJsonIcon aria-hidden="true" data-icon="inline-start" />
+            Edit .mcp.json…
+          </Button>
+          <Button
             type="button"
             variant="outline"
             data-action="close"
@@ -442,6 +476,13 @@ function onOpenChange(value: boolean): void {
     v-model:open="review.open"
     :project-id="projectId"
     :focus-key="review.focusKey"
+  />
+
+  <ProjectFileEditor
+    v-model:open="fileOpen"
+    :project-id="projectId"
+    :entry="fileTarget"
+    @review="onFileReview"
   />
 
   <ConfirmPasswordDialog

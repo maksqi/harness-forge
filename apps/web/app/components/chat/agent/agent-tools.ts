@@ -6,6 +6,7 @@
 // agent source line), background calls (the launch, the live state from the background task or its delivered result),
 // the skill row's source and the task result note's texts.
 import type {
+  AgentColor,
   BackgroundTask,
   CustomizationSource,
   TaskAgent,
@@ -423,4 +424,19 @@ export function taskMetaLine(output: TaskOutput): string {
     output.finishedAt === undefined ? '' : formatDuration(taskDurationMs(output, output.finishedAt)),
   ]
   return items.filter(item => item !== '').join(' · ')
+}
+
+/**
+ * Phase 12 (ADR-058; C46 declares, W12.13 owns): the design token of each agent `color` (docs/UI.md 7.34; existing tokens
+ * only, no new CSS token): the dot and the left rule of a custom agent's task block use `bg-<token>` / `border-<token>`.
+ */
+export const AGENT_COLOR_TOKENS: Readonly<Record<AgentColor, string>> = {
+  red: 'destructive',
+  orange: 'chart-1',
+  yellow: 'warning',
+  green: 'success',
+  blue: 'info',
+  cyan: 'chart-2',
+  purple: 'chart-5',
+  pink: 'chart-5',
 }

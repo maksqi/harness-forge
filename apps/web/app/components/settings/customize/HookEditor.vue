@@ -14,9 +14,13 @@
 // (`hook-discard-confirm`). Opens with focus on Event (new, copy) or Command (edit); reka returns focus to the element
 // that had it when the sheet opened. Tab is never captured.
 // Props, emits and the root test id are frozen from Gate P11-0b (C39 stub); implementation W11.8.
+// Phase 12 (ADR-056, ADR-057; C46 CCR, W12.12 owns it in P12-A): `mode: 'project'` with `target` edits a hook of a
+// project's settings file (`hook-editor[data-mode=project]`): Save writes through `hooks.saveProjectHook(projectId, target,
+// draft)` (no password: saving never approves) and closes without `saved` (no personal hook); the Type toggle
+// (`hook-type`), the Prompt field (`hook-prompt`) and the five new events are W12.12's.
 import type { HookCreate, HookEvent, HookUpdate, PersonalHook } from '@harness-forge/shared'
 import type { AcceptableValue } from 'reka-ui'
-import type { HookDraft } from './hooks'
+import type { HookDraft, ProjectHookTarget } from './hooks'
 import { HOOK_EVENTS, HOOK_LIMITS, isHookTurnOff } from '@harness-forge/shared'
 import { CircleAlertIcon, TriangleAlertIcon } from '@lucide/vue'
 import { useForm } from '@tanstack/vue-form'
@@ -43,11 +47,14 @@ import { commandError, HOOK_COPY, HOOK_EVENT_INFO, matcherError, matcherPreview,
 
 const props = defineProps<{
   open: boolean
-  mode: 'new' | 'edit' | 'copy'
+  /** + Phase 12: `project` edits a hook of a project's settings file (`target`). */
+  mode: 'new' | 'edit' | 'copy' | 'project'
   /** Edit mode: the personal hook. */
   hook: PersonalHook | null
-  /** New (Duplicate, Copy to personal) and copy mode: the prefilled fields. */
+  /** New (Duplicate, Copy to personal), copy and project mode: the prefilled fields. */
   draft?: HookDraft | null
+  /** + Phase 12, project mode: where the hook is written (null indexes = a new handler). */
+  target?: ProjectHookTarget | null
 }>()
 
 const emit = defineEmits<{ 'update:open': [open: boolean], 'saved': [hook: PersonalHook] }>()
@@ -81,7 +88,7 @@ const ids = {
   enabled: useId(),
 }
 
-const title = computed(() => ({ new: 'New hook', edit: 'Edit hook', copy: 'Copy hook' })[props.mode])
+const title = computed(() => ({ new: 'New hook', edit: 'Edit hook', copy: 'Copy hook', project: 'Edit project hook' })[props.mode])
 
 const EMPTY_DRAFT: HookDraft = { event: 'PreToolUse', matcher: '', command: '', timeout: null, enabled: true }
 
@@ -182,7 +189,7 @@ function focusField(id: string): void {
 
 function onOpenAutoFocus(event: Event): void {
   event.preventDefault()
-  focusField(props.mode === 'edit' ? ids.command : ids.event)
+  focusField(props.mode === 'edit' || props.mode === 'project' ? ids.command : ids.event)
 }
 
 // ---------- closing ----------
@@ -291,6 +298,18 @@ async function save(): Promise<void> {
   saving.value = true
   submitError.value = null
   try {
+    if (props.mode === 'project') {
+      // Phase 12: a project's settings file; no password (saving never approves), no personal hook to emit.
+      const target = props.target
+      if (!target)
+        return
+      await hooks.saveProjectHook(target.projectId, target, { ...initial.value, event: current.event, matcher: body.matcher ?? '', command: body.command, timeout: body.timeout, enabled: current.enabled })
+      toast.success(HOOK_COPY.saved!)
+      form.reset({ ...current })
+      initial.value = { ...initial.value, event: current.event, matcher: current.matcher, command: current.command, timeout: body.timeout, enabled: current.enabled }
+      emit('update:open', false)
+      return
+    }
     let saved: PersonalHook
     if (props.mode === 'edit' && props.hook) {
       const hook = props.hook

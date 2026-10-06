@@ -31,6 +31,13 @@
 // `createFakeProjectTrustService({ events })` of ./fake-project-trust.ts, an in-memory approved set) and `projectMcp` the
 // project MCP manager (`'fake'`: `createFakeProjectMcpManager()` of ./fake-project-mcp.ts, scripted tools), or ready
 // services; `overrides` and `factories` of the same name win.
+// Phase 12 (C43-T9): `marketplaces` installs the marketplace service (`'fake'`: `createFakeMarketplaceService({ events,
+// offline })` of ./fake-marketplaces.ts: remote catalogs the test registers), `claudeImport` the home-folder import
+// (`'fake'`: `createFakeClaudeImportService({ events })` of ./fake-claude-import.ts: scripted plan items) and
+// `projectDefinitions` the project definition editor (`'fake'`: `createFakeProjectDefinitionsService({ events })` of
+// ./fake-project-definitions.ts: files in memory), or ready services; `overrides` and `factories` of the same name win.
+// `HF_CLAUDE_HOME` defaults to `<dataDir>/claude-home` (not created: the home route answers `missing`), so no test ever
+// reads the real `~/.claude`; `env.HF_CLAUDE_HOME` wins (`'0'` = the scan is off).
 import type { ApiClient } from '@harness-forge/shared'
 import type { Hono } from 'hono'
 import type { BackgroundTasks } from '../chat/background/types.ts'
@@ -40,11 +47,14 @@ import type { Env } from '../env.ts'
 import type { AppEnv } from '../http/types.ts'
 import type { MemoryLogger } from '../logger.ts'
 import type { ProjectMcpManager } from '../mcp/types.ts'
+import type { MarketplaceService } from '../plugins/marketplaces/types.ts'
 import type { BuiltinPlugin } from '../plugins/types.ts'
 import type { CheckpointService } from '../services/checkpoints/types.ts'
+import type { ClaudeImportService } from '../services/claude-import/types.ts'
 import type { CustomizationService } from '../services/customizations/types.ts'
 import type { HookService } from '../services/hooks/types.ts'
 import type { ProjectConfigService } from '../services/project-config/types.ts'
+import type { ProjectDefinitionsService } from '../services/project-definitions/types.ts'
 import type { ProjectFileService } from '../services/project-files/types.ts'
 import type { ProjectTrustService } from '../services/project-trust/types.ts'
 import type { ShellRuleService } from '../services/shell-rules/types.ts'
@@ -64,9 +74,12 @@ import { createMemoryLogger } from '../logger.ts'
 import { createRedactor } from '../security/redact.ts'
 import { createFakeBackgroundTasks } from './fake-background-tasks.ts'
 import { createFakeCheckpointService } from './fake-checkpoints.ts'
+import { createFakeClaudeImportService } from './fake-claude-import.ts'
 import { createFakeCustomizationService } from './fake-customizations.ts'
 import { createFakeHookService } from './fake-hooks.ts'
+import { createFakeMarketplaceService } from './fake-marketplaces.ts'
 import { createFakeProjectConfigService } from './fake-project-config.ts'
+import { createFakeProjectDefinitionsService } from './fake-project-definitions.ts'
 import { createFakeProjectFileService } from './fake-project-files.ts'
 import { createFakeProjectMcpManager } from './fake-project-mcp.ts'
 import { createFakeProjectTrustService } from './fake-project-trust.ts'
@@ -157,7 +170,26 @@ export interface TestAppOptions {
    * manager; default: the real one. `overrides` / `factories` win.
    */
   projectMcp?: 'fake' | ProjectMcpManager
+  /**
+   * Phase 12: the marketplace service: `'fake'` = `createFakeMarketplaceService({ events: deps.events, offline:
+   * env.offline })` (remote catalogs the test registers, marketplaces in memory), or a ready service; default: the real
+   * one. `overrides.marketplaces` / `factories.marketplaces` win.
+   */
+  marketplaces?: 'fake' | MarketplaceService
+  /**
+   * Phase 12: the home-folder import: `'fake'` = `createFakeClaudeImportService({ events: deps.events })` (a scripted
+   * `home()` and plan items, plans in memory), or a ready service; default: the real one. `overrides` / `factories` win.
+   */
+  claudeImport?: 'fake' | ClaudeImportService
+  /**
+   * Phase 12: the project definition editor: `'fake'` = `createFakeProjectDefinitionsService({ events: deps.events })`
+   * (files in memory), or a ready service; default: the real one. `overrides` / `factories` win.
+   */
+  projectDefinitions?: 'fake' | ProjectDefinitionsService
 }
+
+/** The folder name of the default `HF_CLAUDE_HOME` of a test app, inside its data directory (never created). */
+export const TEST_CLAUDE_HOME_NAME = 'claude-home'
 
 export interface TestRequestOptions {
   /** Client address seen by the server (`getConnInfo(c).remote.address`); default `127.0.0.1`. */
@@ -200,13 +232,30 @@ function usesFakeKeyring(options: TestAppOptions): boolean {
   return options.overrides?.keyring === undefined && options.factories?.keyring === undefined
 }
 
+/** The Phase 12 service options as factories (`overrides` and `factories` of the same name win). */
+function phase12OptionFactories(options: TestAppOptions): Partial<ServiceFactories> {
+  const { marketplaces, claudeImport, projectDefinitions } = options
+  return {
+    ...(marketplaces === undefined
+      ? {}
+      : { marketplaces: (deps: AppDeps) => (marketplaces === 'fake' ? createFakeMarketplaceService({ events: deps.events, offline: deps.env.offline }) : marketplaces) }),
+    ...(claudeImport === undefined
+      ? {}
+      : { claudeImport: (deps: AppDeps) => (claudeImport === 'fake' ? createFakeClaudeImportService({ events: deps.events }) : claudeImport) }),
+    ...(projectDefinitions === undefined
+      ? {}
+      : { projectDefinitions: (deps: AppDeps) => (projectDefinitions === 'fake' ? createFakeProjectDefinitionsService({ events: deps.events }) : projectDefinitions) }),
+  }
+}
+
 /**
- * The Phase 8 - 11 service options as factories (`overrides` and `factories` of the same name win). `background` receives
+ * The Phase 8 - 12 service options as factories (`overrides` and `factories` of the same name win). `background` receives
  * the manager that `backgroundTasks` installs once the runner is built.
  */
 function serviceOptionFactories(options: TestAppOptions, background: { manager: BackgroundTasks | null }): Partial<ServiceFactories> {
   const { checkpoints, shellRules, projectFiles, customizations, backgroundTasks, hooks, projectConfig, projectTrust, projectMcp } = options
   return {
+    ...phase12OptionFactories(options),
     ...(hooks === undefined ? {} : { hooks: (deps: AppDeps) => (hooks === 'fake' ? createFakeHookService({ events: deps.events }) : hooks) }),
     ...(projectConfig === undefined ? {} : { projectConfig: () => (projectConfig === 'fake' ? createFakeProjectConfigService() : projectConfig) }),
     ...(projectTrust === undefined
@@ -238,10 +287,13 @@ export async function createTestApp(options: TestAppOptions = {}): Promise<TestA
   let database: Database | undefined
   try {
     const workspace: Record<string, string> = {
+      // Phase 12: never the real `~/.claude` (a folder inside the temp data directory, not created).
+      HF_CLAUDE_HOME: join(dataDir, TEST_CLAUDE_HOME_NAME),
       ...(options.workspaceRoots === undefined ? {} : { HF_WORKSPACE_ROOTS: options.workspaceRoots.join(',') }),
       ...(options.workspaceShell === undefined ? {} : { HF_WORKSPACE_SHELL: options.workspaceShell ? '1' : '0' }),
     }
-    const env = loadEnv({ HF_DATA_DIR: dataDir, ...workspace, ...options.env }, { cwd: dataDir })
+    // `homedir`: even an explicitly unset `HF_CLAUDE_HOME` resolves inside the temp data directory.
+    const env = loadEnv({ HF_DATA_DIR: dataDir, ...workspace, ...options.env }, { cwd: dataDir, homedir: dataDir })
     ensureDataDir(env)
     const redactor = createRedactor()
     const logs = createMemoryLogger({ redactor })

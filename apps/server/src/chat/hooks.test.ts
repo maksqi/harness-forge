@@ -16,7 +16,11 @@ import {
   answeredToolCalls,
   ChildHooks,
   createRunHooks,
+  cutUnits,
   detachedHooks,
+  hookActivityLabel,
+  hookMatcherTarget,
+  hookMcpServerNames,
   hookModelMessage,
   NO_HOOK_RESULT,
   noHookSnapshot,
@@ -102,6 +106,9 @@ describe('runHooks: PreToolUse', () => {
       input: { messageId: 'msg_a000000000000001', tool: { name: 'shell', callId: 'call_1', input: { command: 'rm -rf x' } } },
       options: { target: 'shell', aliases: ['shell', 'Bash'] },
     })
+    // Phase 12: the record waits until the approval settles the call.
+    expect(host.injected).toEqual([])
+    hooks.settle('call_1', { harnessAsked: false })
     expect(host.injected).toEqual([{ chunk: { type: 'data-hook', data: record }, step: 3 }])
     expect(host.transient).toEqual([
       { type: 'data-activity', data: { kind: 'hooks', event: 'PreToolUse', toolCallId: 'call_1' } },
@@ -426,5 +433,226 @@ describe('runHooks: PreCompact and Notification (W11.2 seams)', () => {
     expect(permissionPromptMessage(message([toolPart('c1', { state: 'approval-requested' }), toolPart('c2', { state: 'approval-requested' })]))).toBe('The agent needs your permission to use Bash.')
     const many = ['a', 'b', 'c', 'd', 'e'].map((name, index) => ({ type: `tool-${name}`, toolCallId: `c${index}`, state: 'approval-requested', input: {} }) as unknown as HarnessUIMessagePart)
     expect(permissionPromptMessage(message([...many, { type: 'dynamic-tool', toolName: 'mcp__x__y', toolCallId: 'd1', state: 'approval-requested', input: {} } as unknown as HarnessUIMessagePart]))).toBe('The agent needs your permission to use a, b, c and 3 more.')
+  })
+})
+
+describe('phase 12 seams (C44-T1)', () => {
+  const call = { toolName: 'shell', toolCallId: 'call_1', input: { command: 'ls' } }
+
+  it('permissionRequest runs once per unanswered call with the PreToolUse input, decides allow or deny, and holds its record', async () => {
+    const pre = fakeHookRecord('PreToolUse', 'rewritten', { toolCallId: 'call_1', toolName: 'shell', updatedInput: { command: 'ls -a' } })
+    const request = fakeHookRecord('PermissionRequest', 'context', { toolCallId: 'call_1', toolName: 'shell', reason: 'fine' })
+    const { hooks, host, snapshot } = runHooks({
+      results: {
+        PreToolUse: fakeHookResult({ updatedInput: { command: 'ls -a' }, record: pre }),
+        PermissionRequest: fakeHookResult({ decision: 'allow', reason: 'fine', updatedInput: { command: 'ls -la' }, record: request }),
+      },
+    })
+    host.stepNumber = 1
+    await hooks.preToolUse(call, signal)
+    expect(await hooks.permissionRequest(call, signal)).toEqual({ decision: 'allow', reason: 'fine', updatedInput: { command: 'ls -la' } })
+    // Once per call: the second call answers the stored decision without running anything.
+    expect(await hooks.permissionRequest(call, signal)).toEqual({ decision: 'allow', reason: 'fine', updatedInput: { command: 'ls -la' } })
+    expect(snapshot.calls.map(entry => entry.event)).toEqual(['PreToolUse', 'PermissionRequest'])
+    expect(snapshot.calls[1]).toMatchObject({ input: { tool: { name: 'shell', callId: 'call_1', input: { command: 'ls -a' } } }, options: { target: 'shell', aliases: ['shell', 'Bash'] } })
+    // The allow's rewrite is the input the tool runs with.
+    expect(hooks.updatedInput('call_1')).toEqual({ input: { command: 'ls -la' } })
+    // Both records wait for the settlement, then come in run order.
+    expect(host.injected).toEqual([])
+    hooks.settle('call_1', { harnessAsked: false })
+    expect(host.injected.map(entry => (entry.chunk as { data: HookData }).data)).toEqual([pre, request])
+    expect(host.injected.every(entry => entry.step === 2)).toBe(true)
+    // Settled once: a second settlement stores nothing.
+    hooks.settle('call_1', { harnessAsked: true })
+    expect(host.injected).toHaveLength(2)
+  })
+
+  it('permissionRequest: a block or a deny denies, interrupt stops the run, nothing ran answers null', async () => {
+    const denied = runHooks({ results: { PermissionRequest: fakeHookResult({ block: true, decision: 'deny', reason: 'no shell', continue: false, stopReason: 'no shell' }) } })
+    expect(await denied.hooks.permissionRequest(call, signal)).toEqual({ decision: 'deny', reason: 'no shell' })
+    expect(denied.hooks.stopRequested).toBe(true)
+    expect(denied.hooks.updatedInput('call_1')).toBeNull()
+    const silent = runHooks({ present: ['PermissionRequest'] })
+    expect(await silent.hooks.permissionRequest(call, signal)).toEqual({ decision: null, reason: null })
+    const free = runHooks()
+    expect(await free.hooks.permissionRequest(call, signal)).toBeNull()
+    expect(free.snapshot.calls).toHaveLength(0)
+    // A deny's rewrite is never applied.
+    const deniedRewrite = runHooks({ results: { PermissionRequest: fakeHookResult({ decision: 'deny', updatedInput: { command: 'x' } }) } })
+    expect(await deniedRewrite.hooks.permissionRequest(call, signal)).toEqual({ decision: 'deny', reason: null })
+    expect(deniedRewrite.hooks.updatedInput('call_1')).toBeNull()
+    const controller = new AbortController()
+    controller.abort(new DOMException('stopped', 'AbortError'))
+    await expect(runHooks({ present: ['PermissionRequest'] }).hooks.permissionRequest(call, controller.signal)).rejects.toMatchObject({ name: 'AbortError' })
+  })
+
+  it('permissionRequest never runs for a call answered in the continued message, nor in a sub-agent', async () => {
+    const continued: HarnessUIMessage = { id: 'msg_a000000000000001', role: 'assistant', parts: [toolPart('call_1', { state: 'approval-responded', approval: { id: 'ap_1', approved: true } })] }
+    const answered = runHooks({ results: { PermissionRequest: fakeHookResult({ decision: 'deny' }) } }, continued)
+    expect(await answered.hooks.permissionRequest(call, signal)).toBeNull()
+    expect(answered.snapshot.calls).toHaveLength(0)
+    const parent = runHooks({ results: { PermissionRequest: fakeHookResult({ decision: 'allow' }) } })
+    const child = parent.hooks.forChild('call_t/')
+    expect(await child.permissionRequest({ ...call, toolCallId: 'call_t/c1' }, signal)).toBeNull()
+    expect(parent.snapshot.calls).toHaveLength(0)
+  })
+
+  it('settle marks the allowed PreToolUse record harnessAsked; other records and outcomes stay as they are', async () => {
+    const allowed = fakeHookRecord('PreToolUse', 'allowed', { toolCallId: 'call_1', toolName: 'shell' })
+    const { hooks, host } = runHooks({ results: { PreToolUse: fakeHookResult({ decision: 'allow', record: allowed }) } })
+    await hooks.preToolUse(call, signal)
+    hooks.settle('call_1', { harnessAsked: true })
+    const stored = (host.injected[0]!.chunk as { data: HookData }).data
+    expect(stored).toEqual({ ...allowed, harnessAsked: true })
+    expect(hookDataSchema.safeParse(stored).success).toBe(true)
+    // The replay of the stored record is unchanged (OUTCOME_DECISIONS).
+    expect(storedDecision(stored)).toEqual({ decision: 'allow', reason: null })
+    const asked = fakeHookRecord('PreToolUse', 'asked', { toolCallId: 'call_2', toolName: 'shell' })
+    const other = runHooks({ results: { PreToolUse: fakeHookResult({ decision: 'ask', record: asked }) } })
+    await other.hooks.preToolUse({ ...call, toolCallId: 'call_2' }, signal)
+    other.hooks.settle('call_2', { harnessAsked: true })
+    expect((other.host.injected[0]!.chunk as { data: HookData }).data).toEqual(asked)
+    // An unknown call is a no-op.
+    expect(() => other.hooks.settle('unknown', { harnessAsked: true })).not.toThrow()
+  })
+
+  it('records nobody settled are stored at the next step boundary', async () => {
+    const record = fakeHookRecord('PreToolUse', 'asked', { toolCallId: 'call_1', toolName: 'shell' })
+    const { hooks, host } = runHooks({ results: { PreToolUse: fakeHookResult({ decision: 'ask', record }) } })
+    host.stepNumber = 0
+    await hooks.preToolUse(call, signal)
+    await hooks.stepPiece()({ stepNumber: 1, messages: [], instructions: undefined, steps: [] })
+    expect(host.injected).toEqual([{ chunk: { type: 'data-hook', data: record }, step: 1 }])
+  })
+
+  it('postToolUseFailure runs with the error, queues the model text, may stop the run and never rejects', async () => {
+    const record = fakeHookRecord('PostToolUseFailure', 'context', { toolCallId: 'call_1', toolName: 'shell', context: 'retry with -f' })
+    const { hooks, host, snapshot } = runHooks({ results: { PostToolUseFailure: fakeHookResult({ context: 'retry with -f', continue: false, stopReason: 'halt', record }) } })
+    await hooks.postToolUseFailure(call, 'exit code 1', signal)
+    expect(snapshot.calls[0]).toMatchObject({ event: 'PostToolUseFailure', input: { tool: { name: 'shell', callId: 'call_1', input: { command: 'ls' } }, error: 'exit code 1' }, options: { target: 'shell' } })
+    expect(host.injected).toEqual([{ chunk: { type: 'data-hook', data: record }, step: 0 }])
+    expect(hooks.takeQueued()).toEqual([hookModelMessage(hookModelText(record, 'assistant')!)])
+    expect(hooks.stopRequested).toBe(true)
+    // The error is cut.
+    const long = runHooks({ present: ['PostToolUseFailure'] })
+    await long.hooks.postToolUseFailure(call, 'e'.repeat(20_000), signal)
+    expect((long.snapshot.calls[0]!.input as { error: string }).error).toHaveLength(16_384)
+    // No hooks: nothing runs; a failing hook or an abort resolves.
+    const free = runHooks()
+    await free.hooks.postToolUseFailure(call, 'x', signal)
+    expect(free.snapshot.calls).toHaveLength(0)
+    const failing = runHooks({ results: { PostToolUseFailure: () => {
+      throw new Error('broken')
+    } } })
+    await expect(failing.hooks.postToolUseFailure(call, 'x', signal)).resolves.toBeUndefined()
+    const controller = new AbortController()
+    controller.abort()
+    await expect(failing.hooks.postToolUseFailure(call, 'x', controller.signal)).resolves.toBeUndefined()
+  })
+
+  it('postCompact runs observe-only with the trigger and places the record for the next step', async () => {
+    const record = fakeHookRecord('PostCompact', 'error')
+    const { hooks, host, snapshot } = runHooks({ results: { PostCompact: fakeHookResult({ continue: false, record }) } })
+    host.stepNumber = 3
+    expect((await hooks.postCompact({ trigger: 'auto' }, signal)).record).toBe(record)
+    expect(snapshot.calls[0]).toMatchObject({ event: 'PostCompact', input: { trigger: 'auto' } })
+    expect(host.injected).toEqual([{ chunk: { type: 'data-hook', data: record }, step: 4 }])
+    expect(hooks.stopRequested).toBe(false)
+    expect(await runHooks().hooks.postCompact({ trigger: 'manual' }, signal)).toBe(NO_HOOK_RESULT)
+  })
+
+  it('subagentStart matches the agent type (Claude names too), answers the context and names the agent of later events', async () => {
+    const { hooks, snapshot, host } = runHooks({
+      results: { SubagentStart: fakeHookResult({ context: '  Use the staging database.  ', record: fakeHookRecord('SubagentStart', 'context', { context: 'Use the staging database.' }) }) },
+      present: ['PreToolUse', 'SubagentStop'],
+    })
+    const child = hooks.forChild('call_t/')
+    expect(child.agent).toBeNull()
+    expect(await child.subagentStart({ id: 'call_t', type: 'general' }, signal)).toBe('Use the staging database.')
+    expect(child.agent).toEqual({ id: 'call_t', type: 'general' })
+    expect(snapshot.calls[0]).toMatchObject({ event: 'SubagentStart', input: { agent: { id: 'call_t', type: 'general' } }, options: { target: 'general', aliases: ['general', 'general-purpose'] } })
+    // Nothing of a child is stored.
+    expect(host.injected).toEqual([])
+    await child.preToolUse({ toolName: 'read_file', toolCallId: 'call_t/c1', input: {} }, signal)
+    expect(snapshot.calls[1]?.input).toMatchObject({ agent: { id: 'call_t', type: 'general' } })
+    // SubagentStop carries the agent only when the runner passes it (the v1.7 input otherwise).
+    await child.subagentStop({ stopHookActive: false }, signal)
+    expect(snapshot.calls[2]?.input).not.toHaveProperty('agent')
+    await child.subagentStop({ stopHookActive: false, agent: child.agent! }, signal)
+    expect(snapshot.calls[3]).toMatchObject({ input: { agent: { id: 'call_t', type: 'general' } }, options: { target: 'general', aliases: ['general', 'general-purpose'] } })
+  })
+
+  it('subagentStart without hooks, without a context, with a failing hook or on abort', async () => {
+    const free = runHooks().hooks.forChild('p/')
+    expect(await free.subagentStart({ id: 'p', type: 'explore' }, signal)).toBeNull()
+    expect(free.agent).toEqual({ id: 'p', type: 'explore' })
+    const silent = runHooks({ present: ['SubagentStart'] }).hooks.forChild('p/')
+    expect(await silent.subagentStart({ id: 'p', type: 'explore' }, signal)).toBeNull()
+    const failing = runHooks({ results: { SubagentStart: () => {
+      throw new Error('broken')
+    } } }).hooks.forChild('p/')
+    expect(await failing.subagentStart({ id: 'p', type: 'general' }, signal)).toBeNull()
+    const controller = new AbortController()
+    controller.abort(new DOMException('stopped', 'AbortError'))
+    await expect(runHooks({ present: ['SubagentStart'] }).hooks.forChild('p/').subagentStart({ id: 'p', type: 'general' }, controller.signal)).rejects.toBeDefined()
+  })
+
+  it('writes the statusMessage label into the hooks activity (cut to 200 characters), none without one', async () => {
+    const { hooks, host } = runHooks({ present: ['PreToolUse', 'Stop', 'PostCompact'], statusMessages: { [hookTargetKey('PreToolUse', 'shell')]: 'Checking the command…', PostCompact: 'Noting the summary' } })
+    await hooks.preToolUse(call, signal)
+    expect(host.transient[0]).toEqual({ type: 'data-activity', data: { kind: 'hooks', event: 'PreToolUse', toolCallId: 'call_1', label: 'Checking the command…' } })
+    await hooks.preToolUse({ ...call, toolName: 'read_file', toolCallId: 'call_2' }, signal)
+    expect(host.transient[2]).toEqual({ type: 'data-activity', data: { kind: 'hooks', event: 'PreToolUse', toolCallId: 'call_2' } })
+    await hooks.postCompact({ trigger: 'auto' }, signal)
+    expect(host.transient[4]).toEqual({ type: 'data-activity', data: { kind: 'hooks', event: 'PostCompact', label: 'Noting the summary' } })
+    const base = createFakeHookSnapshot()
+    expect(hookActivityLabel({ ...base, statusMessage: () => `  ${'x'.repeat(250)}  ` }, 'Stop', undefined)).toHaveLength(200)
+    expect(hookActivityLabel({ ...base, statusMessage: () => '   ' }, 'Stop', undefined)).toBeUndefined()
+    expect(hookActivityLabel(base, 'Stop', undefined)).toBeUndefined()
+    expect(hookActivityLabel({ ...base, statusMessage: () => {
+      throw new Error('broken')
+    } }, 'Stop', undefined)).toBeUndefined()
+    expect(noHookSnapshot(base.scope).statusMessage('Stop')).toBeNull()
+  })
+
+  it('cutUnits never splits a surrogate pair', () => {
+    expect(cutUnits('abc', 5)).toBe('abc')
+    expect(cutUnits('abcdef', 3)).toBe('abc')
+    expect(cutUnits('ab\u{1F600}cd', 3)).toBe('ab')
+    expect(cutUnits('ab\u{1F600}cd', 4)).toBe('ab\u{1F600}')
+    expect(hookActivityLabel({ ...createFakeHookSnapshot(), statusMessage: () => '\u{1F600}'.repeat(150) }, 'Stop', undefined)).toHaveLength(200)
+  })
+
+  it('hookMatcherTarget follows the matcher subject of each event', () => {
+    expect(hookMatcherTarget('PreToolUse', { tool: { name: 'shell', callId: 'c', input: {} } }, {})).toBe('shell')
+    expect(hookMatcherTarget('PermissionRequest', {}, { target: 'write_file' })).toBe('write_file')
+    expect(hookMatcherTarget('PreCompact', { trigger: 'manual' }, {})).toBe('manual')
+    expect(hookMatcherTarget('PostCompact', { trigger: 'auto' }, {})).toBe('auto')
+    expect(hookMatcherTarget('Notification', { notificationType: PERMISSION_PROMPT }, {})).toBe('permission_prompt')
+    expect(hookMatcherTarget('SubagentStart', { agent: { id: 'c', type: 'explore' } }, {})).toBe('explore')
+    expect(hookMatcherTarget('SessionStart', { sessionSource: 'compact' }, {})).toBe('compact')
+    expect(hookMatcherTarget('SessionEnd', {}, {})).toBe('other')
+    expect(hookMatcherTarget('Stop', {}, {})).toBeUndefined()
+  })
+
+  it('hookMcpServerNames: the Claude names of plugin servers, then the project names', () => {
+    const registry = {
+      mcpServers: {
+        list: () => [
+          { pluginId: 'review-kit', decl: { id: 'review-kit', name: 'GitHub' }, claudeName: 'plugin_review-kit_github' },
+          { pluginId: 'core-mcp', decl: { id: 'docs', name: 'Docs' } },
+          { pluginId: 'other', decl: { id: 'shadowed', name: 'S' }, claudeName: 'plugin_other_s' },
+        ],
+      },
+    } as unknown as Parameters<typeof hookMcpServerNames>[0]
+    const names = hookMcpServerNames(registry, new Map([['shadowed', 'Project.S']]))
+    expect([...names]).toEqual([['review-kit', 'plugin_review-kit_github'], ['shadowed', 'Project.S']])
+    const { hooks } = runHooks({}, null, names)
+    expect(hooks.aliases('mcp__review-kit__create_issue')).toContain('mcp__plugin_review-kit_github__create_issue')
+    expect([...hookMcpServerNames(null)]).toEqual([])
+    const broken = { mcpServers: { list: () => {
+      throw new Error('broken')
+    } } } as unknown as Parameters<typeof hookMcpServerNames>[0]
+    expect([...hookMcpServerNames(broken, new Map([['a', 'A']]))]).toEqual([['a', 'A']])
   })
 })

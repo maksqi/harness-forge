@@ -9,6 +9,7 @@ import { useChatQueueStore } from '~/stores/chat-queue'
 import { useChatsStore } from '~/stores/chats'
 import { useCustomizationsStore } from '~/stores/customizations'
 import { useHooksStore } from '~/stores/hooks'
+import { useMarketplacesStore } from '~/stores/marketplaces'
 import { useModelsStore } from '~/stores/models'
 import { usePluginsStore } from '~/stores/plugins'
 import { useProjectMcpStore } from '~/stores/project-mcp'
@@ -472,5 +473,23 @@ describe('refetchLoadedStores', () => {
     await refetchLoadedStores()
     expect(api.chatTasks.list.mock.calls).toEqual([[{ params: { id: chatId(1) } }], [{ params: { id: chatId(1) } }]])
     expect(tasks.tasks(chatId(1))).toEqual([done])
+  })
+})
+
+describe('marketplace events (Phase 12, C46-T7)', () => {
+  it('routes marketplace.changed and plugin.changed to the marketplaces store', () => {
+    const marketplaces = useMarketplacesStore()
+    const apply = vi.spyOn(marketplaces, 'applyEvent')
+    const changed = createServerEvent('marketplace.changed', { id: 'mkt_sample0000000001', marketplace: null }, 1)
+    dispatchServerEvent(changed)
+    const plugin = createServerEvent('plugin.changed', { id: 'review-kit', plugin: null }, 2)
+    dispatchServerEvent(plugin)
+    expect(apply.mock.calls.map(([event]) => event.type)).toEqual(['marketplace.changed', 'plugin.changed'])
+  })
+
+  it('refreshes the loaded marketplaces on a reconnect', async () => {
+    const refresh = vi.spyOn(useMarketplacesStore(), 'refreshLoaded')
+    await refetchLoadedStores()
+    expect(refresh).toHaveBeenCalledTimes(1)
   })
 })

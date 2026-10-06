@@ -6,7 +6,7 @@
 // purge of a removed plugin's provider configuration.
 import type { PluginState } from '@harness-forge/shared'
 import type { Db } from '../db/client.ts'
-import type { PluginRecord, PluginRecordInput } from './types.ts'
+import type { PluginRecord, PluginRecordInput, StoredPluginOrigin } from './types.ts'
 import { Buffer } from 'node:buffer'
 import { HarnessError } from '@harness-forge/shared'
 import { and, eq, inArray, like, ne, sql } from 'drizzle-orm'
@@ -30,6 +30,17 @@ export function isAllowedTransition(from: PluginState, to: PluginState): boolean
 
 // ---------- plugins rows ----------
 
+/**
+ * The stored origin of a row (Phase 12, ADR-054; C43): the JSON the installer wrote (`StoredPluginOrigin`), or null for a
+ * row without one or with an unknown `kind` (the column is written only by this store).
+ */
+function originOf(value: unknown): StoredPluginOrigin | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value))
+    return null
+  const kind = (value as { kind?: unknown }).kind
+  return kind === 'marketplace' || kind === 'github' ? value as StoredPluginOrigin : null
+}
+
 function toRecord(row: typeof plugins.$inferSelect): PluginRecord {
   return {
     id: row.id,
@@ -42,6 +53,8 @@ function toRecord(row: typeof plugins.$inferSelect): PluginRecord {
     lastError: row.lastError ?? null,
     installedAt: row.installedAt,
     updatedAt: row.updatedAt,
+    format: row.format === 'claude' ? 'claude' : 'harness',
+    origin: originOf(row.origin),
   }
 }
 
@@ -100,6 +113,10 @@ export function createPluginRecordStore(db: Db, now: () => number = Date.now): P
           patch.enabled = input.enabled
         if (input.trustedHash !== undefined)
           patch.trustedHash = input.trustedHash
+        if (input.format !== undefined)
+          patch.format = input.format
+        if (input.origin !== undefined)
+          patch.origin = input.origin
         const updated = await update(input.id, patch)
         if (updated)
           return updated
@@ -115,6 +132,8 @@ export function createPluginRecordStore(db: Db, now: () => number = Date.now): P
           trustedHash: input.trustedHash ?? null,
           installedAt: time,
           updatedAt: time,
+          format: input.format ?? 'harness',
+          origin: input.origin ?? null,
         })
         .returning()
       return toRecord(row!)

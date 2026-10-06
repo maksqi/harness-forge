@@ -18,6 +18,14 @@
 // Kill switches (command hooks only; plugin code hooks still run): the setting `hooksEnabled`, `HF_WORKSPACE_SHELL=0`,
 // `HF_SAFE_MODE`. Logging: `info` = event, source, a hash prefix of the label, exit code, duration, outcome; commands,
 // payloads, stdout and stderr only at `debug`, redacted.
+//
+// Phase 12 (ADR-055 / ADR-057; C43, frozen after Gate P12-0b): prompt hooks (`type: 'prompt'`: a model answers
+// `{ ok, reason?, impossible? }`, read only by `readPromptHookAnswer`; `ok: true` never allows) run inside the snapshot
+// as one more handler kind (W12.5); the five new events `PostToolUseFailure`, `PermissionRequest`, `SubagentStart`,
+// `PostCompact` and `SessionEnd` (the run inputs `error`, `agent`, `sessionEndReason`); the activity label of a handler
+// (`HookSnapshot.statusMessage`); `importPersonal` (the home-folder import, one `hooks.changed`); `sessionEnd` (the
+// detached `SessionEnd` hooks of a single chat delete). Prompt hooks are off with `hooksEnabled: false` and
+// `HF_SAFE_MODE`, not with `HF_WORKSPACE_SHELL=0`; prompts and answers are never logged at `info`.
 import type {
   HookCreate,
   HookData,
@@ -33,6 +41,7 @@ import type {
   ToolMode,
 } from '@harness-forge/shared'
 import type { SensitiveOperationOptions } from '../../types.ts'
+import type { ChatRecord } from '../chats/types.ts'
 import type { OpenWorkspace } from '../projects/types.ts'
 
 /**
@@ -64,10 +73,26 @@ export interface HookScope {
  * `output` = the child's report; read only by the plugin code hooks `subagent.stop`, never put into the command payload);
  * `prompt` for `UserPromptSubmit`; `stopHookActive` for `Stop` / `SubagentStop`; `trigger` / `customInstructions` for
  * `PreCompact`; `sessionSource` for `SessionStart`; `message` / `notificationType` for `Notification`.
+ * Phase 12 (ADR-057): `tool` + `error` (the tool's error, cut to `HOOK_LIMITS.errorMaxChars`) for `PostToolUseFailure`;
+ * `tool` for `PermissionRequest`; `agent` (`{ id, type }` of the child: `agent_id` / `agent_type`, the matcher subject
+ * of `SubagentStart` / `SubagentStop`) for `SubagentStart` / `SubagentStop` and for the hooks that run inside a
+ * sub-agent; `trigger` for `PostCompact`; `sessionEndReason` (default `other`) for `SessionEnd`. The snapshot adds
+ * `transcriptPath` itself (W12.5).
  */
 export type HookRunInput = Pick<
   HookPayloadInput,
-  'messageId' | 'tool' | 'prompt' | 'stopHookActive' | 'trigger' | 'customInstructions' | 'sessionSource' | 'message' | 'notificationType'
+  | 'messageId'
+  | 'tool'
+  | 'prompt'
+  | 'stopHookActive'
+  | 'trigger'
+  | 'customInstructions'
+  | 'sessionSource'
+  | 'message'
+  | 'notificationType'
+  | 'error'
+  | 'agent'
+  | 'sessionEndReason'
 > & {
   /**
    * `UserPromptSubmit` of a slash command: the command's name without the `/` (the plugin code hook `prompt.submit`
@@ -100,13 +125,21 @@ export interface HookRunOptions {
 export interface HookEventResult {
   /** At least one hook (a command or a plugin code hook) ran for the event. */
   readonly ran: boolean
-  /** `PreToolUse` only: deny > ask > allow; null = no hook decided. */
+  /**
+   * `PreToolUse`: deny > ask > allow; null = no hook decided. Phase 12 (ADR-057): also the `PermissionRequest` answer
+   * (`hookSpecificOutput.decision.behavior`: `allow` or `deny`, combined deny > allow; never `ask`), which `approval.ts`
+   * applies through the same gate as a `PreToolUse` allow.
+   */
   readonly decision: HookPermissionDecision | null
   /** The block or decision reason (joined, at most `LIMITS.hookReasonMaxChars`); null = none. */
   readonly reason: string | null
   /** Model-visible context (joined, at most `LIMITS.hookContextMaxChars`); null = none. */
   readonly context: string | null
-  /** `PreToolUse` only: the first `updatedInput` in source order (personal, plugin, project); absent = unchanged. */
+  /**
+   * `PreToolUse`: the first `updatedInput` in source order (personal, plugin, project); absent = unchanged. Phase 12: also
+   * the `updatedInput` of a `PermissionRequest` answer (`hookSpecificOutput.decision.updatedInput`), applied like
+   * `PreToolUse`'s.
+   */
   readonly updatedInput?: unknown
   /** A hook blocked (exit 2, `decision: block`, `permissionDecision: deny`). */
   readonly block: boolean
@@ -137,9 +170,32 @@ export interface HookSnapshot {
    * Runs every matching hook of `event` in parallel (at most `LIMITS.hooksPerEventMax`, the server-wide semaphore
    * `LIMITS.hookProcessesMax`, each with its own timeout) and combines the outcomes; every run is added to the run log.
    * Never rejects for a failing hook (a non-blocking `error` record instead); rejects only when `options.signal` aborts.
+   * Phase 12: prompt handlers run here too (a model call through the prompt-hook limiter, outcome by the shared
+   * `promptHookOutcome`; `HookResult.kind: 'prompt'`, `model`); `async` command handlers start detached (tracked, killed
+   * at shutdown, no effect on the result); an `if` rule that does not match the tool call skips its handler.
    */
   readonly run: (event: HookEvent, input: HookRunInput, options: HookRunOptions) => Promise<HookEventResult>
+  /**
+   * Phase 12 (ADR-057, open point 1): the activity label of `event` for `target` (the harness name the matchers are
+   * tested against, as `HookRunOptions.target`; omitted = handlers without a matcher subject or matching every target):
+   * the `statusMessage` of the first handler, in source and declaration order, whose matcher (and `if` rule, when the
+   * target is a tool name) would let it run; null when none has one. Synchronous: the chat pipeline writes it into the
+   * transient `data-activity` (`label`) it emits before the hooks run.
+   */
+  readonly statusMessage: (event: HookEvent, target?: string) => string | null
 }
+
+/**
+ * The chat a `SessionEnd` runs for (Phase 12): the row as it was before the delete (`ChatsService.find`), so the hooks
+ * see its project, tool mode and model.
+ */
+export type SessionEndChat = Pick<ChatRecord, 'id' | 'projectId' | 'modelRef' | 'settings'>
+
+/**
+ * What `importPersonal` did with one item, in the order of the items: the created hook, or why it was not created (one
+ * English sentence that never quotes the command or the prompt).
+ */
+export type HookImportResult = { readonly ok: true, readonly hook: PersonalHook } | { readonly ok: false, readonly message: string }
 
 /**
  * Hooks, the personal hooks and the run log. Errors are `HarnessError`s the routes pass through (API.md 2). Every change
@@ -174,6 +230,22 @@ export interface HookService {
   /** `DELETE /hooks/:id` (no fresh auth: removing a hook only takes power away). Throws `not_found`. */
   readonly remove: (id: string) => Promise<void>
   /**
+   * Phase 12 (ADR-055): the hooks of a home-folder import (`ClaudeImportService.apply`, which required fresh auth). Each
+   * item is a create body, checked like `create` (`hookCreateSchema`, the matcher with `compileMatcher`) and stored as a
+   * personal row (command hooks arrive with `enabled: false` unless the user enabled them in the plan; prompt hooks as
+   * given). Items beyond `LIMITS.personalHooksMax` and invalid items fail (`ok: false`); nothing throws for an item.
+   * Emits exactly one `hooks.changed { projectId: null }` when at least one row was created. Results in item order.
+   */
+  readonly importPersonal: (items: readonly HookCreate[]) => Promise<HookImportResult[]>
+  /**
+   * Phase 12 (ADR-057): the `SessionEnd` hooks of a deleted chat (`DELETE /chats/:id` only, after the delete; never on
+   * delete-all, project deletion or shutdown), reason `other`: a snapshot of the chat's scope (its project's folder
+   * opened by the service, its tool mode and model, origin `request`), run detached within 1.5 s (handlers with an
+   * explicit timeout up to 60 s). The route does not await it (`void`); it never rejects (failures are logged) and does
+   * nothing after `stop()`. Resolves when the hooks finished (tests await it).
+   */
+  readonly sessionEnd: (chat: SessionEndChat) => Promise<void>
+  /**
    * `GET /hooks/runs`: the in-memory run log, newest first, at most `limit` entries (default and maximum
    * `LIMITS.hookRunsKept`); never a command, payload or output. Lost on restart. Synchronous.
    */
@@ -187,7 +259,8 @@ export interface HookService {
   readonly invalidate: (projectId: string | null) => void
   /**
    * Shutdown (`stopDeps`, right after the runs and before the project MCP runtimes): kills every running hook process
-   * group, drops the caches and the subscriptions. Idempotent; never rejects.
+   * group, drops the caches and the subscriptions. Idempotent; never rejects. Phase 12: also the `async` hook processes,
+   * the `SessionEnd` runs in flight, the prompt-hook calls and the transcript writer.
    */
   readonly stop: () => Promise<void>
 }

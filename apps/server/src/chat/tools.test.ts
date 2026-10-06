@@ -22,6 +22,7 @@ import {
   capToolOutput,
   clampToolTimeout,
   CORE_WORKSPACE_PLUGIN_ID,
+  hookErrorText,
   isAsyncGeneratorFunction,
   isAsyncIterable,
   isSkillTool,
@@ -997,16 +998,20 @@ describe('restrictTools (Phase 10)', () => {
 })
 
 describe('wrapToolExecute: command hooks (Phase 11, C37-T3)', () => {
-  /** Tool hooks with scripted rewrites; every PostToolUse call is recorded. */
+  /** Tool hooks with scripted rewrites; every PostToolUse and (Phase 12) PostToolUseFailure call is recorded. */
   function toolHooks(rewrites: Record<string, unknown> = {}) {
     const post: Array<{ toolName: string, toolCallId: string, input: unknown, output: unknown }> = []
+    const failures: Array<{ toolName: string, toolCallId: string, input: unknown, error: string }> = []
     const hooks: NonNullable<ToolWrapContext['hooks']> = {
       updatedInput: toolCallId => (Object.hasOwn(rewrites, toolCallId) ? { input: rewrites[toolCallId] } : null),
       postToolUse: async (result) => {
         post.push(result)
       },
+      postToolUseFailure: async (call, error) => {
+        failures.push({ toolName: call.toolName, toolCallId: call.toolCallId, input: call.input, error })
+      },
     }
-    return { hooks, post }
+    return { hooks, post, failures }
   }
 
   it('runs the tool with the rewritten input (before tool.before, re-validated); PostToolUse sees it and the output', async () => {
@@ -1051,6 +1056,9 @@ describe('wrapToolExecute: command hooks (Phase 11, C37-T3)', () => {
       postToolUse: async (result) => {
         order.push('PostToolUse')
         post.push(result.output)
+      },
+      postToolUseFailure: async () => {
+        order.push('PostToolUseFailure')
       },
     }
     const ok = wrapToolExecute({ pluginId: 'demo', definition: definition({ execute: async () => 'y'.repeat(LIMITS.toolOutputBytes + 10) }) }, { ...wrapContext({ run }), hooks })
@@ -1111,9 +1119,110 @@ describe('assembleTools: project MCP tools and shadowed servers (Phase 11, C37-T
 
   it('gives every wrapped tool the hooks of the run', async () => {
     const post: string[] = []
-    const hooks: NonNullable<ToolAssemblyInput['hooks']> = { updatedInput: () => null, postToolUse: async result => void post.push(result.toolName) }
+    const hooks: NonNullable<ToolAssemblyInput['hooks']> = { updatedInput: () => null, postToolUse: async result => void post.push(result.toolName), postToolUseFailure: async () => {} }
     const result = await assembleTools(assemblyInput({ hooks }))
     await (result.tools.alpha as { execute: (input: unknown, options: ToolExecutionOptions<unknown>) => Promise<unknown> }).execute({ text: 'x' }, options)
     expect(post).toEqual(['alpha'])
+  })
+})
+
+describe('wrapToolExecute: PostToolUseFailure (Phase 12, C44-T3)', () => {
+  function failureHooks() {
+    const failures: Array<{ toolName: string, toolCallId: string, input: unknown, error: string }> = []
+    const post: string[] = []
+    const hooks: NonNullable<ToolWrapContext['hooks']> = {
+      updatedInput: toolCallId => (toolCallId === 'call_rw' ? { input: { text: 'rewritten' } } : null),
+      postToolUse: async result => void post.push(result.toolCallId),
+      postToolUseFailure: async (call, error) => void failures.push({ toolName: call.toolName, toolCallId: call.toolCallId, input: call.input, error }),
+    }
+    return { hooks, failures, post }
+  }
+
+  it('a failing tool runs it once with the input it ran with and the error the model reads; the error is unchanged', async () => {
+    const { hooks, failures, post } = failureHooks()
+    const failing = wrapToolExecute({ pluginId: 'demo', definition: definition({ execute: async () => {
+      throw new Error('disk full')
+    } }) }, { ...wrapContext(), hooks })
+    await expect(failing({ text: 'model' }, { ...options, toolCallId: 'call_rw' })).rejects.toThrow('disk full')
+    expect(failures).toEqual([{ toolName: 'demo_tool', toolCallId: 'call_rw', input: { text: 'rewritten' }, error: 'disk full' }])
+    expect(post).toEqual([])
+    // A failure before the code ran (an invalid input) runs it too, with the input it was given.
+    const invalid = wrapToolExecute({ pluginId: 'demo', definition: definition() }, { ...wrapContext(), hooks })
+    await expect(invalid({ text: 1 }, { ...options, toolCallId: 'call_2' })).rejects.toBeInstanceOf(ToolFailure)
+    expect(failures[1]).toMatchObject({ toolCallId: 'call_2', input: { text: 1 } })
+    expect(failures[1]!.error).toMatch(/^The tool input is invalid: /)
+    // An inactive owner too.
+    const inactive = wrapToolExecute({ pluginId: 'demo', definition: definition() }, { ...wrapContext({ active: false }), hooks })
+    await expect(inactive({ text: 'x' }, { ...options, toolCallId: 'call_3' })).rejects.toBeInstanceOf(ToolFailure)
+    expect(failures).toHaveLength(3)
+    // A successful call never runs it.
+    const ok = wrapToolExecute({ pluginId: 'demo', definition: definition() }, { ...wrapContext(), hooks })
+    await ok({ text: 'x' }, { ...options, toolCallId: 'call_4' })
+    expect(failures).toHaveLength(3)
+    expect(post).toEqual(['call_4'])
+  })
+
+  it('an aborted call never runs it (plain and streaming)', async () => {
+    const { hooks, failures } = failureHooks()
+    const controller = new AbortController()
+    const aborted = wrapToolExecute({ pluginId: 'demo', definition: definition({ execute: async () => {
+      controller.abort(new DOMException('stopped', 'AbortError'))
+      throw new Error('interrupted')
+    } }) }, { ...wrapContext(), hooks })
+    await expect(aborted({ text: 'x' }, { ...options, abortSignal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' })
+    const streamController = new AbortController()
+    const streaming = wrapToolExecute({ pluginId: 'demo', definition: definition({
+      async* execute() {
+        yield { step: 1 }
+        streamController.abort(new DOMException('stopped', 'AbortError'))
+        throw new Error('interrupted')
+      },
+    }) }, { ...wrapContext(), hooks }) as (input: unknown, options: ToolExecutionOptions<unknown>) => AsyncGenerator<unknown>
+    await expect((async () => {
+      for await (const _value of streaming({ text: 'x' }, { ...options, abortSignal: streamController.signal })) {
+        // drain
+      }
+    })()).rejects.toBeDefined()
+    expect(failures).toEqual([])
+  })
+
+  it('a failing streaming tool runs it once; a failure after PostToolUse (an output that cannot be stored) does not', async () => {
+    const { hooks, failures, post } = failureHooks()
+    const streaming = wrapToolExecute({ pluginId: 'demo', definition: definition({
+      async* execute() {
+        yield { step: 1 }
+        throw new Error('stream broke')
+      },
+    }) }, { ...wrapContext(), hooks }) as (input: unknown, options: ToolExecutionOptions<unknown>) => AsyncGenerator<unknown>
+    await expect((async () => {
+      for await (const _value of streaming({ text: 'x' }, options)) {
+        // drain
+      }
+    })()).rejects.toBeInstanceOf(ToolFailure)
+    expect(failures).toEqual([{ toolName: 'demo_tool', toolCallId: 'call_1', input: { text: 'x' }, error: 'stream broke' }])
+    const cyclic: Record<string, unknown> = {}
+    cyclic.self = cyclic
+    const unstorable = wrapToolExecute({ pluginId: 'demo', definition: definition({ execute: async () => cyclic }) }, { ...wrapContext(), hooks })
+    await expect(unstorable({ text: 'x' }, { ...options, toolCallId: 'call_c' })).rejects.toBeInstanceOf(ToolFailure)
+    expect(post).toEqual(['call_c'])
+    expect(failures).toHaveLength(1)
+  })
+
+  it('a failing PostToolUseFailure hook never changes the error; hookErrorText cuts at 16 KiB', async () => {
+    const logs = createMemoryLogger()
+    const hooks: NonNullable<ToolWrapContext['hooks']> = {
+      updatedInput: () => null,
+      postToolUse: async () => {},
+      postToolUseFailure: async () => {
+        throw new Error('hook broke')
+      },
+    }
+    const failing = wrapToolExecute({ pluginId: 'demo', definition: definition({ execute: async () => {
+      throw new Error('disk full')
+    } }) }, { ...wrapContext({ logger: logs.logger }), hooks })
+    await expect(failing({ text: 'x' }, options)).rejects.toThrow('disk full')
+    expect(Buffer.byteLength(hookErrorText(new Error('é'.repeat(20_000))), 'utf8')).toBeLessThanOrEqual(LIMITS.hookErrorBytes)
+    expect(hookErrorText('plain')).toBe('plain')
+    expect(hookErrorText(undefined)).toBe('The tool call failed.')
   })
 })

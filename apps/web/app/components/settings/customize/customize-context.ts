@@ -14,3 +14,15 @@ export interface CustomizeRowContext {
 }
 
 export const CUSTOMIZE_ROW_CONTEXT: InjectionKey<CustomizeRowContext> = Symbol('customize-row-context')
+
+/**
+ * Phase 12 (ADR-056; C46, W12.12 owns it in P12-A): what HooksPanel provides to its rows (HookRow's props are frozen):
+ * whether the hooks of the selected project's settings files can be edited from here (Edit… on project rows opens the
+ * hook editor in project mode). Rows rendered without the panel offer no project Edit….
+ */
+export interface HookRowContext {
+  /** A project is selected and its settings files can be written (`PUT /projects/:id/definitions/file`). */
+  editProjectHooks: ComputedRef<boolean>
+}
+
+export const HOOK_ROW_CONTEXT: InjectionKey<HookRowContext> = Symbol('hook-row-context')

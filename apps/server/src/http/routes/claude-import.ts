@@ -1,5 +1,6 @@
-// Claude Code import routes (API.md 5.35, ADR-055) - Phase 12 stubs (501). Owner: W12.3. Keep the export name
-// `createClaudeImportRoutes`. Thin: validate, call the import service (`services/claude-import/`), map the answer.
+// Claude Code import routes (API.md 5.35, ADR-055). Owner: W12.3. Keep the export name `createClaudeImportRoutes`. Thin:
+// validate, call the import service (`services/claude-import/`), map the answer. Since P12-0b (C43) `home` answers
+// through the service (`deps.claudeImport.home()`); scan, upload and apply stay Phase 12 stubs (501) until W12.3.
 //
 // - `GET /claude-import/home`: whether the server can scan `HF_CLAUDE_HOME` (`available`, `reason`: `disabled` for
 //   `HF_CLAUDE_HOME=0`, `missing`, `unreadable`; `path`). Never reads a file.
@@ -29,9 +30,9 @@ function requireMultipart(c: AppContext): void {
   }
 }
 
-export function createClaudeImportRoutes(_deps: AppDeps): Hono<AppEnv> {
+export function createClaudeImportRoutes(deps: AppDeps): Hono<AppEnv> {
   const app = new Hono<AppEnv>()
-  app.get(apiRoutes['claudeImport.home'].path, notImplemented('claudeImport.home'))
+  app.get(apiRoutes['claudeImport.home'].path, async c => c.json(await deps.claudeImport.home()))
   app.post(apiRoutes['claudeImport.scan'].path, notImplemented('claudeImport.scan'))
   const upload = notImplemented('claudeImport.upload')
   app.post(apiRoutes['claudeImport.upload'].path, (c) => {

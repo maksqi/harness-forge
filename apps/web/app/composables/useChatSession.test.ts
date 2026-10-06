@@ -2350,11 +2350,32 @@ describe('useChatSession: hooks and output styles (Phase 11, P11-0b)', () => {
     const sending = session.submit({ text: 'go', files: [] })
     await reached.promise
     await until(() => session.activity.value === 'hooks', 'hooks')
-    expect(session.hookActivity.value).toEqual({ event: 'PreToolUse', toolCallId: 'call_1' })
+    expect(session.hookActivity.value).toEqual({ event: 'PreToolUse', toolCallId: 'call_1', label: null })
     gate.resolve()
     await sending
     await nextTick()
     expect(session.activity.value).toBeNull()
+    expect(session.hookActivity.value).toBeNull()
+  })
+
+  it('carries the activity label of a hook (Phase 12, statusMessage)', async () => {
+    const session = newSession(23)
+    const gate = deferred()
+    const reached = deferred()
+    server.reply(async (write) => {
+      write({ type: 'start', messageId: ASSISTANT_ID, messageMetadata: { modelRef: MODEL, startedAt: 1 } })
+      write({ type: 'data-activity', data: { kind: 'hooks', event: 'PostToolUse', toolCallId: 'call_2', label: 'Formatting files…' }, transient: true } as UIMessageChunk)
+      reached.resolve()
+      await gate.promise
+      write({ type: 'finish', finishReason: 'stop' })
+    })
+    const sending = session.submit({ text: 'go', files: [] })
+    await reached.promise
+    await until(() => session.hookActivity.value !== null, 'hooks')
+    expect(session.hookActivity.value).toEqual({ event: 'PostToolUse', toolCallId: 'call_2', label: 'Formatting files…' })
+    gate.resolve()
+    await sending
+    await nextTick()
     expect(session.hookActivity.value).toBeNull()
   })
 
@@ -2633,7 +2654,7 @@ describe('useChatSession: hooks, refusals and output styles (Phase 11, W11.11)',
     const sending = session.submit({ text: 'go', files: [] })
     await reached[0]!.promise
     await until(() => session.activity.value === 'hooks', 'message-level hooks')
-    expect(session.hookActivity.value).toEqual({ event: 'UserPromptSubmit', toolCallId: null })
+    expect(session.hookActivity.value).toEqual({ event: 'UserPromptSubmit', toolCallId: null, label: null })
     gates[0]!.resolve()
     await reached[1]!.promise
     await until(() => session.activity.value === 'compacting', 'compacting')
@@ -2641,7 +2662,7 @@ describe('useChatSession: hooks, refusals and output styles (Phase 11, W11.11)',
     gates[1]!.resolve()
     await reached[2]!.promise
     await until(() => session.hookActivity.value?.toolCallId === 'call_7', 'tool hooks')
-    expect(session.hookActivity.value).toEqual({ event: 'PostToolUse', toolCallId: 'call_7' })
+    expect(session.hookActivity.value).toEqual({ event: 'PostToolUse', toolCallId: 'call_7', label: null })
     expect(session.activity.value).toBe('hooks')
     gates[2]!.resolve()
     await reached[3]!.promise

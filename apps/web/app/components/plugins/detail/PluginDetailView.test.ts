@@ -8,8 +8,9 @@ import { reactive } from 'vue'
 import { rememberListRoute } from '~/components/plugins/list/list-route'
 import { byTestId, hrefOf, mountInShell, openWithKeyboard, settle } from '~/components/plugins/list/testing'
 import { useAuthStore } from '~/stores/auth'
+import { useMarketplacesStore } from '~/stores/marketplaces'
 import { testIds } from '~/utils/testids'
-import { authStatus, logEntry, pluginDetail, toolSummary } from '~/utils/testing/fixtures'
+import { authStatus, logEntry, marketplaceList, pluginDetail, pluginUpdate, toolSummary } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import PluginDetailView from './PluginDetailView.vue'
 
@@ -364,5 +365,26 @@ describe('pluginDetailView: tabs', () => {
     await mountDetail('missing')
     expect(document.body.textContent).toContain('Plugin not found')
     expect(byTestId(testIds.pluginTabOverview)).toBeNull()
+  })
+})
+
+describe('pluginDetailView: marketplace update (Phase 12, C46-T7)', () => {
+  it('shows the update banner of a plugin with an update and opens the update dialog', async () => {
+    const marketplaces = useMarketplacesStore()
+    api.marketplaces.list.mockResolvedValue(marketplaceList({ updates: [pluginUpdate({ pluginId: 'dice-roller', plugin: 'dice-roller' })] }))
+    await marketplaces.fetchAll()
+    api.pluginInstall.inspect.mockRejectedValue(new HarnessError({ code: 'not_implemented', message: 'Not yet.' }))
+    await mountDetail('dice-roller')
+    const banner = document.body.querySelector<HTMLElement>('[data-slot="plugin-update-banner"]')!
+    expect(banner.textContent).toContain('Version 1.2.0 is available from claude-plugins-official.')
+    byTestId(testIds.pluginUpdate)!.click()
+    await settle()
+    expect(byTestId(testIds.marketplaceInstallDialog)?.dataset.mode).toBe('update')
+    expect(api.pluginInstall.inspect).toHaveBeenCalledWith({ body: { source: 'marketplace', marketplaceId: pluginUpdate().marketplaceId, plugin: 'dice-roller' } })
+  })
+
+  it('shows no banner without an update', async () => {
+    await mountDetail('dice-roller')
+    expect(document.body.querySelector('[data-slot="plugin-update-banner"]')).toBeNull()
   })
 })

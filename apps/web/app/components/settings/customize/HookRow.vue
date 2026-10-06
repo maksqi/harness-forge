@@ -9,6 +9,10 @@
 // plugin · Copy as JSON (command hooks). A chosen item is emitted once the menu has closed (focus is back on the
 // trigger, so a sheet or dialog it opens returns focus there).
 // Props, emits and the root test id are frozen from Gate P11-0b (C39 stub); implementation W11.8.
+// Phase 12 (ADR-056, ADR-057; C46, W12.12 owns it in P12-A): the hook of a plugin that is not trusted (the store's
+// `untrusted` state, or the server's `pending` state of a plugin row) offers Review plugin… (`data-action="trust-plugin"`);
+// a project command row offers Edit… (`hook-edit`, the hook editor in project mode) when HooksPanel allows it
+// (`HOOK_ROW_CONTEXT`); prompt rows carry `data-kind="prompt"`.
 import type { HookEntry } from '@harness-forge/shared'
 import type { HookAction } from './hooks'
 import {
@@ -21,13 +25,14 @@ import {
   PencilIcon,
   PowerIcon,
   PowerOffIcon,
+  ShieldAlertIcon,
   ShieldCheckIcon,
   ShieldQuestionMarkIcon,
   Trash2Icon,
   WebhookIcon,
   WebhookOffIcon,
 } from '@lucide/vue'
-import { computed, nextTick, useId } from 'vue'
+import { computed, inject, nextTick, useId } from 'vue'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -40,6 +45,7 @@ import {
 import { usePluginsStore } from '~/stores/plugins'
 import { testIds } from '~/utils/testids'
 import { middleTruncate } from './customize'
+import { HOOK_ROW_CONTEXT } from './customize-context'
 import { HOOK_COPY, hookMatcherText, hookRowMeta, hookStateBadge } from './hooks'
 
 const props = defineProps<{ entry: HookEntry, busy?: boolean }>()
@@ -49,6 +55,7 @@ const plugins = usePluginsStore()
 const ids = { diagnostics: useId() }
 
 const pluginName = (id: string): string => plugins.byId(id)?.name ?? id
+const context = inject(HOOK_ROW_CONTEXT, null)
 
 const command = computed(() => (props.entry.kind === 'command' ? props.entry.command : null))
 const shortCommand = computed(() => (command.value === null ? null : middleTruncate(command.value.replace(/\s+/g, ' '), 72)))
@@ -60,6 +67,12 @@ const pluginUntrusted = computed(() => {
     return false
   return plugins.byId(props.entry.pluginId)?.state === 'untrusted'
 })
+/** + Phase 12: the plugin of a plugin row waits for trust (the server lists its hooks as `pending`). */
+const canTrustPlugin = computed(() => props.entry.source === 'plugin' && !!props.entry.pluginId
+  && (pluginUntrusted.value || props.entry.state === 'pending'))
+/** + Phase 12: a project command row whose settings file can be edited here. */
+const canEditProject = computed(() => props.entry.source === 'project' && props.entry.kind === 'command' && !!props.entry.path
+  && context?.editProjectHooks.value === true)
 const badge = computed(() => {
   if (pluginUntrusted.value && props.entry.state !== 'invalid')
     return { label: HOOK_COPY.pluginNotTrusted!, tone: 'warning' as const }
@@ -92,7 +105,7 @@ function onMenuCloseAutoFocus(): void {
     :data-testid="testIds.hookRow"
     :data-source="entry.source"
     :data-event="entry.event"
-    :data-kind="entry.kind"
+    :data-kind="entry.kind === 'command' && entry.type === 'prompt' ? 'prompt' : entry.kind"
     :data-state="entry.state"
     :data-hook-id="entry.source === 'personal' ? entry.id : undefined"
     :data-path="entry.kind === 'command' && entry.source === 'project' ? entry.path : undefined"
@@ -204,6 +217,10 @@ function onMenuCloseAutoFocus(): void {
             </DropdownMenuItem>
           </template>
           <template v-else-if="entry.source === 'project'">
+            <DropdownMenuItem v-if="canEditProject" :data-testid="testIds.hookEdit" class="pointer-coarse:min-h-10" @select="choose('edit')">
+              <PencilIcon aria-hidden="true" />
+              Edit…
+            </DropdownMenuItem>
             <DropdownMenuItem :data-testid="testIds.hookReview" class="pointer-coarse:min-h-10" @select="choose('review')">
               <ShieldQuestionMarkIcon aria-hidden="true" />
               Review…
@@ -218,6 +235,10 @@ function onMenuCloseAutoFocus(): void {
             </DropdownMenuItem>
           </template>
           <template v-else>
+            <DropdownMenuItem v-if="canTrustPlugin" data-action="trust-plugin" class="pointer-coarse:min-h-10" @select="choose('trust-plugin')">
+              <ShieldAlertIcon aria-hidden="true" />
+              Review plugin…
+            </DropdownMenuItem>
             <DropdownMenuItem v-if="entry.pluginId" data-action="open-plugin" class="pointer-coarse:min-h-10" @select="choose('open-plugin')">
               <ExternalLinkIcon aria-hidden="true" />
               Open plugin

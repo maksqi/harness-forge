@@ -2,6 +2,7 @@ import type { ToolPartLike } from '../chat-format'
 import { describe, expect, it } from 'vitest'
 import { backgroundTask, taskInput, taskOutput, taskPart, taskResultData, taskStep, todoItem } from '~/utils/testing/fixtures'
 import {
+  AGENT_COLOR_TOKENS,
   backgroundTaskState,
   currentTodo,
   doneTodos,
@@ -252,5 +253,11 @@ describe('firstSentence keeps tool names (Gate P10-B fix)', () => {
     expect(firstSentence('Called list_directory and read_file on the root.')).toBe('Called list_directory and read_file on the root.')
     expect(firstSentence('Use _this_ and *that* and **bold** and __strong__ now')).toBe('Use this and that and bold and strong now')
     expect(firstSentence('Ran `pnpm vitest --run` with 2*3 = 6 workers')).toBe('Ran pnpm vitest --run with 2*3 = 6 workers')
+  })
+})
+
+describe('aGENT_COLOR_TOKENS (Phase 12, C46)', () => {
+  it('maps every agent color to an existing token', () => {
+    expect(AGENT_COLOR_TOKENS).toEqual({ red: 'destructive', orange: 'chart-1', yellow: 'warning', green: 'success', blue: 'info', cyan: 'chart-2', purple: 'chart-5', pink: 'chart-5' })
   })
 })

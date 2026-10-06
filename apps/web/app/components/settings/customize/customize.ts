@@ -11,7 +11,12 @@
 // project command whose `!` lines wait for approval) and `set-default` (Use by default, a style). W11.8 (P11-A): the style
 // rows (label, coding-instructions meta, default badges), the skill meta (`/name`, "Only when you run it"), the style's
 // label kept on save (`CustomizationDraft.label`, CCR) and the Phase 11 copy.
+// Phase 12 (ADR-056, ADR-058; C46 declares, W12.11 implements; frozen from Gate P12-0b): the project file editor's target
+// (`ProjectFileTarget`, `newProjectFilePath`), the draft's Claude Code keys (`disallowedTools`, `maxTurns`, `color`,
+// `skills`, `whenToUse`, `fork`, `forkAgent`; `formatDefinition` writes a key only when set) and `edit` / `delete` on
+// project rows (they open the project file editor and delete the file).
 import type {
+  AgentColor,
   CommandSummary,
   Customization,
   CustomizationEntry,
@@ -41,7 +46,8 @@ import { CLIENT_COMMAND_DESCRIPTIONS } from '~/components/chat/composer/slash-co
 
 /**
  * The actions of a row's menu (docs/UI.md 9.12); + Phase 11 (9.13): `review` (Review…, a project command whose `!` lines
- * wait for approval) and `set-default` (Use by default, an output style).
+ * wait for approval) and `set-default` (Use by default, an output style); + Phase 12 (9.14): `edit` and `delete` on
+ * project rows (the project file editor, deleting the file).
  */
 export type CustomizationAction = 'edit' | 'view' | 'duplicate' | 'export' | 'toggle' | 'delete' | 'open-plugin' | 'review' | 'set-default'
 
@@ -69,6 +75,50 @@ export interface CustomizationDraft {
    * still matches it. Absent = the slug.
    */
   label?: string
+  /** + Phase 12 (agents `disallowedTools`, commands and skills `disallowed-tools`, ADR-058): tools never offered. */
+  disallowedTools?: string[] | null
+  /** + Phase 12 (agents): `maxTurns`, 1 … 200; null = no limit of its own. */
+  maxTurns?: number | null
+  /** + Phase 12 (agents): `color` in the chat; null = none. */
+  color?: AgentColor | null
+  /** + Phase 12 (agents): `skills` preloaded into the sub-agent (at most 5 names). */
+  skills?: string[] | null
+  /** + Phase 12 (commands and skills): `when_to_use`. */
+  whenToUse?: string | null
+  /** + Phase 12 (commands and skills): `context: fork` ("Run in a sub-agent"). */
+  fork?: boolean
+  /** + Phase 12 (with `fork`): the sub-agent type (`agent`); null = `general`. */
+  forkAgent?: string | null
+}
+
+/**
+ * What the project file editor opens (Phase 12, ADR-056; docs/UI.md 9.14): a project-relative path, its kind (`mcp` =
+ * `.mcp.json`), the definition's name (null for `.mcp.json`) and whether the file is created.
+ */
+export interface ProjectFileTarget {
+  path: string
+  kind: 'agent' | 'command' | 'skill' | 'style' | 'mcp'
+  name: string | null
+  create: boolean
+}
+
+/** The folder of each definition kind under `.harness/` or `.claude/`. */
+const PROJECT_KIND_FOLDERS: Readonly<Record<Exclude<ProjectFileTarget['kind'], 'mcp'>, string>> = {
+  agent: 'agents',
+  command: 'commands',
+  skill: 'skills',
+  style: 'output-styles',
+}
+
+/**
+ * The project-relative path of a new definition file (docs/UI.md 9.14): `<folder>/<kind folder>/<name>.md`, a skill
+ * `<folder>/skills/<name>/SKILL.md`, `.mcp.json` for `mcp`.
+ */
+export function newProjectFilePath(kind: ProjectFileTarget['kind'], folder: '.harness' | '.claude', name: string): string {
+  if (kind === 'mcp')
+    return '.mcp.json'
+  const stem = name.trim()
+  return kind === 'skill' ? `${folder}/skills/${stem}/SKILL.md` : `${folder}/${PROJECT_KIND_FOLDERS[kind]}/${stem}.md`
 }
 
 /** The `?tab=` value of each kind (Phase 11: output styles, ADR-051). */

@@ -64,6 +64,7 @@ import {
   settingsPropertyValueSchema,
   validationError,
 } from '@harness-forge/shared'
+import { notImplementedError } from '../not-implemented.ts'
 import { appVersion, serverPackageRoot } from '../paths.ts'
 import { comparePluginIds, isBuiltinPluginId } from '../registry/order.ts'
 import { compileEntry } from './compile.ts'
@@ -1255,7 +1256,12 @@ export function createPluginHost(deps: AppDeps, options: PluginHostOptions = {})
     guard,
     log,
 
-    inspectDirectory: dir => inspectPluginDirectory(dir),
+    // Phase 12 (C43 compile fix): the options are accepted; the Claude Code reader lands with W12.1.
+    inspectDirectory: async (dir, options) => {
+      if (options?.format === 'claude')
+        throw notImplementedError('Reading a Claude Code plugin')
+      return inspectPluginDirectory(dir)
+    },
 
     saveRecord: async (input) => {
       if (!PLUGIN_ID_PATTERN.test(input.id))

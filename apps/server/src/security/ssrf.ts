@@ -9,6 +9,15 @@
 //   between the check and the connection); TLS still verifies the certificate against the host name.
 // Redirects are followed manually (at most `maxRedirects`, each hop re-checked), the whole exchange shares one timeout,
 // and the body is capped at `maxBytes`, counted on the raw stream and again after decompression (zip-bomb safe).
+//
+// Phase 12 (ADR-054, C45-T3, FROZEN after Gate P12-0b): `createPluginSourceFetch` is the one `SafeFetch` of plugin
+// sources and marketplaces (GitHub API, raw, codeload, archive URLs, hosted `marketplace.json`): https only. With the
+// test-only `HF_TEST_REMOTE_URL` (`env.testRemoteUrl`, honored only with `HF_MOCK_PROVIDER=1`; `http://127.0.0.1:<port>`
+// of the loopback fake in `testing/fake-remote.ts`) every hop `https://<host>/<path>` is requested from
+// `<base>/<host>/<path>` instead; loopback is allowed for that base only, and every other rule is unchanged: the URL
+// must still be https without credentials, an IP literal or `localhost` host is classified as usual (so
+// `https://127.0.0.1/…` and `http://127.0.0.1:<port>/…` stay refused), redirects are re-checked and rerouted the same way,
+// and the result carries the original (logical) URL. No host name is ever resolved in that mode.
 import type { LookupAddress } from 'node:dns'
 import type { ClientRequest, IncomingHttpHeaders, IncomingMessage } from 'node:http'
 import type { LookupFunction } from 'node:net'
@@ -573,9 +582,19 @@ function checkOptions(options: SafeFetchOptions): void {
 
 // ---------- factory ----------
 
+/** Maps the checked (logical) URL of a hop to the URL actually requested (the test remote); null = the URL itself. */
+type HopRoute = (url: URL) => URL
+
 /** A `SafeFetch` with its own policy (`allowLoopback`), resolver and default User-Agent. */
 export function createSafeFetch(config: SafeFetchConfig = {}): SafeFetch {
+  return createGuardedFetch(config, null)
+}
+
+/** The guard of `createSafeFetch`; with `route`, each hop is requested from `route(url)` (see the module comment). */
+function createGuardedFetch(config: SafeFetchConfig, route: HopRoute | null): SafeFetch {
   const policy = { lookup: config.lookup ?? defaultLookup, allowLoopback: config.allowLoopback === true }
+  // The routed target is always the loopback test remote (an IP literal: no resolution); `route` vetted the logical URL.
+  const routedPolicy = { lookup: policy.lookup, allowLoopback: true }
   const userAgent = config.userAgent ?? SAFE_FETCH_USER_AGENT
 
   return async (input: string, options: SafeFetchOptions): Promise<SafeFetchResult> => {
@@ -601,8 +620,9 @@ export function createSafeFetch(config: SafeFetchConfig = {}): SafeFetch {
 
     try {
       for (let redirects = 0; ; redirects++) {
-        const addresses = await raceAbort(checkedAddresses(url, policy), controller.signal)
-        const response = await openRequest(url, method, headers, addresses, controller.signal)
+        const target = route === null ? url : route(url)
+        const addresses = await raceAbort(checkedAddresses(target, route === null ? policy : routedPolicy), controller.signal)
+        const response = await openRequest(target, method, headers, addresses, controller.signal)
         const status = response.statusCode ?? 0
         const location = response.headers.location
         if (REDIRECT_STATUSES.has(status) && typeof location === 'string' && location.trim() !== '') {
@@ -649,3 +669,77 @@ export function createSafeFetch(config: SafeFetchConfig = {}): SafeFetch {
 
 /** The default guard: public addresses only, system DNS. */
 export const safeFetch: SafeFetch = createSafeFetch()
+
+// ---------- plugin sources and the test remote (Phase 12) ----------
+
+/** The only protocol of plugin-source and marketplace fetches. */
+export const PLUGIN_SOURCE_PROTOCOLS: readonly ('http:' | 'https:')[] = ['https:']
+
+const TEST_REMOTE_URL = /^http:\/\/127\.0\.0\.1:(\d{1,5})\/?$/
+
+/**
+ * The base of a valid `HF_TEST_REMOTE_URL` (`http://127.0.0.1:<port>`, port 1 – 65535, an optional trailing slash),
+ * normalized without the slash; null for any other value (`localhost`, https, a path, another address).
+ */
+export function parseTestRemoteUrl(value: string): string | null {
+  if (typeof value !== 'string')
+    return null
+  const match = TEST_REMOTE_URL.exec(value.trim())
+  const port = match === null ? 0 : Number(match[1])
+  return port >= 1 && port <= 65_535 ? `http://127.0.0.1:${port}` : null
+}
+
+/** `https://<host>/<path>?<query>` as the test remote serves it: `<base>/<host>/<path>?<query>` (the fragment dropped). */
+export function testRemoteUrlFor(base: string, url: string): string {
+  const parsed = new URL(url)
+  return `${base.replace(/\/+$/, '')}/${parsed.host}${parsed.pathname}${parsed.search}`
+}
+
+/** The hop route of the test remote: vets the logical host like the guard, then points the request at `base`. */
+function testRemoteRoute(base: string): HopRoute {
+  return (url) => {
+    const host = unbracket(url.hostname)
+    if (isIP(host) !== 0) {
+      const kind = classifyAddress(host)
+      if (kind !== 'public')
+        throw blocked(host, host, kind)
+    }
+    else if (isLocalhostName(host)) {
+      throw invalid(`The host "${host}" is ${CLASS_LABELS.loopback}: only public internet addresses can be fetched.`)
+    }
+    return new URL(testRemoteUrlFor(base, url.href))
+  }
+}
+
+export interface PluginSourceFetchOptions {
+  /** `env.testRemoteUrl` (`HF_TEST_REMOTE_URL`; null, undefined or '' = the real hosts). Any other invalid value throws. */
+  readonly testRemoteUrl?: string | null
+  /** DNS resolver of the normal guard (tests). */
+  readonly lookup?: SafeFetchConfig['lookup']
+  /** Default User-Agent; the caller's headers win. */
+  readonly userAgent?: string
+}
+
+/**
+ * The `SafeFetch` of plugin sources and marketplaces (GitHub API, raw, codeload, archive and `marketplace.json` URLs):
+ * the normal guard restricted to https (`protocols` of a call are ignored). With `testRemoteUrl` every hop goes to the
+ * loopback test remote instead (see the module comment).
+ */
+export function createPluginSourceFetch(options: PluginSourceFetchOptions = {}): SafeFetch {
+  const config: SafeFetchConfig = {
+    ...(options.lookup === undefined ? {} : { lookup: options.lookup }),
+    ...(options.userAgent === undefined ? {} : { userAgent: options.userAgent }),
+  }
+  const remote = options.testRemoteUrl ?? ''
+  let guarded: SafeFetch
+  if (remote === '') {
+    guarded = createGuardedFetch(config, null)
+  }
+  else {
+    const base = parseTestRemoteUrl(remote)
+    if (base === null)
+      throw new TypeError('The test remote URL must be http://127.0.0.1:<port>.')
+    guarded = createGuardedFetch(config, testRemoteRoute(base))
+  }
+  return (url, fetchOptions) => guarded(url, { ...fetchOptions, protocols: PLUGIN_SOURCE_PROTOCOLS })
+}

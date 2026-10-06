@@ -23,6 +23,8 @@ import {
   customizationList,
   hookEntry,
   hookList,
+  projectDefinitionFile,
+  projectDefinitionWriteResult,
   projectId,
   projectSummary,
   projectTrustList,
@@ -517,5 +519,60 @@ describe('customizeSettings', () => {
     document.body.querySelector<HTMLElement>('[data-action="open-plugin"]')!.click()
     await settle()
     expect(mocks.router.push).toHaveBeenCalledWith('/plugins/db-tools')
+  })
+})
+
+describe('customize: Claude Code import and project files (Phase 12, C46-T7)', () => {
+  it('opens the import dialog from the header and from ?import=claude, and drops the query on close', async () => {
+    api.claudeImport.home.mockResolvedValue({ available: false, reason: 'disabled', path: null })
+    await mountIn(CustomizePage)
+    expect(byTestId(testIds.claudeImportDialog)).toBeNull()
+    expect(byTestId(testIds.customizeImportClaude)?.textContent?.trim()).toBe('Import from Claude Code…')
+    byTestId(testIds.customizeImportClaude)!.click()
+    await settle()
+    expect(byTestId(testIds.claudeImportDialog)?.dataset.step).toBe('source')
+    document.body.querySelector<HTMLElement>('[data-slot="dialog-close"]')!.click()
+    await settle()
+    expect(byTestId(testIds.claudeImportDialog)).toBeNull()
+
+    mocks.route!.query = { import: 'claude', tab: 'skills' }
+    await settle()
+    expect(byTestId(testIds.claudeImportDialog)).not.toBeNull()
+    document.body.querySelector<HTMLElement>('[data-slot="dialog-close"]')!.click()
+    await settle()
+    expect(mocks.router.replace).toHaveBeenLastCalledWith({ query: { tab: 'skills' } })
+
+    mocks.route!.query = { import: 'other' }
+    await settle()
+    expect(byTestId(testIds.claudeImportDialog)).toBeNull()
+    expect(mocks.router.replace).toHaveBeenLastCalledWith({ query: {} })
+  })
+
+  it('edits a project definition file from its row and from the viewer', async () => {
+    mocks.route!.query = { project: projectId(1) }
+    api.projectDefinitions.read.mockResolvedValue(projectDefinitionFile({ path: '.harness/agents/reviewer.md' }))
+    api.projectDefinitions.write.mockResolvedValue(projectDefinitionWriteResult({ path: '.harness/agents/reviewer.md', trust: { pending: 0 } }))
+    await mountIn(CustomizeSettings)
+    const reviewer = allByTestId(testIds.customizationRow).find(element => element.dataset.name === 'reviewer' && element.dataset.source === 'project')!
+    byTestId(testIds.customizationRowMenu, reviewer)!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await flushPromises()
+    const edit = byTestId(testIds.customizationEdit)!
+    expect(edit.dataset.source).toBe('project')
+    edit.click()
+    await settle()
+    expect(byTestId(testIds.projectFileEditor)?.dataset).toMatchObject({ kind: 'agent', path: '.harness/agents/reviewer.md', mode: 'edit' })
+    expect(api.projectDefinitions.read).toHaveBeenCalledWith({ params: { id: projectId(1) }, query: { path: '.harness/agents/reviewer.md' } })
+    byTestId(testIds.projectFileSave)!.click()
+    await settle()
+    expect(api.projectDefinitions.write).toHaveBeenCalledTimes(1)
+    expect(byTestId(testIds.projectFileEditor)).toBeNull()
+
+    api.customizations.source.mockResolvedValue({ content: '---\nname: reviewer\ndescription: Reviews a diff\n---\nReview.\n', path: '.harness/agents/reviewer.md' })
+    await chooseFromMenu('reviewer', testIds.customizationView)
+    const viewerEdit = byTestId(testIds.customizationViewer)!.querySelector<HTMLElement>('[data-action="edit"]')!
+    viewerEdit.click()
+    await settle()
+    expect(byTestId(testIds.customizationViewer)).toBeNull()
+    expect(byTestId(testIds.projectFileEditor)?.dataset.path).toBe('.harness/agents/reviewer.md')
   })
 })

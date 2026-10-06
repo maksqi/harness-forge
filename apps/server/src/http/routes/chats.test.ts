@@ -2,6 +2,7 @@ import type { HarnessUIMessage, ServerEvent } from '@harness-forge/shared'
 import type { ChatRunner } from '../../chat/types.ts'
 import type { ChatsService } from '../../services/chats/types.ts'
 import type { TestApp } from '../../testing/create-test-app.ts'
+import type { FakeHookService } from '../../testing/fake-hooks.ts'
 import {
   chatDetailSchema,
   chatExportSchema,
@@ -580,6 +581,60 @@ describe('pATCH /api/chats/:id { projectId } with a real run held in preparing',
     finally {
       release()
       await app.close()
+    }
+  })
+})
+
+describe('dELETE /api/chats/:id: SessionEnd (Phase 12, C44 call site)', () => {
+  let app: TestApp
+  let hooks: FakeHookService
+
+  beforeAll(async () => {
+    const runs = { ...t.deps.runs, stop: async () => false, stopTasks: async () => 0, hasRun: () => false, hasTasks: () => false }
+    app = await createTestApp({ start: false, hooks: 'fake', overrides: { runs } })
+    hooks = app.deps.hooks as FakeHookService
+  })
+
+  afterAll(async () => {
+    await app.close()
+  })
+
+  it('hands the deleted chat (as it was) to the SessionEnd hooks once, after chat.deleted; a 404 calls nothing', async () => {
+    const project = 'prj_sessionendproj01'
+    await app.db.insert(projects).values({ id: project, name: 'Session project', path: '/workspaces/session', createdAt: 1, updatedAt: 1 })
+    const id = chatId(900)
+    expect((await app.request('/api/chats', json('POST', { id, projectId: project }))).status).toBe(201)
+    const order: string[] = []
+    app.deps.events.subscribe((event) => {
+      if (event.type === 'chat.deleted')
+        order.push(`deleted:${hooks.sessionEnds.length}`)
+    })
+    expect((await app.request(`/api/chats/${id}`, { method: 'DELETE' })).status).toBe(204)
+    expect(hooks.calls.sessionEnd).toBe(1)
+    expect(hooks.sessionEnds).toHaveLength(1)
+    expect(hooks.sessionEnds[0]).toMatchObject({ id, projectId: project })
+    // The chat was already deleted when its session ended.
+    expect(order).toEqual(['deleted:0'])
+    expect((await app.request(`/api/chats/${id}`, { method: 'DELETE' })).status).toBe(404)
+    expect(hooks.calls.sessionEnd).toBe(1)
+  })
+
+  it('a failing SessionEnd never fails the delete', async () => {
+    const id = chatId(901)
+    expect((await app.request('/api/chats', json('POST', { id }))).status).toBe(201)
+    const original = hooks.sessionEnd
+    Object.assign(hooks, { sessionEnd: async () => Promise.reject(new Error('broken')) })
+    try {
+      expect((await app.request(`/api/chats/${id}`, { method: 'DELETE' })).status).toBe(204)
+      Object.assign(hooks, { sessionEnd: () => {
+        throw new Error('broken')
+      } })
+      const other = chatId(902)
+      expect((await app.request('/api/chats', json('POST', { id: other }))).status).toBe(201)
+      expect((await app.request(`/api/chats/${other}`, { method: 'DELETE' })).status).toBe(204)
+    }
+    finally {
+      Object.assign(hooks, { sessionEnd: original })
     }
   })
 })

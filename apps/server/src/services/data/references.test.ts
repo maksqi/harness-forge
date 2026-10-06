@@ -267,7 +267,9 @@ describe('referenced file ids: schema coverage', () => {
   })
 
   it('phase 11 (migration 0008): every column of hooks and project_trust and projects.output_style is unscanned', () => {
-    const phase11 = Object.keys(UNSCANNED_COLUMNS).filter(column => /^(?:hooks|project_trust)\./.test(column) || column === 'projects.output_style')
+    // Phase 12 (`0009`) adds the hook handler columns `type`, `prompt`, `model` and `options` (the next test).
+    const PHASE_12_HOOK_COLUMNS = new Set(['hooks.type', 'hooks.prompt', 'hooks.model', 'hooks.options'])
+    const phase11 = Object.keys(UNSCANNED_COLUMNS).filter(column => (/^(?:hooks|project_trust)\./.test(column) || column === 'projects.output_style') && !PHASE_12_HOOK_COLUMNS.has(column))
     expect(phase11.sort()).toEqual([
       'hooks.command',
       'hooks.event',
@@ -280,6 +282,25 @@ describe('referenced file ids: schema coverage', () => {
       'projects.output_style',
     ])
     expect(scanned.filter(column => /^(?:hooks|project_trust)\./.test(column) || column === 'projects.output_style')).toEqual([])
+  })
+
+  it('phase 12 (migration 0009): every column of marketplaces, plugins.format / origin and the new hooks columns is unscanned', () => {
+    const PHASE_12 = /^marketplaces\.|^plugins\.(?:format|origin)$|^hooks\.(?:type|prompt|model|options)$/
+    expect(Object.keys(UNSCANNED_COLUMNS).filter(column => PHASE_12.test(column)).sort()).toEqual([
+      'hooks.model',
+      'hooks.options',
+      'hooks.prompt',
+      'hooks.type',
+      'marketplaces.catalog',
+      'marketplaces.id',
+      'marketplaces.last_error',
+      'marketplaces.name',
+      'marketplaces.resolved_ref',
+      'marketplaces.source',
+      'plugins.format',
+      'plugins.origin',
+    ])
+    expect(scanned.filter(column => PHASE_12.test(column))).toEqual([])
   })
 
   it('reports a column that is in neither list', () => {

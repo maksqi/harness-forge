@@ -59,6 +59,9 @@ describe('plugin records', () => {
       lastError: null,
       installedAt: 1000,
       updatedAt: 1000,
+      // Phase 12 (C43): a row without a format is a harness plugin without an origin.
+      format: 'harness',
+      origin: null,
     })
     now = 2000
     await records.update('acme', { enabled: false })
@@ -70,6 +73,17 @@ describe('plugin records', () => {
     expect(await records.update('missing', { enabled: true })).toBeNull()
     expect(await records.remove('acme')).toBe(true)
     expect(await records.remove('acme')).toBe(false)
+  })
+
+  it('phase 12: stores the format and the origin; undefined keeps them, a null origin clears it', async () => {
+    const records = createPluginRecordStore(await db(), () => 1000)
+    const origin = { kind: 'github', repo: 'acme/review-kit', ref: null, commit: 'c'.repeat(40), path: null } as const
+    expect(await records.upsert({ id: 'review-kit', source: 'github', sourceRef: `acme/review-kit@${'c'.repeat(12)}`, version: '1.0.0', format: 'claude', origin })).toMatchObject({ format: 'claude', origin })
+    expect(await records.upsert({ id: 'review-kit', source: 'github', version: '1.1.0' })).toMatchObject({ format: 'claude', origin, version: '1.1.0' })
+    const marketplace = { kind: 'marketplace', marketplaceId: 'mkt_AAAAAAAAAAAAAAAA', marketplace: 'acme', plugin: 'review-kit', sourceKind: 'relative', commit: 'd'.repeat(40), version: '1.2.0', overlay: { name: 'review-kit', strict: false, overlay: { commands: ['./extra'] } } } as const
+    expect(await records.upsert({ id: 'review-kit', source: 'marketplace', version: '1.2.0', origin: marketplace })).toMatchObject({ format: 'claude', origin: marketplace })
+    expect((await records.get('review-kit'))?.origin).toEqual(marketplace)
+    expect(await records.upsert({ id: 'review-kit', source: 'zip', version: '1.2.0', format: 'harness', origin: null })).toMatchObject({ format: 'harness', origin: null })
   })
 
   it('creates builtin rows once and refreshes their version', async () => {

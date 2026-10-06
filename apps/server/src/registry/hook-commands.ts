@@ -17,6 +17,8 @@ import { toDisposable } from './disposable.ts'
 import { comparePluginIds } from './order.ts'
 import { duplicate, validateHookCommands } from './validate.ts'
 
+const NO_ENV: Readonly<Record<string, string>> = Object.freeze({})
+
 /** `HookCommandRegistry` plus the host-only `removeOwner`. */
 export interface PluginHookCommandRegistry extends HookCommandRegistry {
   /** Removes the registration of `pluginId` when it is still present (with a `removed` change); returns 1 or 0. */
@@ -30,7 +32,8 @@ export function createHookCommandRegistry(core: DefinitionRegistryCore): PluginH
       const validated = validateHookCommands(registration)
       if (entries.has(pluginId))
         throw duplicate(`The plugin "${pluginId}" already registered its command hooks.`)
-      const entry: RegisteredHookCommands = Object.freeze({ pluginId, root: validated.root, hooks: validated.hooks, diagnostics: validated.diagnostics })
+      // Phase 12 (C43 compile fix): `env` and the prompt handlers are registered by W12.1; until then none.
+      const entry: RegisteredHookCommands = Object.freeze({ pluginId, root: validated.root, hooks: validated.hooks, diagnostics: validated.diagnostics, env: NO_ENV, prompts: [] })
       entries.set(pluginId, entry)
       core.notify({ kind: 'hookCommands', action: 'added', pluginId, key: pluginId })
       return toDisposable(() => {

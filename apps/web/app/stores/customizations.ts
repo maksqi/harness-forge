@@ -9,6 +9,10 @@
 // { enabled })` alone is optimistic (rolled back on a failure), and an event refetches the lists used in the last
 // minute (the others are refetched on their next use). Errors are thrown as `HarnessError` (409 `exists`, 400 with the
 // diagnostics in `details`); the editor maps them to its fields.
+// Phase 12 (ADR-056; C46 CCR, W12.11 implements; frozen from Gate P12-0b): the project definition files edited from the UI
+// (`GET` / `PUT` / `DELETE /projects/:id/definitions/file`; no fresh auth, `expectedSha256` → 409 `stale`, saving never
+// approves) and `projectSource(projectId, entry)`, the editable target of a project entry. With the hooks store the only
+// caller of the project definition routes.
 import type {
   CommandSummary,
   Customization,
@@ -17,8 +21,13 @@ import type {
   CustomizationKind,
   CustomizationList,
   CustomizationUpdate,
+  ProjectDefinitionFile,
+  ProjectDefinitionWriteBody,
+  ProjectDefinitionWriteResult,
   ServerEvent,
 } from '@harness-forge/shared'
+import type { ProjectFileTarget } from '~/components/settings/customize/customize'
+import { projectDefinitionPathKind } from '@harness-forge/shared'
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { useApi } from '~/composables/useApi'
@@ -327,6 +336,67 @@ export const useCustomizationsStore = defineStore('customizations', () => {
     }
   }
 
+  // ---------- actions: project definition files (Phase 12) ----------
+
+  /** Marks the lists of a project's scope stale (refetched on their next use) and overtakes their fetches in flight. */
+  function markScopeStale(projectId: string): void {
+    const scope = customizationScopeKey(projectId)
+    const next: Record<string, true> = { ...stale.value }
+    for (const key of [catalogKey(scope), commandsKey(scope)]) {
+      bump(key)
+      pending.delete(key)
+      pending.delete(`${key}:refresh`)
+      if (key in loadedAt.value)
+        next[key] = true
+    }
+    stale.value = next
+  }
+
+  /**
+   * `GET /projects/:id/definitions/file?path`: the raw file with its sha256 (a missing file is `exists: false`). Throws
+   * `HarnessError` (404 for an unknown project, 400 for a path that is not an editable definition file).
+   */
+  function readProjectFile(projectId: string, path: string): Promise<ProjectDefinitionFile> {
+    return withHarnessErrors(api.projectDefinitions.read({ params: { id: projectId }, query: { path } }))
+  }
+
+  /**
+   * `PUT /projects/:id/definitions/file` (no fresh auth): the raw markdown of a definition, the `hooks` key of a settings
+   * file or the `mcpServers` key of `.mcp.json`, checked against `expectedSha256` (409 `conflict` reason `stale`). Marks
+   * the project's scope stale. Saving never approves: the result counts the items that wait for an approval.
+   */
+  async function saveProjectFile(projectId: string, body: ProjectDefinitionWriteBody): Promise<ProjectDefinitionWriteResult> {
+    try {
+      return await withHarnessErrors(api.projectDefinitions.write({ params: { id: projectId }, body }))
+    }
+    finally {
+      markScopeStale(projectId)
+    }
+  }
+
+  /** `DELETE /projects/:id/definitions/file?path&expectedSha256` (markdown definitions only). Marks the scope stale. */
+  async function removeProjectFile(projectId: string, path: string, expectedSha256: string): Promise<void> {
+    try {
+      await withHarnessErrors(api.projectDefinitions.remove({ params: { id: projectId }, query: { path, expectedSha256 } }))
+    }
+    finally {
+      markScopeStale(projectId)
+    }
+  }
+
+  /**
+   * The editable target of a catalog entry (the project file editor): a project entry whose `path` is an editable
+   * definition file; null for every other source (and without a project).
+   */
+  function projectSource(projectId: string | null, entry: CustomizationEntry): ProjectFileTarget | null {
+    if (projectId === null || entry.source !== 'project' || !entry.path)
+      return null
+    const kind = projectDefinitionPathKind(entry.path)
+    if (kind !== entry.kind)
+      return null
+    return { path: entry.path, kind: entry.kind, name: entry.name, create: false }
+  }
+
   // ---------- events and reconnects ----------
 
   /**
@@ -377,6 +447,10 @@ export const useCustomizationsStore = defineStore('customizations', () => {
     create,
     update,
     remove,
+    readProjectFile,
+    saveProjectFile,
+    removeProjectFile,
+    projectSource,
     applyEvent,
     refreshLoaded,
   }

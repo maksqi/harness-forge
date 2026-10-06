@@ -460,6 +460,17 @@ reconciled docs (W12.15) follow these, not the task text further down.
     keeps `data-state="running"` for 5 s. **W12.13** owns `W/components/chat/background/**` and
     `W/stores/background-tasks*` in P12-A and fixes it (find why the stop answer / `task.changed` does not reach the
     row; a regression test that stops a task while progress events arrive); W12.14 runs the spec 10× after the fix.
+- **Gate P12-0b** (coordinator):
+  - G12B upgrade probe 95/98: the v1.8-only project `prompt` hook is not listed yet (server reads project hooks without
+    `{ prompts: true }`); **W12.5** lists project prompt hooks as v2 trust items; the check moves to G12P (upgrade group)
+    and the final upgrade. Seam probe 76/76.
+  - `HF_TEST_REMOTE_URL`: an invalid value fails the boot even without `HF_MOCK_PROVIDER=1`; a valid loopback value without
+    the flag is ignored with a warning (C43; consistent with DECISIONS).
+  - CCRs applied: `hookModelText` gives feedback for a blocked `PostToolUseFailure` (C44); `renderCommandExpansion(…,
+    options?)` computes one argument base for the whole body (C44); `hookEntrySchema` gains `position?` for project hooks
+    (C46; W12.5 fills it, W12.12 uses it).
+  - C46 deviations (UI.md won; W12.15 updates UI.md 10.9 / 11.9): see `.tmp/waves/P12-0b-notes.md` (C46).
+  - `examples.test.ts`: the registered hook commands of `hook-pack` carry `env: {}` and `prompts: []`.
 
 ## Rules for every Phase 12 agent
 

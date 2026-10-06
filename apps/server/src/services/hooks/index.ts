@@ -34,6 +34,7 @@ import type { HookEventResult, HookRunInput, HookRunOptions, HookScope, HookServ
 import { chmod, mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { compileMatcher, HOOK_EVENTS, LIMITS } from '@harness-forge/shared'
+import { rejectsNotImplemented } from '../../not-implemented.ts'
 import { onSettingsChange } from '../settings/index.ts'
 import { codeHookOf, codeHookPlugins, isListedCodeHook } from './code-hooks.ts'
 import { listHooks, pluginCodeEntries } from './listing.ts'
@@ -70,6 +71,7 @@ export function emptyHookSnapshot(scope: HookScope): HookSnapshot {
       throwIfAborted(options.signal)
       return NOTHING_RAN
     },
+    statusMessage: (_event: HookEvent, _target?: string) => null,
   })
 }
 
@@ -438,6 +440,9 @@ export function createHookService(deps: AppDeps, options: HookServiceOptions = {
       await personal.remove(id)
     },
     runs: limit => runLog.list(limit),
+    // Phase 12 (C43 compile fix): the import of personal hooks and the SessionEnd runs land with W12.5.
+    importPersonal: rejectsNotImplemented('Importing personal hooks'),
+    sessionEnd: async () => {},
     invalidate: (projectId) => {
       try {
         invalidate(projectId)

@@ -172,6 +172,9 @@ describe('registry.hookCommands (plugin API 1.5.0)', () => {
         { event: 'Stop', matcher: null, command: 'sh again.sh', timeoutSec: null, position: [0, 1] },
       ],
       diagnostics: [],
+      // Phase 12 (C43): no extra environment, no prompt handlers.
+      env: {},
+      prompts: [],
     })
     expect(Object.isFrozen(entry)).toBe(true)
     expect(Object.isFrozen(entry?.hooks)).toBe(true)

@@ -51,6 +51,7 @@ import {
   safeParseModelRef,
   validationError,
 } from '@harness-forge/shared'
+import { rejectsNotImplemented } from '../../not-implemented.ts'
 import { builtinCatalogEntries, loadBuiltin } from './builtins.ts'
 import { createCatalogCache, CUSTOMIZATION_CACHE_PROJECTS_MAX } from './cache.ts'
 import { mergeCatalog, projectFingerprint } from './catalog.ts'
@@ -485,6 +486,9 @@ export function createCustomizationService(deps: AppDeps, options: Customization
     },
 
     exportBackup: async () => store.exportBackup(),
+
+    // Phase 12 (C43 compile fix): the import of personal definitions lands with W12.7.
+    importDefinitions: rejectsNotImplemented('Importing personal definitions'),
 
     restoreBackup: async (items) => {
       const result = await store.restoreBackup(items)

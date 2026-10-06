@@ -241,6 +241,9 @@ describe('plugin context', () => {
       root: '/plugins/ctx-test',
       hooks: [{ event: 'Stop', matcher: null, command: 'sh "$HARNESS_PLUGIN_ROOT/stop.sh"', timeoutSec: null, position: [0, 0] }],
       diagnostics: [],
+      // Phase 12 (C43): no extra environment, no prompt handlers.
+      env: {},
+      prompts: [],
     })
     expect(registry.contributions('ctx-test').commandHooks).toBe(1)
     expect(() => runtime.registerHookCommands(hooks)).toThrow(expect.objectContaining({ code: 'conflict' }))

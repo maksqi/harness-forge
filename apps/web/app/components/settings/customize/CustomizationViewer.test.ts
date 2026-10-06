@@ -41,7 +41,7 @@ afterEach(() => {
 
 async function mountViewer(entry: CustomizationEntry) {
   const state = reactive({ open: true })
-  const emitted = { open: [] as boolean[], copy: [] as unknown[] }
+  const emitted = { open: [] as boolean[], copy: [] as unknown[], edit: 0 }
   const Host = defineComponent({
     setup: () => () => h(TooltipProvider, null, {
       default: () => h(CustomizationViewer, {
@@ -53,6 +53,9 @@ async function mountViewer(entry: CustomizationEntry) {
           state.open = value
         },
         'onCopy': (draft: unknown) => emitted.copy.push(draft),
+        'onEdit': () => {
+          emitted.edit += 1
+        },
       }),
     }),
   })
@@ -142,5 +145,22 @@ describe('customizationViewer', () => {
     expect(viewer().textContent).toContain('/deploy')
     expect(viewer().textContent).toContain('<env>')
     expect(viewer().textContent).toContain('Only when you run it')
+  })
+})
+
+describe('customizationViewer: Edit (Phase 12, C46-T6)', () => {
+  it('offers Edit for a project file and emits edit; other sources have none', async () => {
+    api.customizations.source.mockResolvedValue({ content: AGENT_MARKDOWN, path: '.harness/agents/reviewer.md' })
+    const { emitted } = await mountViewer(customizationEntry())
+    const edit = viewer().querySelector<HTMLElement>('[data-action="edit"]')!
+    expect(edit.textContent?.trim()).toBe('Edit')
+    edit.click()
+    expect(emitted.edit).toBe(1)
+    wrapper!.unmount()
+    wrapper = null
+    document.body.replaceChildren()
+
+    await mountViewer(customizationEntry({ source: 'plugin', pluginId: 'db-tools', path: undefined }))
+    expect(viewer().querySelector('[data-action="edit"]')).toBeNull()
   })
 })

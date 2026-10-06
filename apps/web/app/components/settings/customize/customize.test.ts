@@ -30,6 +30,7 @@ import {
   kindOfTab,
   middleTruncate,
   nameError,
+  newProjectFilePath,
   pendingCommandTrust,
   PERSONAL_EMPTY,
   projectEmpty,
@@ -397,5 +398,15 @@ describe('customize output styles and skills (W11.8-T6, T7)', () => {
     expect(projectEmpty('style', 'website')).toBe('No output styles in website. Add Markdown files to .harness/output-styles/ (or .claude/output-styles/) in the project folder.')
     expect(nameError('style', 'learning')).toBe('learning is a built-in name.')
     expect(existsError('style', 'terse')).toBe('You already have an output style named terse.')
+  })
+})
+
+describe('newProjectFilePath (Phase 12, C46)', () => {
+  it('names the file of a new project definition', () => {
+    expect(newProjectFilePath('agent', '.claude', 'reviewer')).toBe('.claude/agents/reviewer.md')
+    expect(newProjectFilePath('command', '.harness', 'deploy')).toBe('.harness/commands/deploy.md')
+    expect(newProjectFilePath('skill', '.claude', 'pdf')).toBe('.claude/skills/pdf/SKILL.md')
+    expect(newProjectFilePath('style', '.harness', 'terse')).toBe('.harness/output-styles/terse.md')
+    expect(newProjectFilePath('mcp', '.claude', '')).toBe('.mcp.json')
   })
 })

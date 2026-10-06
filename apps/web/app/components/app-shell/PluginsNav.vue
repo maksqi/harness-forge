@@ -4,7 +4,13 @@
 // plugins store (`/plugins?filter=`), and every installed plugin (builtins first, then by name) with its icon and
 // state dot. Browse and Installed scroll together below the fixed rows and are hidden in icon mode. Contract: no
 // props, no emits; renders inside <SidebarContent> and never renders its own <Sidebar>.
-import { ChevronDownIcon, DownloadIcon, PackagePlusIcon } from '@lucide/vue'
+// Phase 12 (ADR-054; C46, frozen from Gate P12-0b; W12.8 owns it in P12-A): the "Marketplaces" row (`Store`,
+// `plugins-marketplaces`, a link to /plugins/marketplaces) between Install… and Browse with the count of installed
+// plugins that have an update (`data-count`, absent at 0; sr-only "{n} updates available"), from
+// `useMarketplacesStore().fetchAll({ maxAgeMs: 60_000 })` on mount (answered from the stored catalogs); the Installed
+// group's active row skips the reserved ids (`isReservedPluginId`: `new`, `marketplaces`).
+import { isReservedPluginId } from '@harness-forge/shared'
+import { ChevronDownIcon, DownloadIcon, PackagePlusIcon, StoreIcon } from '@lucide/vue'
 import { computed, onMounted, ref } from 'vue'
 import { Button } from '@/components/ui/button'
 import {
@@ -29,6 +35,7 @@ import {
 } from '~/components/plugins/list/plugin-display'
 import PluginIcon from '~/components/plugins/list/PluginIcon.vue'
 import PluginNewMenu from '~/components/plugins/list/PluginNewMenu.vue'
+import { useMarketplacesStore } from '~/stores/marketplaces'
 import { parsePluginFilter, usePluginsStore } from '~/stores/plugins'
 import { useUiStore } from '~/stores/ui'
 import { isAbortError } from '~/utils/errors'
@@ -37,9 +44,13 @@ import { useRoute } from './nuxt-imports'
 import { SIDEBAR_ROW_CLASS } from './sidebar-classes'
 
 const plugins = usePluginsStore()
+const marketplaces = useMarketplacesStore()
 const ui = useUiStore()
 const route = useRoute()
 const { isMobile, state, setOpenMobile } = useSidebar()
+
+/** The Marketplaces page (Phase 12): a script constant, never a path literal in a component prop (vue-tsc #6240). */
+const MARKETPLACES_ROUTE = '/plugins/marketplaces'
 
 const loading = ref(false)
 const loadFailed = ref(false)
@@ -50,10 +61,15 @@ const installed = computed(() => sortPluginsByName(plugins.items))
 /** The filter of the list page, or null on other plugin pages. */
 const activeFilter = computed(() => (route.path === '/plugins' ? parsePluginFilter(route.query.filter) : null))
 
-/** Id of the plugin shown by /plugins/[id], if any (never the `new` page). */
+/** The Marketplaces page is shown (Phase 12). */
+const marketplacesActive = computed(() => /^\/plugins\/marketplaces\/?$/.test(route.path))
+/** Installed plugins with an update in a marketplace (the row's badge; 0 hides it). */
+const updateCount = computed(() => marketplaces.updateCount)
+
+/** Id of the plugin shown by /plugins/[id], if any (never a reserved page: `new`, `marketplaces`). */
 const activePluginId = computed(() => {
   const match = route.path.match(/^\/plugins\/([^/]+)\/?$/)
-  if (!match?.[1] || match[1] === 'new')
+  if (!match?.[1] || isReservedPluginId(match[1]))
     return null
   try {
     return decodeURIComponent(match[1])
@@ -81,6 +97,8 @@ async function load() {
 onMounted(() => {
   if (!plugins.loaded)
     void load()
+  // The update count; the server answers from the stored catalogs (no network). A failure leaves the badge hidden.
+  marketplaces.fetchAll({ maxAgeMs: 60_000 }).catch(() => {})
 })
 
 function openInstall() {
@@ -114,6 +132,30 @@ function openInstall() {
             <DownloadIcon aria-hidden="true" />
             <span>Install…</span>
           </SidebarMenuButton>
+        </SidebarMenuItem>
+        <SidebarMenuItem>
+          <SidebarMenuButton
+            as-child
+            tooltip="Marketplaces"
+            :is-active="marketplacesActive"
+            :data-testid="testIds.pluginsMarketplaces"
+            :data-count="updateCount > 0 ? updateCount : undefined"
+            :class="cn(SIDEBAR_ROW_CLASS, 'pr-9')"
+          >
+            <NuxtLink :to="MARKETPLACES_ROUTE">
+              <StoreIcon aria-hidden="true" />
+              <span>Marketplaces</span>
+              <span v-if="updateCount > 0" class="sr-only">, {{ updateCount }} updates available</span>
+            </NuxtLink>
+          </SidebarMenuButton>
+          <SidebarMenuBadge
+            v-if="updateCount > 0"
+            data-slot="plugins-marketplaces-count"
+            aria-hidden="true"
+            class="top-1/2! -translate-y-1/2 tabular-nums"
+          >
+            {{ updateCount }}
+          </SidebarMenuBadge>
         </SidebarMenuItem>
       </SidebarMenu>
     </SidebarGroup>

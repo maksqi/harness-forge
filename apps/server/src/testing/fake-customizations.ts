@@ -17,6 +17,9 @@
 // `exists`), at most `LIMITS.customizationsPerKindMax` per kind; every change emits `customization.changed` on
 // `options.events`. Projects are not checked (any id is a project with an available folder and no folders read).
 // Every call is counted.
+// Phase 12 (C43-T9): `restoreBackup` turns restored commands with `` !`cmd` `` spans off and counts them (`turnedOff`,
+// like the real store); `importDefinitions` follows the contract in memory (create, overwrite keeping `enabled`, rename
+// through `setDefinitionName`; span commands off unless `enable`; failures per item; one `customization.changed {}`).
 import type {
   BackupCustomization,
   Customization,
@@ -26,7 +29,14 @@ import type {
   DefinitionDiagnostic,
   ParsedDefinition,
 } from '@harness-forge/shared'
-import type { CustomizationCatalog, CustomizationRestoreResult, CustomizationService, LoadedDefinition } from '../services/customizations/types.ts'
+import type {
+  CustomizationCatalog,
+  CustomizationImportItem,
+  CustomizationImportResult,
+  CustomizationRestoreResult,
+  CustomizationService,
+  LoadedDefinition,
+} from '../services/customizations/types.ts'
 import type { EventBus } from '../services/events/types.ts'
 import {
   createCustomizationId,
@@ -35,9 +45,11 @@ import {
   HarnessError,
   LIMITS,
   parseDefinition,
+  setDefinitionName,
 } from '@harness-forge/shared'
 import { builtinCatalogEntries, loadBuiltin } from '../services/customizations/builtins.ts'
 import { applyPrecedence, catalogList, createCatalogSnapshot } from '../services/customizations/snapshot.ts'
+import { runsShellSpans } from '../services/customizations/store.ts'
 
 /** The key of a catalog entry's body in `FakeCustomizationService.bodies`: `kind:source:name[:path or pluginId]`. */
 export function catalogEntryKey(entry: Pick<CustomizationEntry, 'kind' | 'source' | 'name' | 'path' | 'pluginId'>): string {
@@ -90,6 +102,8 @@ export interface FakeCustomizationService extends CustomizationService {
   readonly calls: Record<keyof CustomizationService, number>
   /** Every `invalidate` argument, in order. */
   readonly invalidated: Array<string | null>
+  /** Phase 12: every item of every `importDefinitions` call, in order. */
+  readonly imported: CustomizationImportItem[]
 }
 
 function notFound(message: string): HarnessError {
@@ -134,9 +148,11 @@ export function createFakeCustomizationService(options: FakeCustomizationService
     remove: 0,
     exportBackup: 0,
     restoreBackup: 0,
+    importDefinitions: 0,
     invalidate: 0,
     stop: 0,
   }
+  const imported: CustomizationImportItem[] = []
 
   function changed(kind: CustomizationKind, id: string): void {
     options.events?.emit('customization.changed', { kind, id })
@@ -184,7 +200,11 @@ export function createFakeCustomizationService(options: FakeCustomizationService
     return [...personal.values()].some(row => row.kind === kind && row.name === name && row.id !== exceptId)
   }
 
-  function createRow(kind: CustomizationKind, content: string, enabled: boolean): Customization {
+  /**
+   * Creates a personal row (`enabled` = a function of the parsed definition: restores and imports turn span commands
+   * off); `notify` = emit `customization.changed { kind, id }`.
+   */
+  function createRow(kind: CustomizationKind, content: string, enabled: boolean | ((definition: ParsedDefinition) => boolean), notify = true): Customization {
     const { definition, diagnostics: found } = parsePersonal(kind, content)
     const name = definition.fields.name
     if (nameTaken(kind, name))
@@ -192,10 +212,28 @@ export function createFakeCustomizationService(options: FakeCustomizationService
     if ([...personal.values()].filter(row => row.kind === kind).length >= LIMITS.customizationsPerKindMax)
       throw new HarnessError({ code: 'conflict', message: `At most ${LIMITS.customizationsPerKindMax} personal ${kind}s can be stored; delete one first.`, details: { reason: 'exists' } })
     const at = now()
-    const row = toCustomization({ id: createCustomizationId(), name, description: definition.fields.description, content, enabled, diagnostics: found, createdAt: at, updatedAt: at }, kind, definition)
+    const on = typeof enabled === 'function' ? enabled(definition) : enabled
+    const row = toCustomization({ id: createCustomizationId(), name, description: definition.fields.description, content, enabled: on, diagnostics: found, createdAt: at, updatedAt: at }, kind, definition)
     personal.set(row.id, row)
-    changed(kind, row.id)
+    if (notify)
+      changed(kind, row.id)
     return row
+  }
+
+  /** One item of `importDefinitions` (throws the error of a failed item; emits nothing). */
+  function importItem(item: CustomizationImportItem): CustomizationImportResult {
+    const enabled = (definition: ParsedDefinition): boolean => item.enable === true || !runsShellSpans(definition)
+    if (item.action === 'overwrite') {
+      const { definition, diagnostics: found } = parsePersonal(item.kind, item.content)
+      const existing = [...personal.values()].find(row => row.kind === item.kind && row.name === definition.fields.name)
+      if (existing !== undefined) {
+        const next = toCustomization({ ...existing, description: definition.fields.description, content: item.content, diagnostics: found, enabled: existing.enabled && enabled(definition), updatedAt: now() }, item.kind, definition)
+        personal.set(existing.id, next)
+        return { ok: true, outcome: 'updated', customization: next }
+      }
+    }
+    const content = item.action === 'rename' && item.renameTo !== undefined ? setDefinitionName(item.content, item.renameTo) : item.content
+    return { ok: true, outcome: 'created', customization: createRow(item.kind, content, enabled, false) }
   }
 
   function personalRow(id: string): Customization {
@@ -227,6 +265,7 @@ export function createFakeCustomizationService(options: FakeCustomizationService
     personal,
     calls,
     invalidated,
+    imported,
     catalog: async (projectId, catalogOptions) => {
       calls.catalog += 1
       catalogOptions?.signal?.throwIfAborted()
@@ -311,6 +350,7 @@ export function createFakeCustomizationService(options: FakeCustomizationService
       let imported = 0
       let skipped = 0
       let failed = 0
+      let turnedOff = 0
       const warnings: string[] = []
       for (const item of items) {
         if (nameTaken(item.kind, item.name)) {
@@ -324,8 +364,11 @@ export function createFakeCustomizationService(options: FakeCustomizationService
           continue
         }
         try {
-          createRow(item.kind, item.content, item.enabled)
+          // Phase 12: a command with `!` spans comes back turned off (ADR-052), counted in `turnedOff`.
+          const row = createRow(item.kind, item.content, definition => item.enabled && !runsShellSpans(definition))
           imported += 1
+          if (item.enabled && !row.enabled)
+            turnedOff += 1
         }
         catch (error) {
           if (error instanceof HarnessError && error.code === 'conflict' && (error.details as { reason?: unknown } | undefined)?.reason === 'exists') {
@@ -336,7 +379,24 @@ export function createFakeCustomizationService(options: FakeCustomizationService
           warnings.push(`The personal ${item.kind} "${item.name}" was not restored.`.slice(0, 300))
         }
       }
-      return { imported, skipped, failed, warnings }
+      return { imported, skipped, failed, warnings, turnedOff }
+    },
+    importDefinitions: async (items) => {
+      calls.importDefinitions += 1
+      const results: CustomizationImportResult[] = []
+      for (const item of items) {
+        imported.push(item)
+        try {
+          results.push(importItem(item))
+        }
+        catch (error) {
+          const reason = error instanceof HarnessError ? error.message : 'it could not be stored.'
+          results.push({ ok: false, message: `The ${item.kind} was not imported: ${reason}`.slice(0, 300) })
+        }
+      }
+      if (results.some(result => result.ok))
+        options.events?.emit('customization.changed', {})
+      return results
     },
     invalidate: (projectId) => {
       calls.invalidate += 1

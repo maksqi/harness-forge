@@ -26,6 +26,8 @@
 // Phase 11 (C37, ADR-048): a child with hooks (`ChildToolsInput.hooks`, `ChildHooks` of `../hooks.ts`) runs `PreToolUse`
 // in its approval function (an `ask` becomes the sub-agent denial above, never a card) and the `PreToolUse` rewrite and
 // `PostToolUse` in its tool wrapper, with the prefixed call ids; nothing of it is stored.
+// Phase 12 (C44 seam, ADR-058): an agent's `disallowedTools` (`ChildToolsInput.disallowedTools`) remove the tools they
+// match before its `tools` list narrows the set (restrict-only; W12.6 fills them from the definition).
 // Phase 11 (ADR-050, W11.17): a child of a project chat gets its parent run's project MCP result
 // (`ChildToolsInput.projectTools`, the `RunProjectTools` of `pipeline.ts`, foreground and background alike): the global
 // servers a project server shadows are not offered, and the project server tools join the candidates under the same
@@ -88,6 +90,11 @@ export interface ChildToolsInput {
    * (`matchToolAllowlist`). Null or absent = no restriction (the builtins, an agent without `tools`); `[]` = no tool.
    */
   readonly allowlist?: readonly string[] | null
+  /**
+   * Phase 12 (ADR-058): an agent's `disallowedTools` (`ChildAgentSpec.disallowedTools`): the tools they match
+   * (`matchToolAllowlist`) are removed before `allowlist` narrows the set. Null or absent = none.
+   */
+  readonly disallowedTools?: readonly string[] | null
   /**
    * Phase 11 (ADR-048): the child's hooks (`ChildSession.hooks.forChild(childCallIdPrefix(parentCallId))`); null or
    * absent = none.
@@ -177,6 +184,7 @@ export async function childTools(input: ChildToolsInput): Promise<ChildTools> {
 
   const active = assembled.activeTools === undefined ? null : new Set(assembled.activeTools)
   const allowlist = input.allowlist ?? null
+  const disallowed = input.disallowedTools ?? null
   const tools: ToolSet = {}
   const byName = new Map<string, ApprovalTool>()
   for (const [name, entry] of assembled.byName) {
@@ -184,6 +192,8 @@ export async function childTools(input: ChildToolsInput): Promise<ChildTools> {
     if (tool === undefined || (active !== null && !active.has(name)))
       continue
     if (!offeredToChild(entry, mode, assembled.prefs.get(name)?.override ?? null))
+      continue
+    if (disallowed !== null && matchToolAllowlist(name, disallowed))
       continue
     if (allowlist !== null && !matchToolAllowlist(name, allowlist))
       continue

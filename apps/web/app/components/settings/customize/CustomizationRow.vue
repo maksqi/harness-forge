@@ -16,6 +16,8 @@
 // "/{name}" and "Only when you run it"; a project command whose `!` lines wait for approval shows Needs approval
 // (`ShieldQuestionMark`) and the menu item Review… (`customization-review`). The defaults and the pending trust come
 // from CustomizeSettings through `CUSTOMIZE_ROW_CONTEXT` (the props are frozen).
+// Phase 12 (ADR-056; C46, W12.11 owns it in P12-A): project rows add Edit… (`customization-edit`, `data-source="project"`,
+// after Review…), which CustomizeSettings answers with the project file editor.
 import type { CustomizationEntry } from '@harness-forge/shared'
 import type { CustomizationAction } from './customize'
 import {
@@ -270,6 +272,15 @@ function onMenuCloseAutoFocus(): void {
             <DropdownMenuItem v-if="needsApproval" :data-testid="testIds.customizationReview" @select="choose('review')">
               <ShieldQuestionMarkIcon aria-hidden="true" />
               Review…
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              v-if="entry.source === 'project' && entry.path"
+              :data-testid="testIds.customizationEdit"
+              data-source="project"
+              @select="choose('edit')"
+            >
+              <PencilIcon aria-hidden="true" />
+              Edit…
             </DropdownMenuItem>
             <DropdownMenuItem :data-testid="testIds.customizationView" @select="choose('view')">
               <EyeIcon aria-hidden="true" />

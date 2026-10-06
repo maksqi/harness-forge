@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { openDatabase } from './client.ts'
 import { primaryKeyViolation, uniqueViolation } from './constraint.test-util.ts'
 import { migrateDatabase, resolveMigrationsFolder } from './migrate.ts'
-import { backgroundTasks, chats, chatShares, customizations, hooks, messages, projects, projectTrust, shellRules, TABLE_NAMES, usage, workspaceChanges } from './schema.ts'
+import { backgroundTasks, chats, chatShares, customizations, hooks, marketplaces, messages, plugins, projects, projectTrust, shellRules, TABLE_NAMES, usage, workspaceChanges } from './schema.ts'
 
 const opened: Database[] = []
 const tempDirs: string[] = []
@@ -68,10 +68,11 @@ describe('migrations', () => {
     expect(resolveMigrationsFolder()).toMatch(/[/\\]apps[/\\]server[/\\]drizzle$/)
   })
 
-  it('creates the 22 tables of the data model', async () => {
+  it('creates the 23 tables of the data model', async () => {
     const database = await freshDatabase()
     const tables = (await names(database, 'table')).filter(name => name !== '__drizzle_migrations')
-    expect(TABLE_NAMES).toHaveLength(22)
+    expect(TABLE_NAMES).toHaveLength(23)
+    expect(TABLE_NAMES).toContain('marketplaces')
     expect(TABLE_NAMES).toContain('hooks')
     expect(TABLE_NAMES).toContain('project_trust')
     expect(TABLE_NAMES).toContain('chat_shares')
@@ -105,12 +106,13 @@ describe('migrations', () => {
       'customizations_kind_name_uq',
       'background_tasks_chat_idx',
       'background_tasks_pending_idx',
+      'marketplaces_name_unique',
     ]))
     expect(await indexColumns(database, 'messages_chat_parent_idx')).toEqual(['chat_id', 'parent_id'])
     expect(await indexColumns(database, 'chat_shares_chat_idx')).toEqual(['chat_id'])
   })
 
-  it('applies every migration: 0000 initial schema, 0001 message tree and chat_shares, 0002 remembered versions, 0003, 0004 projects, 0005 workspace checkpoints, 0006 shell rule unique, 0007 customizations, 0008 hooks and trust', async () => {
+  it('applies every migration: 0000 initial schema, 0001 message tree and chat_shares, 0002 remembered versions, 0003, 0004 projects, 0005 workspace checkpoints, 0006 shell rule unique, 0007 customizations, 0008 hooks and trust, 0009 claude ecosystem', async () => {
     const database = await freshDatabase()
     const journal = JSON.parse(readFileSync(join(resolveMigrationsFolder(), 'meta', '_journal.json'), 'utf8')) as { entries: Array<{ tag: string }> }
     expect(journal.entries.map(entry => entry.tag)).toEqual([
@@ -123,6 +125,7 @@ describe('migrations', () => {
       '0006_shell_rule_unique',
       '0007_customizations',
       '0008_hooks_trust',
+      '0009_claude_ecosystem',
     ])
     const applied = await database.client.execute('SELECT hash, created_at FROM __drizzle_migrations ORDER BY created_at')
     expect(applied.rows).toHaveLength(journal.entries.length)
@@ -530,6 +533,11 @@ describe('phase 11 schema (0008: ADR-048 personal hooks, ADR-049 project trust, 
       ['enabled', 'INTEGER', 1, 0],
       ['created_at', 'INTEGER', 1, 0],
       ['updated_at', 'INTEGER', 1, 0],
+      // Phase 12 (0009, appended): the handler type and the prompt hook / handler fields.
+      ['type', 'TEXT', 1, 0],
+      ['prompt', 'TEXT', 0, 0],
+      ['model', 'TEXT', 0, 0],
+      ['options', 'TEXT', 0, 0],
     ])
     expect(info.enabled?.dflt_value).toBe('true')
     expect(info.matcher?.dflt_value).toBeNull()
@@ -559,9 +567,11 @@ describe('phase 11 schema (0008: ADR-048 personal hooks, ADR-049 project trust, 
     await db.insert(hooks).values({ id: 'hok_AAAAAAAAAAAAAAAA', event: 'PreToolUse', matcher: 'Bash|Write', command: 'sh .claude/hooks/guard.sh', timeout: 30 })
     await db.insert(hooks).values({ id: 'hok_BBBBBBBBBBBBBBBB', event: 'Stop', command: 'sh check.sh', enabled: false })
     const rows = await db.select().from(hooks).orderBy(hooks.id)
+    // Phase 12 (0009): a row written without the new columns is a command hook without prompt, model or options.
+    const v18 = { type: 'command', prompt: null, model: null, options: null }
     expect(rows.map(({ createdAt, updatedAt, ...row }) => row)).toEqual([
-      { id: 'hok_AAAAAAAAAAAAAAAA', event: 'PreToolUse', matcher: 'Bash|Write', command: 'sh .claude/hooks/guard.sh', timeout: 30, enabled: true },
-      { id: 'hok_BBBBBBBBBBBBBBBB', event: 'Stop', matcher: null, command: 'sh check.sh', timeout: null, enabled: false },
+      { id: 'hok_AAAAAAAAAAAAAAAA', event: 'PreToolUse', matcher: 'Bash|Write', command: 'sh .claude/hooks/guard.sh', timeout: 30, enabled: true, ...v18 },
+      { id: 'hok_BBBBBBBBBBBBBBBB', event: 'Stop', matcher: null, command: 'sh check.sh', timeout: null, enabled: false, ...v18 },
     ])
     for (const row of rows) {
       expect(row.createdAt).toBeGreaterThan(0)
@@ -589,6 +599,81 @@ describe('phase 11 schema (0008: ADR-048 personal hooks, ADR-049 project trust, 
 
     await db.delete(projects).where(eq(projects.id, PROJECT))
     expect(await db.select({ projectId: projectTrust.projectId, sha256: projectTrust.sha256 }).from(projectTrust)).toEqual([{ projectId: OTHER_PROJECT, sha256: HASH_A }])
+  })
+})
+
+describe('phase 12 schema (0009: ADR-053 plugin format, ADR-054 marketplaces, ADR-057 hook handler fields)', () => {
+  const NOW = 1_790_000_000_000
+
+  it('creates marketplaces as documented: text id, unique name, JSON source and catalog, nullable fetch state, no foreign key', async () => {
+    const database = await freshDatabase()
+    const info = await columns(database, 'marketplaces')
+    expect(Object.values(info).map(column => [column.name, column.type, column.notnull, column.pk])).toEqual([
+      ['id', 'TEXT', 1, 1],
+      ['name', 'TEXT', 1, 0],
+      ['source', 'TEXT', 1, 0],
+      ['resolved_ref', 'TEXT', 0, 0],
+      ['catalog', 'TEXT', 0, 0],
+      ['fetched_at', 'INTEGER', 0, 0],
+      ['last_error', 'TEXT', 0, 0],
+      ['created_at', 'INTEGER', 1, 0],
+      ['updated_at', 'INTEGER', 1, 0],
+    ])
+    expect(await foreignKeys(database, 'marketplaces')).toEqual([])
+    expect(await indexColumns(database, 'marketplaces_name_unique')).toEqual(['name'])
+    const list = await database.client.execute(`PRAGMA index_list(marketplaces)`)
+    expect(list.rows.map(row => [String(row.name), Number(row.unique)]).sort()).toEqual([['marketplaces_name_unique', 1], ['sqlite_autoindex_marketplaces_1', 1]])
+  })
+
+  it('adds plugins.format (text, not null, default harness) and plugins.origin (nullable text) at the end', async () => {
+    const database = await freshDatabase()
+    const info = await columns(database, 'plugins')
+    expect(Object.keys(info).slice(-2)).toEqual(['format', 'origin'])
+    expect(info.format).toEqual({ name: 'format', type: 'TEXT', notnull: 1, dflt_value: '\'harness\'', pk: 0 })
+    expect(info.origin).toEqual({ name: 'origin', type: 'TEXT', notnull: 0, dflt_value: null, pk: 0 })
+    const hookColumns = await columns(database, 'hooks')
+    expect(hookColumns.type).toEqual({ name: 'type', type: 'TEXT', notnull: 1, dflt_value: '\'command\'', pk: 0 })
+    for (const name of ['prompt', 'model', 'options'])
+      expect(hookColumns[name], name).toMatchObject({ type: 'TEXT', notnull: 0, dflt_value: null })
+  })
+
+  it('stores marketplaces with their JSON columns; a second marketplace of the same name is a unique violation', async () => {
+    const { db } = await freshDatabase()
+    const catalog = { version: 1, marketplace: { name: 'acme', owner: { name: 'Acme' }, plugins: [] }, diagnostics: [] }
+    await db.insert(marketplaces).values({ id: 'mkt_AAAAAAAAAAAAAAAA', name: 'acme', source: { type: 'github', repo: 'acme/tools' }, resolvedRef: 'a'.repeat(40), catalog, fetchedAt: NOW })
+    await db.insert(marketplaces).values({ id: 'mkt_BBBBBBBBBBBBBBBB', name: 'local', source: { type: 'path', path: '/srv/marketplace' }, lastError: { code: 'not_found', message: 'Gone.' } })
+    const stored = await db.select().from(marketplaces).orderBy(marketplaces.id)
+    expect(stored.map(({ createdAt, updatedAt, ...row }) => row)).toEqual([
+      { id: 'mkt_AAAAAAAAAAAAAAAA', name: 'acme', source: { type: 'github', repo: 'acme/tools' }, resolvedRef: 'a'.repeat(40), catalog, fetchedAt: NOW, lastError: null },
+      { id: 'mkt_BBBBBBBBBBBBBBBB', name: 'local', source: { type: 'path', path: '/srv/marketplace' }, resolvedRef: null, catalog: null, fetchedAt: null, lastError: { code: 'not_found', message: 'Gone.' } },
+    ])
+    for (const row of stored)
+      expect(row.createdAt).toBeGreaterThan(0)
+    expect(await uniqueViolation(db.insert(marketplaces).values({ id: 'mkt_CCCCCCCCCCCCCCCC', name: 'acme', source: { type: 'url', url: 'https://example.com/marketplace.json' } })))
+      .toBe('UNIQUE constraint failed: marketplaces.name')
+  })
+
+  it('stores the plugin format and origin; a row without them is a harness plugin without an origin', async () => {
+    const { db } = await freshDatabase()
+    await db.insert(plugins).values({ id: 'legacy', source: 'zip', version: '1.0.0' })
+    const origin = { kind: 'marketplace', marketplaceId: 'mkt_AAAAAAAAAAAAAAAA', marketplace: 'acme', plugin: 'review-kit', sourceKind: 'relative', commit: 'c'.repeat(40), version: '1.2.0', overlay: { name: 'review-kit', strict: true, overlay: {} } }
+    await db.insert(plugins).values({ id: 'review-kit', source: 'marketplace', sourceRef: `acme/tools@${'c'.repeat(12)}`, version: '1.2.0', format: 'claude', origin })
+    const stored = await db.select({ id: plugins.id, format: plugins.format, origin: plugins.origin }).from(plugins).orderBy(plugins.id)
+    expect(stored).toEqual([
+      { id: 'legacy', format: 'harness', origin: null },
+      { id: 'review-kit', format: 'claude', origin },
+    ])
+  })
+
+  it('stores a prompt hook (command empty, type prompt, prompt, model, options JSON) next to a command hook', async () => {
+    const { db } = await freshDatabase()
+    await db.insert(hooks).values({ id: 'hok_CCCCCCCCCCCCCCCC', event: 'Stop', command: '', type: 'prompt', prompt: 'Did the tests run? $ARGUMENTS', model: 'mock:prompt-hook', options: { continueOnBlock: true, statusMessage: 'Checking…' } })
+    await db.insert(hooks).values({ id: 'hok_DDDDDDDDDDDDDDDD', event: 'PreToolUse', matcher: 'Bash', command: 'node', options: { args: ['guard.mjs', '--strict'], if: 'Bash(git push:*)' } })
+    const stored = await db.select({ id: hooks.id, type: hooks.type, command: hooks.command, prompt: hooks.prompt, model: hooks.model, options: hooks.options }).from(hooks).orderBy(hooks.id)
+    expect(stored).toEqual([
+      { id: 'hok_CCCCCCCCCCCCCCCC', type: 'prompt', command: '', prompt: 'Did the tests run? $ARGUMENTS', model: 'mock:prompt-hook', options: { continueOnBlock: true, statusMessage: 'Checking…' } },
+      { id: 'hok_DDDDDDDDDDDDDDDD', type: 'command', command: 'node', prompt: null, model: null, options: { args: ['guard.mjs', '--strict'], if: 'Bash(git push:*)' } },
+    ])
   })
 })
 

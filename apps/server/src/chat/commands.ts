@@ -38,8 +38,13 @@
 // (the 64 KB floor, the project, the shell switch, the folder, the trust hash) but its spans and `@path` reads wait: the
 // prompt resolution carries `finish()` and a placeholder expansion (every span empty, no file block) that is never
 // stored; `prepare.ts` runs the prompt hooks first and calls `finish()` only once they passed.
+// Phase 12 (C44 stubs, ADR-058; W12.7 implements behind them): every `expandArguments` call of a definition body passes
+// `argumentOptions({ body, names, vars })` (`vars`: `CommandContext.argumentVars` of `prepare.ts`, plus what the call
+// site knows); the stub answers undefined, the Phase 10 expansion (no names, base 1, no variables), so every v1.7
+// template expands as before. Qualified names (`<pluginId>:<name>`) pass through unchanged (their resolution and the
+// bare alias are W12.7's, open point 8).
 import type { CommandDefinition, CommandRunResult } from '@harness-forge/plugin-sdk'
-import type { CommandInvocation, CommandSource, CommandSummary, CustomizationEntry, CustomizationSource, HarnessUIMessage } from '@harness-forge/shared'
+import type { CommandInvocation, CommandSource, CommandSummary, CustomizationEntry, CustomizationSource, ExpandArgumentsOptions, HarnessUIMessage } from '@harness-forge/shared'
 import type { Logger } from '../logger.ts'
 import type { PluginHost } from '../plugins/types.ts'
 import type { Registry } from '../registry/types.ts'
@@ -159,6 +164,33 @@ export interface CommandContext {
    * prompt hooks run in between, `prepare.ts`); default false (they run while resolving).
    */
   deferExpansion?: boolean
+  /**
+   * Phase 12 (ADR-058): the `${NAME}` variables of definition bodies the caller knows (`prepare.ts`:
+   * `CLAUDE_SESSION_ID` = the chat id), for `argumentOptions`. Absent = none.
+   */
+  argumentVars?: Readonly<Record<string, string>>
+}
+
+/** What the `expandArguments` options of one definition body are built from (Phase 12, ADR-058). */
+export interface ArgumentOptionsInput {
+  /** The body that is expanded (the argument base heuristic, `argumentBase`, reads it). */
+  readonly body: string
+  /** The definition's `arguments` names (`fields.arguments`); null or absent = none. */
+  readonly names?: readonly string[] | null
+  /**
+   * The `${NAME}` variables of the call site (`CLAUDE_SESSION_ID`, `CLAUDE_PROJECT_DIR`, `CLAUDE_SKILL_DIR`, the plugin
+   * variables); absent = none. Never read from `process.env`.
+   */
+  readonly vars?: Readonly<Record<string, string>>
+}
+
+/**
+ * The `expandArguments` options of a definition body (Phase 12, ADR-058; C44 stub with its final signature: W12.7
+ * answers `{ names, base: argumentBase(body, names), vars }`). The stub answers undefined: the Phase 10 expansion (no
+ * names, base 1, no variables), so every v1.6 / v1.7 template expands exactly as before.
+ */
+export function argumentOptions(_input: ArgumentOptionsInput): ExpandArgumentsOptions | undefined {
+  return undefined
 }
 
 function tooLong(name: string): HarnessError {
@@ -331,7 +363,8 @@ async function definitionResolution(
   const source: CommandSource = entry.source
   const modelRef = commandModelRef(fields.model)
   const allowedTools = commandAllowedTools(fields.allowedTools)
-  const expansion = await bodyExpansion(parsed.name, fields.body, parsed.input, entry.source, context, () => expandArguments(fields.body, parsed.input).text)
+  const options = argumentOptions({ body: fields.body, names: fields.arguments ?? null, vars: context.argumentVars ?? {} })
+  const expansion = await bodyExpansion(parsed.name, fields.body, parsed.input, entry.source, context, () => expandArguments(fields.body, parsed.input, options).text)
   return bodyResolution(parsed.name, parsed.input, expansion, {
     source,
     ...(modelRef === undefined ? {} : { modelRef }),
@@ -366,7 +399,9 @@ async function skillResolution(services: CommandServices, entry: CustomizationEn
     throw definitionUnavailable(parsed.name, new HarnessError({ code: 'validation_error', message: 'The definition is not a skill.' }))
   if (!skillInvocation(definition.fields).userInvocable)
     throw definitionUnavailable(parsed.name, new HarnessError({ code: 'validation_error', message: 'The skill can no longer be run as a command.' }))
-  const expansion = expandArguments(definition.fields.content, parsed.input).text
+  const content = definition.fields.content
+  const options = argumentOptions({ body: content, names: definition.fields.arguments ?? null, vars: context.argumentVars ?? {} })
+  const expansion = expandArguments(content, parsed.input, options).text
   return promptResolution(parsed.name, parsed.input, expansion, { kind: 'skill', source: skillSource(entry.source) })
 }
 

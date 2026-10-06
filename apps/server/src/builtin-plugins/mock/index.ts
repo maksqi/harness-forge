@@ -9,7 +9,8 @@
 // (./subagent.ts) and `mock:steer` (./steer.ts), with the shared rules in ./turn.ts; Phase 10 (the customization
 // mocks, PROVIDERS.md 8 "Customization mocks (Phase 10)", FROZEN after Gate P10-0b): `mock:agents` (./agents.ts) and
 // `mock:background` (./background.ts); Phase 11 (PROVIDERS.md 8 "Hook mocks (Phase 11)", FROZEN after Gate P11-0b):
-// `mock:hooks` (./hooks.ts), the 17th language model.
+// `mock:hooks` (./hooks.ts), the 17th language model; Phase 12 (PROVIDERS.md 8 "Prompt hook mock (Phase 12)", FROZEN
+// after Gate P12-0b): `mock:prompt-hook` (./prompt-hook.ts), the 18th language model, which answers prompt hooks.
 import type { HarnessErrorInit, ModelInfo, PluginManifest, ProviderDefinition, ReasoningLevel, ToolDefinition } from '@harness-forge/plugin-sdk'
 import { APICallError } from '@ai-sdk/provider'
 import { definePlugin } from '@harness-forge/plugin-sdk'
@@ -32,6 +33,7 @@ import {
   MOCK_PROVIDER_ID,
   MOCK_TOOL_NAME,
 } from './models.ts'
+import { MOCK_PROMPT_HOOK_MODEL_ID } from './prompt-hook.ts'
 
 export {
   MOCK_AGENT_CONTENT,
@@ -116,6 +118,19 @@ export {
   MOCK_PLAN_TODOS,
   mockRevisedPlan,
 } from './plan-mode.ts'
+export {
+  findPromptHookMarker,
+  MOCK_PROMPT_HOOK_FENCED,
+  MOCK_PROMPT_HOOK_FENCED_REASON,
+  MOCK_PROMPT_HOOK_INVALID,
+  MOCK_PROMPT_HOOK_MARKERS,
+  MOCK_PROMPT_HOOK_MODEL_ID,
+  MOCK_PROMPT_HOOK_OK,
+  MOCK_PROMPT_HOOK_USAGE,
+  mockPromptHookAnswer,
+  mockPromptHookText,
+} from './prompt-hook.ts'
+export type { MockPromptHookMarker, MockPromptHookMatch } from './prompt-hook.ts'
 export { MOCK_SHELL_DONE_PREFIX } from './shell.ts'
 export { MOCK_STEER_STEP_DELAY_MS, MOCK_STEER_STEPS_MAX } from './steer.ts'
 export {
@@ -174,14 +189,16 @@ function mockModel(id: string, name: string, capabilities: Partial<Record<MockCa
 }
 
 /**
- * The twenty mock models (listing and seeds): the four chat models of v1, then the Phase 6 models in the order of
+ * The twenty-one mock models (listing and seeds): the four chat models of v1, then the Phase 6 models in the order of
  * PROVIDERS.md 8, then `workspace` (Phase 7), `checkpoint` and `shell` (Phase 8), then the agent mocks of Phase 9
  * (`compact` with a 2000-token context window, `plan`, `todo`, `subagent`, `steer`; the `tools` capability only), then
  * the customization mocks of Phase 10 (`agents`, `background`; the `tools` capability only), then `hooks` (Phase 11;
- * the `tools` capability only). The media models carry explicit kinds: `image` (vision, the same cost),
- * `transcription` and `speech` (with `voices`). `image-chat`, `image-tool`, `workspace`, `checkpoint`, `shell` and the
- * agent, customization and hook mocks say `kind: 'chat'` explicitly: an explicit kind always wins over `classify()`, so
- * their ids can never be read as dedicated image models.
+ * the `tools` capability only), then `prompt-hook` (Phase 12; no capabilities: it never calls a tool, it answers
+ * prompt hooks). The media models carry explicit kinds: `image` (vision, the same cost), `transcription` and `speech`
+ * (with `voices`). `image-chat`, `image-tool`, `workspace`, `checkpoint`, `shell` and the agent, customization and hook
+ * mocks say `kind: 'chat'` explicitly: an explicit kind always wins over `classify()`, so their ids can never be read as
+ * dedicated image models. Counts since Phase 12: listing 21, `GET /api/models` 19 (transcribe and speech hidden), the
+ * provider's `modelCount` 18 (visible chat models).
  */
 export function mockModels(): ModelInfo[] {
   return [
@@ -205,6 +222,7 @@ export function mockModels(): ModelInfo[] {
     mockModel('agents', 'Mock Agents', { tools: true }, { kind: 'chat' }),
     mockModel('background', 'Mock Background', { tools: true }, { kind: 'chat' }),
     mockModel('hooks', 'Mock Hooks', { tools: true }, { kind: 'chat' }),
+    mockModel(MOCK_PROMPT_HOOK_MODEL_ID, 'Mock Prompt Hook', {}, { kind: 'chat' }),
   ]
 }
 

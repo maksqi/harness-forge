@@ -17,7 +17,7 @@ import { LIMITS, skillOutputSchema } from '@harness-forge/shared'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createMemoryLogger, createSilentLogger } from '../logger.ts'
 import { catalogEntryKey, createFakeCustomizationService, fakeCatalogEntry } from '../testing/fake-customizations.ts'
-import { capUtf8, listSkillFiles, loadSkill, modelInvocableSkills, skillBaseDir, SKILLS_UNAVAILABLE_TEXT } from './skills.ts'
+import { capUtf8, listSkillFiles, loadSkill, modelInvocableSkills, skillBaseDir, skillBody, SKILLS_UNAVAILABLE_TEXT } from './skills.ts'
 import { catalogEntry, testCatalog } from './testing.ts'
 
 const PROJECT = 'prj_SKILLSTESTAAAAAA'
@@ -310,5 +310,22 @@ describe('helpers', () => {
     expect(capUtf8('abé', 3)).toEqual({ text: 'ab', truncated: true })
     expect(capUtf8('a😀b', 4)).toEqual({ text: 'a', truncated: true })
     expect(capUtf8('a😀b', 5)).toEqual({ text: 'a😀', truncated: true })
+  })
+})
+
+describe('phase 12 stubs (C44-T6): the loadSkill options and the body seam', () => {
+  it('loadSkill takes the options (file, toolCallId) and answers as before until W12.7', async () => {
+    await put('.harness/skills/pdf/SKILL.md', SKILL_MD)
+    await put('.harness/skills/pdf/ref.md', '# Fields')
+    projectSkill('pdf')
+    const plain = await loadSkill(await context(), 'pdf', signal())
+    expect(await loadSkill(await context(), 'pdf', signal(), { file: 'ref.md', toolCallId: 'call_1' })).toEqual(plain)
+    expect(await loadSkill(await context(), 'pdf', signal(), {})).toEqual(plain)
+  })
+
+  it('skillBody leaves the body as it is (the argumentOptions stub answers no options)', () => {
+    const body = `Use $ARGUMENTS, $0, $ARGUMENTS[1], \\$HOME and \${CLAUDE_SKILL_DIR}/ref.md.`
+    expect(skillBody(body, ['first'], { CLAUDE_SKILL_DIR: '/srv/skills/pdf' })).toBe(body)
+    expect(skillBody(body, null, {})).toBe(body)
   })
 })

@@ -27,9 +27,12 @@
 // W11.19: the Project select wraps below the tabs when both do not fit on one line (always below `sm`; at 1280 px the
 // five tabs keep the whole width), and a tab row that still does not fit scrolls sideways with the active tab scrolled
 // into view (`tabRevealOffset`) on load, on a tab change and when the counts arrive.
+// Phase 12 (ADR-056; C46 mounts, W12.11 owns it in P12-A): Edit… of a project row and Edit in the viewer open the project
+// file editor (ProjectFileEditor, mounted here, with `customizations.projectSource(projectId, entry)`); its `review`
+// opens the project trust dialog; a save refreshes the catalog of the project.
 import type { Customization, CustomizationEntry, CustomizationKind } from '@harness-forge/shared'
 import type { AcceptableValue } from 'reka-ui'
-import type { CustomizationAction, CustomizationDraft, CustomizeTab } from './customize'
+import type { CustomizationAction, CustomizationDraft, CustomizeTab, ProjectFileTarget } from './customize'
 import { CUSTOMIZATION_KINDS } from '@harness-forge/shared'
 import { FileUpIcon, PlusIcon, TriangleAlertIcon } from '@lucide/vue'
 import { computed, markRaw, nextTick, onMounted, provide, ref, shallowRef, useId, useTemplateRef, watch } from 'vue'
@@ -81,6 +84,7 @@ import {
 } from './customize'
 import { CUSTOMIZE_ROW_CONTEXT } from './customize-context'
 import HooksPanel from './HooksPanel.vue'
+import ProjectFileEditor from './ProjectFileEditor.vue'
 import StyleScopeBar from './StyleScopeBar.vue'
 
 /** How long Undo stays offered after a delete. */
@@ -365,6 +369,13 @@ function onViewerCopy(draft: CustomizationDraft): void {
   openEditor(draft.kind, 'import', { draft })
 }
 
+function onViewerEdit(): void {
+  const entry = viewerEntry.value
+  viewerOpen.value = false
+  if (entry)
+    openProjectFile(entry)
+}
+
 // ---------- import ----------
 
 let importOpener: HTMLElement | null = null
@@ -582,12 +593,38 @@ async function setDefault(entry: CustomizationEntry): Promise<void> {
   }
 }
 
+// ---------- the project file editor (Phase 12) ----------
+
+const fileOpen = ref(false)
+const fileTarget = shallowRef<ProjectFileTarget | null>(null)
+
+/** Edit… of a project row (and Edit in the viewer): the raw file in the project file editor. */
+function openProjectFile(entry: CustomizationEntry): void {
+  const target = customizations.projectSource(projectId.value, entry)
+  if (!target)
+    return
+  fileTarget.value = target
+  fileOpen.value = true
+}
+
+function onFileSaved(): void {
+  void refreshScope()
+}
+
+function onFileReview(sha256?: string): void {
+  trustFocus.value = sha256 ?? null
+  trustOpen.value = true
+}
+
 // ---------- dispatch ----------
 
 function onAction(action: CustomizationAction, entry: CustomizationEntry): void {
   switch (action) {
     case 'edit':
-      void edit(entry)
+      if (entry.source === 'project')
+        openProjectFile(entry)
+      else
+        void edit(entry)
       break
     case 'view':
       viewerEntry.value = entry
@@ -766,6 +803,14 @@ defineExpose<{ create: () => void, import: () => void }>({ create, import: impor
       :entry="viewerEntry"
       :project-id="projectId"
       @copy="onViewerCopy"
+      @edit="onViewerEdit"
+    />
+    <ProjectFileEditor
+      v-model:open="fileOpen"
+      :project-id="projectId"
+      :entry="fileTarget"
+      @saved="onFileSaved"
+      @review="onFileReview"
     />
     <ConfirmDialog
       :open="deleteOpen"

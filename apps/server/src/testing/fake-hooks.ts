@@ -18,10 +18,28 @@
 // live `results` / `targets` / `present`, so a test may script them after the run took its snapshot. Personal hooks follow
 // the contract in memory (fresh auth unless the update only turns a hook off, `LIMITS.personalHooksMax`, `not_found`,
 // `hooks.changed`); `runs` answers `runLog`.
+//
+// Phase 12 (C43-T9): `statusMessages` scripts the activity labels (`HookSnapshot.statusMessage(event, target?)`: key
+// `hookTargetKey(event, target)` first, then the event); `fakePromptHookResult` / `fakePromptHookRecord` script what a
+// prompt hook decided (a record whose hook has `kind: 'prompt'` and the answering `model`); `importPersonal` creates
+// personal hooks like `create` (no fresh auth; invalid items and items over the limit fail; one `hooks.changed`) and
+// `sessionEnd` records the chat in `sessionEnds`.
+//
+//   fake.statusMessages.set(hookTargetKey('PreToolUse', 'write_file'), 'Checking the write…')
+//   fake.results.set('Stop', fakePromptHookResult({ block: true, reason: 'run the tests' }, 'Stop', 'continued'))
 import type { HookCreate, HookData, HookEvent, HookList, HookRecordOutcome, HookRun, HookSwitches, HookUpdate, PersonalHook } from '@harness-forge/shared'
 import type { EventBus } from '../services/events/types.ts'
-import type { HookEventResult, HookRunInput, HookRunOptions, HookScope, HookService, HookSnapshot } from '../services/hooks/types.ts'
-import { createHookId, createHookRecordId, HarnessError, isHookTurnOff, LIMITS, personalHookSchema } from '@harness-forge/shared'
+import type {
+  HookEventResult,
+  HookImportResult,
+  HookRunInput,
+  HookRunOptions,
+  HookScope,
+  HookService,
+  HookSnapshot,
+  SessionEndChat,
+} from '../services/hooks/types.ts'
+import { compileMatcher, createHookId, createHookRecordId, HarnessError, hookCreateSchema, isHookTurnOff, LIMITS, personalHookSchema } from '@harness-forge/shared'
 import { NOTHING_RAN, personalHookEntry } from '../services/hooks/index.ts'
 
 /** A scripted result: a value, or a function of the run's input and options. */
@@ -59,6 +77,30 @@ export function fakeHookRecord(event: HookEvent, outcome: HookRecordOutcome, fie
   }
 }
 
+/** The model a fake prompt hook answers with (`HookResult.model`). */
+export const FAKE_PROMPT_HOOK_MODEL = 'mock:prompt-hook'
+
+/**
+ * Phase 12: a `data-hook` record of one personal prompt hook (`kind: 'prompt'`, the answering `model`, no exit code),
+ * then `fields`.
+ */
+export function fakePromptHookRecord(event: HookEvent, outcome: HookRecordOutcome, fields: Partial<HookData> = {}, model = FAKE_PROMPT_HOOK_MODEL): HookData {
+  return fakeHookRecord(event, outcome, {
+    hooks: [{ source: 'personal', label: 'Check the call.', kind: 'prompt', model, exitCode: null, durationMs: 1 }],
+    ...fields,
+  })
+}
+
+/**
+ * Phase 12: the result of a prompt hook that ran (`fakeHookResult(fields)`) with a prompt-hook record of `event` and
+ * `outcome` (default: `blocked` when `fields.block`, else `context` when `fields.context`, else no record: a silent
+ * `ok: true`).
+ */
+export function fakePromptHookResult(fields: Partial<HookEventResult> = {}, event: HookEvent = 'PreToolUse', outcome?: HookRecordOutcome): HookEventResult {
+  const chosen = outcome ?? (fields.block === true ? 'blocked' : fields.context !== undefined && fields.context !== null ? 'context' : undefined)
+  return fakeHookResult({ ...(chosen === undefined ? {} : { record: fakePromptHookRecord(event, chosen) }), ...fields })
+}
+
 /** The scripts a fake snapshot reads (live: changes apply to later `has` / `run` calls). */
 export interface FakeHookScript {
   /** Results per event. */
@@ -67,6 +109,11 @@ export interface FakeHookScript {
   readonly targets: Map<string, FakeHookResult>
   /** Events `has()` reports true for without a scripted result (`run` answers "nothing ran"). */
   readonly present: Set<HookEvent>
+  /**
+   * Phase 12: the activity labels `statusMessage(event, target?)` answers: by `hookTargetKey(event, target)` first, then
+   * by the event; null when neither is set.
+   */
+  readonly statusMessages: Map<string, string>
 }
 
 export interface FakeHookSnapshotOptions {
@@ -78,6 +125,8 @@ export interface FakeHookSnapshotOptions {
   targets?: Readonly<Record<string, FakeHookResult>>
   /** Events `has()` reports true for without a scripted result. */
   present?: readonly HookEvent[]
+  /** Phase 12: activity labels by event or `hookTargetKey(event, target)`. */
+  statusMessages?: Readonly<Record<string, string>>
 }
 
 export interface FakeHookSnapshot extends HookSnapshot {
@@ -107,6 +156,7 @@ export function createFakeHookScript(options: Omit<FakeHookSnapshotOptions, 'sco
     results: new Map(Object.entries(options.results ?? {}) as Array<[HookEvent, FakeHookResult]>),
     targets: new Map(Object.entries(options.targets ?? {})),
     present: new Set(options.present ?? []),
+    statusMessages: new Map(Object.entries(options.statusMessages ?? {})),
   }
 }
 
@@ -130,6 +180,7 @@ function snapshotOver(scope: HookScope, script: FakeHookScript, record: (call: F
       options.signal.throwIfAborted()
       return result
     },
+    statusMessage: (event, target) => (target === undefined ? undefined : script.statusMessages.get(hookTargetKey(event, target))) ?? script.statusMessages.get(event) ?? null,
   }
 }
 
@@ -164,6 +215,10 @@ export interface FakeHookService extends HookService, FakeHookScript {
   readonly calls: Record<keyof HookService, number>
   /** Every `invalidate` argument, in order. */
   readonly invalidated: Array<string | null>
+  /** Phase 12: every item of every `importPersonal` call, in order. */
+  readonly imported: HookCreate[]
+  /** Phase 12: every chat of a `sessionEnd` call, in order. */
+  readonly sessionEnds: SessionEndChat[]
 }
 
 function notFound(id: string): HarnessError {
@@ -202,7 +257,20 @@ export function createFakeHookService(options: FakeHookServiceOptions = {}): Fak
   const runLog = [...(options.runLog ?? [])]
   const switches: HookSwitches = { setting: true, shell: true, safeMode: false, ...options.switches }
   const invalidated: Array<string | null> = []
-  const calls: Record<keyof HookService, number> = { snapshot: 0, list: 0, create: 0, update: 0, remove: 0, runs: 0, invalidate: 0, stop: 0 }
+  const imported: HookCreate[] = []
+  const sessionEnds: SessionEndChat[] = []
+  const calls: Record<keyof HookService, number> = {
+    snapshot: 0,
+    list: 0,
+    create: 0,
+    update: 0,
+    remove: 0,
+    runs: 0,
+    invalidate: 0,
+    stop: 0,
+    importPersonal: 0,
+    sessionEnd: 0,
+  }
 
   function changed(): void {
     options.events?.emit('hooks.changed', { projectId: null })
@@ -224,6 +292,8 @@ export function createFakeHookService(options: FakeHookServiceOptions = {}): Fak
     switches,
     calls,
     invalidated,
+    imported,
+    sessionEnds,
     snapshot: async (scope, snapshotOptions) => {
       calls.snapshot += 1
       snapshotOptions?.signal?.throwIfAborted()
@@ -267,6 +337,33 @@ export function createFakeHookService(options: FakeHookServiceOptions = {}): Fak
       get(id)
       personal.delete(id)
       changed()
+    },
+    importPersonal: async (items): Promise<HookImportResult[]> => {
+      calls.importPersonal += 1
+      const results: HookImportResult[] = []
+      for (const item of items) {
+        imported.push(item)
+        const parsed = hookCreateSchema.safeParse(item)
+        if (!parsed.success || !compileMatcher(parsed.data.matcher ?? null).ok) {
+          results.push({ ok: false, message: 'The hook is not valid.' })
+          continue
+        }
+        if (personal.size >= LIMITS.personalHooksMax) {
+          results.push({ ok: false, message: `You already have ${LIMITS.personalHooksMax} personal hooks.` })
+          continue
+        }
+        const at = now()
+        const hook = fakePersonalHook({ id: createHookId(), matcher: null, timeout: null, enabled: true, createdAt: at, updatedAt: at }, parsed.data)
+        personal.set(hook.id, hook)
+        results.push({ ok: true, hook })
+      }
+      if (results.some(result => result.ok))
+        changed()
+      return results
+    },
+    sessionEnd: async (chat) => {
+      calls.sessionEnd += 1
+      sessionEnds.push(chat)
     },
     runs: (limit) => {
       calls.runs += 1

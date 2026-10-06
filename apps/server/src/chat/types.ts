@@ -12,7 +12,11 @@
 // continuation, a server-started turn from a user-role carrier message that holds only `data-hook` parts) and
 // `RunReleaseFollowUp`, what a released run hands to the runner (`RunContext.onReleased(ending, awaitingApproval,
 // followUp)`, `chat/pipeline.ts`); the runner starts the hook turn itself (`startHookTurn` in `chat/index.ts`), so
-// `ChatRunner` gains no member.
+// `ChatRunner` gains no member. Phase 12 (C43 with C44, ADR-057): no new member either: the five new hook events run
+// through the C44 seams of `chat/hooks.ts` (`ToolHooks.permissionRequest`, `postToolUseFailure`, `settle`,
+// `RunHooks.postCompact`, `ChildHooks.subagentStart`), the `SessionEnd` hooks of a single chat delete through
+// `HookService.sessionEnd(chat: SessionEndChat)` from the `chats.remove` route (detached), and prompt-hook Stop
+// continuations through the existing `RunReleaseFollowUp` (`kind: 'hook'`).
 import type { BackgroundTask, ChatRequestBody, HookData, QueueAddBody, QueueItem, QueueRemovalReason } from '@harness-forge/shared'
 import type { Logger } from '../logger.ts'
 

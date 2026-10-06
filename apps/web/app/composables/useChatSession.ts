@@ -64,6 +64,8 @@
 // own copy of that message lacks; an accepted response that counts them (`PROMPT_HOOKS_HEADER`) makes the session reload
 // the path from that message on once the run finished (`run.finished`: the reply is stored by then), so its notes show
 // without a reload of the page (one request per such turn, none for turns without records).
+// Phase 12 (ADR-057; C46, complete from P12-0b, no P12-A owner): `hookActivity` gains `label`, the `statusMessage` of the
+// first matching handler (`data-activity.label`), which the tool rows show instead of "Running hook…" (W12.13).
 import type { UseChatHelpers } from '@ai-sdk/vue'
 import type {
   BackgroundTask,
@@ -311,8 +313,10 @@ export interface ChatSession {
   /**
    * + Phase 11 (ADR-048; W11.11): the command hooks running now: their event and, for PreToolUse / PostToolUse, the tool
    * call (`data-activity { kind: 'hooks', event, toolCallId? }`); null otherwise and once the stream ended.
+   * + Phase 12 (ADR-057; C46): `label`, the `statusMessage` of the first matching handler (`data-activity.label`), shown
+   * instead of "Running hook…"; null without one.
    */
-  hookActivity: Readonly<Ref<{ event: HookEvent, toolCallId: string | null } | null>>
+  hookActivity: Readonly<Ref<{ event: HookEvent, toolCallId: string | null, label: string | null } | null>>
   /**
    * + Phase 11 (ADR-051; W11.11): the chat's own output style (`settings.outputStyle`); null = Automatic (the project's
    * style, else the global default). Writing it saves it on a persisted chat; a new chat sends it with its first
@@ -714,7 +718,7 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
   /** The transient `data-activity` of the current stream (`onData`); null when idle or once the stream ended. */
   const activity = ref<'compacting' | 'hooks' | null>(null)
   /** + Phase 11: the event (and tool call) of the command hooks running now; null otherwise. */
-  const hookActivity = shallowRef<{ event: HookEvent, toolCallId: string | null } | null>(null)
+  const hookActivity = shallowRef<{ event: HookEvent, toolCallId: string | null, label: string | null } | null>(null)
 
   // ---------- project (ADR-031) ----------
 
@@ -837,15 +841,18 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
     },
   })
 
-  /** + Phase 11: a transient activity chunk: `compacting`, `hooks` (with the event and the tool call) or `idle`. */
-  function applyActivity(data: { kind: string, event?: HookEvent, toolCallId?: string }) {
+  /**
+   * + Phase 11: a transient activity chunk: `compacting`, `hooks` (with the event and the tool call; + Phase 12 the
+   * handler's `statusMessage` as `label`) or `idle`.
+   */
+  function applyActivity(data: { kind: string, event?: HookEvent, toolCallId?: string, label?: string }) {
     if (data.kind === 'compacting') {
       activity.value = 'compacting'
       hookActivity.value = null
     }
     else if (data.kind === 'hooks') {
       activity.value = 'hooks'
-      hookActivity.value = data.event ? { event: data.event, toolCallId: data.toolCallId ?? null } : null
+      hookActivity.value = data.event ? { event: data.event, toolCallId: data.toolCallId ?? null, label: data.label ?? null } : null
     }
     else {
       activity.value = null

@@ -18,6 +18,10 @@
 // keeps its own values. The SDK carries returned messages (and instructions) into the later steps. Only an abort error
 // propagates (the run ends `aborted`); any other error of a piece is logged and the piece counts as unchanged (the guard
 // falls back to trimming on its own, the steer step logs).
+// Phase 12 (C44, ADR-057; COMPLETE and FROZEN after P12-0b): the composer is unchanged. The hooks piece also stores the
+// hook records of a tool call nobody settled (`ToolHooks.settle`, `hooks.ts`), and its queue also holds the model texts
+// of `PostToolUseFailure` records. A sub-agent's `SubagentStart` context is not queued: it is part of the child's first
+// user message (`childFirstMessage`, `subagent/host.ts`).
 import type { Instructions, ModelMessage, PrepareStepFunction, StepResult, ToolSet } from 'ai'
 import type { Logger } from '../logger.ts'
 import { isAbortError } from './errors.ts'

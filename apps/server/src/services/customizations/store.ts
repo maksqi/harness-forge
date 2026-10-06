@@ -412,7 +412,8 @@ export function createCustomizationStore(deps: Pick<AppDeps, 'db'>, options: Cus
           turnedOff += 1
       }
       options.logger().info('customizations restored', { imported, skipped, failed, turnedOff })
-      return { imported, skipped, failed, warnings }
+      // Phase 12 (C43 compile fix): the count of commands turned off reaches the result (`CustomizationRestoreResult`).
+      return { imported, skipped, failed, warnings, turnedOff }
     }),
   }
 }

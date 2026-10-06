@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import process from 'node:process'
 import { afterEach, describe, expect, it } from 'vitest'
-import { bindSafetyError, defaultEnvFile, ensureDataDir, envBootWarnings, EnvError, isLoopbackHost, loadDotEnvFile, loadEnv, parseWorkspaceRoots, TEST_FILE_SWEEP_DELAY_RANGE } from './env.ts'
+import { bindSafetyError, defaultEnvFile, ensureDataDir, envBootWarnings, EnvError, isLoopbackHost, loadDotEnvFile, loadEnv, parseWorkspaceRoots, TEST_FILE_SWEEP_DELAY_RANGE, TEST_REMOTE_URL_IGNORED_WARNING } from './env.ts'
 import { findWorkspaceRoot, serverPackageRoot } from './paths.ts'
 
 const tempDirs: string[] = []
@@ -304,6 +304,93 @@ describe('phase 8: checkpoints and HF_TEST_FILE_SWEEP_DELAY_MS (ADR-036, ADR-039
     const cwd = tempDir()
     expect(() => loadEnv({ HF_MOCK_PROVIDER: '1', HF_TEST_FILE_SWEEP_DELAY_MS: value }, { cwd })).toThrow(EnvError)
     expect(() => loadEnv({ HF_TEST_FILE_SWEEP_DELAY_MS: value }, { cwd })).toThrow(/HF_TEST_FILE_SWEEP_DELAY_MS/)
+  })
+})
+
+describe('phase 12: HF_CLAUDE_HOME, HF_TEST_REMOTE_URL and the transcripts folder (ADR-054, ADR-055, ADR-057)', () => {
+  it('the transcripts folder is <dataDir>/transcripts; ensureDataDir does not create it (the hook service does)', () => {
+    const dataDir = join(tempDir(), 'data')
+    const env = loadEnv({ HF_DATA_DIR: dataDir })
+    expect(env.paths.transcripts).toBe(join(dataDir, 'transcripts'))
+    ensureDataDir(env)
+    expect(existsSync(env.paths.transcripts)).toBe(false)
+  })
+
+  it.each([
+    [undefined, '/home/someone/.claude'],
+    ['', '/home/someone/.claude'],
+    ['  ', '/home/someone/.claude'],
+    ['0', null],
+    [' 0 ', null],
+    ['/claude', '/claude'],
+    [' /srv/claude-home/ ', '/srv/claude-home'],
+    ['/srv/a/../claude', '/srv/claude'],
+  ])('hF_CLAUDE_HOME %j -> %j (unset = <home>/.claude, 0 = the scan is off, else an absolute folder)', (value, expected) => {
+    const env = loadEnv({ HF_CLAUDE_HOME: value }, { cwd: tempDir(), homedir: '/home/someone' })
+    expect(env.claudeHome).toBe(expected)
+  })
+
+  it('hF_CLAUDE_HOME unset defaults to the .claude folder of os.homedir() without touching it', () => {
+    const env = loadEnv({}, { cwd: tempDir() })
+    expect(env.claudeHome).toMatch(/[/\\]\.claude$/)
+  })
+
+  it.each(['relative/path', './claude', '~/.claude', 'claude', '00', 'off', 'false', '/claude\0x'])('hF_CLAUDE_HOME %j fails the boot (not 0, not absolute)', (value) => {
+    const cwd = tempDir()
+    expect(() => loadEnv({ HF_CLAUDE_HOME: value }, { cwd })).toThrow(EnvError)
+    expect(() => loadEnv({ HF_CLAUDE_HOME: value }, { cwd })).toThrow(/HF_CLAUDE_HOME/)
+  })
+
+  it('hF_TEST_REMOTE_URL unset (or empty): null and no warning, with or without the mock provider', () => {
+    const cwd = tempDir()
+    for (const value of [undefined, '', '  ']) {
+      for (const mock of [undefined, '1']) {
+        const env = loadEnv({ HF_MOCK_PROVIDER: mock, HF_TEST_REMOTE_URL: value }, { cwd })
+        expect(env.testRemoteUrl).toBeNull()
+        expect(envBootWarnings(env)).toEqual([])
+      }
+    }
+  })
+
+  it.each([
+    ['http://127.0.0.1:8899', 'http://127.0.0.1:8899'],
+    ['http://127.0.0.1:1/', 'http://127.0.0.1:1'],
+    [' http://127.0.0.1:65535 ', 'http://127.0.0.1:65535'],
+  ])('hF_TEST_REMOTE_URL %j is honored with HF_MOCK_PROVIDER=1 as %j', (value, expected) => {
+    const env = loadEnv({ HF_MOCK_PROVIDER: '1', HF_TEST_REMOTE_URL: value }, { cwd: tempDir() })
+    expect(env.testRemoteUrl).toBe(expected)
+    expect(envBootWarnings(env)).toEqual([])
+  })
+
+  it('hF_TEST_REMOTE_URL without HF_MOCK_PROVIDER=1 is ignored: null and a boot warning that names it in words', () => {
+    const cwd = tempDir()
+    for (const mock of [undefined, '0']) {
+      const env = loadEnv({ HF_MOCK_PROVIDER: mock, HF_TEST_REMOTE_URL: 'http://127.0.0.1:8899' }, { cwd })
+      expect(env.testRemoteUrl).toBeNull()
+      expect(envBootWarnings(env)).toEqual([TEST_REMOTE_URL_IGNORED_WARNING])
+      // The redactor masks HF_ followed by 16 or more word characters: the warning never spells the variable.
+      expect(TEST_REMOTE_URL_IGNORED_WARNING).not.toMatch(/HF_\w{16,}/)
+    }
+    const both = loadEnv({ HF_TEST_FILE_SWEEP_DELAY_MS: '2000', HF_TEST_REMOTE_URL: 'http://127.0.0.1:8899' }, { cwd })
+    expect(envBootWarnings(both)).toHaveLength(2)
+  })
+
+  it.each([
+    'http://example.com',
+    'https://127.0.0.1:8899',
+    'http://localhost:8899',
+    'http://127.0.0.2:8899',
+    'http://[::1]:8899',
+    'http://127.0.0.1',
+    'http://127.0.0.1:0',
+    'http://127.0.0.1:65536',
+    'http://127.0.0.1:8899/base',
+    'http://user@127.0.0.1:8899',
+    '127.0.0.1:8899',
+  ])('hF_TEST_REMOTE_URL %j fails the boot (only http://127.0.0.1:<port>), with or without the mock provider', (value) => {
+    const cwd = tempDir()
+    expect(() => loadEnv({ HF_MOCK_PROVIDER: '1', HF_TEST_REMOTE_URL: value }, { cwd })).toThrow(EnvError)
+    expect(() => loadEnv({ HF_TEST_REMOTE_URL: value }, { cwd })).toThrow(/HF_TEST_REMOTE_URL/)
   })
 })
 

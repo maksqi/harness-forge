@@ -68,6 +68,9 @@ describe('ui store', () => {
     expect(ui.installSource).toBe('zip')
     ui.openInstall('npm')
     expect(ui.installSource).toBe('npm')
+    // Phase 12 (ADR-054): the GitHub tab.
+    ui.openInstall('github')
+    expect(ui.installSource).toBe('github')
   })
 
   it('opens the share dialog for one chat at a time and closes it', () => {

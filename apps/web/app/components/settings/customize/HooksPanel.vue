@@ -11,10 +11,13 @@
 // hook), Review… (the trust dialog focused on the item) and Open plugin. CustomizeSettings renders it for `?tab=hooks`;
 // the page header's New hook / Import… reach it through the exposed `create()` / `import()`.
 // Props, exposes and the root test id are frozen from Gate P11-0b (C39 stub); implementation W11.8.
+// Phase 12 (ADR-056, ADR-057; C46, W12.12 owns it in P12-A): with a project selected, project command rows offer Edit…
+// (`HOOK_ROW_CONTEXT`), which opens HookEditor in project mode (`target`: the settings file and the event; the handler's
+// position is found by W12.12); Review plugin… of an untrusted plugin's hook opens the plugin's TrustDialog.
 import type { HookEntry, PersonalHook } from '@harness-forge/shared'
-import type { HookAction, HookDraft } from './hooks'
+import type { HookAction, HookDraft, ProjectHookTarget } from './hooks'
 import { FileUpIcon, InfoIcon, PlusIcon, TriangleAlertIcon } from '@lucide/vue'
-import { computed, nextTick, onMounted, ref, shallowRef, useId, useTemplateRef, watch } from 'vue'
+import { computed, nextTick, onMounted, provide, ref, shallowRef, useId, useTemplateRef, watch } from 'vue'
 import { toast } from 'vue-sonner'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
@@ -24,6 +27,7 @@ import { Switch } from '@/components/ui/switch'
 import { copyText } from '~/components/common/clipboard'
 import ConfirmDialog from '~/components/common/ConfirmDialog.vue'
 import ConfirmPasswordDialog from '~/components/common/ConfirmPasswordDialog.vue'
+import TrustDialog from '~/components/plugins/install/TrustDialog.vue'
 import ProjectTrustDialog from '~/components/projects/trust/ProjectTrustDialog.vue'
 import { isFreshAuthCancelled, useFreshAuth } from '~/composables/useFreshAuth'
 import { hookScopeKey, useHooksStore } from '~/stores/hooks'
@@ -34,6 +38,7 @@ import { testIds } from '~/utils/testids'
 import { toastError } from '../notify'
 import { useRouter } from '../nuxt-imports'
 import SettingsLoadError from '../SettingsLoadError.vue'
+import { HOOK_ROW_CONTEXT } from './customize-context'
 import HookEditor from './HookEditor.vue'
 import HookImportDialog from './HookImportDialog.vue'
 import { draftFromHook, HOOK_COPY, hookDeleteCopy, hookJson } from './hooks'
@@ -164,17 +169,25 @@ function neighborOf(id: string): string | null {
 // ---------- the editor and the import ----------
 
 const editorOpen = ref(false)
-const editorMode = ref<'new' | 'edit' | 'copy'>('new')
+const editorMode = ref<'new' | 'edit' | 'copy' | 'project'>('new')
 const editorHook = shallowRef<PersonalHook | null>(null)
 const editorDraft = shallowRef<HookDraft | null>(null)
+const editorTarget = shallowRef<ProjectHookTarget | null>(null)
 const importOpen = ref(false)
 
-function openEditor(mode: 'new' | 'edit' | 'copy', options: { hook?: PersonalHook | null, draft?: HookDraft | null } = {}): void {
+function openEditor(mode: 'new' | 'edit' | 'copy' | 'project', options: { hook?: PersonalHook | null, draft?: HookDraft | null, target?: ProjectHookTarget | null } = {}): void {
   editorMode.value = mode
   editorHook.value = options.hook ?? null
   editorDraft.value = options.draft ?? null
+  editorTarget.value = options.target ?? null
   editorOpen.value = true
 }
+
+// + Phase 12: project command rows can be edited while a project is selected.
+provide(HOOK_ROW_CONTEXT, { editProjectHooks: computed(() => props.projectId !== null) })
+
+/** + Phase 12: the plugin whose trust Review plugin… reviews (TrustDialog). */
+const trustPluginId = ref<string | null>(null)
 
 function create(): void {
   openEditor('new')
@@ -290,11 +303,20 @@ function onTrustOpenChange(value: boolean): void {
 function onAction(action: HookAction, entry: HookEntry): void {
   switch (action) {
     case 'edit': {
+      if (entry.source === 'project') {
+        if (props.projectId && entry.kind === 'command' && entry.path)
+          openEditor('project', { draft: draftFromHook(entry), target: { projectId: props.projectId, path: entry.path, event: entry.event, groupIndex: null, handlerIndex: null } })
+        break
+      }
       const hook = hookOf(entry)
       if (hook)
         openEditor('edit', { hook })
       break
     }
+    case 'trust-plugin':
+      if (entry.pluginId)
+        trustPluginId.value = entry.pluginId
+      break
     case 'duplicate':
       openEditor(entry.source === 'personal' ? 'new' : 'copy', { draft: draftFromHook(entry) })
       break
@@ -425,7 +447,15 @@ defineExpose<{ create: () => void, import: () => void }>({ create, import: impor
       :mode="editorMode"
       :hook="editorHook"
       :draft="editorDraft"
+      :target="editorTarget"
       @saved="refresh"
+    />
+    <TrustDialog
+      v-if="trustPluginId"
+      :open="trustPluginId !== null"
+      :plugin-id="trustPluginId"
+      @update:open="value => { if (!value) trustPluginId = null }"
+      @trusted="refresh"
     />
     <HookImportDialog v-model:open="importOpen" @imported="refresh" />
     <ProjectTrustDialog :open="trustOpen" :project-id="projectId" :focus-key="trustFocus" @update:open="onTrustOpenChange" />

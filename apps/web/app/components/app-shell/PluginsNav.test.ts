@@ -9,7 +9,7 @@ import { allByTestId, byTestId, mountInShell, openWithKeyboard, settle } from '~
 import { usePluginsStore } from '~/stores/plugins'
 import { useUiStore } from '~/stores/ui'
 import { testIds } from '~/utils/testids'
-import { pluginSummary } from '~/utils/testing/fixtures'
+import { marketplaceList, pluginSummary, pluginUpdate } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import PluginsNav from './PluginsNav.vue'
 
@@ -219,5 +219,37 @@ describe('pluginsNav: installed list', () => {
     await settle()
     expect(api.plugins.list).not.toHaveBeenCalled()
     expect(navRows()).toHaveLength(7)
+  })
+})
+
+describe('pluginsNav: marketplaces (Phase 12, C46-T2)', () => {
+  it('links the Marketplaces row between Install… and Browse and counts the updates', async () => {
+    api.marketplaces.list.mockResolvedValue(marketplaceList({ updates: [pluginUpdate(), pluginUpdate({ pluginId: 'db-mcp', plugin: 'db-mcp' })] }))
+    await mountNav()
+    const row = byTestId(testIds.pluginsMarketplaces)!
+    expect(row.getAttribute('href')).toBe('/plugins/marketplaces')
+    expect(row.textContent).toContain('Marketplaces')
+    expect(row.dataset.count).toBe('2')
+    expect(row.textContent).toContain('2 updates available')
+    expect(api.marketplaces.list).toHaveBeenCalledTimes(1)
+    // Order: New plugin, Install…, Marketplaces, then the Browse filters.
+    const order = [testIds.pluginsNew, testIds.pluginsInstall, testIds.pluginsMarketplaces, testIds.pluginsFilter]
+      .map(id => byTestId(id)!)
+    for (let index = 1; index < order.length; index++)
+      expect(order[index - 1]!.compareDocumentPosition(order[index]!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('hides the count without updates and when the list cannot load', async () => {
+    await mountNav()
+    expect(byTestId(testIds.pluginsMarketplaces)!.dataset.count).toBeUndefined()
+    expect(document.querySelector('[data-slot="plugins-marketplaces-count"]')).toBeNull()
+  })
+
+  it('is active on the Marketplaces page, where no installed plugin is (a reserved id)', async () => {
+    api.marketplaces.list.mockResolvedValue(marketplaceList({ items: [], updates: [] }))
+    go('/plugins/marketplaces')
+    await mountNav([...PLUGINS, pluginSummary({ id: 'marketplaces', name: 'Squatter' })])
+    expect(byTestId(testIds.pluginsMarketplaces)!.dataset.active).toBe('true')
+    expect(navRows().some(row => row.dataset.active)).toBe(false)
   })
 })

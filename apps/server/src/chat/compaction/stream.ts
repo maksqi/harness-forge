@@ -14,6 +14,10 @@
 // command reply; the chat's project folder is opened for it, so approved project hooks run): observe only (`continue:
 // false` changes nothing, logged), its record written into the reply right before the `data-compaction` marker (the
 // marker hides it from the model), the `hooks` activity around it. A failing hook is logged and the compaction goes on.
+// Phase 12 (C44 call site, ADR-057; W12.6 owns the logic behind it): right after the `data-compaction` marker,
+// `PostCompact` runs over the same snapshot (`trigger: 'manual'`): observe only, its record written into the reply right
+// after the marker; a failing hook is logged and the reply finishes as compacted; an abort ends the reply `aborted`
+// (the marker stays).
 import type { CompactionData, HarnessUIMessage, MessageUsage } from '@harness-forge/shared'
 import type { LanguageModelUsage, UIMessageChunk, UIMessageStreamWriter } from 'ai'
 import type { OpenWorkspace } from '../../services/projects/types.ts'
@@ -131,11 +135,15 @@ export async function compactHooks(session: RunSession, write: (chunk: HarnessDa
   return createRunHooks({ snapshot, host, continued: null, messageId: session.assistantId, logger })
 }
 
-/** `PreCompact` of a `/compact` (observe only); rejects only on an abort of the run. */
-async function manualPreCompact(session: RunSession, writer: UIMessageStreamWriter<HarnessUIMessage>, focus: string | null): Promise<void> {
+/**
+ * `PreCompact` of a `/compact` (observe only); answers the reply's hooks for `PostCompact` (null when the snapshot could
+ * not be taken: logged). Rejects only on an abort of the run.
+ */
+async function manualPreCompact(session: RunSession, writer: UIMessageStreamWriter<HarnessUIMessage>, focus: string | null): Promise<RunHooks | null> {
   const { run, logger } = session.ctx
+  let hooks: RunHooks | null = null
   try {
-    const hooks = await compactHooks(session, chunk => writer.write(chunk))
+    hooks = await compactHooks(session, chunk => writer.write(chunk))
     const result = await hooks.preCompact({ trigger: 'manual', customInstructions: focus }, run.signal)
     if (!result.continue)
       logger.info('a PreCompact hook asked to stop; the compaction goes on (PreCompact only observes)')
@@ -144,6 +152,24 @@ async function manualPreCompact(session: RunSession, writer: UIMessageStreamWrit
     if (run.signal.aborted)
       throw error
     logger.warn('the PreCompact hooks failed; the compaction goes on', { err: error })
+  }
+  return hooks
+}
+
+/** `PostCompact` of a `/compact` (Phase 12; observe only), after the marker; rejects only on an abort of the run. */
+async function manualPostCompact(session: RunSession, hooks: RunHooks | null): Promise<void> {
+  const { run, logger } = session.ctx
+  if (hooks === null)
+    return
+  try {
+    const result = await hooks.postCompact({ trigger: 'manual' }, run.signal)
+    if (!result.continue)
+      logger.info('a PostCompact hook asked to stop; nothing changes (PostCompact only observes)')
+  }
+  catch (error) {
+    if (run.signal.aborted)
+      throw error
+    logger.warn('the PostCompact hooks failed; the compaction stays', { err: error })
   }
 }
 
@@ -173,9 +199,10 @@ export async function compactStream(session: RunSession, focus: string | null): 
       writer.write({ type: 'start', messageId: session.assistantId, messageMetadata: session.startMetadata() })
       let data: CompactionData
       let usage: LanguageModelUsage
+      let hooks: RunHooks | null = null
       try {
         // Phase 11: `PreCompact` (observe only) before the `compacting` activity.
-        await manualPreCompact(session, writer, focus)
+        hooks = await manualPreCompact(session, writer, focus)
         session.writeTransient({ type: 'data-activity', data: { kind: 'compacting' } })
         // Tool outputs as their model text (`toModelOutput` of the registered tools), like the model saw them.
         const tools = conversionTools(session.ctx.deps, {}, logger)
@@ -209,6 +236,14 @@ export async function compactStream(session: RunSession, focus: string | null): 
       writer.write({ type: 'data-compaction', data })
       session.writeTransient({ type: 'data-activity', data: { kind: 'idle' } })
       logger.info('conversation compacted', { trigger: 'manual', messagesCompacted: data.messagesCompacted, tokensBefore: data.tokensBefore, tokensAfter: data.tokensAfter })
+      // Phase 12: `PostCompact` (observe only) after the marker; an abort ends the reply `aborted` (the marker stays).
+      try {
+        await manualPostCompact(session, hooks)
+      }
+      catch {
+        writer.write({ type: 'abort' })
+        return
+      }
       session.finished = true
       session.finishMetadata = { ...session.buildFinishMetadata(session.ctx.now(), 'completed'), usage: compactUsage(usage, data.tokensAfter) }
       writer.write({ type: 'finish', finishReason: 'stop', messageMetadata: session.finishMetadata })

@@ -75,9 +75,16 @@ describe('builtin plugins', () => {
 
   it('phase 11 pins (C38): the three builtin output styles of core-agent and the 17th mock model, hooks', () => {
     expect(BUILTIN_STYLE_DEFINITIONS.map(style => style.name)).toEqual([...BUILTIN_OUTPUT_STYLE_NAMES])
-    expect(MOCK_MODEL_IDS).toHaveLength(17)
-    expect(MOCK_MODEL_IDS.at(-1)).toBe('hooks')
-    expect(mockModels().map(model => model.id).at(-1)).toBe('hooks')
+    expect(MOCK_MODEL_IDS.at(16)).toBe('hooks')
+  })
+
+  it('phase 12 pins (C45): the 18th mock model, prompt-hook, the last of the language models and of the listing', () => {
+    expect(MOCK_MODEL_IDS).toHaveLength(18)
+    expect(MOCK_MODEL_IDS.at(-1)).toBe('prompt-hook')
+    expect(mockModels().map(model => model.id).slice(-2)).toEqual(['hooks', 'prompt-hook'])
+    expect(mockModels()).toHaveLength(21)
+    // The list of builtins is unchanged in Phase 12 (the mock model lives in mock/prompt-hook.ts).
+    expect(BUILTIN_PLUGINS).toHaveLength(7)
   })
 
   it.each(BUILTIN_PLUGINS.map(plugin => [plugin.id, plugin] as const))('%s has a valid manifest and module', (id, plugin) => {

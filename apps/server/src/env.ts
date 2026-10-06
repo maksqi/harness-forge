@@ -2,15 +2,18 @@
 // optional `<workspace root>/.env` file was loaded (`loadDotEnvFile`; variables already set win). Owned by W1.1 after
 // Phase 0 (bind safety with a stored password is enforced in `main.ts`); `HF_TRUST_PROXY` by W5.7 (ADR-026);
 // `HF_WORKSPACE_ROOTS` / `HF_WORKSPACE_SHELL` by C14 (Phase 7, ADR-031 / ADR-033); `DataPaths.checkpoints` and the
-// test-only `HF_TEST_FILE_SWEEP_DELAY_MS` by C19 (Phase 8, ADR-036 / ADR-039).
+// test-only `HF_TEST_FILE_SWEEP_DELAY_MS` by C19 (Phase 8, ADR-036 / ADR-039); `HF_CLAUDE_HOME`, the test-only
+// `HF_TEST_REMOTE_URL` and `DataPaths.transcripts` by C43 (Phase 12, ADR-054 / ADR-055 / ADR-057).
 import type { LogLevel } from './logger.ts'
 import { Buffer } from 'node:buffer'
 import { existsSync, mkdirSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { isAbsolute, join, parse, resolve } from 'node:path'
 import process from 'node:process'
 import { z } from 'zod'
 import { findWorkspaceRoot, serverPackageRoot } from './paths.ts'
 import { parseTrustProxy } from './security/proxy-trust.ts'
+import { parseTestRemoteUrl } from './security/ssrf.ts'
 
 /** Every path inside the data directory (DECISIONS.md "Data directory", ARCHITECTURE.md 7). */
 export interface DataPaths {
@@ -43,6 +46,12 @@ export interface DataPaths {
    * served, never in a backup, never touched by the file sweep.
    */
   readonly checkpoints: string
+  /**
+   * Hook transcripts `transcripts/<chatId>.jsonl` (Phase 12, ADR-057): the Claude Code-compatible `transcript_path` of
+   * hook payloads. Created with mode 0700 by the hook service the first time a hook needs one (not by `ensureDataDir`);
+   * never served, never in a backup, removed with their chats.
+   */
+  readonly transcripts: string
 }
 
 export interface Env {
@@ -98,6 +107,21 @@ export interface Env {
    * `startDeps`). Null when unset.
    */
   readonly testFileSweepDelayMs: number | null
+  /**
+   * `HF_CLAUDE_HOME` (Phase 12, ADR-055): the Claude Code folder the import scan reads (`POST /claude-import/scan`),
+   * absolute and normalized with `resolve`; null when the scan is off (`0`, the Docker image's default). Unset = the
+   * `.claude` folder of the server user's home (`os.homedir()`). Any other value must be an absolute path (else the boot
+   * fails). `loadEnv` never touches the folder; only the explicit import scan reads it, and only its allowlist.
+   */
+  readonly claudeHome: string | null
+  /**
+   * Test-only `HF_TEST_REMOTE_URL` (Phase 12, ADR-054): `http://127.0.0.1:<port>` of the loopback fake remote
+   * (`testing/fake-remote.ts`); every plugin-source and marketplace fetch of `https://<host>/<path>` goes to
+   * `<base>/<host>/<path>`, and only that loopback base is allowed (`security/ssrf.ts`). Honored only with
+   * `HF_MOCK_PROVIDER=1`; otherwise null, and `envBootWarnings` reports the ignored value (logged by `startDeps`). Any
+   * other value than a loopback base fails the boot. Null when unset. Normalized without a trailing `/`.
+   */
+  readonly testRemoteUrl: string | null
   /** `HF_API_TARGET`: proxy target of `nuxt dev` (unused by the server, kept for completeness). */
   readonly apiTarget: string
   /**
@@ -215,6 +239,44 @@ const testFileSweepDelaySchema = z
     .max(TEST_FILE_SWEEP_DELAY_RANGE.max, `Expected ${TEST_FILE_SWEEP_DELAY_RANGE.min} - ${TEST_FILE_SWEEP_DELAY_RANGE.max} ms.`))
   .optional()
 
+/** `HF_CLAUDE_HOME=0` turns the import scan off. */
+const CLAUDE_HOME_OFF = '0'
+
+/**
+ * `HF_CLAUDE_HOME` (Phase 12, ADR-055): `0` = off (null), else an absolute folder without a NUL character, normalized
+ * with `resolve`. Unset is handled by `loadEnv` (the home folder's `.claude`).
+ */
+const claudeHomeSchema = z
+  .string()
+  .transform((value, ctx) => {
+    const trimmed = value.trim()
+    if (trimmed === CLAUDE_HOME_OFF)
+      return null
+    if (trimmed.includes('\0') || !isAbsolute(trimmed)) {
+      ctx.addIssue({ code: 'custom', message: 'Use 0 (the import scan is off) or the absolute path of a Claude Code folder, e.g. /claude.' })
+      return z.NEVER
+    }
+    return resolve(trimmed)
+  })
+  .optional()
+
+/**
+ * `HF_TEST_REMOTE_URL` (Phase 12, test-only): the loopback base of the fake remote, `http://127.0.0.1:<port>` (port 1 -
+ * 65535, a trailing `/` allowed), returned without the `/`; read by the same `parseTestRemoteUrl` as the plugin-source
+ * fetch (`security/ssrf.ts`).
+ */
+const testRemoteUrlSchema = z
+  .string()
+  .transform((value, ctx) => {
+    const base = parseTestRemoteUrl(value)
+    if (base === null) {
+      ctx.addIssue({ code: 'custom', message: 'Expected http://127.0.0.1:<port> (the loopback fake remote of the tests).' })
+      return z.NEVER
+    }
+    return base
+  })
+  .optional()
+
 const workspaceRootsSchema = z
   .string()
   .transform((value, ctx) => {
@@ -243,6 +305,8 @@ const envSchema = z.object({
   HF_WORKSPACE_ROOTS: workspaceRootsSchema,
   HF_WORKSPACE_SHELL: flag(true),
   HF_TEST_FILE_SWEEP_DELAY_MS: testFileSweepDelaySchema,
+  HF_CLAUDE_HOME: claudeHomeSchema,
+  HF_TEST_REMOTE_URL: testRemoteUrlSchema,
   NODE_ENV: z.string().optional(),
 })
 
@@ -251,6 +315,8 @@ export interface LoadEnvOptions {
   cwd?: string
   /** Overrides the development-mode detection (tests). */
   dev?: boolean
+  /** The home folder of an unset `HF_CLAUDE_HOME` (`<home>/.claude`); default `os.homedir()` (tests pass a temp folder). */
+  homedir?: string
 }
 
 function runningFromSource(): boolean {
@@ -279,6 +345,7 @@ export function dataPaths(root: string): DataPaths {
     pluginCache: join(cache, 'plugins'),
     workspaces: join(root, 'workspaces'),
     checkpoints: join(root, 'checkpoints'),
+    transcripts: join(root, 'transcripts'),
   })
 }
 
@@ -320,6 +387,8 @@ export function loadEnv(source: Record<string, string | undefined> = process.env
     workspaceRootsDefault: values.HF_WORKSPACE_ROOTS === undefined,
     workspaceShell: values.HF_WORKSPACE_SHELL,
     testFileSweepDelayMs: values.HF_MOCK_PROVIDER ? values.HF_TEST_FILE_SWEEP_DELAY_MS ?? null : null,
+    claudeHome: values.HF_CLAUDE_HOME === undefined ? join(options.homedir ?? homedir(), '.claude') : values.HF_CLAUDE_HOME,
+    testRemoteUrl: values.HF_MOCK_PROVIDER ? values.HF_TEST_REMOTE_URL ?? null : null,
     apiTarget: values.HF_API_TARGET,
     webDir: values.HF_WEB_DIR === undefined ? null : resolveDataDir(values.HF_WEB_DIR, cwd),
     dev,
@@ -328,17 +397,22 @@ export function loadEnv(source: Record<string, string | undefined> = process.env
   })
 }
 
+/** The boot warning of a valid `HF_TEST_REMOTE_URL` without `HF_MOCK_PROVIDER=1` (Phase 12). */
+export const TEST_REMOTE_URL_IGNORED_WARNING = 'the test-only remote URL is ignored: it is honored only with HF_MOCK_PROVIDER=1'
+
 /**
  * Warnings about the environment that do not stop the boot, logged once by `startDeps` (Phase 8): a valid
- * `HF_TEST_FILE_SWEEP_DELAY_MS` without `HF_MOCK_PROVIDER=1` is ignored.
+ * `HF_TEST_FILE_SWEEP_DELAY_MS` without `HF_MOCK_PROVIDER=1` is ignored; Phase 12: so is a valid `HF_TEST_REMOTE_URL`.
  */
 export function envBootWarnings(env: Pick<Env, 'mockProvider' | 'vars'>): string[] {
   const warnings: string[] = []
-  const delay = env.vars.HF_TEST_FILE_SWEEP_DELAY_MS
-  if (!env.mockProvider && typeof delay === 'string' && delay.trim() !== '')
-    // The log redactor masks `HF_` + 16 or more word characters (its `hf_` key pattern), so the message names the setting
-    // in words.
+  const set = (value: string | undefined): boolean => typeof value === 'string' && value.trim() !== ''
+  // The log redactor masks `HF_` + 16 or more word characters (its `hf_` key pattern), so the messages name the
+  // settings in words.
+  if (!env.mockProvider && set(env.vars.HF_TEST_FILE_SWEEP_DELAY_MS))
     warnings.push('the test-only automatic file sweep delay is ignored: it is honored only with HF_MOCK_PROVIDER=1')
+  if (!env.mockProvider && set(env.vars.HF_TEST_REMOTE_URL))
+    warnings.push(TEST_REMOTE_URL_IGNORED_WARNING)
   return warnings
 }
 

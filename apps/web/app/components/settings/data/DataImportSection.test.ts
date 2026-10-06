@@ -93,3 +93,13 @@ describe('dataImportSection (Phase 10)', () => {
     expect(refreshLoaded).not.toHaveBeenCalled()
   })
 })
+
+describe('dataImportSection: Import from Claude Code (Phase 12, C46-T7)', () => {
+  it('links to the import dialog of Customize', () => {
+    const NuxtLink = { props: ['to'], template: '<a :data-to="JSON.stringify(to)"><slot /></a>' }
+    wrapper = mount(DataImportSection, { attachTo: document.body, global: { plugins: [pinia], stubs: { NuxtLink } } })
+    const link = byTestId(testIds.dataImportClaude)!
+    expect(link.textContent?.trim()).toBe('Import from Claude Code…')
+    expect(JSON.parse(link.dataset.to!)).toEqual({ path: '/settings/customize', query: { import: 'claude' } })
+  })
+})

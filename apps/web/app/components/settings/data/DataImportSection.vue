@@ -6,8 +6,10 @@
 // the output styles too, and commands with shell lines come back turned off). The
 // result panel lists every chat; the chat list reloads, and so do the settings when the backup restored them, and the
 // customizations when it restored any. 409 `busy` and 413 become toasts, other failures show inline.
+// Phase 12 (ADR-055; C46, W12.10 owns it in P12-A): the link Import from Claude Code… (`data-import-claude`) opens the
+// import dialog of Customize (`/settings/customize?import=claude`).
 import type { DataConflictPolicy, DataImportResult } from '@harness-forge/shared'
-import { CircleAlertIcon, FileArchiveIcon, FileBracesIcon, FolderOpenIcon, UploadIcon } from '@lucide/vue'
+import { CircleAlertIcon, FileArchiveIcon, FileBracesIcon, FolderDownIcon, FolderOpenIcon, UploadIcon } from '@lucide/vue'
 import { computed, nextTick, ref, useId } from 'vue'
 import { toast } from 'vue-sonner'
 import { Alert, AlertDescription } from '@/components/ui/alert'
@@ -32,6 +34,9 @@ const emit = defineEmits<{
   /** An import finished (some chats may have failed): what is stored changed. */
   imported: [result: DataImportResult]
 }>()
+
+/** Import from Claude Code (Phase 12): the Customize dialog's deep link (docs/UI.md 6, 9.14). */
+const IMPORT_CLAUDE_ROUTE = { path: '/settings/customize', query: { import: 'claude' } } as const
 
 const api = useApi()
 const chats = useChatsStore()
@@ -247,6 +252,16 @@ async function runImport(): Promise<void> {
     </div>
 
     <DataImportResultPanel v-if="result" :result="result" />
+
+    <p class="text-sm text-muted-foreground">
+      Coming from Claude Code?
+      <Button as-child variant="link" class="h-auto p-0">
+        <NuxtLink :to="IMPORT_CLAUDE_ROUTE" :data-testid="testIds.dataImportClaude">
+          <FolderDownIcon aria-hidden="true" data-icon="inline-start" />
+          Import from Claude Code…
+        </NuxtLink>
+      </Button>
+    </p>
 
     <div class="sr-only" role="status" aria-live="polite" aria-atomic="true">
       {{ announcement }}

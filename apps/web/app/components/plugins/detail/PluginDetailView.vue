@@ -4,6 +4,8 @@
 // plugins, read-only unless editable, and editable declarative plugins) · Logs. A missing or hidden tab falls back to
 // Overview. Configuration and Source stay mounted once opened, so switching tabs keeps unsaved edits. The page has
 // its own scroll area with a stable scrollbar gutter.
+// Phase 12 (ADR-054; C46 mounts, W12.9 owns it in P12-A): PluginUpdateBanner above the tabs while a marketplace offers
+// another version (`useMarketplacesStore().updateOf(pluginId)`); Update… opens MarketplaceInstallDialog in update mode.
 import type { PluginTab } from './plugin-detail'
 import { BlocksIcon, CircleAlertIcon } from '@lucide/vue'
 import { computed, onMounted, ref, watch } from 'vue'
@@ -12,20 +14,24 @@ import { Button } from '@/components/ui/button'
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { useMarketplacesStore } from '~/stores/marketplaces'
 import { usePluginsStore } from '~/stores/plugins'
 import { hasErrorCode, isAbortError, toHarnessError } from '~/utils/errors'
 import { testIds } from '~/utils/testids'
 import { lastListRoute } from '../list/list-route'
 import { useHead, useRoute, useRouter } from '../list/nuxt-imports'
+import MarketplaceInstallDialog from '../marketplaces/MarketplaceInstallDialog.vue'
 import { hasSourceTab, PLUGIN_TAB_LABELS, pluginTabs, resolvePluginTab } from './plugin-detail'
 import PluginConfigurationTab from './PluginConfigurationTab.vue'
 import PluginHeader from './PluginHeader.vue'
 import PluginLogsTab from './PluginLogsTab.vue'
 import PluginOverviewTab from './PluginOverviewTab.vue'
+import PluginUpdateBanner from './PluginUpdateBanner.vue'
 
 const props = defineProps<{ pluginId: string }>()
 
 const plugins = usePluginsStore()
+const marketplaces = useMarketplacesStore()
 const route = useRoute()
 const router = useRouter()
 
@@ -94,6 +100,11 @@ function setTab(value: unknown) {
 }
 
 const loadMessage = computed(() => (loadError.value ? toHarnessError(loadError.value).message : ''))
+
+/** Phase 12: the update a marketplace offers for this plugin, and the update dialog. */
+const update = computed(() => marketplaces.updateOf(props.pluginId))
+const updateMarketplace = computed(() => (update.value ? marketplaces.byId(update.value.marketplaceId)?.name ?? null : null))
+const updateOpen = ref(false)
 const sourceReadonly = computed(() => !detail.value?.editable)
 </script>
 
@@ -107,6 +118,14 @@ const sourceReadonly = computed(() => !detail.value?.editable)
     <div class="mx-auto flex w-full max-w-5xl flex-col gap-6 px-4 pb-16 md:px-6">
       <template v-if="detail">
         <PluginHeader :plugin="detail" @view-logs="setTab('logs')" />
+        <PluginUpdateBanner :update="update" :marketplace-name="updateMarketplace" @update="updateOpen = true" />
+        <MarketplaceInstallDialog
+          v-model:open="updateOpen"
+          :marketplace-id="update?.marketplaceId ?? null"
+          :entry-name="update?.plugin ?? null"
+          mode="update"
+          @installed="updateOpen = false"
+        />
 
         <Tabs :model-value="activeTab" class="gap-6" @update:model-value="setTab">
           <div class="-mx-4 overflow-x-auto border-b px-4 md:-mx-6 md:px-6">

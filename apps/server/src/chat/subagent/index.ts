@@ -59,6 +59,11 @@
 // W11.17 (ADR-050): the parent run's project MCP result (`SubagentRunnerInput.projectTools`) goes to every child's tool
 // assembly (`childTools({ projectTools })`), and through the launch input to background children, so a child never sees
 // a global MCP server its project shadows.
+// Phase 12 (C44 seams, ADR-057 / ADR-058; W12.6 implements behind them): before step 0 a child with hooks runs
+// `SubagentStart` (`hooks.subagentStart({ id: <parent task call id>, type }, signal)`) and its context joins the first
+// user message (`childFirstMessage`, `./host.ts`); the child spec (`ChildAgentSpec`; `childSpec`, the C44 stub answers
+// `DEFAULT_CHILD_SPEC`) sets the step limit (`childMaxSteps`), the preloaded skills text (after the agent's body) and the
+// `disallowedTools` of `childTools`. With the default spec and no hooks every child runs as in v1.7.
 import type { AgentDefinitionFields, CustomizationEntry, RunOrigin, Settings, TaskAgent, TaskInput, TaskOutput, TaskStatus, TaskType, ToolMode } from '@harness-forge/shared'
 import type { ModelMessage, TextStreamPart, ToolSet } from 'ai'
 import type { Logger } from '../../logger.ts'
@@ -71,7 +76,7 @@ import type { RunSubagentOptions } from '../agent-scope.ts'
 import type { BackgroundLaunchInput, BackgroundTasks } from '../background/types.ts'
 import type { ChildHooks } from '../hooks.ts'
 import type { StepPiece } from '../steps.ts'
-import type { ChildSession } from './host.ts'
+import type { ChildAgentSpec, ChildSession } from './host.ts'
 import type { ChildProjectTools } from './tools.ts'
 import { AGENT_TYPE_ALIASES, hookModelText, isHarnessError, LIMITS } from '@harness-forge/shared'
 import { isStepCount, streamText } from 'ai'
@@ -85,6 +90,7 @@ import { SUBAGENT_INSTRUCTIONS_MARKER } from '../markers.ts'
 import { buildRunParams, joinInstructions, orderAgentTypes } from '../params.ts'
 import { createPrepareStep, noopStepPiece } from '../steps.ts'
 import { RunTracker, toMessageUsage } from '../usage.ts'
+import { childFirstMessage, childMaxSteps, DEFAULT_CHILD_SPEC } from './host.ts'
 import { oneLine, resultPreview, TaskProgress } from './progress.ts'
 import { childCallIdPrefix, childToolMode, childTools } from './tools.ts'
 
@@ -535,6 +541,17 @@ async function loadAgent(session: ChildSession, choice: AgentChoice, signal: Abo
   }
 }
 
+/**
+ * The child spec of an agent (Phase 12, ADR-058; C44 stub with its final signature): W12.6 computes `maxTurns`, the
+ * preloaded `skills` text (bodies through `customizations.load`, ≤ `LIMITS.agentSkillsPreloadBytes`) and
+ * `disallowedTools` from `definition` (null for a builtin). The stub answers `DEFAULT_CHILD_SPEC`. Rejects only when
+ * `signal` aborts.
+ */
+export async function childSpec(_session: ChildSession, _choice: AgentChoice, _definition: AgentDefinitionFields | null, signal: AbortSignal): Promise<ChildAgentSpec> {
+  signal.throwIfAborted()
+  return DEFAULT_CHILD_SPEC
+}
+
 /** What `subagentStopFeedback` needs of the round that would complete. */
 interface SubagentStopRound {
   /** 0 for the child's first round, then one more per continuation (`stop_hook_active` from round 1). */
@@ -626,7 +643,9 @@ async function* executeChild(host: ChildHost, task: TaskInput, choice: AgentChoi
 
     const settings = session.ctx.prepared.settings
     const mode = childToolMode(choice.base, host.toolMode)
-    const maxSteps = settings.subagentMaxSteps
+    // Phase 12 (ADR-058): what the agent definition adds (`maxTurns`, the skills preload, `disallowedTools`).
+    const spec = await childSpec(session, choice, definition, signal)
+    const maxSteps = childMaxSteps(settings.subagentMaxSteps, spec)
     // Phase 11 (C37, ADR-048): the child's hooks (PreToolUse, PostToolUse; SubagentStop is W11.2's), none without a host
     // handle.
     const hooks = session.hooks?.forChild(childCallIdPrefix(host.toolCallId)) ?? null
@@ -640,6 +659,7 @@ async function* executeChild(host: ChildHost, task: TaskInput, choice: AgentChoi
       parentCallId: host.toolCallId,
       signal,
       allowlist: definition?.tools ?? null,
+      disallowedTools: spec.disallowedTools,
       hooks,
       projectTools: host.projectTools,
     })
@@ -652,7 +672,7 @@ async function* executeChild(host: ChildHost, task: TaskInput, choice: AgentChoi
       resolved: model,
       reasoningEffort: session.ctx.reasoningEffort,
       toolMode: mode,
-      globalInstructions: joinInstructions(SUBAGENT_PREAMBLE, agentText, settings.instructions),
+      globalInstructions: joinInstructions(SUBAGENT_PREAMBLE, agentText, spec.skillsText, settings.instructions),
       chatInstructions: session.ctx.prepared.chat.settings.instructions,
       workspace: host.workspace,
       workspaceTools: [...tools.byName.values()].filter(entry => toolWorkspaceAccess(entry.definition) !== null).map(entry => entry.definition.name),
@@ -662,7 +682,9 @@ async function* executeChild(host: ChildHost, task: TaskInput, choice: AgentChoi
       logger,
     })
 
-    const user: ModelMessage = { role: 'user', content: [{ type: 'text', text: task.prompt }] }
+    // Phase 12 (ADR-057): `SubagentStart` before step 0; its context joins the first user message.
+    const startContext = hooks === null ? null : await hooks.subagentStart({ id: host.toolCallId, type: choice.name }, signal)
+    const user: ModelMessage = childFirstMessage(task.prompt, startContext)
     let finalized = false
     const hasTools = Object.keys(tools.tools).length > 0
     // Phase 11 (W11.2): with `SubagentStop` hooks the child may run more rounds, so its usage is the sum of its steps

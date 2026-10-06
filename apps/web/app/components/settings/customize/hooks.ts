@@ -4,31 +4,73 @@
 // Code `hooks` JSON of rows (Copy as JSON), the hook import (over the shared `readSettingsHooks` / `readHooksConfig`),
 // the tab's copy and the delete confirmation. Hook configurations are read only by the shared `util/hooks.ts`. No Vue,
 // no stores. Signatures frozen from Gate P11-0b (C39); W11.8 owns the bodies (P11-A).
-import type { HookDiagnostic, HookEntry, HookEvent, HookSpec } from '@harness-forge/shared'
+// Phase 12 (ADR-057; C46 declares, W12.12 implements; frozen from Gate P12-0b): the 13 events (`HOOK_EVENT_INFO` +
+// `promptAllowed` and the matcher subject), the prompt type and the handler fields of the draft, the project target of
+// the editor (`ProjectHookTarget`), the row action `trust-plugin` (Review plugin… of an untrusted plugin's hook) and
+// `promptError`.
+import type { HookDiagnostic, HookEntry, HookEvent, HookMatcherSubject, HookSpec } from '@harness-forge/shared'
 import {
   claudeToolName,
   compileMatcher,
   HOOK_EVENTS,
   HOOK_LIMITS,
+  HOOK_MATCHER_SUBJECTS,
   hookTargetNames,
+  PROMPT_HOOK_EVENTS,
   readHooksConfig,
   readSettingsHooks,
   TOOL_HOOK_EVENTS,
 } from '@harness-forge/shared'
 
-/** The actions of a hook row's menu (docs/UI.md 9.13). */
-export type HookAction = 'edit' | 'duplicate' | 'toggle' | 'copy-json' | 'delete' | 'review' | 'open-plugin'
+/**
+ * The actions of a hook row's menu (docs/UI.md 9.13); + Phase 12 (9.14): `trust-plugin` (Review plugin…, the hook of a
+ * plugin that is not trusted) and `edit` on project rows (the hook editor in project mode).
+ */
+export type HookAction = 'edit' | 'duplicate' | 'toggle' | 'copy-json' | 'delete' | 'review' | 'open-plugin' | 'trust-plugin'
 
-/** The editor's fields (`timeout` in seconds; null = the default 60 s). */
+/**
+ * The editor's fields (`timeout` in seconds; null = the default 60 s, 30 s for a prompt hook). + Phase 12 (ADR-057): the
+ * handler type and its fields; absent = a command hook with the Phase 11 defaults (`type: 'command'`, no prompt, no
+ * model, `continueOnBlock: false`, no `args`, not `async`, no `if`, no `statusMessage`).
+ */
 export interface HookDraft {
   event: HookEvent
   matcher: string
   command: string
   timeout: number | null
   enabled: boolean
+  /** + Phase 12: the handler type. */
+  type?: 'command' | 'prompt'
+  /** + Phase 12 (prompt hooks): the prompt (`$ARGUMENTS` = the event as JSON). */
+  prompt?: string
+  /** + Phase 12 (prompt hooks): a model ref or a Claude alias; null = the Hook model setting. */
+  model?: string | null
+  /** + Phase 12 (prompt hooks on Stop / SubagentStop): a "not ok" answer makes the agent continue. */
+  continueOnBlock?: boolean
+  /** + Phase 12 (command hooks): the exec-form arguments (`command` is then the program). */
+  args?: string[]
+  /** + Phase 12 (command hooks): runs detached; its output is not read. */
+  async?: boolean
+  /** + Phase 12 (tool events): the `if` rule (`Bash(git *)`); '' = none. */
+  if?: string
+  /** + Phase 12: the activity label while it runs; '' = "Running hook…". */
+  statusMessage?: string
+}
+
+/**
+ * Where the hook editor writes in project mode (Phase 12, ADR-056): the project, its settings file, the event and the
+ * handler's position in the file's `hooks` key (null indexes = a new handler, appended to a group of its matcher).
+ */
+export interface ProjectHookTarget {
+  projectId: string
+  path: string
+  event: HookEvent
+  groupIndex: number | null
+  handlerIndex: number | null
 }
 
 const TOOL_EVENTS: ReadonlySet<HookEvent> = new Set(TOOL_HOOK_EVENTS)
+const PROMPT_EVENTS: ReadonlySet<HookEvent> = new Set(PROMPT_HOOK_EVENTS)
 
 const EVENT_DESCRIPTIONS: Readonly<Record<HookEvent, string>> = {
   PreToolUse: 'Before a tool runs. It can block the call, allow it without asking or change its input.',
@@ -47,10 +89,29 @@ const EVENT_DESCRIPTIONS: Readonly<Record<HookEvent, string>> = {
   SessionEnd: 'When you delete a chat.',
 }
 
-/** The events in `HOOK_EVENTS` order: the label (Claude Code's spelling), the description, a tool matcher. */
-export const HOOK_EVENT_INFO: Readonly<Record<HookEvent, { label: string, description: string, toolMatcher: boolean }>> = Object.fromEntries(
-  HOOK_EVENTS.map(event => [event, { label: event, description: EVENT_DESCRIPTIONS[event], toolMatcher: TOOL_EVENTS.has(event) }]),
-) as Record<HookEvent, { label: string, description: string, toolMatcher: boolean }>
+/** What the editor knows of an event. */
+export interface HookEventInfo {
+  /** Claude Code's spelling. */
+  label: string
+  description: string
+  /** The matcher is matched against tool names. */
+  toolMatcher: boolean
+  /** + Phase 12: prompt hooks may use the event (`PROMPT_HOOK_EVENTS`). */
+  promptAllowed: boolean
+  /** + Phase 12: what the matcher is tested against (`HOOK_MATCHER_SUBJECTS`); null = no matcher. */
+  matcher: HookMatcherSubject | null
+}
+
+/** The events in `HOOK_EVENTS` order: the label, the description, the matcher and whether prompt hooks may use them. */
+export const HOOK_EVENT_INFO: Readonly<Record<HookEvent, HookEventInfo>> = Object.fromEntries(
+  HOOK_EVENTS.map(event => [event, {
+    label: event,
+    description: EVENT_DESCRIPTIONS[event],
+    toolMatcher: TOOL_EVENTS.has(event),
+    promptAllowed: PROMPT_EVENTS.has(event),
+    matcher: HOOK_MATCHER_SUBJECTS[event],
+  }]),
+) as Record<HookEvent, HookEventInfo>
 
 /** The copy of the tab, the rows, the editor and the import (docs/UI.md 9.13, 15). */
 export const HOOK_COPY: Readonly<Record<string, string>> = {
@@ -358,6 +419,17 @@ export function matcherError(value: string): string | null {
   if (value.trim().length > HOOK_LIMITS.matcherMaxChars)
     return `Use at most ${HOOK_LIMITS.matcherMaxChars} characters.`
   return compileMatcher(value).ok ? null : HOOK_COPY.matcherInvalid!
+}
+
+/** A prompt's problem (Phase 12): empty, longer than 16,384 characters or with NUL characters; else null. */
+export function promptError(text: string): string | null {
+  if (text.trim() === '')
+    return 'Add the prompt.'
+  if (text.length > HOOK_LIMITS.promptMaxChars)
+    return `Use at most ${HOOK_LIMITS.promptMaxChars.toLocaleString('en-US')} characters.`
+  if (text.includes('\0'))
+    return 'The prompt cannot contain NUL characters.'
+  return null
 }
 
 /** The command's problem, else null. */

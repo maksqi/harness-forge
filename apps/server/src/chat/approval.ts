@@ -32,6 +32,15 @@
 // `modes.ts`'s and the plan card is decided before the hooks). The hook record is stored by the hooks (`data-hook`);
 // its `updatedInput` is applied by the tool wrapper (`tools.ts`), so the tool part and the approval signature keep the
 // model's input.
+// Phase 12 (C44, ADR-057; COMPLETE and FROZEN after P12-0b): after the `PreToolUse` combination, when the result asks
+// the user (`user-approval`) and the call is not answered in the continued message, `PermissionRequest` runs
+// (`ToolHooks.permissionRequest`; the main agent only: a child's hooks answer null, so a child never runs it, and one
+// request and its approved continuation run it exactly once). Its `allow` approves only through the same gate as a
+// `PreToolUse` `allow` (`allowApproves`: never in plan mode, never for an `execute` tool or a policy other than `safe` /
+// `ask`; otherwise the card stays), its `deny` → denied "Blocked by hook: <reason>", its `updatedInput` is applied like
+// `PreToolUse`'s (the tool wrapper reads it; the call only runs in this run when the allow approved it). Then, whatever
+// happened (the catch path included), `ToolHooks.settle(callId, { harnessAsked })` stores the call's pending hook
+// records: `harnessAsked` = a `PreToolUse` `allow` whose call still asks the user.
 import type { ToolCallContext, ToolDefinition, ToolWorkspace, ToolWorkspaceAccess } from '@harness-forge/plugin-sdk'
 import type { ToolMode, ToolOverride, ToolPolicy } from '@harness-forge/shared'
 import type { ModelMessage, ToolApprovalStatus, ToolSet } from 'ai'
@@ -40,7 +49,7 @@ import type { ToolPref } from '../mcp/types.ts'
 import type { PluginHost } from '../plugins/types.ts'
 import type { Registry } from '../registry/types.ts'
 import type { WorkspaceRunScope, WorkspaceRunScopeInit } from '../workspace/run-scope.ts'
-import type { PreToolUseDecision, ToolHooks } from './hooks.ts'
+import type { PermissionRequestDecision, PreToolUseDecision, ToolHooks } from './hooks.ts'
 import { CORE_AGENT_PLUGIN_ID, EXIT_PLAN_MODE_TOOL_NAME } from '../builtin-plugins/core-agent/index.ts'
 import { GUARD_TIMEOUTS } from '../plugins/guard.ts'
 import { bindRunScope } from '../workspace/run-scope.ts'
@@ -169,10 +178,10 @@ export interface ToolApprovalContext {
    */
   scope?: WorkspaceRunScopeInit | null
   /**
-   * The command hooks of the run (Phase 11, `RunHooks` / `ChildHooks` of `hooks.ts`): `PreToolUse` per call (see the
-   * module comment). Null or absent = no hooks.
+   * The command hooks of the run (Phase 11, `RunHooks` / `ChildHooks` of `hooks.ts`): `PreToolUse` per call, Phase 12
+   * `PermissionRequest` and `settle` (see the module comment). Null or absent = no hooks.
    */
-  hooks?: Pick<ToolHooks, 'preToolUse'> | null
+  hooks?: Pick<ToolHooks, 'preToolUse' | 'permissionRequest' | 'settle'> | null
 }
 
 /**
@@ -281,6 +290,32 @@ function allowApproves(harness: ApprovalResult, workspace: ToolWorkspaceAccess |
     && (policy === 'safe' || policy === 'ask')
 }
 
+/**
+ * Applies the `PermissionRequest` decision of a call (Phase 12, see the module comment) to `result`, the outcome after
+ * the `PreToolUse` combination: only a `user-approval` result changes; `deny` → denied "Blocked by hook: …"; `allow` →
+ * approved through `allowApproves` (else the card stays); no decision → `result`.
+ */
+export function applyPermissionRequest(
+  result: ApprovalResult,
+  request: Pick<PermissionRequestDecision, 'decision' | 'reason'> | null,
+  workspace: ToolWorkspaceAccess | null,
+  policy: EffectivePolicy | null,
+  toolMode?: ToolMode,
+): ApprovalResult {
+  if (request === null || request.decision === null || result.outcome !== 'user-approval')
+    return result
+  if (request.decision === 'deny')
+    return { outcome: 'denied', reason: blockedByHookReason(request.reason) }
+  return allowApproves(result, workspace, policy, toolMode) ? { outcome: 'approved' } : result
+}
+
+/** The outcome type of an AI SDK status (`denied` for `{ type: 'denied' }`; undefined = `not-applicable`). */
+function statusType(status: ToolApprovalStatus): ApprovalOutcome {
+  if (status === undefined)
+    return 'not-applicable'
+  return typeof status === 'object' ? status.type : status
+}
+
 /** A tool call as the approval function receives it. */
 interface ApprovalCall {
   readonly toolName: string
@@ -336,35 +371,81 @@ async function harnessApproval(
 export function createToolApproval(context: ToolApprovalContext) {
   return async (options: { toolCall: { toolName: string, toolCallId: string, input: unknown }, messages: ModelMessage[], tools?: ToolSet }): Promise<ToolApprovalStatus> => {
     const { toolCall } = options
+    const hooks = context.hooks ?? null
+    // The `PreToolUse` decision of the call, once known (a holder: the callback below sets it).
+    const seen: { hook: PreToolUseDecision | null } = { hook: null }
+    let status: ToolApprovalStatus = 'user-approval'
     try {
-      // A call to a tool this run does not offer (tool mode off, disabled, owner inactive, a workspace tool without a
-      // workspace) can only be denied: an approved call without an executable tool would leave the model without a
-      // result.
-      const tool = context.tools.get(toolCall.toolName)
-      if (tool === undefined)
-        return { type: 'denied', reason: DENIED_UNAVAILABLE }
-      // The plan card always shows (ADR-041): no override or hook decides it, and on an approved continuation this
-      // result keeps the user's approval.
-      if (isPlanExitTool(tool))
-        return 'user-approval'
-      const workspace = toolWorkspaceAccess(tool.definition)
-      // Phase 11: `PreToolUse` once per call (replayed for a call answered in the continued message).
-      const hook = context.hooks == null
-        ? null
-        : await context.hooks.preToolUse({ toolName: toolCall.toolName, toolCallId: toolCall.toolCallId, input: toolCall.input }, context.signal)
-      const harness = await harnessApproval(context, tool, workspace, toolCall, options.messages)
-      if (hook === null || hook.decision === null)
-        return toApprovalStatus(harness.result)
-      // An `allow` needs the tool's policy: evaluated now when an override or a `tool.approve` hook decided (never in
-      // plan mode, where an `allow` keeps the card).
-      const policy = hook.decision === 'allow' && harness.result.outcome === 'user-approval' && harness.policy === null && context.toolMode !== 'plan'
-        ? await callPolicy(context, tool, toolCall, options.messages)
-        : harness.policy
-      return toApprovalStatus(applyHookDecision(harness.result, hook, workspace, policy, context.toolMode))
+      status = await decideApproval(context, options, (decided) => {
+        seen.hook = decided
+      })
+      return status
     }
     catch (error) {
       context.logger.warn('tool approval failed, asking the user', { tool: toolCall.toolName, err: error })
-      return 'user-approval'
+      status = 'user-approval'
+      return status
+    }
+    finally {
+      // Phase 12: the call's pending hook records are stored whatever happened (`harnessAsked`: a `PreToolUse` allow
+      // whose call still asks the user).
+      if (hooks !== null) {
+        const allowed = seen.hook?.decision === 'allow'
+        try {
+          hooks.settle(toolCall.toolCallId, { harnessAsked: allowed && statusType(status) === 'user-approval' })
+        }
+        catch (error) {
+          context.logger.warn('the hook records of a tool call could not be stored', { tool: toolCall.toolName, err: error })
+        }
+      }
     }
   }
+}
+
+/** The approval of one call (see the module comment); `onHook` receives the `PreToolUse` decision once it is known. */
+async function decideApproval(
+  context: ToolApprovalContext,
+  options: { toolCall: ApprovalCall, messages: ModelMessage[] },
+  onHook: (decided: PreToolUseDecision | null) => void,
+): Promise<ToolApprovalStatus> {
+  const { toolCall } = options
+  // A call to a tool this run does not offer (tool mode off, disabled, owner inactive, a workspace tool without a
+  // workspace) can only be denied: an approved call without an executable tool would leave the model without a result.
+  const tool = context.tools.get(toolCall.toolName)
+  if (tool === undefined)
+    return { type: 'denied', reason: DENIED_UNAVAILABLE }
+  // The plan card always shows (ADR-041): no override or hook decides it, and on an approved continuation this result
+  // keeps the user's approval.
+  if (isPlanExitTool(tool))
+    return 'user-approval'
+  const workspace = toolWorkspaceAccess(tool.definition)
+  const hooks = context.hooks ?? null
+  const call = { toolName: toolCall.toolName, toolCallId: toolCall.toolCallId, input: toolCall.input }
+  // Phase 11: `PreToolUse` once per call (replayed for a call answered in the continued message).
+  const hook = hooks === null ? null : await hooks.preToolUse(call, context.signal)
+  onHook(hook)
+  const harness = await harnessApproval(context, tool, workspace, toolCall, options.messages)
+  // An `allow` needs the tool's policy: evaluated when an override or a `tool.approve` hook decided (never in plan mode,
+  // where an `allow` keeps the card), at most once per call.
+  let policy = harness.policy
+  const evaluateForAllow = async (outcome: ApprovalOutcome): Promise<void> => {
+    if (outcome === 'user-approval' && policy === null && context.toolMode !== 'plan')
+      policy = await callPolicy(context, tool, toolCall, options.messages)
+  }
+  let result = harness.result
+  if (hook !== null && hook.decision !== null) {
+    if (hook.decision === 'allow')
+      await evaluateForAllow(harness.result.outcome)
+    result = applyHookDecision(harness.result, hook, workspace, policy, context.toolMode)
+  }
+  // Phase 12: `PermissionRequest` for a call that would ask the user (null for a child, an answered call, no hooks).
+  if (hooks !== null && result.outcome === 'user-approval') {
+    const request = await hooks.permissionRequest(call, context.signal)
+    if (request !== null && request.decision !== null) {
+      if (request.decision === 'allow')
+        await evaluateForAllow(result.outcome)
+      result = applyPermissionRequest(result, request, workspace, policy, context.toolMode)
+    }
+  }
+  return toApprovalStatus(result)
 }

@@ -422,6 +422,9 @@ export async function inspectPluginDirectory(dir: string): Promise<PluginDirecto
     reserved: isReservedPluginId(manifest.id),
     contributions: declaredContributions(manifest),
     files: await countFiles(read.dir),
+    // Phase 12 (C43 compile fix): this reader reads harness plugins; Claude Code plugins are read by W12.1's reader.
+    format: 'harness',
+    claude: null,
   }
 }
 

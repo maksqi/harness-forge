@@ -289,12 +289,12 @@ describe('media models (Phase 6)', () => {
     const t = await createProvidersTestApp({ env: { HF_MOCK_PROVIDER: '1' } })
     app = t
     const visible = await t.deps.catalog.list({ providerId: 'mock' })
-    expect(visible.map(model => model.id)).toEqual(['agents', 'background', 'checkpoint', 'compact', 'echo', 'error', 'hooks', 'image', 'image-chat', 'image-tool', 'plan', 'reasoning', 'shell', 'steer', 'subagent', 'todo', 'tool-approval', 'workspace'])
+    expect(visible.map(model => model.id)).toEqual(['agents', 'background', 'checkpoint', 'compact', 'echo', 'error', 'hooks', 'image', 'image-chat', 'image-tool', 'plan', 'prompt-hook', 'reasoning', 'shell', 'steer', 'subagent', 'todo', 'tool-approval', 'workspace'])
     const all = await t.deps.catalog.list({ providerId: 'mock', includeHidden: true })
     expect(all.filter(model => model.hidden).map(model => [model.id, model.kind])).toEqual([['speech', 'speech'], ['transcribe', 'transcription']])
     expect(all.find(model => model.id === 'speech')?.voices).toEqual(['mock-voice-a', 'mock-voice-b'])
     expect(all.find(model => model.id === 'image-chat')).toMatchObject({ kind: 'chat', capabilities: { imageOutput: true } })
-    expect(await t.deps.catalog.stats('mock')).toMatchObject({ modelCount: 17 })
+    expect(await t.deps.catalog.stats('mock')).toMatchObject({ modelCount: 18 })
   })
 })
 

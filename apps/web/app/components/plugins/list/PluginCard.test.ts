@@ -1,21 +1,22 @@
-import type { PluginSummary } from '@harness-forge/shared'
+import type { PluginSummary, PluginUpdate } from '@harness-forge/shared'
 import { mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it } from 'vitest'
 import { h } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { testIds } from '~/utils/testids'
-import { pluginSummary } from '~/utils/testing/fixtures'
+import { pluginSummary, pluginUpdate } from '~/utils/testing/fixtures'
 import PluginCard from './PluginCard.vue'
 import { NuxtLinkStub, settle } from './testing'
 
 const none = { providers: [], models: 0, tools: [], mcpServers: [], commands: [], hooks: [], agents: [], skills: [], commandHooks: 0, outputStyles: [] }
 
-function mountCard(plugin: PluginSummary) {
+function mountCard(plugin: PluginSummary, update: PluginUpdate | null = null) {
   const events: Array<[string, unknown[]]> = []
   const wrapper = mount({
     render: () => h(TooltipProvider, null, {
       default: () => h(PluginCard, {
         plugin,
+        update,
         'onUpdate:enabled': (...args: unknown[]) => events.push(['update:enabled', args]),
         'onViewLogs': (...args: unknown[]) => events.push(['view-logs', args]),
         'onReview': (...args: unknown[]) => events.push(['review', args]),
@@ -139,5 +140,21 @@ describe('pluginCard', () => {
     expect(card.get(`[data-testid="${testIds.pluginCardSwitch}"]`).classes()).toContain('z-10')
     expect(card.get(`[data-testid="${testIds.pluginCardReview}"]`).classes()).toContain('z-10')
     expect(card.get('h3 a').classes()).toContain('after:absolute')
+  })
+})
+
+describe('pluginCard: marketplace update (Phase 12, C46-T7)', () => {
+  it('shows the update badge with the offered version', () => {
+    const { card } = mountCard(pluginSummary({ id: 'review-kit', name: 'Review kit' }), pluginUpdate())
+    const badge = card.get(`[data-testid="${testIds.pluginUpdateAvailable}"]`)
+    expect(badge.attributes('data-version')).toBe('1.2.0')
+    expect(badge.text()).toBe('Update to 1.2.0')
+    const commit = mountCard(pluginSummary({ id: 'other' }), pluginUpdate({ pluginId: 'other', availableVersion: null }))
+    expect(commit.card.get(`[data-testid="${testIds.pluginUpdateAvailable}"]`).attributes('data-version')).toBe('')
+  })
+
+  it('shows no badge without an update', () => {
+    const { card } = mountCard(pluginSummary())
+    expect(card.find(`[data-testid="${testIds.pluginUpdateAvailable}"]`).exists()).toBe(false)
   })
 })

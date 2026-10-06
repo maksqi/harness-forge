@@ -16,12 +16,18 @@
 // only by the shared `parseDefinition` (`packages/shared/src/util/definitions.ts`). A definition only ever narrows what
 // a run may do (its tools); it never grants an approval, a mode, a tool override or a shell rule. Bodies, command
 // expansions and file contents are never logged at info; diagnostics carry project-relative paths only.
+//
+// Phase 12 (ADR-053 / ADR-055 / ADR-058; C43, frozen after Gate P12-0b): plugin entries of Claude Code plugins have
+// qualified names (`<pluginId>:<name>`; the getters accept a bare name by the rule of ADR-053, W12.7), the new
+// frontmatter keys, `importDefinitions` (the home-folder import: one batch through the write queue, one
+// `customization.changed {}`) and `CustomizationRestoreResult.turnedOff` (restored commands with `!` spans).
 import type {
   BackupCustomization,
   BackupCustomizations,
   Customization,
   CustomizationCreate,
   CustomizationEntry,
+  CustomizationKind,
   CustomizationList,
   CustomizationProjectScan,
   CustomizationSourceQuery,
@@ -107,7 +113,40 @@ export interface CustomizationRestoreResult {
   readonly failed: number
   /** One line per failed item (kind and name, never the content), each at most 300 characters. */
   readonly warnings: readonly string[]
+  /**
+   * Phase 12: restored personal commands with `` !`cmd` `` spans that came back turned off although the backup had them
+   * on (ADR-052; `DataImportResult.customizations.turnedOff`).
+   */
+  readonly turnedOff: number
 }
+
+/** One definition of a home-folder import (Phase 12, ADR-055; `ClaudeImportService.apply`). */
+export interface CustomizationImportItem {
+  readonly kind: CustomizationKind
+  /** The raw markdown, parsed like a create (`parseDefinition`); a missing `name:` was inserted by the planner. */
+  readonly content: string
+  /**
+   * `create`: a new personal definition (the kind and name must be free); `overwrite`: replaces the content of the
+   * personal definition of that kind and name and keeps its `enabled` (created when there is none); `rename`: created
+   * under `renameTo` (the `name:` line rewritten with `setDefinitionName`; the new name must be free).
+   */
+  readonly action: 'create' | 'overwrite' | 'rename'
+  /** The new name of a `rename`. */
+  readonly renameTo?: string
+  /**
+   * A command whose body holds `` !`cmd` `` spans arrives turned off (ADR-052) unless `enable` is true (the user enabled
+   * it in the plan; apply required fresh auth). Other definitions arrive enabled.
+   */
+  readonly enable?: boolean
+}
+
+/**
+ * What `importDefinitions` did with one item, in the order of the items: the created or updated personal definition, or
+ * why it failed (one English sentence naming the kind and name, never the content; ≤ 300 characters).
+ */
+export type CustomizationImportResult
+  = | { readonly ok: true, readonly outcome: 'created' | 'updated', readonly customization: Customization }
+    | { readonly ok: false, readonly message: string }
 
 /**
  * The catalog and the personal definitions. Errors are `HarnessError`s the routes pass through (API.md 2). Every change
@@ -169,6 +208,13 @@ export interface CustomizationService {
    * Never throws for an item.
    */
   readonly restoreBackup: (items: readonly BackupCustomization[]) => Promise<CustomizationRestoreResult>
+  /**
+   * Phase 12 (ADR-055): the definitions of a home-folder import, as one batch in the store's write queue (create,
+   * overwrite or rename; builtin and reserved names, invalid content, a taken name and the per-kind limit fail the item;
+   * commands with `!` spans turned off unless `enable`). Never throws for an item; drops every cached catalog and emits
+   * exactly one `customization.changed {}` when anything changed.
+   */
+  readonly importDefinitions: (items: readonly CustomizationImportItem[]) => Promise<CustomizationImportResult[]>
   /**
    * Drops the cached catalog of a project (a build in flight is not kept); null drops every cached catalog (the global
    * one and every project's). Called by the service itself on `workspace.changed`, `project.changed`, `run.finished`,

@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest'
 import { createSilentLogger } from '../logger.ts'
 import { catalogEntryKey, createFakeCustomizationService, fakeCatalogEntry } from '../testing/fake-customizations.ts'
 import {
+  argumentOptions,
   compactNeedsChatModel,
   definitionCommand,
   expandTemplate,
@@ -463,5 +464,26 @@ describe('the queue marks queued command files turnOnly (W10.2-T4 through create
     expect((await add('chat-b', 'msg_q000000000000002', '/review a.ts')).turnOnly).toBe(false)
     expect((await add('chat-a', 'msg_q000000000000003', '/model mock:echo')).turnOnly).toBe(false)
     expect((await add('chat-a', 'msg_q000000000000004', 'please /review')).turnOnly).toBe(false)
+  })
+})
+
+describe('phase 12 stubs (C44-T6): the expandArguments options at the call sites', () => {
+  it('argumentOptions answers no options (the Phase 10 expansion: no names, base 1, no variables)', () => {
+    expect(argumentOptions({ body: 'Fix $0 in $ARGUMENTS[1]', names: ['file'], vars: { CLAUDE_SESSION_ID: 'chat' } })).toBeUndefined()
+    expect(argumentOptions({ body: 'x' })).toBeUndefined()
+  })
+
+  it('a command file with Claude placeholders and named arguments still expands like v1.7', async () => {
+    const fake = createFakeCustomizationService()
+    const session = `\${CLAUDE_SESSION_ID}`
+    commandFile(fake, PROJECT, '.harness', 'fix', `---\ndescription: Fix.\narguments: [file, line]\n---\nFix $1 ($0) at $ARGUMENTS[1], line $line, session ${session}.`)
+    const resolution = await resolveCommand(fileServices(fake), '/fix a.ts 12', { ...context, catalog: await fake.catalog(PROJECT), argumentVars: { CLAUDE_SESSION_ID: 'chat' } })
+    expect(expansionOf(resolution)).toBe(`Fix a.ts ($0) at a.ts 12[1], line $line, session ${session}.`)
+  })
+
+  it('qualified names pass through unchanged (their resolution is W12.7\'s)', async () => {
+    const fake = createFakeCustomizationService()
+    expect(await resolveIn(fake, PROJECT, '/review-kit:review x')).toBeNull()
+    expect(parseSlashCommand('/review-kit:review x')).toBeNull()
   })
 })

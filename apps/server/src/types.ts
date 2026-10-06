@@ -7,6 +7,7 @@ import type { Db } from './db/client.ts'
 import type { Env } from './env.ts'
 import type { Logger } from './logger.ts'
 import type { McpManager, ProjectMcpManager, ToolService } from './mcp/types.ts'
+import type { MarketplaceService } from './plugins/marketplaces/types.ts'
 import type { BuiltinPlugin, PluginDrafts, PluginFiles, PluginHost, PluginInstaller } from './plugins/types.ts'
 import type { IconService, ProviderService } from './providers/types.ts'
 import type { Registry } from './registry/types.ts'
@@ -14,6 +15,7 @@ import type { Keyring, PasswordService, Redactor, SessionService } from './secur
 import type { AudioService } from './services/audio/types.ts'
 import type { ChatsService } from './services/chats/types.ts'
 import type { CheckpointService } from './services/checkpoints/types.ts'
+import type { ClaudeImportService } from './services/claude-import/types.ts'
 import type { CustomizationService } from './services/customizations/types.ts'
 import type { DataService } from './services/data/types.ts'
 import type { EventBus } from './services/events/types.ts'
@@ -23,6 +25,7 @@ import type { ImageService } from './services/images/types.ts'
 import type { KeyService } from './services/keys/types.ts'
 import type { MaintenanceService } from './services/maintenance/types.ts'
 import type { ProjectConfigService } from './services/project-config/types.ts'
+import type { ProjectDefinitionsService } from './services/project-definitions/types.ts'
 import type { ProjectFileService } from './services/project-files/types.ts'
 import type { ProjectTrustService } from './services/project-trust/types.ts'
 import type { ProjectService } from './services/projects/types.ts'
@@ -147,6 +150,23 @@ export interface AppServices {
    * Lazy (no boot step); `stop()` right after the hooks.
    */
   readonly projectMcp: ProjectMcpManager
+  /**
+   * Claude Code plugin marketplaces: the `marketplaces` table, the GitHub / URL / folder sources read as HTTPS archives
+   * through the plugin-source `safeFetch` (Phase 12, ADR-054; C43 stub, W12.2). Lazy (no boot step); `stop()` after the
+   * checkpoints, before the plugins (the fetches in flight aborted).
+   */
+  readonly marketplaces: MarketplaceService
+  /**
+   * The import from a Claude Code home folder: the allowlisted scan of `HF_CLAUDE_HOME` or an upload, the in-memory plans
+   * and apply (Phase 12, ADR-055; C43 stub with a real `home()`, W12.3). Lazy; `stop()` is the first shutdown step (the
+   * plans dropped).
+   */
+  readonly claudeImport: ClaudeImportService
+  /**
+   * The project definition file editor: definitions, the `hooks` key of settings files and `.mcp.json`'s `mcpServers`
+   * (Phase 12, ADR-056; C43 stub, W12.4). No state: no boot or shutdown step.
+   */
+  readonly projectDefinitions: ProjectDefinitionsService
 }
 
 export interface AppDeps extends AppBase, AppServices {}

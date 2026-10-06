@@ -5,8 +5,11 @@
 // controls). States: error -> red border, message and "View logs"; untrusted -> "Untrusted" + "Review";
 // incompatible -> badge with the reason; loading -> spinner; disabled -> dimmed. Presentational: the parent runs
 // the actions.
-import type { PluginSummary } from '@harness-forge/shared'
-import { CircleAlertIcon, ShieldAlertIcon } from '@lucide/vue'
+// Phase 12 (ADR-054; C46 declares the prop, W12.9 owns the badge in P12-A): `update` (from
+// `useMarketplacesStore().updateOf(id)`, passed by PluginGrid) shows the badge `plugin-update-available` (`data-version`:
+// the offered version, '' for a newer commit).
+import type { PluginSummary, PluginUpdate } from '@harness-forge/shared'
+import { CircleAlertIcon, CircleArrowUpIcon, ShieldAlertIcon } from '@lucide/vue'
 import { computed } from 'vue'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -20,7 +23,7 @@ import PluginIcon from './PluginIcon.vue'
 import PluginRunsCodeBadge from './PluginRunsCodeBadge.vue'
 import PluginSourceBadge from './PluginSourceBadge.vue'
 
-const props = defineProps<{ plugin: PluginSummary }>()
+const props = defineProps<{ plugin: PluginSummary, update?: PluginUpdate | null }>()
 
 const emit = defineEmits<{
   'update:enabled': [value: boolean]
@@ -113,6 +116,16 @@ const ABOVE_LINK = 'relative z-10'
       >
         <ShieldAlertIcon aria-hidden="true" data-icon="inline-start" class="text-warning" />
         Untrusted
+      </Badge>
+      <Badge
+        v-if="update"
+        variant="outline"
+        :data-testid="testIds.pluginUpdateAvailable"
+        :data-version="update.availableVersion ?? ''"
+        class="rounded-md border-transparent bg-info/15 px-1.5 text-foreground dark:text-info"
+      >
+        <CircleArrowUpIcon aria-hidden="true" data-icon="inline-start" class="text-info" />
+        {{ update.availableVersion ? `Update to ${update.availableVersion}` : 'Update available' }}
       </Badge>
       <Tooltip v-if="plugin.state === 'incompatible'">
         <TooltipTrigger as-child>

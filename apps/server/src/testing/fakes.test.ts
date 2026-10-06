@@ -10,7 +10,27 @@ import type { TestApp } from './create-test-app.ts'
 import type { FakeBackgroundTasks, FakeChatRunner, RecordingEventBus } from './fakes.ts'
 import { createHash } from 'node:crypto'
 import { existsSync, readdirSync } from 'node:fs'
-import { chatDetailSchema, chatExportSchema, dataCleanupPreviewSchema, dataCleanupResultSchema, dataImportResultSchema, HarnessError, LIMITS, queueChangedDataSchema, queueItemSchema, SHARE_TOKEN_PATTERN, shareSummarySchema, shareViewSchema } from '@harness-forge/shared'
+import {
+  chatDetailSchema,
+  chatExportSchema,
+  claudeImportApplyResultSchema,
+  claudeImportPlanSchema,
+  dataCleanupPreviewSchema,
+  dataCleanupResultSchema,
+  dataImportResultSchema,
+  HarnessError,
+  hookDataSchema,
+  LIMITS,
+  marketplaceDetailSchema,
+  marketplaceListSchema,
+  projectDefinitionFileSchema,
+  projectDefinitionWriteResultSchema,
+  queueChangedDataSchema,
+  queueItemSchema,
+  SHARE_TOKEN_PATTERN,
+  shareSummarySchema,
+  shareViewSchema,
+} from '@harness-forge/shared'
 import { generateImage, generateSpeech, transcribe } from 'ai'
 import { MockTranscriptionModelV4 } from 'ai/test'
 import { and, eq } from 'drizzle-orm'
@@ -26,8 +46,11 @@ import { messageInsertValues } from '../services/chats/store.ts'
 import { createFilesService } from '../services/files/index.ts'
 import { seedStoredFile } from '../services/files/store.test-util.ts'
 import { createTestApp } from './create-test-app.ts'
-import { createFakeHookService, createFakeHookSnapshot, fakeHookRecord, fakeHookResult, hookTargetKey } from './fake-hooks.ts'
+import { createFakeClaudeImportService, fakeClaudeImportItem } from './fake-claude-import.ts'
+import { createFakeHookService, createFakeHookSnapshot, fakeHookRecord, fakeHookResult, fakePromptHookRecord, fakePromptHookResult, hookTargetKey } from './fake-hooks.ts'
+import { createFakeMarketplaceService, fakeMarketplaceEntry, marketplaceSourceKey } from './fake-marketplaces.ts'
 import { createFakeProjectConfigService, fakeProjectConfigSnapshot, fakeProjectHookItem, fakeProjectMcpServerItem } from './fake-project-config.ts'
+import { createFakeProjectDefinitionsService, projectDefinitionFileKey } from './fake-project-definitions.ts'
 import { createFakeProjectMcpManager, fakeProjectMcpTool, fakeProjectMcpTools } from './fake-project-mcp.ts'
 import { createFakeProjectTrustService, trustItemOf } from './fake-project-trust.ts'
 import {
@@ -1203,5 +1226,204 @@ describe('phase 11 fakes: project config, trust and MCP', () => {
     expect(seen).toEqual(['hooks.changed', 'project-trust.changed', 'hooks.changed'])
     expect((t.deps.projectConfig as ReturnType<typeof createFakeProjectConfigService>).snapshots).toBeInstanceOf(Map)
     expect((t.deps.projectMcp as ReturnType<typeof createFakeProjectMcpManager>).toolsCalls).toEqual([])
+  })
+})
+
+describe('phase 12 fakes: hooks (status messages, prompt hooks, importPersonal, sessionEnd)', () => {
+  const signal = new AbortController().signal
+
+  it('statusMessage answers the scripted label by target first, then by event; prompt-hook results carry kind prompt', async () => {
+    const snapshot = createFakeHookSnapshot({ statusMessages: { [hookTargetKey('PreToolUse', 'write_file')]: 'Checking the write…', Stop: 'Reviewing…' } })
+    expect(snapshot.statusMessage('PreToolUse', 'write_file')).toBe('Checking the write…')
+    expect(snapshot.statusMessage('PreToolUse', 'shell')).toBeNull()
+    expect(snapshot.statusMessage('Stop')).toBe('Reviewing…')
+    expect(snapshot.statusMessage('SessionEnd')).toBeNull()
+
+    const blocked = fakePromptHookResult({ block: true, reason: 'run the tests' }, 'Stop')
+    expect(blocked).toMatchObject({ ran: true, block: true, reason: 'run the tests', record: { event: 'Stop', outcome: 'blocked' } })
+    expect(hookDataSchema.parse(blocked.record).hooks[0]).toMatchObject({ kind: 'prompt', model: 'mock:prompt-hook', exitCode: null })
+    expect(fakePromptHookResult({}).record).toBeNull()
+    expect(fakePromptHookResult({ context: 'ok' }, 'PostToolUse').record?.outcome).toBe('context')
+    expect(fakePromptHookRecord('PermissionRequest', 'context', {}, 'mock:echo').hooks[0]?.model).toBe('mock:echo')
+
+    const service = createFakeHookService()
+    const taken = await service.snapshot({ chatId: chatId(7), projectId: null, workspace: null, toolMode: 'ask', origin: 'request', modelRef: 'mock:echo' })
+    service.statusMessages.set('PostToolUseFailure', 'Looking at the failure…')
+    expect(taken.statusMessage('PostToolUseFailure', 'shell')).toBe('Looking at the failure…')
+    service.results.set('PostToolUseFailure', input => fakeHookResult({ context: `failed: ${input.error}` }))
+    expect((await taken.run('PostToolUseFailure', { tool: { name: 'shell', callId: 'c9', input: {} }, error: 'exit 1' }, { signal })).context).toBe('failed: exit 1')
+  })
+
+  it('importPersonal creates valid hooks like create (no fresh auth), fails invalid items and items over the limit, one hooks.changed', async () => {
+    const events = createRecordingEventBus()
+    const service = createFakeHookService({ events })
+    const results = await service.importPersonal([
+      { event: 'PreToolUse', matcher: 'Bash', command: 'sh guard.sh', enabled: false },
+      { type: 'prompt', event: 'Stop', prompt: 'Did the tests run? $ARGUMENTS', model: 'sonnet' },
+      { event: 'PreToolUse', matcher: 'Bash(', command: 'sh broken.sh' },
+    ])
+    expect(results.map(result => result.ok)).toEqual([true, true, false])
+    expect(results[0]).toMatchObject({ ok: true, hook: { type: 'command', enabled: false, command: 'sh guard.sh' } })
+    expect(results[1]).toMatchObject({ ok: true, hook: { type: 'prompt', model: 'sonnet', enabled: true } })
+    expect(service.personal.size).toBe(2)
+    expect(events.ofType('hooks.changed')).toHaveLength(1)
+    expect(await service.importPersonal([{ event: 'Stop', command: '' }])).toEqual([{ ok: false, message: 'The hook is not valid.' }])
+    expect(events.ofType('hooks.changed')).toHaveLength(1)
+    for (let index = service.personal.size; index < LIMITS.personalHooksMax; index++)
+      await service.create({ event: 'Stop', command: `sh stop-${index}.sh` })
+    expect((await service.importPersonal([{ event: 'Stop', command: 'sh one-more.sh' }]))[0]?.ok).toBe(false)
+    expect(service.imported).toHaveLength(5)
+
+    const chat = { id: chatId(8), projectId: null, modelRef: 'mock:echo', settings: {} }
+    await expect(service.sessionEnd(chat)).resolves.toBeUndefined()
+    expect(service.sessionEnds).toEqual([chat])
+    expect(service.calls).toMatchObject({ importPersonal: 3, sessionEnd: 1 })
+  })
+})
+
+describe('phase 12 fakes: marketplaces', () => {
+  const GITHUB = { type: 'github', repo: 'acme/tools' } as const
+
+  it('add fetches the scripted remote and stores it; get, refresh (a failure keeps the catalog), remove; events and suggestions', async () => {
+    const events = createRecordingEventBus()
+    const service = createFakeMarketplaceService({ events, remotes: { [marketplaceSourceKey(GITHUB)]: { name: 'acme', entries: [fakeMarketplaceEntry('lint'), fakeMarketplaceEntry('fmt', { supported: false, unsupportedReason: 'Unsupported source (git).' })] } } })
+    await expect(service.add({ source: { type: 'github', repo: 'acme/other' } })).rejects.toMatchObject({ code: 'not_found' })
+    const added = marketplaceDetailSchema.parse(await service.add({ source: GITHUB }))
+    expect(added).toMatchObject({ name: 'acme', plugins: 2, resolvedRef: 'a'.repeat(40), lastError: null, updates: 0 })
+    expect(added.id).toMatch(/^mkt_/)
+    expect(await service.get(added.id)).toEqual(added)
+    await expect(service.add({ source: GITHUB })).rejects.toMatchObject({ code: 'conflict', details: { reason: 'exists' } })
+
+    service.updates.push({ pluginId: 'lint', marketplaceId: added.id, plugin: 'lint', version: '1.0.0', availableVersion: '1.1.0' })
+    const list = marketplaceListSchema.parse(await service.list())
+    expect(list.items.map(item => [item.name, item.updates])).toEqual([['acme', 1]])
+    expect(list.suggestions.map(suggestion => suggestion.name)).toEqual(['claude-plugins-official'])
+
+    service.remotes.set(marketplaceSourceKey(GITHUB), { name: 'acme', resolvedRef: 'b'.repeat(40), entries: [fakeMarketplaceEntry('lint', { version: '1.1.0' })] })
+    expect(await service.refresh(added.id)).toMatchObject({ plugins: 1, resolvedRef: 'b'.repeat(40) })
+    service.remotes.set(marketplaceSourceKey(GITHUB), new HarnessError({ code: 'rate_limited', message: 'Slow down.', retryAfterMs: 1000 }))
+    await expect(service.refresh(added.id)).rejects.toMatchObject({ code: 'rate_limited' })
+    expect(await service.get(added.id)).toMatchObject({ plugins: 1, lastError: { code: 'rate_limited', message: 'Slow down.' } })
+
+    await service.remove(added.id)
+    await expect(service.get(added.id)).rejects.toMatchObject({ code: 'not_found' })
+    await expect(service.remove(added.id)).rejects.toMatchObject({ code: 'not_found' })
+    expect(events.ofType('marketplace.changed').map(event => event.data.marketplace?.name ?? null)).toEqual(['acme', 'acme', 'acme', null])
+    await service.stop()
+    expect(service.calls).toMatchObject({ list: 1, add: 3, get: 3, refresh: 2, remove: 2, stop: 1 })
+  })
+
+  it('hF_OFFLINE refuses github / url sources (409 offline), a path source still works; reserved names only from anthropics/*', async () => {
+    const official = { type: 'github', repo: 'anthropics/claude-plugins-official' } as const
+    const impostor = { type: 'github', repo: 'evil/official' } as const
+    const folder = { type: 'path', path: '/srv/marketplace' } as const
+    const service = createFakeMarketplaceService({
+      offline: true,
+      remotes: {
+        [marketplaceSourceKey(official)]: { name: 'claude-plugins-official' },
+        [marketplaceSourceKey(impostor)]: { name: 'anthropic-tools' },
+        [marketplaceSourceKey(folder)]: { name: 'local' },
+      },
+    })
+    await expect(service.add({ source: official })).rejects.toMatchObject({ code: 'conflict', details: { reason: 'offline' } })
+    expect(await service.add({ source: folder })).toMatchObject({ name: 'local', resolvedRef: null })
+    service.offline = false
+    await expect(service.add({ source: impostor })).rejects.toMatchObject({ code: 'validation_error' })
+    expect(await service.add({ source: official })).toMatchObject({ name: 'claude-plugins-official' })
+    expect((await service.list()).suggestions).toEqual([])
+  })
+})
+
+describe('phase 12 fakes: claude import', () => {
+  it('home and scan follow homeAnswer (disabled 409, missing 404, fresh auth); upload checks its parts; plans are kept and capped', async () => {
+    const service = createFakeClaudeImportService({ items: [fakeClaudeImportItem('agent', 'reviewer'), fakeClaudeImportItem('hook', 'PreToolUse Bash', { executable: true, warnings: ['runs-commands'] })] })
+    expect(await service.home()).toEqual({ available: true, path: '/home/test/.claude' })
+    let fresh = 0
+    const plan = claudeImportPlanSchema.parse(await service.scan({ requireFreshAuth: () => void (fresh += 1) }))
+    expect(fresh).toBe(1)
+    expect(plan).toMatchObject({ source: 'scan', root: '/home/test/.claude' })
+    expect(plan.items.map(item => [item.kind, item.name])).toEqual([['agent', 'reviewer'], ['hook', 'PreToolUse Bash']])
+    expect(plan.expiresAt - plan.createdAt).toBe(LIMITS.claudeImportPlanTtlMs)
+    service.homeAnswer = { available: false, reason: 'disabled', path: null }
+    await expect(service.scan()).rejects.toMatchObject({ code: 'conflict', details: { reason: 'disabled' } })
+    service.homeAnswer = { available: false, reason: 'missing', path: '/nowhere' }
+    await expect(service.scan()).rejects.toMatchObject({ code: 'not_found' })
+
+    await expect(service.upload({})).rejects.toMatchObject({ code: 'validation_error' })
+    await expect(service.upload({ zip: new Blob(['PK']), files: [{ path: 'agents/a.md', file: new Blob(['a']) }] })).rejects.toMatchObject({ code: 'validation_error' })
+    for (let index = 0; index < LIMITS.claudeImportPlansMax + 1; index++)
+      await service.upload({ label: `upload-${index}`, zip: new Blob(['PK']) })
+    expect(service.plans.size).toBe(LIMITS.claudeImportPlansMax)
+    expect(service.plans.has(plan.id)).toBe(false)
+    expect(service.uploads).toHaveLength(LIMITS.claudeImportPlansMax + 3)
+    await service.stop()
+    expect(service.plans.size).toBe(0)
+  })
+
+  it('apply checks the plan, the keys and the actions, reports outcomes, drops the plan and emits one event of each kind', async () => {
+    const events = createRecordingEventBus()
+    let now = 1_000
+    const service = createFakeClaudeImportService({ events, now: () => now, items: [fakeClaudeImportItem('agent', 'reviewer'), fakeClaudeImportItem('command', 'status'), fakeClaudeImportItem('skill', 'notes')] })
+    const plan = await service.upload({ zip: new Blob(['PK']) })
+    const [agent, command, skill] = plan.items as [typeof plan.items[0], typeof plan.items[0], typeof plan.items[0]]
+    await expect(service.apply({ planId: plan.id, items: [{ key: 'agent:nope', action: 'import' }] })).rejects.toMatchObject({ code: 'validation_error' })
+    await expect(service.apply({ planId: plan.id, items: [{ key: agent.key, action: 'overwrite' }] })).rejects.toMatchObject({ code: 'validation_error' })
+    service.outcomes.set(skill.key, 'failed')
+    let fresh = 0
+    const result = claudeImportApplyResultSchema.parse(await service.apply({ planId: plan.id, items: [{ key: agent.key, action: 'import' }, { key: command.key, action: 'skip' }, { key: skill.key, action: 'import' }] }, { requireFreshAuth: () => void (fresh += 1) }))
+    expect(fresh).toBe(1)
+    expect(result.results.map(entry => entry.outcome)).toEqual(['created', 'skipped', 'failed'])
+    expect(result.counts).toEqual({ created: 1, updated: 0, unchanged: 0, skipped: 1, failed: 1 })
+    expect(events.ofType('customization.changed').map(event => event.data)).toEqual([{}])
+    expect(events.ofType('hooks.changed').map(event => event.data)).toEqual([{ projectId: null }])
+    await expect(service.apply({ planId: plan.id, items: [{ key: agent.key, action: 'import' }] })).rejects.toMatchObject({ code: 'not_found' })
+
+    const expiring = await service.upload({ zip: new Blob(['PK']) })
+    now += LIMITS.claudeImportPlanTtlMs
+    await expect(service.apply({ planId: expiring.id, items: [{ key: agent.key, action: 'import' }] })).rejects.toMatchObject({ code: 'not_found', message: 'The import plan expired. Read the folder again.' })
+    expect(service.applied).toHaveLength(5)
+  })
+})
+
+describe('phase 12 fakes: project definitions', () => {
+  const PROJECT = 'prj_AAAAAAAAAAAAAAAA'
+
+  it('reads, writes with the sha check, splices settings and .mcp.json keys, removes markdown only, emits workspace.changed', async () => {
+    const events = createRecordingEventBus()
+    const service = createFakeProjectDefinitionsService({ events, pending: 2, files: { [projectDefinitionFileKey(PROJECT, '.claude/settings.json')]: '{\n  "model": "sonnet",\n  "hooks": {},\n  "env": { "A": "1" }\n}\n' } })
+    const missing = projectDefinitionFileSchema.parse(await service.read(PROJECT, '.claude/agents/reviewer.md'))
+    expect(missing).toEqual({ path: '.claude/agents/reviewer.md', kind: 'agent', exists: false, content: null, sha256: null, diagnostics: [] })
+    await expect(service.read(PROJECT, '.claude/notes.md')).rejects.toMatchObject({ code: 'validation_error' })
+
+    const created = projectDefinitionWriteResultSchema.parse(await service.write(PROJECT, { path: '.claude/agents/reviewer.md', expectedSha256: null, content: '---\nname: reviewer\n---\nReview.' }))
+    expect(created).toMatchObject({ created: true, trust: { pending: 2 } })
+    await expect(service.write(PROJECT, { path: '.claude/agents/reviewer.md', expectedSha256: null, content: 'x' })).rejects.toMatchObject({ code: 'conflict', details: { reason: 'stale' } })
+    const read = await service.read(PROJECT, '.claude/agents/reviewer.md')
+    expect(read).toMatchObject({ exists: true, content: '---\nname: reviewer\n---\nReview.', sha256: created.sha256 })
+
+    const settings = await service.read(PROJECT, '.claude/settings.json')
+    await service.write(PROJECT, { path: '.claude/settings.json', expectedSha256: settings.sha256, hooks: { Stop: [{ hooks: [{ type: 'command', command: 'sh stop.sh' }] }] } })
+    const spliced = JSON.parse(service.files.get(projectDefinitionFileKey(PROJECT, '.claude/settings.json')) ?? '{}') as Record<string, unknown>
+    expect(Object.keys(spliced)).toEqual(['model', 'hooks', 'env'])
+    expect(spliced.env).toEqual({ A: '1' })
+    const mcp = await service.write(PROJECT, { path: '.mcp.json', expectedSha256: null, mcpServers: { github: { type: 'http', url: 'https://example.com/mcp' } } })
+    expect(mcp.created).toBe(true)
+    await service.write(PROJECT, { path: '.mcp.json', expectedSha256: mcp.sha256, mcpServers: null })
+    expect(service.files.get(projectDefinitionFileKey(PROJECT, '.mcp.json'))).toBe('{}\n')
+
+    await expect(service.remove(PROJECT, '.claude/settings.json', 'a'.repeat(64))).rejects.toMatchObject({ code: 'validation_error' })
+    await expect(service.remove(PROJECT, '.claude/agents/reviewer.md', 'a'.repeat(64))).rejects.toMatchObject({ code: 'conflict', details: { reason: 'stale' } })
+    await service.remove(PROJECT, '.claude/agents/reviewer.md', created.sha256)
+    await expect(service.remove(PROJECT, '.claude/agents/reviewer.md', created.sha256)).rejects.toMatchObject({ code: 'not_found' })
+    expect(events.ofType('workspace.changed').map(event => [event.data.source, event.data.chatId, event.data.paths])).toEqual([
+      ['user', null, ['.claude/agents/reviewer.md']],
+      ['user', null, ['.claude/settings.json']],
+      ['user', null, ['.mcp.json']],
+      ['user', null, ['.mcp.json']],
+      ['user', null, ['.claude/agents/reviewer.md']],
+    ])
+    service.missingProjects.add(PROJECT)
+    await expect(service.read(PROJECT, '.mcp.json')).rejects.toMatchObject({ code: 'not_found' })
+    expect(service.calls).toMatchObject({ read: 5, write: 5, remove: 4 })
   })
 })

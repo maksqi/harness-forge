@@ -47,6 +47,9 @@
 //   `PreparedRun` never holds the placeholder expansion;
 // - then `resolveRunOutputStyle` (`output-style.ts`, W11.6) gives `PreparedRun.outputStyle` for a chat-model run that
 //   calls the model (null for image turns and command replies) and its notices.
+// Phase 12 (C44 stub call sites, ADR-058; W12.7 implements behind them): the command resolutions pass
+// `CommandContext.argumentVars` (`commandArgumentVars`: `CLAUDE_SESSION_ID` = the chat id) for the `expandArguments`
+// options of definition bodies (`argumentOptions`, `commands.ts`; the stub keeps the Phase 10 expansion).
 import type {
   CatalogModel,
   ChatRequestBody,
@@ -433,6 +436,14 @@ export function commandExpansionHost(deps: Pick<AppDeps, 'env' | 'projects' | 'p
   return expansionHost(deps, turnWorkspace(deps, projectId))
 }
 
+/**
+ * The `${NAME}` variables of definition bodies a command resolution of the chat knows (Phase 12, ADR-058;
+ * `CommandContext.argumentVars`): `CLAUDE_SESSION_ID` = the chat id (W12.7 adds `CLAUDE_PROJECT_DIR`).
+ */
+export function commandArgumentVars(chatId: string): Readonly<Record<string, string>> {
+  return Object.freeze({ CLAUDE_SESSION_ID: chatId })
+}
+
 /** The spans and `@path` reads of a new message's command that still have to run (`PromptCommandResolution.finish`). */
 type PendingExpansion = () => Promise<PromptCommandResolution>
 
@@ -454,6 +465,7 @@ async function buildUserMessage(context: PrepareContext): Promise<{ message: Har
     expansion: expansionHost(deps, context.turnWorkspace),
     logger: context.logger,
     deferExpansion: true,
+    argumentVars: commandArgumentVars(body.chatId),
   })
   let command = resolved
   let expand: PendingExpansion | null = null
@@ -484,7 +496,12 @@ async function regeneratedCommand(context: PrepareContext, userMessage: HarnessU
   const type = userMessage.metadata?.command?.type
   if (type !== 'reply' && type !== 'compact')
     return null
-  const resolution = await resolveCommand(context.deps, firstTextOf(userMessage.parts), { chatId: context.body.chatId, signal: context.run.signal, catalog: context.catalog })
+  const resolution = await resolveCommand(context.deps, firstTextOf(userMessage.parts), {
+    chatId: context.body.chatId,
+    signal: context.run.signal,
+    catalog: context.catalog,
+    argumentVars: commandArgumentVars(context.body.chatId),
+  })
   return resolution?.kind === 'prompt' ? null : resolution
 }
 

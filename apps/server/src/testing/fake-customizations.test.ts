@@ -145,3 +145,49 @@ describe('createFakeCustomizationService: personal definitions', () => {
     expect(target.calls.stop).toBe(1)
   })
 })
+
+describe('createFakeCustomizationService: phase 12 (importDefinitions, turnedOff)', () => {
+  const SPAN_COMMAND = '---\nname: status\ndescription: Show the status.\n---\nRun !`git status --short`: $ARGUMENTS'
+  const PLAIN_COMMAND = '---\nname: greet\ndescription: Greets.\n---\nSay hello to $ARGUMENTS.'
+
+  it('restoreBackup turns restored commands with ! spans off and counts them in turnedOff', async () => {
+    const fake = createFakeCustomizationService()
+    const result = await fake.restoreBackup([
+      { kind: 'command', name: 'status', content: SPAN_COMMAND, enabled: true },
+      { kind: 'command', name: 'greet', content: PLAIN_COMMAND, enabled: true },
+      // Already off in the backup: restored off, not counted.
+      { kind: 'agent', name: 'reviewer', content: AGENT, enabled: false },
+    ])
+    expect(result).toMatchObject({ imported: 3, skipped: 0, failed: 0, turnedOff: 1 })
+    expect([...fake.personal.values()].map(row => [row.name, row.enabled]).sort()).toEqual([['greet', true], ['reviewer', false], ['status', false]])
+  })
+
+  it('importDefinitions creates, overwrites (keeping enabled), renames; span commands arrive off unless enabled; one event', async () => {
+    const events = createRecordingEventBus()
+    const fake = createFakeCustomizationService({ events })
+    const existing = await fake.create({ kind: 'agent', content: AGENT, enabled: false })
+    const before = events.ofType('customization.changed').length
+    const results = await fake.importDefinitions([
+      { kind: 'command', content: SPAN_COMMAND, action: 'create' },
+      { kind: 'command', content: PLAIN_COMMAND.replace('greet', 'hello'), action: 'create', enable: true },
+      { kind: 'agent', content: AGENT.replace('carefully', 'twice'), action: 'overwrite' },
+      { kind: 'agent', content: AGENT, action: 'rename', renameTo: 'reviewer-2' },
+      { kind: 'skill', content: '---\ndescription: [broken\n---\n', action: 'create' },
+      { kind: 'command', content: SPAN_COMMAND, action: 'create' },
+    ])
+    expect(results.map(result => (result.ok ? result.outcome : 'failed'))).toEqual(['created', 'created', 'updated', 'created', 'failed', 'failed'])
+    expect(results[0]).toMatchObject({ ok: true, customization: { name: 'status', enabled: false } })
+    expect(results[2]).toMatchObject({ ok: true, customization: { id: existing.id, enabled: false } })
+    expect(results[3]).toMatchObject({ ok: true, customization: { name: 'reviewer-2', enabled: true } })
+    for (const result of results.filter(entry => !entry.ok))
+      expect((result as { message: string }).message.length).toBeLessThanOrEqual(300)
+    expect(fake.personal.get(existing.id)?.content).toContain('Review the diff twice.')
+    expect(events.ofType('customization.changed').slice(before).map(event => event.data)).toEqual([{}])
+    expect(fake.imported).toHaveLength(6)
+    expect(fake.calls.importDefinitions).toBe(1)
+
+    // An enabled import of a span command stays on.
+    const enabled = await fake.importDefinitions([{ kind: 'command', content: SPAN_COMMAND.replace('status', 'status-now'), action: 'create', enable: true }])
+    expect(enabled[0]).toMatchObject({ ok: true, customization: { name: 'status-now', enabled: true } })
+  })
+})

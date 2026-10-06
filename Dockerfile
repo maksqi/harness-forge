@@ -16,6 +16,10 @@
 # Master-key rotation with HF_MASTER_KEY (ADR-034): stop the container, then run the offline CLI on the same volume:
 #   docker run --rm -v harness-forge-data:/data -e HF_MASTER_KEY=<old> -e HF_NEW_MASTER_KEY=<new> harness-forge \
 #     node apps/server/dist/main.mjs rotate-key
+#
+# Import from Claude Code (ADR-055): HF_CLAUDE_HOME=0 turns the server-side scan off (the browser upload still works).
+# To scan a Claude Code folder from the container, mount it read-only (readable by uid 1000) and name it:
+#   docker run ... -v ~/.claude:/claude:ro -e HF_CLAUDE_HOME=/claude harness-forge
 
 ARG NODE_VERSION=24
 
@@ -68,7 +72,8 @@ RUN apk add --no-cache tini bash git \
 ENV NODE_ENV=production \
   HF_HOST=0.0.0.0 \
   HF_PORT=8787 \
-  HF_DATA_DIR=/data
+  HF_DATA_DIR=/data \
+  HF_CLAUDE_HOME=0
 
 WORKDIR /app
 COPY --from=prod-deps /app/node_modules ./node_modules

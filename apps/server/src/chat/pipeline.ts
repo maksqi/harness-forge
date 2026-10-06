@@ -58,6 +58,13 @@
 //   the notice `project-mcp-unavailable`;
 // - output styles: `PreparedRun.outputStyle` (`output-style.ts`, resolved while preparing) reaches `buildRunParams`
 //   (`RunParamsInput.outputStyle`; the main agent only).
+// Phase 12 (C44, ADR-057 / ADR-058; COMPLETE and FROZEN after P12-0b): the run's `RunHooks` also run
+// `PermissionRequest` and settle the hook records of every call in the approval function (`approval.ts`),
+// `PostToolUseFailure` in the tool wrapper (`tools.ts`; its model text goes through the same queue and hooks piece as
+// `PostToolUse`'s, so `splitHooks` rebuilds it from the saved reply), `PostCompact` after an automatic compaction
+// (`compaction/guard.ts`) and `SubagentStart` in the children; the hook matchers see the Claude names of plugin MCP
+// servers too (`hookMcpServerNames`); the `hooks` activity carries the `statusMessage` label. The agent scope's
+// `loadSkill` passes its options (`{ file?, toolCallId? }`, `skills.ts`; W12.7). Nothing else changes here.
 import type { HarnessError, HarnessUIMessage, HarnessUIMessagePart, MessageMetadata, NoticeData, ReasoningEffort, RunOrigin, ToolMode } from '@harness-forge/shared'
 import type { LanguageModelUsage, ModelMessage, TextStreamPart, Tool, ToolSet, UIMessageChunk, UIMessageStreamOnEndCallback, UIMessageStreamWriter } from 'ai'
 import type { Logger } from '../logger.ts'
@@ -100,7 +107,7 @@ import {
 import { prepareModelFiles } from './files.ts'
 import { GeneratedFiles, storeGeneratedFiles } from './generated-files.ts'
 import { finalizeParts, hasPendingApproval, plainText } from './history.ts'
-import { createRunHooks, noHookSnapshot, PERMISSION_PROMPT, permissionPromptMessage } from './hooks.ts'
+import { createRunHooks, hookMcpServerNames, noHookSnapshot, PERMISSION_PROMPT, permissionPromptMessage } from './hooks.ts'
 import { imageStream } from './images.ts'
 import { buildModelHistory } from './model-history.ts'
 import { NOTICES } from './notices.ts'
@@ -921,7 +928,9 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
     origin,
     modelRef,
   }, { signal: run.signal })
-  const hooks = createRunHooks({ snapshot, host: session, continued: prepared.continued, messageId: session.assistantId, mcpServerNames: projectTools.names, logger })
+  // Phase 12: hook matchers also see the Claude names of plugin MCP servers (`mcp__plugin_<name>_<server>__*`).
+  const mcpServerNames = hookMcpServerNames(deps.registry, projectTools.names)
+  const hooks = createRunHooks({ snapshot, host: session, continued: prepared.continued, messageId: session.assistantId, mcpServerNames, logger })
   session.hooks = hooks
   // The run's catalog snapshot (Phase 10): agent types, skills, background launches.
   const catalog = prepared.catalog
@@ -944,7 +953,7 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
     toolMode: session.ctx.toolMode,
     runSubagent: (input, options) => subagents.run(input, options),
     todos: () => latestTodos(prepared.history),
-    loadSkill: (name, signal) => loadSkill({ deps, catalog, workspace: prepared.workspace, logger }, name, signal),
+    loadSkill: (name, signal, options) => loadSkill({ deps, catalog, workspace: prepared.workspace, logger }, name, signal, options),
     savePlan: (plan, c) => savePlan({ deps, settings: prepared.settings, logger, now: session.ctx.now }, plan, c),
   }
   const skills = catalog.skills()

@@ -65,6 +65,15 @@ const BACKGROUND_TASK_REASON = 'background tasks: ids, enums, the agent type and
 const HOOKS_TRUST_REASON = 'hooks / project trust: ids, enums, shell commands, matchers, hashes and labels; never a data/files id'
 
 /**
+ * Why the Phase 12 columns of migration `0009` are not scanned (ADR-053 / ADR-054 / ADR-057): the `marketplaces` rows
+ * (ids, names, sources, resolved commits, the normalized catalog of a remote `marketplace.json`, fetch errors) are
+ * configuration read from a remote or a server folder, never in a backup; `plugins.format` / `origin` are an enum and the
+ * install origin (marketplace, entry, commit, overlay); the new `hooks` columns are the handler type, a prompt hook's
+ * prompt and model and the handler options. None of them names a data/files id.
+ */
+const CLAUDE_ECOSYSTEM_REASON = 'marketplaces / plugin format and origin / hook handler fields: configuration and remote catalogs; never a data/files id'
+
+/**
  * `table.column` -> why it is not scanned: every text, JSON or blob column outside `REFERENCE_SOURCES`. A new column
  * must be added to one of the two lists (the schema-coverage test).
  */
@@ -166,6 +175,19 @@ export const UNSCANNED_COLUMNS: Readonly<Record<string, string>> = {
   'project_trust.kind': HOOKS_TRUST_REASON,
   'project_trust.label': HOOKS_TRUST_REASON,
   'projects.output_style': 'an output style name (`AGENT_NAME_PATTERN`)',
+  // Phase 12 (ADR-053 / ADR-054 / ADR-057, migration `0009`).
+  'marketplaces.id': CLAUDE_ECOSYSTEM_REASON,
+  'marketplaces.name': CLAUDE_ECOSYSTEM_REASON,
+  'marketplaces.source': CLAUDE_ECOSYSTEM_REASON,
+  'marketplaces.resolved_ref': CLAUDE_ECOSYSTEM_REASON,
+  'marketplaces.catalog': CLAUDE_ECOSYSTEM_REASON,
+  'marketplaces.last_error': CLAUDE_ECOSYSTEM_REASON,
+  'plugins.format': CLAUDE_ECOSYSTEM_REASON,
+  'plugins.origin': CLAUDE_ECOSYSTEM_REASON,
+  'hooks.type': CLAUDE_ECOSYSTEM_REASON,
+  'hooks.prompt': CLAUDE_ECOSYSTEM_REASON,
+  'hooks.model': CLAUDE_ECOSYSTEM_REASON,
+  'hooks.options': CLAUDE_ECOSYSTEM_REASON,
 }
 
 /** `table.column` names of the scanned columns. */

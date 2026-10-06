@@ -14,6 +14,9 @@
 // Phase 11 (C37, ADR-048; FROZEN again after P11-0b): the scope gains nothing. A run's command hooks reach its
 // sub-agents through the host (`ChildSession.hooks`, `subagent/host.ts`: `RunSession.hooks.forChild(…)` when the runner
 // starts a child), never through this scope or the call context, so no plugin tool can run or skip a hook.
+// Phase 12 (C44, open point 10; COMPLETE and FROZEN after P12-0b): `loadSkill(name, signal, options?)` takes the
+// `skill` call's options (`LoadSkillOptions`: a supporting `file` of a plugin skill, the call's `toolCallId` for a fork
+// skill's child); `chat/skills.ts` ignores them until W12.7.
 import type { ToolCallContext } from '@harness-forge/plugin-sdk'
 import type { ExitPlanModeOutput, SkillOutput, TaskInput, TaskOutput, TodoState, ToolMode } from '@harness-forge/shared'
 
@@ -23,6 +26,20 @@ export interface RunSubagentOptions {
   readonly toolCallId: string
   /** The `task` call's abort signal (the run's Stop, the tool timeout); the child also has its own deadline. */
   readonly signal: AbortSignal
+}
+
+/** The call-specific options of `AgentRunScope.loadSkill` (Phase 12, open point 10). */
+export interface LoadSkillOptions {
+  /**
+   * A supporting file of a plugin skill to read instead of its body (relative to the skill folder; `skill { file }`,
+   * W12.7 through the skill-files helper). Absent = the skill itself.
+   */
+  readonly file?: string
+  /**
+   * The `skill` tool call id: a fork skill (`context: fork`) runs its child under it (`<toolCallId>/<child call id>`,
+   * W12.7). Absent = the skill cannot fork (its body is returned).
+   */
+  readonly toolCallId?: string
 }
 
 /**
@@ -52,9 +69,10 @@ export interface AgentRunScope {
   /**
    * Phase 10 (ADR-045; `chat/skills.ts`, W10.5): loads one skill of the run's catalog for `skill` (the body read and
    * validated again; a project skill also lists its supporting files). Rejects for an unknown, disabled or unreadable
-   * skill (the tool error the model reads names the available skills) and when `signal` aborts.
+   * skill (the tool error the model reads names the available skills) and when `signal` aborts. Phase 12 (open point
+   * 10): `options` (`LoadSkillOptions`: `file`, `toolCallId`); a fork skill's report comes back as `content`.
    */
-  loadSkill: (name: string, signal: AbortSignal) => Promise<SkillOutput>
+  loadSkill: (name: string, signal: AbortSignal, options?: LoadSkillOptions) => Promise<SkillOutput>
   /**
    * Phase 10 (ADR-047; `chat/plan-file.ts`, W10.5): writes an approved plan to the project when `planFiles` is on and the
    * call context `c` has a workspace (journaled through the run scope bound to `c`). Never rejects: a failed write is

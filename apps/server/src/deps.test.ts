@@ -1,20 +1,29 @@
+import type { AddressInfo } from 'node:net'
 import type { CreateDepsOptions } from './deps.ts'
+import type { MarketplaceService } from './plugins/marketplaces/types.ts'
 import type { CheckpointService } from './services/checkpoints/types.ts'
+import type { ClaudeImportService } from './services/claude-import/types.ts'
 import type { CustomizationService } from './services/customizations/types.ts'
+import type { ProjectDefinitionsService } from './services/project-definitions/types.ts'
 import type { ProjectFileService } from './services/project-files/types.ts'
 import type { ShellRuleService } from './services/shell-rules/types.ts'
 import type { FakeBackgroundTasks } from './testing/fake-background-tasks.ts'
 import type { FakeCheckpointService } from './testing/fake-checkpoints.ts'
+import type { FakeClaudeImportService } from './testing/fake-claude-import.ts'
 import type { FakeCustomizationService } from './testing/fake-customizations.ts'
 import type { FakeHookService } from './testing/fake-hooks.ts'
+import type { FakeMarketplaceService } from './testing/fake-marketplaces.ts'
 import type { FakeProjectConfigService } from './testing/fake-project-config.ts'
+import type { FakeProjectDefinitionsService } from './testing/fake-project-definitions.ts'
 import type { FakeProjectFileService } from './testing/fake-project-files.ts'
 import type { FakeProjectMcpManager } from './testing/fake-project-mcp.ts'
 import type { FakeProjectTrustService } from './testing/fake-project-trust.ts'
 import type { FakeProjectService } from './testing/fake-projects.ts'
 import type { FakeShellRuleService } from './testing/fake-shell-rules.ts'
 import type { AppDeps } from './types.ts'
+import { Buffer } from 'node:buffer'
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import process from 'node:process'
@@ -22,26 +31,42 @@ import { getConnInfo } from '@hono/node-server/conninfo'
 import { afterEach, describe, expect, it } from 'vitest'
 import { chatBody, postChat, readSse, runnerOf, streamedText, testChatId } from './chat/testing.ts'
 import { openDatabase } from './db/client.ts'
-import { BOOT_STEPS, createDeps, SERVICE_FACTORIES, SERVICE_NAMES, SHUTDOWN_STEPS, startDeps, stopDeps } from './deps.ts'
+import {
+  BOOT_STEPS,
+  createDeps,
+  createPluginSourceInstaller,
+  createPluginSourceMarketplaces,
+  pluginSourceFetch,
+  SERVICE_FACTORIES,
+  SERVICE_NAMES,
+  SHUTDOWN_STEPS,
+  startDeps,
+  stopDeps,
+} from './deps.ts'
 import { EnvError, loadEnv } from './env.ts'
 import { createMemoryLogger } from './logger.ts'
 import { createProjectMcpManager } from './mcp/project.ts'
 import { createPluginInstaller } from './plugins/install/index.ts'
 import { createRedactor } from './security/redact.ts'
 import { createCheckpointService } from './services/checkpoints/index.ts'
+import { createClaudeImportService } from './services/claude-import/index.ts'
 import { createCustomizationService } from './services/customizations/index.ts'
 import { createDataService } from './services/data/index.ts'
 import { createHookService } from './services/hooks/index.ts'
 import { createProjectConfigService } from './services/project-config/index.ts'
+import { createProjectDefinitionsService } from './services/project-definitions/index.ts'
 import { createProjectFileService } from './services/project-files/index.ts'
 import { createProjectTrustService } from './services/project-trust/index.ts'
 import { createProjectService } from './services/projects/index.ts'
 import { SAMPLE_SHARE_TOKEN } from './testing/api-samples.ts'
 import { createTestApp } from './testing/create-test-app.ts'
 import { createFakeBackgroundTasks } from './testing/fake-background-tasks.ts'
+import { createFakeClaudeImportService } from './testing/fake-claude-import.ts'
 import { createFakeCustomizationService } from './testing/fake-customizations.ts'
 import { createFakeHookService } from './testing/fake-hooks.ts'
+import { createFakeMarketplaceService } from './testing/fake-marketplaces.ts'
 import { createFakeProjectConfigService } from './testing/fake-project-config.ts'
+import { createFakeProjectDefinitionsService } from './testing/fake-project-definitions.ts'
 import { createFakeProjectFileService } from './testing/fake-project-files.ts'
 import { createFakeProjectMcpManager } from './testing/fake-project-mcp.ts'
 import { createFakeProjectTrustService } from './testing/fake-project-trust.ts'
@@ -542,7 +567,7 @@ describe('phase 8 skeleton (checkpoints, shell rules, the data service lifecycle
     expect(order).toEqual([...BOOT_STEPS])
   })
 
-  it('stopDeps order: data (first) -> runs -> hooks -> projectMcp -> customizations -> projectConfig -> projectFiles -> checkpoints -> plugins -> mcp -> catalog -> events; a failing step still lets the next run', async () => {
+  it('stopDeps order: claudeImport (first) -> data -> runs -> hooks -> projectMcp -> customizations -> projectConfig -> projectFiles -> checkpoints -> marketplaces -> plugins -> mcp -> catalog -> events; a failing step still lets the next run', async () => {
     const t = await createTestApp()
     cleanups.push(() => t.close())
     const order: string[] = []
@@ -554,6 +579,9 @@ describe('phase 8 skeleton (checkpoints, shell rules, the data service lifecycle
     const deps = new Proxy(t.deps, {
       get(target, key, receiver) {
         switch (key) {
+          // Phase 12: the import plans first, the marketplace fetches right before the plugins.
+          case 'claudeImport': return { ...target.claudeImport, stop: step('claudeImport', true) }
+          case 'marketplaces': return { ...target.marketplaces, stop: step('marketplaces') }
           case 'data': return { ...target.data, stop: step('data', true) }
           case 'runs': return { ...target.runs, stopAll: step('runs') }
           // Phase 11: the hook processes, then the project MCP runtimes, right after the runs.
@@ -578,10 +606,10 @@ describe('phase 8 skeleton (checkpoints, shell rules, the data service lifecycle
       },
     })
     await expect(stopDeps(deps)).resolves.toBeUndefined()
-    expect(order).toEqual(['data', 'runs', 'hooks', 'projectMcp', 'customizations', 'projectConfig', 'projectFiles', 'checkpoints', 'plugins', 'mcp', 'catalog', 'events'])
+    expect(order).toEqual(['claudeImport', 'data', 'runs', 'hooks', 'projectMcp', 'customizations', 'projectConfig', 'projectFiles', 'checkpoints', 'marketplaces', 'plugins', 'mcp', 'catalog', 'events'])
     expect(order).toEqual([...SHUTDOWN_STEPS])
     const failures = t.logs.records.filter(record => record.msg === 'shutdown step failed').map(record => record.step)
-    expect(failures).toEqual(['data', 'hooks', 'projectFiles', 'checkpoints'])
+    expect(failures).toEqual(['claudeImport', 'data', 'hooks', 'projectFiles', 'checkpoints'])
   })
 
   it('startDeps logs HF_TEST_FILE_SWEEP_DELAY_MS without HF_MOCK_PROVIDER=1 as a warning (ignored)', async () => {
@@ -663,7 +691,7 @@ describe('phase 9 skeleton (project files, the steer queue members, the stop ord
   it('the stop order: the runs (queues first, inside stopAll) -> the file index -> checkpoints', async () => {
     // Phase 10: the customization catalog sits between the runs and the file index; Phase 11: the hook processes, the
     // project MCP runtimes and the project config caches too.
-    expect(SHUTDOWN_STEPS).toEqual(['data', 'runs', 'hooks', 'projectMcp', 'customizations', 'projectConfig', 'projectFiles', 'checkpoints', 'plugins', 'mcp', 'catalog', 'events'])
+    expect(SHUTDOWN_STEPS).toEqual(['claudeImport', 'data', 'runs', 'hooks', 'projectMcp', 'customizations', 'projectConfig', 'projectFiles', 'checkpoints', 'marketplaces', 'plugins', 'mcp', 'catalog', 'events'])
     expect(SHUTDOWN_STEPS.indexOf('projectFiles')).toBe(SHUTDOWN_STEPS.indexOf('runs') + 5)
     // A runner's stopAll runs to its end (queues cleared, runs stopped) before the index is dropped.
     const t = await createTestApp()
@@ -946,7 +974,7 @@ describe('phase 11 skeleton (hooks, project config, project trust, project MCP, 
   })
 
   it('sHUTDOWN_STEPS: the hook processes and the project MCP runtimes stop right after the runs; project config after the customizations', () => {
-    expect(SHUTDOWN_STEPS).toEqual(['data', 'runs', 'hooks', 'projectMcp', 'customizations', 'projectConfig', 'projectFiles', 'checkpoints', 'plugins', 'mcp', 'catalog', 'events'])
+    expect(SHUTDOWN_STEPS).toEqual(['claudeImport', 'data', 'runs', 'hooks', 'projectMcp', 'customizations', 'projectConfig', 'projectFiles', 'checkpoints', 'marketplaces', 'plugins', 'mcp', 'catalog', 'events'])
     expect(SHUTDOWN_STEPS.indexOf('hooks')).toBe(SHUTDOWN_STEPS.indexOf('runs') + 1)
     expect(SHUTDOWN_STEPS.indexOf('projectMcp')).toBe(SHUTDOWN_STEPS.indexOf('hooks') + 1)
     expect(SHUTDOWN_STEPS.indexOf('projectConfig')).toBeGreaterThan(SHUTDOWN_STEPS.indexOf('customizations'))
@@ -972,5 +1000,130 @@ describe('phase 11 skeleton (hooks, project config, project trust, project MCP, 
     cleanups.push(() => v.close())
     expect(v.deps.hooks).toBe(override)
     expect('toolsCalls' in v.deps.projectMcp).toBe(false)
+  })
+})
+
+describe('phase 12 skeleton (marketplaces, the home-folder import, project definitions, the plugin-source fetch, the stop order)', () => {
+  const PHASE_12 = ['marketplaces', 'claudeImport', 'projectDefinitions'] as const
+
+  it('wires the three services with the C43 factories; the stubs answer an empty list, the home folder and 501', async () => {
+    const t = await createTestApp()
+    cleanups.push(() => t.close())
+    for (const name of PHASE_12)
+      expect(SERVICE_NAMES, name).toContain(name)
+    expect(SERVICE_FACTORIES.marketplaces).toBe(createPluginSourceMarketplaces)
+    expect(SERVICE_FACTORIES.claudeImport).toBe(createClaudeImportService)
+    expect(SERVICE_FACTORIES.projectDefinitions).toBe(createProjectDefinitionsService)
+    // Phase 12: the installer is the W3.2 installer with the plugin-source fetch.
+    expect(SERVICE_FACTORIES.installer).toBe(createPluginSourceInstaller)
+
+    const list = await t.deps.marketplaces.list()
+    expect(list.items).toEqual([])
+    expect(list.updates).toEqual([])
+    expect(list.suggestions.map(suggestion => suggestion.name)).toEqual(['claude-plugins-official'])
+    await expect(t.deps.marketplaces.add({ source: { type: 'github', repo: 'acme/tools' } })).rejects.toMatchObject({ code: 'not_implemented' })
+    // createTestApp points HF_CLAUDE_HOME into its temp data directory (never the real ~/.claude): missing there.
+    expect(t.env.claudeHome).toBe(join(t.env.dataDir, 'claude-home'))
+    expect(await t.deps.claudeImport.home()).toEqual({ available: false, reason: 'missing', path: t.env.claudeHome })
+    await expect(t.deps.claudeImport.scan()).rejects.toMatchObject({ code: 'not_implemented' })
+    await expect(t.deps.projectDefinitions.read('prj_AAAAAAAAAAAAAAAA', '.claude/agents/a.md')).rejects.toMatchObject({ code: 'not_implemented' })
+  })
+
+  it('no boot step (BOOT_STEPS unchanged): startDeps never touches them; shutdown stops claudeImport and marketplaces only', async () => {
+    expect(BOOT_STEPS).toEqual(['projects', 'checkpoints', 'runs', 'installer', 'plugins', 'catalog', 'mcp', 'data'])
+    const touched: string[] = []
+    const watched = <K extends typeof PHASE_12[number]>(name: K, make: (d: AppDeps) => AppDeps[K]) => (d: AppDeps): AppDeps[K] => new Proxy(make(d), {
+      get(target, key, receiver) {
+        touched.push(`${name}.${String(key)}`)
+        return Reflect.get(target, key, receiver) as unknown
+      },
+    })
+    const t = await createTestApp({
+      factories: {
+        marketplaces: watched('marketplaces', createPluginSourceMarketplaces),
+        claudeImport: watched('claudeImport', createClaudeImportService),
+        projectDefinitions: watched('projectDefinitions', createProjectDefinitionsService),
+      },
+    })
+    cleanups.push(() => t.close())
+    expect(touched).toEqual([])
+    await t.close()
+    expect(touched).toEqual(['claudeImport.stop', 'marketplaces.stop'])
+  })
+
+  it('sHUTDOWN_STEPS: the import plans first; the marketplace fetches after the checkpoints, right before the plugins', () => {
+    expect(SHUTDOWN_STEPS).toEqual(['claudeImport', 'data', 'runs', 'hooks', 'projectMcp', 'customizations', 'projectConfig', 'projectFiles', 'checkpoints', 'marketplaces', 'plugins', 'mcp', 'catalog', 'events'])
+    expect(SHUTDOWN_STEPS[0]).toBe('claudeImport')
+    expect(SHUTDOWN_STEPS.indexOf('marketplaces')).toBe(SHUTDOWN_STEPS.indexOf('checkpoints') + 1)
+    expect(SHUTDOWN_STEPS.indexOf('plugins')).toBe(SHUTDOWN_STEPS.indexOf('marketplaces') + 1)
+    // The Phase 11 neighbors are unchanged; the project definition editor keeps no state.
+    expect(SHUTDOWN_STEPS.indexOf('hooks')).toBe(SHUTDOWN_STEPS.indexOf('runs') + 1)
+    expect(SHUTDOWN_STEPS).not.toContain('projectDefinitions')
+  })
+
+  it('the plugin-source fetch goes to the loopback test remote only with HF_MOCK_PROVIDER=1 and HF_TEST_REMOTE_URL', async () => {
+    const requests: string[] = []
+    const server = createServer((request, response) => {
+      requests.push(`${request.method} ${request.url}`)
+      response.writeHead(404).end()
+    })
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    cleanups.push(() => new Promise<void>(resolve => server.close(() => resolve())))
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+
+    const t = await createTestApp({ start: false, env: { HF_MOCK_PROVIDER: '1', HF_TEST_REMOTE_URL: base } })
+    cleanups.push(() => t.close())
+    expect(t.env.testRemoteUrl).toBe(base)
+    expect(t.logs.records.some(record => record.level === 'warn' && String(record.msg).includes('test-only remote URL'))).toBe(false)
+    // A URL install through the installer of deps: rerouted to `<base>/<host>/<path>` (the fake answers 404).
+    const integrity = `sha256-${Buffer.alloc(32).toString('base64')}`
+    await expect(t.deps.installer.inspect({ source: 'url', url: 'https://plugins.example.com/acme.zip', integrity })).rejects.toMatchObject({ code: 'provider_error' })
+    expect(requests).toEqual(['GET /plugins.example.com/acme.zip'])
+    // The fetch itself: https only, and a plain loopback URL is still refused (never the network, never the fake).
+    const direct = pluginSourceFetch(t.env)
+    await expect(direct(`${base}/api.github.com/x`, { maxBytes: 1024 })).rejects.toBeDefined()
+    expect(requests).toHaveLength(1)
+
+    // Without the mock provider the variable is ignored (null) and the boot logs the warning.
+    const ignored = await createTestApp({ env: { HF_TEST_REMOTE_URL: base } })
+    cleanups.push(() => ignored.close())
+    expect(ignored.env.testRemoteUrl).toBeNull()
+    expect(ignored.logs.records.filter(record => record.level === 'warn').map(record => record.msg)).toContain('the test-only remote URL is ignored: it is honored only with HF_MOCK_PROVIDER=1')
+    await expect(pluginSourceFetch(ignored.env)(`${base}/x`, { maxBytes: 1024 })).rejects.toBeDefined()
+    expect(requests).toHaveLength(1)
+  })
+
+  it('createTestApp accepts marketplaces, claudeImport and projectDefinitions: the fakes and ready services; overrides and factories win', async () => {
+    const t = await createTestApp({ start: false, marketplaces: 'fake', claudeImport: 'fake', projectDefinitions: 'fake', env: { HF_OFFLINE: '1' } })
+    cleanups.push(() => t.close())
+    expect((t.deps.marketplaces as FakeMarketplaceService).offline).toBe(true)
+    expect((t.deps.claudeImport as FakeClaudeImportService).calls.home).toBe(0)
+    expect((t.deps.projectDefinitions as FakeProjectDefinitionsService).files.size).toBe(0)
+
+    const ready: { marketplaces: MarketplaceService, claudeImport: ClaudeImportService, projectDefinitions: ProjectDefinitionsService } = {
+      marketplaces: createFakeMarketplaceService(),
+      claudeImport: createFakeClaudeImportService(),
+      projectDefinitions: createFakeProjectDefinitionsService(),
+    }
+    const u = await createTestApp({ start: false, ...ready })
+    cleanups.push(() => u.close())
+    for (const name of PHASE_12)
+      expect(u.deps[name], name).toBe(ready[name])
+
+    const override = createFakeClaudeImportService()
+    const v = await createTestApp({ start: false, claudeImport: 'fake', marketplaces: 'fake', overrides: { claudeImport: override }, factories: { marketplaces: createPluginSourceMarketplaces } })
+    cleanups.push(() => v.close())
+    expect(v.deps.claudeImport).toBe(override)
+    expect('remotes' in v.deps.marketplaces).toBe(false)
+  })
+
+  it('createTestApp never points HF_CLAUDE_HOME at the real home: the temp default, an explicit value or 0 wins', async () => {
+    const off = await createTestApp({ start: false, env: { HF_CLAUDE_HOME: '0' } })
+    cleanups.push(() => off.close())
+    expect(off.env.claudeHome).toBeNull()
+    expect(await off.deps.claudeImport.home()).toEqual({ available: false, reason: 'disabled', path: null })
+    const unset = await createTestApp({ start: false, env: { HF_CLAUDE_HOME: undefined } })
+    cleanups.push(() => unset.close())
+    expect(unset.env.claudeHome?.startsWith(unset.env.dataDir)).toBe(true)
   })
 })

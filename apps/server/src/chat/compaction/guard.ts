@@ -27,6 +27,10 @@
 // through the host's hooks (`HostSession.hooks.preCompact`, `trigger: 'auto'`, no custom instructions), before the
 // `compacting` activity: observe only (`continue: false` changes nothing, logged), its record placed for the step next
 // to (before) the compaction marker; a failing hook is logged and the compaction goes on; an abort re-throws.
+// Phase 12 (C44 call site, ADR-057; W12.6 owns the logic behind it): right after a successful automatic compaction of a
+// chat run (its marker injected, the `compacting` activity over), `PostCompact` runs through the host's hooks
+// (`HostSession.hooks.postCompact`, `trigger: 'auto'`): observe only, its record placed for the step after (behind) the
+// marker; a failing hook is logged and the step goes on; an abort re-throws. A silent guard runs none.
 import type { CompactionData, CompactionKeep, HarnessUIMessage, NoticeData, TodoItem } from '@harness-forge/shared'
 import type { ModelMessage, StepResult, ToolSet } from 'ai'
 import type { ResolvedModel } from '../../providers/types.ts'
@@ -148,6 +152,23 @@ export function createContextGuard(input: ContextGuardInput): StepPiece {
     }
   }
 
+  /** `PostCompact` after an automatic compaction (Phase 12; a chat run's guard only): observe only. Rejects on an abort. */
+  const postCompact = async (signal: AbortSignal): Promise<void> => {
+    const hooks = host?.hooks
+    if (hooks === undefined || hooks === null)
+      return
+    try {
+      const result = await hooks.postCompact({ trigger: 'auto' }, signal)
+      if (!result.continue)
+        logger.info('a PostCompact hook asked to stop; the run goes on (PostCompact only observes)')
+    }
+    catch (error) {
+      if (signal.aborted || session.ctx.run.signal.aborted)
+        throw error
+      logger.warn('the PostCompact hooks failed; the run goes on', { err: error })
+    }
+  }
+
   /** Step 0 only: the trimmed messages and the notice when anything was left out (`always`: the notice anyway). */
   const trim = (step: StepInput, ratio: number, notice: NoticeData, always: boolean): StepPieceResult | undefined => {
     if (step.stepNumber !== 0)
@@ -212,10 +233,10 @@ export function createContextGuard(input: ContextGuardInput): StepPiece {
     attempts += 1
     await preCompact(signal)
     host?.writeTransient({ type: 'data-activity', data: { kind: 'compacting' } })
+    let result: StepPieceResult
     try {
-      const result = await compact(step, window, estimate, signal)
+      result = await compact(step, window, estimate, signal)
       compactedAt = step.stepNumber
-      return result
     }
     catch (error) {
       if (signal.aborted || session.ctx.run.signal.aborted)
@@ -227,5 +248,8 @@ export function createContextGuard(input: ContextGuardInput): StepPiece {
     finally {
       host?.writeTransient({ type: 'data-activity', data: { kind: 'idle' } })
     }
+    // Phase 12: `PostCompact` after the marker (observe only).
+    await postCompact(signal)
+    return result
   }
 }

@@ -871,6 +871,13 @@ describe('hookModelText', () => {
       .toBe('<hook-feedback event="Stop">\n(no reason given)\n</hook-feedback>')
   })
 
+  it('writes feedback for a blocked PostToolUseFailure in a reply only (Phase 12)', () => {
+    expect(hookModelText({ event: 'PostToolUseFailure', outcome: 'blocked', toolName: 'shell', reason: 'Retry with --force.' }, 'assistant'))
+      .toBe('<hook-feedback event="PostToolUseFailure" tool="shell">\nRetry with --force.\n</hook-feedback>')
+    expect(hookModelText({ event: 'PostToolUseFailure', outcome: 'blocked', reason: 'r' }, 'user')).toBeNull()
+    expect(hookModelText({ event: 'PostToolUseFailure', outcome: 'error', reason: 'stderr' }, 'assistant')).toBeNull()
+  })
+
   it('is null for display-only records', () => {
     const displayOnly: Array<[HookFields, 'assistant' | 'user']> = [
       [{ event: 'PreToolUse', outcome: 'denied', toolName: 'shell', reason: 'No rm.' }, 'assistant'],

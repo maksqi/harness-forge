@@ -9,8 +9,8 @@ import { applyAppearanceToDocument, cacheAppearance } from '~/utils/appearance'
 import { useChatsStore } from './chats'
 import { useSettingsStore } from './settings'
 
-/** Source tab the install dialog opens on (docs/UI.md 8.3). */
-export type InstallSource = 'zip' | 'npm' | 'url' | 'folder'
+/** Source tab the install dialog opens on (docs/UI.md 8.3); + Phase 12 (ADR-054, C46 CCR): `github`. */
+export type InstallSource = 'zip' | 'npm' | 'url' | 'github' | 'folder'
 
 // Window events of the Phase 0 app-shell stubs (C3): ChatNav opens the palette with `hf:open-command-palette`,
 // the palette opens the shortcuts dialog with `hf:open-shortcuts`. The store mirrors them into its state and sends

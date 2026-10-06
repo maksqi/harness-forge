@@ -2,7 +2,7 @@ import type { MockApi } from '~/utils/testing/mock-api'
 import { createServerEvent, HarnessError } from '@harness-forge/shared'
 import { createPinia, disposePinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { AGENT_MARKDOWN, agentCustomization, commandSummary, customizationEntry, customizationId, customizationList, pluginSummary, projectId } from '~/utils/testing/fixtures'
+import { AGENT_MARKDOWN, agentCustomization, commandSummary, customizationEntry, customizationId, customizationList, pluginSummary, projectDefinitionFile, projectDefinitionWriteResult, projectId, trustSha } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { customizationScopeKey, useCustomizationsStore } from './customizations'
 
@@ -259,5 +259,37 @@ describe('customizations store: optimistic toggle and errors (W10.8)', () => {
     api.customizations.update.mockRejectedValueOnce(new HarnessError({ code: 'validation_error', message: 'The definition has errors.', details: { issues: [], diagnostics } }))
     const invalid = await store.update(customizationId(1), { content: '---\nname: x\n---\n' }).catch((error: unknown) => error)
     expect(invalid).toMatchObject({ code: 'validation_error', details: { diagnostics } })
+  })
+})
+
+describe('customizations store: project definition files (Phase 12, C46)', () => {
+  it('maps a project entry to its editable file and nothing else', () => {
+    const store = useCustomizationsStore()
+    const project = customizationEntry({ name: 'reviewer', source: 'project', path: '.claude/agents/reviewer.md' })
+    expect(store.projectSource(projectId(1), project)).toEqual({ path: '.claude/agents/reviewer.md', kind: 'agent', name: 'reviewer', create: false })
+    expect(store.projectSource(null, project)).toBeNull()
+    expect(store.projectSource(projectId(1), customizationEntry({ source: 'user', id: customizationId(1), path: undefined }))).toBeNull()
+    expect(store.projectSource(projectId(1), customizationEntry({ source: 'project', path: 'notes/reviewer.md' }))).toBeNull()
+  })
+
+  it('reads, saves and deletes a project file and marks the project scope stale', async () => {
+    const store = useCustomizationsStore()
+    api.customizations.list.mockResolvedValue(customizationList())
+    await store.fetchCatalog(projectId(1))
+    api.projectDefinitions.read.mockResolvedValueOnce(projectDefinitionFile())
+    const file = await store.readProjectFile(projectId(1), '.claude/agents/reviewer.md')
+    expect(file.sha256).toBe(trustSha(1))
+    expect(api.projectDefinitions.read).toHaveBeenCalledWith({ params: { id: projectId(1) }, query: { path: '.claude/agents/reviewer.md' } })
+
+    api.projectDefinitions.write.mockResolvedValueOnce(projectDefinitionWriteResult({ path: '.claude/agents/reviewer.md', trust: { pending: 0 } }))
+    const body = { path: '.claude/agents/reviewer.md', expectedSha256: trustSha(1), content: '---\nname: reviewer\ndescription: x\n---\nBody\n' }
+    const saved = await store.saveProjectFile(projectId(1), body)
+    expect(saved.trust.pending).toBe(0)
+    expect(api.projectDefinitions.write).toHaveBeenCalledWith({ params: { id: projectId(1) }, body })
+    expect(store.stale[`catalog:${customizationScopeKey(projectId(1))}`]).toBe(true)
+
+    api.projectDefinitions.remove.mockResolvedValueOnce(undefined)
+    await store.removeProjectFile(projectId(1), '.claude/agents/reviewer.md', trustSha(2))
+    expect(api.projectDefinitions.remove).toHaveBeenCalledWith({ params: { id: projectId(1) }, query: { path: '.claude/agents/reviewer.md', expectedSha256: trustSha(2) } })
   })
 })

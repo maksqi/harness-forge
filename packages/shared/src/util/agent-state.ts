@@ -484,8 +484,8 @@ function hookElement(tag: 'hook-context' | 'hook-feedback', data: HookModelTextI
  * What the model reads for a hook record, or null when the record is display-only:
  * - `context` (trimmed, non-empty) → `<hook-context event="…" tool="…">`, a newline, the context, a newline,
  *   `</hook-context>` (`tool` only when the record names one);
- * - in a reply (`role: 'assistant'`): a blocked `PostToolUse` record (exit 2 / `decision: block`) also gives
- *   `<hook-feedback event="PostToolUse" tool="…">` with the reason;
+ * - in a reply (`role: 'assistant'`): a blocked `PostToolUse` or (Phase 12) `PostToolUseFailure` record (exit 2 /
+ *   `decision: block` / a prompt hook's `ok: false`) also gives `<hook-feedback event="…" tool="…">` with the reason;
  * - on a user message (`role: 'user'`, the carrier of a hook turn): a `Stop` / `SubagentStop` record with outcome
  *   `continued` or `blocked` gives `<hook-feedback event="Stop">` with the reason (`(no reason given)` when empty);
  * - both blocks, when present, are joined by a blank line (context first). Everything else (PreToolUse decisions, whose
@@ -501,7 +501,7 @@ export function hookModelText(data: HookModelTextInput, role: 'assistant' | 'use
     blocks.push(hookElement('hook-context', data, context))
   const reason = typeof data.reason === 'string' ? data.reason.trim() : ''
   const feedback = role === 'assistant'
-    ? data.event === 'PostToolUse' && data.outcome === 'blocked'
+    ? (data.event === 'PostToolUse' || data.event === 'PostToolUseFailure') && data.outcome === 'blocked'
     : (data.event === 'Stop' || data.event === 'SubagentStop') && (data.outcome === 'continued' || data.outcome === 'blocked')
   if (feedback)
     blocks.push(hookElement('hook-feedback', data, reason === '' ? HOOK_NO_REASON : reason))

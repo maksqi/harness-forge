@@ -9,9 +9,11 @@
 // Props, emits and the root test id are frozen from Gate P10-0b (C33).
 // Phase 11 (W11.8; docs/UI.md 9.13): a style is titled by its label and lists its name and what it does with the coding
 // instructions; a skill lists the argument hint, whether it is in the slash menu and "Only when you run it".
+// Phase 12 (ADR-056; C46 CCR, W12.11 owns it in P12-A): project files get Edit in the footer (`data-action="edit"`), the
+// emit `edit` that CustomizeSettings answers with the project file editor.
 import type { CustomizationEntry } from '@harness-forge/shared'
 import type { CustomizationDraft } from './customize'
-import { CopyPlusIcon, DownloadIcon, FileXIcon } from '@lucide/vue'
+import { CopyPlusIcon, DownloadIcon, FileXIcon, PencilIcon } from '@lucide/vue'
 import { computed, ref, watch } from 'vue'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
@@ -29,7 +31,7 @@ import { displayName as displayNameOf, draftFromEntry, sourceLabel } from './cus
 
 const props = defineProps<{ open: boolean, entry: CustomizationEntry | null, projectId: string | null }>()
 
-const emit = defineEmits<{ 'update:open': [open: boolean], 'copy': [draft: CustomizationDraft] }>()
+const emit = defineEmits<{ 'update:open': [open: boolean], 'copy': [draft: CustomizationDraft], 'edit': [] }>()
 
 const customizations = useCustomizationsStore()
 const plugins = usePluginsStore()
@@ -205,6 +207,17 @@ function exportFile(): void {
           <Button type="button" variant="outline" :disabled="content === null" class="pointer-coarse:h-10" @click="exportFile">
             <DownloadIcon aria-hidden="true" data-icon="inline-start" />
             Export .md
+          </Button>
+          <Button
+            v-if="entry?.source === 'project' && entry.path"
+            type="button"
+            variant="outline"
+            data-action="edit"
+            class="pointer-coarse:h-10"
+            @click="emit('edit')"
+          >
+            <PencilIcon aria-hidden="true" data-icon="inline-start" />
+            Edit
           </Button>
           <Button type="button" :disabled="content === null" class="pointer-coarse:h-10" @click="copyToPersonal">
             <CopyPlusIcon aria-hidden="true" data-icon="inline-start" />

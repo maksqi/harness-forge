@@ -444,6 +444,11 @@ export const hookEntrySchema = z.discriminatedUnion('kind', [
     path: z.string().min(1).max(LIMITS.workspacePathMaxChars).optional(),
     /** Project hooks: the current trust hash (`POST /projects/:id/trust` approves it). */
     sha256: sha256HexSchema.optional(),
+    /**
+     * Project hooks (Phase 12, ADR-056): the handler's place in its settings file's `hooks[event]` array: `[group index,
+     * handler index]` (`HookSpec.position`), so the editor changes exactly that handler.
+     */
+    position: z.tuple([z.int().min(0), z.int().min(0)]).optional(),
   }),
   z.object({
     ...hookEntryBaseShape,

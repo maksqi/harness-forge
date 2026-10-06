@@ -51,7 +51,7 @@ import type { DetachedChildInput } from '../subagent/index.ts'
 import type { BackgroundLaunchInput, BackgroundTasks, BackgroundTasksHost } from './types.ts'
 import { AGENT_TYPE_ALIASES, createBackgroundTaskId, createMessageId, isHarnessError, LIMITS, safeParseModelRef } from '@harness-forge/shared'
 import { abortReason } from '../errors.ts'
-import { detachedHooks } from '../hooks.ts'
+import { detachedHooks, hookMcpServerNames } from '../hooks.ts'
 import { createDetachedSession } from '../subagent/host.ts'
 import { runDetachedChild } from '../subagent/index.ts'
 import { roundUsd } from '../usage.ts'
@@ -601,8 +601,9 @@ export function createBackgroundTasks(deps: AppDeps, host: BackgroundTasksHost, 
         origin: input.origin,
         modelRef: input.model.modelRef,
       }, { signal })
-      const mcpServerNames = input.projectTools?.names
-      return detachedHooks({ snapshot, messageId: input.messageId, logger, ...(mcpServerNames === undefined ? {} : { mcpServerNames }) })
+      // Phase 12: the Claude names of plugin MCP servers too (`mcp__plugin_<name>_<server>__*`), then the project names.
+      const mcpServerNames = hookMcpServerNames(deps.registry ?? null, input.projectTools?.names)
+      return detachedHooks({ snapshot, messageId: input.messageId, logger, mcpServerNames })
     }
     catch (error) {
       // A stop during the snapshot: the child ends at once anyway (its signal aborted).

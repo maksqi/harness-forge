@@ -18,6 +18,12 @@
 // contributions `outputStyles` / `commandHooks`. C36 lands them empty (`registry/{styles,hook-commands}.ts`: nothing
 // registered, `register` answers `not_implemented`); W11.7 implements the registration and its validation. The
 // customization catalog reads `styles` (W11.6), the hook service `hookCommands` (W11.1).
+//
+// Phase 12 (plugin API 1.6.0, ADR-053 / ADR-057; C43, frozen after Gate P12-0b): a command hook registration may carry
+// extra environment variables for the plugin's hooks (`env`: `CLAUDE_PLUGIN_DATA`, `CLAUDE_PLUGIN_OPTION_<KEY>`) and
+// prompt hook handlers (`prompts`); an MCP server may carry its Claude Code name (`claudeName`, so the tool alias
+// `mcp__plugin_<name>_<server>__*` of a Claude Code plugin resolves and matches hooks). Names of agents, skills, styles
+// and commands may be qualified with the owner's id (`<pluginId>:<name>`, `catalogNameSchema`): W12.1 validates them.
 import type {
   AgentDefinition,
   CommandDefinition,
@@ -33,7 +39,7 @@ import type {
   SkillDefinition,
   ToolDefinition,
 } from '@harness-forge/plugin-sdk'
-import type { HookDiagnostic, HookSpec, PluginContributions } from '@harness-forge/shared'
+import type { HookDiagnostic, HookSpec, PluginContributions, PromptHookSpec } from '@harness-forge/shared'
 
 export interface RegisteredProvider {
   readonly pluginId: string
@@ -79,6 +85,18 @@ export interface RegisteredHook<K extends HookName = HookName> {
 export interface RegisteredMcpServer {
   readonly pluginId: string
   readonly decl: McpServerDecl
+  /**
+   * Phase 12 (ADR-053): the server's Claude Code name `plugin_<plugin name>_<server name>` (a server of a Claude Code
+   * plugin, whose harness id is `<pluginId>` or `<pluginId>-<slug>`): the tool alias `mcp__<claudeName>__<tool>` is
+   * rewritten to the harness tool name in `tools` / `allowed-tools` and matched by hook matchers. Absent otherwise.
+   */
+  readonly claudeName?: string
+}
+
+/** Options of `McpServerRegistry.register` (Phase 12). */
+export interface McpServerRegisterOptions {
+  /** The Claude Code name of the server (`RegisteredMcpServer.claudeName`): `plugin_<name>_<server>`, ≤ 128 characters. */
+  readonly claudeName?: string
 }
 
 /** An agent type contributed by a plugin (manifest `contributes.agents` or `ctx.agents.register`; plugin API 1.4.0). */
@@ -108,6 +126,19 @@ export interface HookCommandsRegistration {
   readonly root: string
   /** The Claude Code `hooks` object as declared (at most `LIMITS.pluginHooksMax` handlers). */
   readonly hooks: HooksConfig
+  /**
+   * Phase 12 (ADR-053): extra environment variables of the plugin's command hooks (a Claude Code plugin:
+   * `CLAUDE_PLUGIN_DATA` = its private data folder and `CLAUDE_PLUGIN_OPTION_<KEY>` = its `userConfig` values), merged
+   * over the minimal hook environment (`HARNESS_PLUGIN_ROOT` / `CLAUDE_PLUGIN_ROOT` and the project variables win; the
+   * reserved names of `SHELL_ENV_RESERVED` are refused). Never read from `process.env`. Absent = none.
+   */
+  readonly env?: Readonly<Record<string, string>>
+  /**
+   * Phase 12 (ADR-057): prompt hook handlers of the plugin read elsewhere (`readHooksConfig(…, { source: 'plugin',
+   * prompts: true })` of a Claude Code plugin's merged hook files), added to the prompt handlers of `hooks`. Counted
+   * with the command handlers against `LIMITS.pluginHooksMax`. Absent = none.
+   */
+  readonly prompts?: readonly PromptHookSpec[]
 }
 
 /** The command hooks of one plugin (manifest `contributes.hooks`; plugin API 1.5.0, ADR-048). */
@@ -122,6 +153,13 @@ export interface RegisteredHookCommands {
   readonly hooks: readonly HookSpec[]
   /** What `readHooksConfig` reported (shown by `GET /hooks`). */
   readonly diagnostics: readonly HookDiagnostic[]
+  /** Phase 12: the extra environment of the plugin's command hooks (`HookCommandsRegistration.env`; empty = none). */
+  readonly env: Readonly<Record<string, string>>
+  /**
+   * Phase 12 (ADR-057): the valid prompt hook handlers (of `hooks` and `HookCommandsRegistration.prompts`), in
+   * declaration order; they run as prompt hooks of source `plugin` while the plugin is active (no trust pin needed).
+   */
+  readonly prompts: readonly PromptHookSpec[]
 }
 
 export type RegistryKind = 'provider' | 'models' | 'tool' | 'command' | 'hook' | 'mcpServer' | 'agent' | 'skill' | 'style' | 'hookCommands'
@@ -188,8 +226,11 @@ export interface HookRegistry {
 }
 
 export interface McpServerRegistry {
-  /** Same rules as `contributes.mcpServers`; a duplicate id (across plugins and user servers) throws `conflict`. */
-  readonly register: (pluginId: string, decl: McpServerDecl) => Disposable
+  /**
+   * Same rules as `contributes.mcpServers`; a duplicate id (across plugins and user servers) throws `conflict`. Phase 12:
+   * `options.claudeName` records the Claude Code name of a Claude Code plugin's server (`RegisteredMcpServer.claudeName`).
+   */
+  readonly register: (pluginId: string, decl: McpServerDecl, options?: McpServerRegisterOptions) => Disposable
   readonly get: (id: string) => RegisteredMcpServer | undefined
   readonly list: () => RegisteredMcpServer[]
 }
@@ -257,7 +298,8 @@ export interface HookCommandRegistry {
   /**
    * Reads `registration.hooks` with `readHooksConfig(…, { source: 'plugin' })` (at most `LIMITS.pluginHooksMax`
    * handlers) and adds them; a second registration of the same plugin throws `conflict` (W11.7; the C36 stub throws
-   * `not_implemented`).
+   * `not_implemented`). Phase 12: also `registration.env` and the prompt handlers (`registration.prompts` and, read
+   * with `prompts: true`, those of `hooks`; W12.1).
    */
   readonly register: (pluginId: string, registration: HookCommandsRegistration) => Disposable
   /** The registration of a plugin, or undefined. */

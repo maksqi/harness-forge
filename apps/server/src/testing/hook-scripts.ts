@@ -22,6 +22,15 @@
 //                 `{"decision":"block","reason":"run the tests"}`
 //   prompt-block  stderr `Prompt blocked by hook.`, exit 2 (a UserPromptSubmit block)
 //
+// Phase 12 (ADR-057; C45-T5, FROZEN after Gate P12-0b):
+//   permission-allow  PermissionRequest `hookSpecificOutput.decision.behavior: allow` (`text` is ignored)
+//   permission-deny   PermissionRequest `decision.behavior: deny` with `HOOK_SCRIPT_TEXT.permissionDeny` as `message`
+//   print-args        writes each of its arguments on its own line to `$HARNESS_PROJECT_DIR/.hook-args` (the file is
+//                     replaced on every run; no arguments leave it empty), for the exec form (`args`): run it as
+//                     `execFormCommand('sh', [<relative path>, ...args])` and compare `readHookArgs` with the arguments
+//                     (an argument with a newline spans several lines)
+//   agent-context     SubagentStart `hookSpecificOutput.additionalContext` = `HOOK_SCRIPT_TEXT.agentContext`
+//
 // Files go to `$HARNESS_PROJECT_DIR` (`.` when it is unset: the hook's working folder). `text` replaces the fixed text
 // of a script (the reason, the context, the stderr line, the rewritten command), `seconds` the sleep of `sleep`, `dir`
 // / `file` the location (`<dir>/<file>.sh`), so two variants of one script can live side by side.
@@ -41,6 +50,10 @@ export const HOOK_SCRIPT_NAMES = [
   'env',
   'stop-once',
   'prompt-block',
+  'permission-allow',
+  'permission-deny',
+  'print-args',
+  'agent-context',
 ] as const
 export type HookScriptName = (typeof HOOK_SCRIPT_NAMES)[number]
 
@@ -52,6 +65,8 @@ export const HOOK_LOG_FILE = '.hook-log'
 export const HOOK_ENV_FILE = '.hook-env'
 /** `sleep` appends "<script pid> <sleep pid>" here (in `$HARNESS_PROJECT_DIR`). */
 export const HOOK_SLEEP_PIDS_FILE = '.hook-sleep-pids'
+/** `print-args` writes its arguments here, one per line (in `$HARNESS_PROJECT_DIR`). */
+export const HOOK_ARGS_FILE = '.hook-args'
 /** Seconds `sleep` sleeps by default (far beyond any test timeout). */
 export const HOOK_SLEEP_DEFAULT_SECONDS = 30
 
@@ -66,6 +81,8 @@ export const HOOK_SCRIPT_TEXT = {
   error: 'hook failed',
   stop: 'run the tests',
   promptBlock: 'Prompt blocked by hook.',
+  permissionDeny: 'Denied by the permission hook.',
+  agentContext: 'Agent context from the hook.',
 } as const
 
 export interface HookScriptOptions {
@@ -73,7 +90,10 @@ export interface HookScriptOptions {
   dir?: string
   /** File name without `.sh` (default the script name). */
   file?: string
-  /** Replaces the script's fixed text (see the module comment); ignored by `sleep`, `record` and `env`. */
+  /**
+   * Replaces the script's fixed text (see the module comment); ignored by `sleep`, `record`, `env`, `permission-allow`
+   * and `print-args`.
+   */
   text?: string
   /** `sleep`: seconds to sleep (default `HOOK_SLEEP_DEFAULT_SECONDS`). */
   seconds?: number
@@ -144,6 +164,11 @@ function decision(kind: 'deny' | 'ask' | 'allow', reason: string): string {
   return JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: kind, permissionDecisionReason: reason } })
 }
 
+/** A PermissionRequest decision (`hookSpecificOutput.decision`, Phase 12). */
+function permissionRequest(behavior: 'allow' | 'deny', message?: string): string {
+  return JSON.stringify({ hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: message === undefined ? { behavior } : { behavior, message } } })
+}
+
 /** The body lines of a script after the header (each reads stdin first). */
 function body(name: HookScriptName, options: HookScriptOptions): string[] {
   const discard = 'cat > /dev/null'
@@ -196,6 +221,22 @@ function body(name: HookScriptName, options: HookScriptOptions): string[] {
       ]
     case 'prompt-block':
       return [discard, printLine(checkedText(options.text, HOOK_SCRIPT_TEXT.promptBlock), true), 'exit 2']
+    case 'permission-allow':
+      return [discard, printLine(permissionRequest('allow'))]
+    case 'permission-deny':
+      return [discard, printLine(permissionRequest('deny', checkedText(options.text, HOOK_SCRIPT_TEXT.permissionDeny)))]
+    case 'print-args':
+      return [
+        discard,
+        `: > ${projectFile(HOOK_ARGS_FILE)}`,
+        'if [ "$#" -gt 0 ]; then',
+        `  printf '%s\\n' "$@" >> ${projectFile(HOOK_ARGS_FILE)}`,
+        'fi',
+      ]
+    case 'agent-context': {
+      const context = checkedText(options.text, HOOK_SCRIPT_TEXT.agentContext)
+      return [discard, printLine(JSON.stringify({ hookSpecificOutput: { hookEventName: 'SubagentStart', additionalContext: context } }))]
+    }
   }
 }
 
@@ -269,6 +310,17 @@ export async function readHookEnv(projectDir: string): Promise<Record<string, st
       env[match[1]!] = match[2]!
   }
   return env
+}
+
+/**
+ * The lines `print-args` wrote (one per argument; an argument holding a newline spans several lines); [] without the
+ * file or without arguments.
+ */
+export async function readHookArgs(projectDir: string): Promise<string[]> {
+  const text = await readOptional(join(projectDir, HOOK_ARGS_FILE))
+  if (text === '')
+    return []
+  return (text.endsWith('\n') ? text.slice(0, -1) : text).split('\n')
 }
 
 /** Every pid `sleep` recorded (the script's and its background `sleep`'s); [] without the file. */

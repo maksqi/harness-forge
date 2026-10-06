@@ -48,6 +48,13 @@
 //   global MCP servers a project server shadows and adds the project server tools (`ProjectMcpManager.toolsFor`) to the
 //   candidates before the mode filter, so they pass the same preferences, mode, restriction and approval as registry
 //   tools (preferences apply by name; a registry tool keeps a name an extra tool would take).
+// Phase 12 (C44, ADR-057; COMPLETE and FROZEN after P12-0b): `PostToolUseFailure` runs in the catch paths of
+// `runToolCall` and `streamToolCall` (`hooks.postToolUseFailure`): once for a call that failed after its approval (the
+// owner gone, `tool.before`, an invalid or rewritten input, the plugin's code, its timeout, `tool.after`, an output that
+// cannot be serialized), with the input the call ran with (else the input it was given) and the error text the model
+// reads (cut to `LIMITS.hookErrorBytes`); never for an abort of the run, never after `PostToolUse` ran for the call. Its
+// model text is queued for the next step like `PostToolUse`'s (a prompt hook's block is feedback: the turn continues);
+// the error the model reads is unchanged.
 import type { ToolCallContext, ToolDefinition, ToolResultOutput, ToolWorkspace } from '@harness-forge/plugin-sdk'
 import type { AgentToolName, HarnessUIMessage, McpServer, ToolMode } from '@harness-forge/shared'
 import type { JSONValue, Tool, ToolExecutionOptions, ToolSet } from 'ai'
@@ -170,10 +177,10 @@ export interface ToolWrapContext {
   /** Warnings of the journal step (default: none). */
   logger?: Logger
   /**
-   * The command hooks of the run (Phase 11, `hooks.ts`): the `PreToolUse` rewrite (`updatedInput`) and `PostToolUse`
-   * (see the module comment). Null or absent = no hooks.
+   * The command hooks of the run (Phase 11, `hooks.ts`): the `PreToolUse` rewrite (`updatedInput`), `PostToolUse` and
+   * (Phase 12) `PostToolUseFailure` (see the module comment). Null or absent = no hooks.
    */
-  hooks?: Pick<ToolHooks, 'updatedInput' | 'postToolUse'> | null
+  hooks?: Pick<ToolHooks, 'updatedInput' | 'postToolUse' | 'postToolUseFailure'> | null
 }
 
 /** The builtin plugin of the workspace tools (`builtin-plugins/core-workspace`). */
@@ -321,6 +328,27 @@ async function postToolUse(context: ToolWrapContext, base: CallBase, input: unkn
   await hooks.postToolUse({ toolName: base.tool, toolCallId: base.toolCallId, input, output: after.output, ...(pluginContext === undefined ? {} : { pluginContext }) }, signal)
 }
 
+/** The error text of a failed call as the model reads it (a `ToolFailure`'s message), cut to `LIMITS.hookErrorBytes`. */
+export function hookErrorText(error: unknown): string {
+  return utf8Prefix(failureMessage(error), LIMITS.hookErrorBytes)
+}
+
+/**
+ * `PostToolUseFailure` of a failed call (Phase 12, see the module comment): skipped for an abort of the run; never
+ * rejects (the call's own error is rethrown by the caller).
+ */
+async function postToolUseFailure(context: ToolWrapContext, base: CallBase, input: unknown, error: unknown, signal: AbortSignal): Promise<void> {
+  const hooks = context.hooks ?? null
+  if (hooks === null || (signal.aborted && isAbortError(error)) || context.signal.aborted)
+    return
+  try {
+    await hooks.postToolUseFailure({ toolName: base.tool, toolCallId: base.toolCallId, input }, hookErrorText(error), signal)
+  }
+  catch (failure) {
+    context.logger?.warn('the PostToolUseFailure hooks failed', { tool: base.tool, err: failure })
+  }
+}
+
 /** The output draft of the plugin `tool.after` hook: the output, and (plugin API 1.5.0) a context for the model. */
 interface ToolAfterDraft {
   output: unknown
@@ -360,13 +388,42 @@ async function drain(iterable: AsyncIterable<unknown>, signal: AbortSignal): Pro
   return last
 }
 
+/** What the catch path of a call knows (Phase 12): the input it ran with so far, and whether `PostToolUse` ran. */
+interface CallProgress {
+  input: unknown
+  posted: boolean
+}
+
 /** The promise path of `wrapToolExecute` (a plain `execute`; an `AsyncIterable` result is drained). */
 async function runToolCall(registered: WrappedTool, context: ToolWrapContext, input: unknown, options: ToolExecutionOptions<unknown>): Promise<unknown> {
-  const { pluginId, definition } = registered
   const signal = options.abortSignal ?? context.signal
   const toolCallId = callIdOf(context, options)
-  const base: CallBase = { chatId: context.chatId, modelRef: context.modelRef, tool: definition.name, toolCallId }
-  const finalInput = await prepareInput(registered, context, base, input)
+  const base: CallBase = { chatId: context.chatId, modelRef: context.modelRef, tool: registered.definition.name, toolCallId }
+  const progress: CallProgress = { input, posted: false }
+  try {
+    return await runPreparedCall(registered, context, base, progress, options, signal)
+  }
+  catch (error) {
+    // Phase 12: `PostToolUseFailure` (never for an abort, never after `PostToolUse`); the error goes on unchanged.
+    if (!progress.posted)
+      await postToolUseFailure(context, base, progress.input, error, signal)
+    throw error
+  }
+}
+
+/** Steps 1 and 3-6 of a plain call (`runToolCall`); `progress` follows the input and `PostToolUse`. */
+async function runPreparedCall(
+  registered: WrappedTool,
+  context: ToolWrapContext,
+  base: CallBase,
+  progress: CallProgress,
+  options: ToolExecutionOptions<unknown>,
+  signal: AbortSignal,
+): Promise<unknown> {
+  const { pluginId, definition } = registered
+  const toolCallId = base.toolCallId
+  const finalInput = await prepareInput(registered, context, base, progress.input)
+  progress.input = finalInput
 
   let output: unknown
   let started = false
@@ -393,6 +450,7 @@ async function runToolCall(registered: WrappedTool, context: ToolWrapContext, in
 
   const after: ToolAfterDraft = { output }
   await context.registry.hooks.run('tool.after', { ...base, input: finalInput }, after)
+  progress.posted = true
   await postToolUse(context, base, finalInput, after, signal)
   return capToolOutput(after.output)
 }
@@ -460,11 +518,34 @@ type IterationOutcome = { ok: true, last: unknown } | { ok: false, error: unknow
 
 /** The streaming path of `wrapToolExecute` (an async generator `execute`; see the module comment). */
 async function* streamToolCall(registered: WrappedTool, context: ToolWrapContext, input: unknown, options: ToolExecutionOptions<unknown>): AsyncGenerator<unknown, void, undefined> {
-  const { pluginId, definition } = registered
   const signal = options.abortSignal ?? context.signal
   const toolCallId = callIdOf(context, options)
-  const base: CallBase = { chatId: context.chatId, modelRef: context.modelRef, tool: definition.name, toolCallId }
-  const finalInput = await prepareInput(registered, context, base, input)
+  const base: CallBase = { chatId: context.chatId, modelRef: context.modelRef, tool: registered.definition.name, toolCallId }
+  const progress: CallProgress = { input, posted: false }
+  try {
+    yield* streamPreparedCall(registered, context, base, progress, options, signal)
+  }
+  catch (error) {
+    // Phase 12: `PostToolUseFailure` (never for an abort, never after `PostToolUse`); the error goes on unchanged.
+    if (!progress.posted)
+      await postToolUseFailure(context, base, progress.input, error, signal)
+    throw error
+  }
+}
+
+/** Steps 1 and 3-6 of a streaming call (`streamToolCall`); `progress` follows the input and `PostToolUse`. */
+async function* streamPreparedCall(
+  registered: WrappedTool,
+  context: ToolWrapContext,
+  base: CallBase,
+  progress: CallProgress,
+  options: ToolExecutionOptions<unknown>,
+  signal: AbortSignal,
+): AsyncGenerator<unknown, void, undefined> {
+  const { pluginId, definition } = registered
+  const toolCallId = base.toolCallId
+  const finalInput = await prepareInput(registered, context, base, progress.input)
+  progress.input = finalInput
 
   const latest = new LatestValue()
   // Ends the plugin's iteration when this generator ends before it (a value that cannot be capped, a consumer that
@@ -537,6 +618,7 @@ async function* streamToolCall(registered: WrappedTool, context: ToolWrapContext
       throw settledError(settled.error, signal)
     const after: ToolAfterDraft = { output: settled.last }
     await context.registry.hooks.run('tool.after', { ...base, input: finalInput }, after)
+    progress.posted = true
     await postToolUse(context, base, finalInput, after, signal)
     yield capToolOutput(after.output)
   }
@@ -622,10 +704,10 @@ export interface ToolAssemblyInput {
    */
   skillsAvailable?: boolean
   /**
-   * The command hooks of the run (Phase 11, `hooks.ts`): passed to every wrapped tool (`ToolWrapContext.hooks`). Null or
-   * absent = none.
+   * The command hooks of the run (Phase 11, `hooks.ts`; Phase 12 `postToolUseFailure`): passed to every wrapped tool
+   * (`ToolWrapContext.hooks`). Null or absent = none.
    */
-  hooks?: Pick<ToolHooks, 'updatedInput' | 'postToolUse'> | null
+  hooks?: Pick<ToolHooks, 'updatedInput' | 'postToolUse' | 'postToolUseFailure'> | null
   /**
    * Tools of the run that are not in the registry (Phase 11, ADR-050: the project MCP server tools of
    * `ProjectMcpManager.toolsFor`): added to the candidates before the mode filter (the same preferences, workspace,

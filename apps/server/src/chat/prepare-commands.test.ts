@@ -25,7 +25,7 @@ import { killLiveShellGroups } from '../workspace/shell.ts'
 import { applyCommandExpansions } from './context.ts'
 import { NOTICES } from './notices.ts'
 import { resolveRunOutputStyle } from './output-style.ts'
-import { commitHistory, prepareRun } from './prepare.ts'
+import { commandArgumentVars, commitHistory, prepareRun } from './prepare.ts'
 import { createRunRegistry } from './runs.ts'
 import { chatBody, testChatId } from './testing.ts'
 
@@ -245,5 +245,13 @@ describe.skipIf(!posix)('prepareRun: command extras (W11.5)', () => {
     expect(NOTICES.hookContinuationLimit()).toEqual({ level: 'info', code: 'hook-continuation-limit', message: `Stopped after ${LIMITS.hookContinuationsMax} hook continuations in a row.` })
     expect(NOTICES.projectMcpUnavailable(['Docs'])).toEqual({ level: 'warning', code: 'project-mcp-unavailable', message: 'The project MCP server "Docs" is not ready, so its tools were not sent.' })
     expect(NOTICES.projectMcpUnavailable(['A', 'B']).message).toBe('2 project MCP servers are not ready ("A", "B"), so their tools were not sent.')
+  })
+})
+
+describe('commandArgumentVars (Phase 12, C44-T6 call sites)', () => {
+  it('names the chat as CLAUDE_SESSION_ID for the expandArguments options of definition bodies', () => {
+    const vars = commandArgumentVars('0199a8f0-0000-7000-8000-000000000001')
+    expect(vars).toEqual({ CLAUDE_SESSION_ID: '0199a8f0-0000-7000-8000-000000000001' })
+    expect(Object.isFrozen(vars)).toBe(true)
   })
 })

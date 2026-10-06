@@ -24,6 +24,10 @@
 //      with a user message: the history never holds two user messages in a row because of the summary.
 // A path without a marker, steers, task results, hook records and task outputs (every v1.4 – v1.6 path without them)
 // comes back unchanged (the same message objects).
+// Phase 12 (C44, ADR-057; COMPLETE and FROZEN after P12-0b): the stages are unchanged. The records of the new events go
+// through `splitHooks` like the others: a `PostToolUseFailure` record in a reply gives the model text the run queued for
+// its next step (`hookModelText(data, 'assistant')`), `PermissionRequest`, `PostCompact` (behind its marker) and
+// `harnessAsked` are display-only, and a prompt hook's record reads like a command hook's.
 import type { HarnessUIMessage } from '@harness-forge/shared'
 import type { CompactedHistory } from './compaction/history.ts'
 import { splitHooks, splitSteers, splitTaskResults } from '@harness-forge/shared'

@@ -754,8 +754,8 @@ async function runHook(name: HookScriptName, event: HookEvent, options: { prefix
 }
 
 describe('hook scripts: names, paths and sources', () => {
-  it('has the twelve scripts of PROVIDERS.md 8, invoked as `sh <relative path>`', () => {
-    expect(HOOK_SCRIPT_NAMES).toEqual(['deny', 'ask', 'allow', 'rewrite', 'context', 'exit2', 'error', 'sleep', 'record', 'env', 'stop-once', 'prompt-block'])
+  it('has the twelve scripts of PROVIDERS.md 8 and the four of Phase 12, invoked as `sh <relative path>`', () => {
+    expect(HOOK_SCRIPT_NAMES).toEqual(['deny', 'ask', 'allow', 'rewrite', 'context', 'exit2', 'error', 'sleep', 'record', 'env', 'stop-once', 'prompt-block', 'permission-allow', 'permission-deny', 'print-args', 'agent-context'])
     expect(HOOK_SCRIPT_DIR).toBe('.harness/hooks')
     expect(hookScriptCommand('deny')).toBe('sh .harness/hooks/deny.sh')
     expect(hookScriptCommand('stop-once', { dir: '.claude/hooks', file: 'stop' })).toBe('sh .claude/hooks/stop.sh')

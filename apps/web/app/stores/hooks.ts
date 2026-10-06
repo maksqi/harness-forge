@@ -10,8 +10,21 @@
 // `maxAgeMs`, every mutation marks every scope stale (personal rows show in every scope), `{ enabled: false }` alone is
 // optimistic (every cached list shows the hook off at once; a failure brings it back), and an event refetches the
 // affected scopes used in the last minute (the others on their next use).
-import type { HookCreate, HookEntry, HookList, HookRunList, HookUpdate, PersonalHook, ServerEvent } from '@harness-forge/shared'
-import { isHookTurnOff } from '@harness-forge/shared'
+// Phase 12 (ADR-056, ADR-057; C46 CCR, W12.12 implements; frozen from Gate P12-0b): `saveProjectHook(projectId, target,
+// draft)` edits a hook in a project's settings file (read the file, splice the handler into its `hooks` key, `PUT
+// /projects/:id/definitions/file` with `expectedSha256`; no fresh auth, never approves). P12-0b: not implemented yet.
+import type {
+  HookCreate,
+  HookEntry,
+  HookList,
+  HookRunList,
+  HookUpdate,
+  PersonalHook,
+  ProjectDefinitionWriteResult,
+  ServerEvent,
+} from '@harness-forge/shared'
+import type { HookDraft, ProjectHookTarget } from '~/components/settings/customize/hooks'
+import { HarnessError, isHookTurnOff } from '@harness-forge/shared'
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { useApi } from '~/composables/useApi'
@@ -242,6 +255,18 @@ export const useHooksStore = defineStore('hooks', () => {
     }
   }
 
+  /**
+   * Writes a hook of a project's settings file (Phase 12, ADR-056): reads the file (`GET /projects/:id/definitions/file`),
+   * splices the draft's handler into its `hooks` key at `target` (a new handler without indexes; null removes the
+   * handler), then `PUT`s the key with the sha256 it read (409 `conflict` reason `stale` when the file changed). No fresh
+   * auth; saving never approves (the result counts the pending items). Marks the project's scope stale. W12.12 implements
+   * it; until then it throws `not_implemented`.
+   */
+  async function saveProjectHook(projectId: string, _target: ProjectHookTarget, _draft: HookDraft | null): Promise<ProjectDefinitionWriteResult> {
+    markStale([hookScopeKey(projectId)])
+    throw new HarnessError({ code: 'not_implemented', message: 'Editing project hooks is not available yet.' })
+  }
+
   /** Refetches quietly the scopes among `scopes` that were used in the last minute. */
   function refetchRecent(scopes: Iterable<string>): void {
     const since = Date.now() - HOOKS_RECENT_MS
@@ -303,6 +328,7 @@ export const useHooksStore = defineStore('hooks', () => {
     create,
     update,
     remove,
+    saveProjectHook,
     applyEvent,
     refreshLoaded,
   }

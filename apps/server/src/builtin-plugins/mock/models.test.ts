@@ -1,7 +1,7 @@
 import type { LanguageModelV4, LanguageModelV4CallOptions, LanguageModelV4Prompt, LanguageModelV4StreamPart, LanguageModelV4ToolResultOutput } from '@ai-sdk/provider'
 import { APICallError } from '@ai-sdk/provider'
-import { GENERATE_IMAGE_TOOL_NAME, generateImageToolInputSchema } from '@harness-forge/shared'
-import { isStepCount, streamText, tool } from 'ai'
+import { buildHookPayload, expandHookPrompt, GENERATE_IMAGE_TOOL_NAME, generateImageToolInputSchema, promptHookOutcome, readPromptHookAnswer } from '@harness-forge/shared'
+import { generateText, isStepCount, streamText, tool } from 'ai'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { firstPixel, readPng } from './media.test-util.ts'
@@ -18,6 +18,14 @@ import {
   streamSchedule,
   wordChunks,
 } from './models.ts'
+import {
+  findPromptHookMarker,
+  MOCK_PROMPT_HOOK_FENCED,
+  MOCK_PROMPT_HOOK_INVALID,
+  MOCK_PROMPT_HOOK_OK,
+  mockPromptHookAnswer,
+  mockPromptHookText,
+} from './prompt-hook.ts'
 
 function user(text: string, files = 0): LanguageModelV4Prompt[number] {
   const content: Extract<LanguageModelV4Prompt[number], { role: 'user' }>['content'] = [{ type: 'text', text }]
@@ -308,9 +316,9 @@ describe('mock:image-tool (Phase 6)', () => {
 })
 
 describe('language model ids', () => {
-  it('covers the four v1 models, the two Phase 6 chat models, the Phase 7 workspace model, the Phase 8 checkpoint and shell models, the five Phase 9 agent mocks, the two Phase 10 customization mocks and the Phase 11 hook mock', () => {
-    expect(MOCK_MODEL_IDS).toEqual(['echo', 'reasoning', 'tool-approval', 'error', 'image-chat', 'image-tool', 'workspace', 'checkpoint', 'shell', 'compact', 'plan', 'todo', 'subagent', 'steer', 'agents', 'background', 'hooks'])
-    expect(MOCK_MODEL_IDS).toHaveLength(17)
+  it('covers the four v1 models, the two Phase 6 chat models, the Phase 7 workspace model, the Phase 8 checkpoint and shell models, the five Phase 9 agent mocks, the two Phase 10 customization mocks, the Phase 11 hook mock and the Phase 12 prompt hook mock', () => {
+    expect(MOCK_MODEL_IDS).toEqual(['echo', 'reasoning', 'tool-approval', 'error', 'image-chat', 'image-tool', 'workspace', 'checkpoint', 'shell', 'compact', 'plan', 'todo', 'subagent', 'steer', 'agents', 'background', 'hooks', 'prompt-hook'])
+    expect(MOCK_MODEL_IDS).toHaveLength(18)
     for (const modelId of ['image', 'transcribe', 'speech'])
       expect(MOCK_MODEL_IDS as readonly string[]).not.toContain(modelId)
   })
@@ -417,5 +425,124 @@ describe('mockPlan additions of Phase 9: parallel calls and the step delay', () 
     expect(settled).toBe(false)
     await vi.advanceTimersByTimeAsync(1)
     expect((await generating).content.map(part => part.type)).toEqual(['tool-call'])
+  })
+})
+
+// ---------- Phase 12 (C45-T1): mock:prompt-hook (PROVIDERS.md 8 "Prompt hook mock (Phase 12)") ----------
+
+describe('mock:prompt-hook', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  const model = (): LanguageModelV4 => createMockLanguageModel('prompt-hook')
+
+  it.each([
+    ['[[ph:ok]]', '{"ok":true}', { ok: true, reason: null, impossible: false }],
+    ['[[ph:deny no writes]]', '{"ok":false,"reason":"no writes"}', { ok: false, reason: 'no writes', impossible: false }],
+    ['[[ph:deny   spaced out  ]]', '{"ok":false,"reason":"spaced out"}', { ok: false, reason: 'spaced out', impossible: false }],
+    ['[[ph:impossible done]]', '{"ok":false,"reason":"done","impossible":true}', { ok: false, reason: 'done', impossible: true }],
+    ['[[ph:fenced]]', MOCK_PROMPT_HOOK_FENCED, { ok: false, reason: 'fenced', impossible: false }],
+    ['no marker at all', '{"ok":true}', { ok: true, reason: null, impossible: false }],
+  ] as const)('%s answers %s (read by readPromptHookAnswer)', async (prompt, answer, read) => {
+    const result = await generateText({ model: model(), prompt: `Judge this. ${prompt}`, maxRetries: 0 })
+    expect(result.text).toBe(answer)
+    expect(readPromptHookAnswer(result.text)).toEqual({ valid: true, answer: read })
+  })
+
+  it('[[ph:fenced]] is a line of prose, then the object in a json fence', () => {
+    expect(MOCK_PROMPT_HOOK_FENCED).toBe('Here is my answer:\n```json\n{"ok":false,"reason":"fenced"}\n```')
+  })
+
+  it('[[ph:invalid]] answers prose without JSON (a non-blocking error); an empty deny reason is invalid too', async () => {
+    const invalid = await generateText({ model: model(), prompt: '[[ph:invalid]]', maxRetries: 0 })
+    expect(invalid.text).toBe(MOCK_PROMPT_HOOK_INVALID)
+    expect(invalid.text).toBe('I cannot decide.')
+    expect(readPromptHookAnswer(invalid.text)).toMatchObject({ valid: false })
+    expect(mockPromptHookAnswer('[[ph:deny]]')).toBe('{"ok":false,"reason":""}')
+    expect(readPromptHookAnswer(mockPromptHookAnswer('[[ph:deny]]'))).toMatchObject({ valid: false })
+    expect(mockPromptHookAnswer('[[ph:impossible]]')).toBe('{"ok":false,"reason":"","impossible":true}')
+  })
+
+  it('answers from the first marker; unknown keywords and markers with extra text are skipped', () => {
+    expect(mockPromptHookAnswer('[[ph:deny first]] then [[ph:ok]]')).toBe('{"ok":false,"reason":"first"}')
+    expect(mockPromptHookAnswer('[[ph:ok]] then [[ph:deny second]]')).toBe(MOCK_PROMPT_HOOK_OK)
+    expect(findPromptHookMarker('[[ph:bogus]] [[ph:okay]] [[ph:ok please]] [[ph:impossible why]]')).toEqual({ marker: 'impossible', reason: 'why' })
+    expect(findPromptHookMarker('[[ph:deny reason with ] bracket]] tail')).toEqual({ marker: 'deny', reason: 'reason with ] bracket' })
+    expect(findPromptHookMarker('[[ph:deny\nacross lines]]')).toEqual({ marker: 'deny', reason: 'across lines' })
+    expect(findPromptHookMarker('[[PH:deny x]] [ph:deny y] [[ph:deny z]')).toBeNull()
+    expect(mockPromptHookAnswer('')).toBe(MOCK_PROMPT_HOOK_OK)
+  })
+
+  it('searches the user messages in order, never the system text or assistant messages', async () => {
+    const prompt: LanguageModelV4Prompt = [
+      { role: 'system', content: 'Rules: [[ph:deny from the system]]' },
+      user('first: [[ph:impossible from the first user message]]'),
+      { role: 'assistant', content: [{ type: 'text', text: '[[ph:deny from the assistant]]' }] },
+      { role: 'user', content: [{ type: 'text', text: 'second' }, { type: 'text', text: '[[ph:deny from the second]]' }] },
+    ]
+    expect(mockPromptHookText(prompt)).toBe('first: [[ph:impossible from the first user message]]\nsecond\n[[ph:deny from the second]]')
+    const result = await model().doGenerate({ prompt })
+    expect(result.content).toEqual([{ type: 'text', text: '{"ok":false,"reason":"from the first user message","impossible":true}' }])
+    const systemOnly = await model().doGenerate({ prompt: [{ role: 'system', content: '[[ph:deny system]]' }, user('nothing here')] })
+    expect(systemOnly.content).toEqual([{ type: 'text', text: MOCK_PROMPT_HOOK_OK }])
+  })
+
+  it('a marker in the hook prompt wins over one in the hook input, unless $ARGUMENTS comes first', () => {
+    const payload = JSON.stringify({ hook_event_name: 'PreToolUse', tool_input: { content: '[[ph:deny from the input]]' } })
+    expect(mockPromptHookAnswer(expandHookPrompt('Allow it? [[ph:ok]]', payload))).toBe(MOCK_PROMPT_HOOK_OK)
+    expect(mockPromptHookAnswer(expandHookPrompt('Check [[ph:impossible prompt]] $ARGUMENTS', payload))).toBe('{"ok":false,"reason":"prompt","impossible":true}')
+    expect(mockPromptHookAnswer(expandHookPrompt('$ARGUMENTS and then [[ph:ok]]', payload))).toBe('{"ok":false,"reason":"from the input"}')
+    expect(mockPromptHookAnswer(expandHookPrompt('Is this write allowed?', payload))).toBe('{"ok":false,"reason":"from the input"}')
+  })
+
+  it('drives promptHookOutcome end to end: a PreToolUse write_file whose content holds [[ph:deny no writes]] is denied', async () => {
+    const payload = buildHookPayload('PreToolUse', {
+      chatId: '0199a8f0-0000-7000-8000-000000000001',
+      projectId: 'prj_AAAAAAAAAAAAAAAA',
+      modelRef: 'mock:hooks',
+      origin: 'request',
+      cwd: '/tmp/project',
+      toolMode: 'ask',
+      source: 'project',
+      tool: { name: 'write_file', callId: 'mock_call_1', input: { path: 'a.txt', content: '[[ph:deny no writes]]' } },
+    })
+    const result = await generateText({ model: model(), prompt: expandHookPrompt('May the agent write this file?', payload.json), maxRetries: 0 })
+    const read = readPromptHookAnswer(result.text)
+    expect(read).toEqual({ valid: true, answer: { ok: false, reason: 'no writes', impossible: false } })
+    const answer = read.valid ? read.answer : null
+    expect(promptHookOutcome('PreToolUse', answer)).toMatchObject({ status: 'blocked', decision: 'deny', reason: 'no writes', continue: false })
+    expect(promptHookOutcome('PreToolUse', answer, { continueOnBlock: true })).toMatchObject({ status: 'blocked', decision: 'deny', reason: 'no writes', continue: true })
+  })
+
+  it('has a fixed usage of 10 input and 5 output tokens and finishes with stop, ignoring reasoning and the output cap', async () => {
+    const result = await generateText({ model: model(), prompt: 'a long prompt with many words [[ph:deny x]]', maxOutputTokens: 1, reasoning: 'high', maxRetries: 0 })
+    expect(result.text).toBe('{"ok":false,"reason":"x"}')
+    expect(result.finishReason).toBe('stop')
+    expect(result.usage).toMatchObject({ inputTokens: 10, outputTokens: 5 })
+    const parts = await collect(model(), { prompt: [user('[[ph:ok]]')], maxOutputTokens: 1, reasoning: 'xhigh' })
+    expect(finishOf(parts).usage).toEqual({ inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 5, text: 5, reasoning: 0 } })
+    expect(finishOf(parts).finishReason).toEqual({ unified: 'stop', raw: 'stop' })
+    expect(parts.some(part => part.type === 'reasoning-delta' || part.type === 'tool-call')).toBe(false)
+  })
+
+  it('streams the whole answer at once without any timer (fake timers never advanced)', async () => {
+    vi.useFakeTimers()
+    const parts = await collect(model(), { prompt: [user('[[ph:fenced]]')] })
+    expect(parts.map(part => part.type)).toEqual(['stream-start', 'response-metadata', 'text-start', 'text-delta', 'text-end', 'finish'])
+    expect(textOf(parts)).toBe(MOCK_PROMPT_HOOK_FENCED)
+    const streamed = streamText({ model: model(), prompt: '[[ph:impossible all done]]' })
+    expect(await streamed.text).toBe('{"ok":false,"reason":"all done","impossible":true}')
+  })
+
+  it('rejects at once with the reason of an aborted signal', async () => {
+    const controller = new AbortController()
+    controller.abort()
+    await expect(model().doGenerate({ prompt: [user('[[ph:ok]]')], abortSignal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' })
+    await expect(model().doStream({ prompt: [user('[[ph:ok]]')], abortSignal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' })
+  })
+
+  it('mockPlan gives the same answer as text (the model itself is served by ./prompt-hook.ts)', () => {
+    expect(mockPlan('prompt-hook', { prompt: [user('[[ph:deny plan]]')] })).toEqual({ reasoning: null, text: '{"ok":false,"reason":"plan"}', toolCall: null, finishReason: 'stop' })
   })
 })

@@ -17,6 +17,7 @@ import {
   orphanedText,
   pendingItems,
   revokedText,
+  selectAllState,
   selectedText,
   shellQuote,
   showOrphaned,
@@ -167,5 +168,14 @@ describe('project trust helpers', () => {
     expect(mcpServerCommand(trustMcpItem())).toBe('node tools/mcp-memory.mjs')
     expect(mcpServerCommand(trustHookItem())).toBeNull()
     expect(mcpServerCommand(null)).toBeNull()
+  })
+})
+
+describe('selectAllState (Phase 12, C46)', () => {
+  it('is false for none, true for every pending item and indeterminate for some', () => {
+    const items = [trustHookItem({ sha256: trustSha(1) }), trustMcpItem({ sha256: trustSha(2) }), trustHookItem({ sha256: trustSha(3), state: 'approved' })]
+    expect(selectAllState(items, new Set())).toBe(false)
+    expect(selectAllState(items, new Set([trustSha(1)]))).toBe('indeterminate')
+    expect(selectAllState(items, new Set([trustSha(1), trustSha(2)]))).toBe(true)
   })
 })

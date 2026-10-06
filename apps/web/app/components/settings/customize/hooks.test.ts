@@ -21,6 +21,7 @@ import {
   matcherPreview,
   matchesEveryTool,
   parseHookTimeout,
+  promptError,
   sortHookEntries,
 } from './hooks'
 
@@ -166,5 +167,21 @@ describe('customize hooks helpers', () => {
       hookEntry({ key: 'd', event: 'PreToolUse', matcher: 'Bash' }),
     ])
     expect(rows.map(row => row.key)).toEqual(['d', 'c', 'b', 'plugin:hook-pack:0'])
+  })
+})
+
+describe('phase 12 hook helpers (C46)', () => {
+  it('knows the matcher subject of every event and where prompt hooks run', () => {
+    expect(HOOK_EVENT_INFO.PostToolUseFailure).toMatchObject({ toolMatcher: true, promptAllowed: true, matcher: 'tool' })
+    expect(HOOK_EVENT_INFO.SessionEnd).toMatchObject({ toolMatcher: false, promptAllowed: false, matcher: 'reason' })
+    expect(HOOK_EVENT_INFO.Stop).toMatchObject({ promptAllowed: true, matcher: null })
+    expect(HOOK_EVENT_INFO.SubagentStart.matcher).toBe('agent')
+  })
+
+  it('checks a prompt', () => {
+    expect(promptError('')).toBe('Add the prompt.')
+    expect(promptError('x'.repeat(16_385))).toBe('Use at most 16,384 characters.')
+    expect(promptError('a\0b')).toBe('The prompt cannot contain NUL characters.')
+    expect(promptError('Did the tests pass? $ARGUMENTS')).toBeNull()
   })
 })

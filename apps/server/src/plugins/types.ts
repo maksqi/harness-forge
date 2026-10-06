@@ -5,11 +5,20 @@
 // - `PluginDrafts`    -> `createPluginDrafts(deps)` in `plugins/drafts/index.ts` (W3.3)
 // - `PluginFiles`     -> `createPluginFiles(deps)` in `plugins/scaffold/index.ts` (W3.4)
 // Phase 3 agents use only these interfaces (never W1.3 internals); a missing capability is a CCR.
+//
+// Phase 12 (ADR-053 / ADR-054; C43, frozen after Gate P12-0b): the plugin format (`PluginRecord.format`, column
+// `plugins.format`: `harness` = a `plugin.json` plugin, `claude` = a Claude Code plugin read in place by
+// `plugins/claude/**`), where a GitHub or marketplace install came from (`StoredPluginOrigin`, column `plugins.origin`,
+// with the marketplace entry overlay that never reaches a DTO), the format and Claude Code info of an inspection and the
+// `inspectDirectory` options (`format`, `overlay`, `nameHint`, `versionHint`). W12.1 reads the Claude Code format behind
+// them; W12.2 stages the new sources and stores the origin.
 import type { DeclarativeProvider, Disposable, PluginManifest, PluginModule, ProviderDefinition } from '@harness-forge/plugin-sdk'
 import type {
   BuildDiagnostic,
   BuildResult,
   BuiltinPluginId,
+  ClaudeMarketplaceEntry,
+  ClaudePluginInfo,
   DraftTestRequest,
   DraftTestResult,
   HarnessErrorInit,
@@ -22,11 +31,13 @@ import type {
   PluginFileContent,
   PluginFileEntry,
   PluginFileWrite,
+  PluginFormat,
   PluginInspection,
   PluginInstallSource,
   PluginKind,
   PluginLogEntry,
   PluginManifestUpdate,
+  PluginOrigin,
   PluginSettingsView,
   PluginSource,
   PluginState,
@@ -47,11 +58,29 @@ export interface BuiltinPlugin {
 
 // ---------- records ----------
 
+/**
+ * The marketplace entry a Claude Code plugin was installed from, as `mergeEntryOverlay` (`util/claude-plugins.ts`)
+ * applies it to the plugin's own `plugin.json` (ADR-054): the entry `name`, `strict` (true merges, false makes the entry
+ * the whole manifest), the entry `version` / `description` fallbacks and the inline `plugin.json` fields (`overlay`).
+ * Kept in `plugins.origin` (never in the files, so they stay byte-identical, and never in a DTO); part of the whole-tree
+ * trust hash (`O\0` + `canonicalJson(overlay)`).
+ */
+export type ClaudeEntryOverlay = Pick<ClaudeMarketplaceEntry, 'name' | 'strict' | 'version' | 'description' | 'overlay'>
+
+/**
+ * Where a `github` or `marketplace` install came from (Phase 12, ADR-054; column `plugins.origin`): the DTO
+ * `PluginOrigin` plus, for a marketplace entry, the entry overlay (`ClaudeEntryOverlay`; the DTO drops it). Null for the
+ * other sources.
+ */
+export type StoredPluginOrigin
+  = | (Extract<PluginOrigin, { kind: 'marketplace' }> & { readonly overlay?: ClaudeEntryOverlay })
+    | Extract<PluginOrigin, { kind: 'github' }>
+
 /** A `plugins` row. */
 export interface PluginRecord {
   id: string
   source: PluginSource
-  /** npm spec, URL, linked absolute path, or zip file name. */
+  /** npm spec, URL, linked absolute path, zip file name; Phase 12: `owner/repo@<sha12>[/path]` (github, marketplace). */
   sourceRef: string | null
   version: string
   /** User intent. */
@@ -63,6 +92,13 @@ export interface PluginRecord {
   lastError: HarnessErrorInit | null
   installedAt: number
   updatedAt: number
+  /**
+   * Phase 12 (ADR-053): `harness` (a `plugin.json` plugin; every row before v1.8 and every builtin) or `claude` (a Claude
+   * Code plugin, read in place by `plugins/claude/**`). The host picks the reader by it.
+   */
+  format: PluginFormat
+  /** Phase 12 (ADR-054): where a `github` or `marketplace` install came from; null for the other sources. */
+  origin: StoredPluginOrigin | null
 }
 
 /** Creates or updates a `plugins` row (installs, updates, drafts, scaffolds). */
@@ -75,16 +111,30 @@ export interface PluginRecordInput {
   enabled?: boolean
   /** `undefined`: keep the current pin; `null`: clear it. */
   trustedHash?: string | null
+  /** Phase 12: `undefined` keeps the current format (a new row: `harness`). */
+  format?: PluginFormat
+  /** Phase 12: `undefined` keeps the current origin (a new row: null); `null` clears it. */
+  origin?: StoredPluginOrigin | null
 }
 
 /** Result of validating a plugin directory that is not loaded (install staging, drafts). */
 export interface PluginDirectoryInspection {
-  /** Parsed with `pluginManifestBaseSchema` (reserved ids are allowed here: see `reserved`). */
+  /**
+   * Parsed with `pluginManifestBaseSchema` (reserved ids are allowed here: see `reserved`). Phase 12: for a Claude Code
+   * plugin, the synthesized manifest (id from `claudePluginId`, name, version, description, author, homepage, the
+   * `settings` of its `userConfig`; no `contributes`).
+   */
   manifest: PluginManifest
   kind: PluginKind
-  /** The trust hash of the files (PLUGINS.md 13 "Pinning"): the value `trust` / `trustedHash` pins. */
+  /**
+   * The trust hash of the files (PLUGINS.md 13 "Pinning"): the value `trust` / `trustedHash` pins. Phase 12: for a
+   * Claude Code plugin, the whole-tree hash `hf-claude-plugin/v1` (every regular file with its mode, plus the overlay).
+   */
   sha256: string
-  /** Code plugin or declares a stdio MCP server. */
+  /**
+   * Code plugin or declares a stdio MCP server (plugin API 1.5.0: command hooks, `!` spans). Phase 12: a Claude Code
+   * plugin with a command hook handler, a stdio MCP server or a `!` span.
+   */
   requiresTrust: boolean
   /** `engines.harness` satisfies `PLUGIN_API_VERSION`. */
   compatible: boolean
@@ -93,6 +143,31 @@ export interface PluginDirectoryInspection {
   /** Declared in the manifest (code plugins may register more at runtime). */
   contributions: PluginContributions
   files: { count: number, bytes: number }
+  /** Phase 12 (ADR-053): the format that was read. */
+  format: PluginFormat
+  /** Phase 12: the Claude Code plugin info (components, executables, hosts, `userConfig`, diagnostics); null for harness. */
+  claude: ClaudePluginInfo | null
+}
+
+/** Options of `PluginHost.inspectDirectory` (Phase 12, ADR-053 / ADR-054). */
+export interface InspectDirectoryOptions {
+  /**
+   * The format to read; omitted = `harness` (the folder's layout is detected by the caller with `detectPluginLayout`,
+   * `plugins/claude/detect.ts`).
+   */
+  format?: PluginFormat
+  /** A Claude Code plugin from a marketplace: the entry overlay applied to its `plugin.json` (and hashed with it). */
+  overlay?: ClaudeEntryOverlay
+  /**
+   * A Claude Code plugin without a `plugin.json` name and without an overlay: the name its id is derived from (the
+   * folder, repository or package name).
+   */
+  nameHint?: string
+  /**
+   * A Claude Code plugin without a version in `plugin.json` or the entry: the raw version (the 12-character commit or
+   * archive sha256 of its origin); else `0.0.0`.
+   */
+  versionHint?: string
 }
 
 // ---------- runtime ----------
@@ -225,9 +300,12 @@ export interface PluginHost {
   /**
    * Validates a plugin directory without loading it (validation steps 1-6 of PLUGINS.md 11 except the directory name
    * and trust checks) and computes its trust hash. Throws `validation_error` (with issues) for a missing or invalid
-   * `plugin.json`, an entry or icon outside the directory, a wrong extension.
+   * `plugin.json`, an entry or icon outside the directory, a wrong extension. Phase 12: `options.format: 'claude'` reads
+   * a Claude Code plugin (`readClaudePluginDirectory`, W12.1) with the entry `overlay` and the `nameHint` /
+   * `versionHint` fallbacks; it throws `validation_error` for an unusable `plugin.json`, a path outside the folder, a
+   * link or a special file.
    */
-  readonly inspectDirectory: (dir: string) => Promise<PluginDirectoryInspection>
+  readonly inspectDirectory: (dir: string, options?: InspectDirectoryOptions) => Promise<PluginDirectoryInspection>
   /** Upserts the `plugins` row; does not load (call `load`). */
   readonly saveRecord: (input: PluginRecordInput) => Promise<PluginRecord>
   /**

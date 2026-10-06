@@ -11,8 +11,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { nextTick } from 'vue'
 import { useAuthStore } from '~/stores/auth'
 import { useHooksStore } from '~/stores/hooks'
+import { usePluginsStore } from '~/stores/plugins'
 import { testIds } from '~/utils/testids'
-import { authStatus, codeHookEntry, hookEntry, hookId, hookList, personalHook, pluginSummary, projectId, projectSummary, settings, trustSha } from '~/utils/testing/fixtures'
+import { authStatus, codeHookEntry, hookEntry, hookId, hookList, personalHook, pluginDetail, pluginSummary, projectId, projectSummary, settings, trustSha } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import HooksPanel from './HooksPanel.vue'
 
@@ -274,5 +275,25 @@ describe('hooksPanel', () => {
     await flushPromises()
     expect(document.body.querySelector('[data-slot="settings-load-error"]')).toBeNull()
     expect(sections()).toHaveLength(2)
+  })
+})
+
+describe('hooksPanel: Phase 12 (C46-T7)', () => {
+  it('edits a project hook in the editor\'s project mode', async () => {
+    await mountPanel(projectId(1), 'website')
+    await chooseFromMenu(row(element => element.dataset.source === 'project'), testIds.hookEdit)
+    const editor = byTestId(testIds.hookEditor)!
+    expect(editor.dataset.mode).toBe('project')
+    expect(wrapper!.findComponent({ name: 'HookEditor' }).props('target')).toEqual({ projectId: projectId(1), path: '.claude/settings.json', event: 'PreToolUse', groupIndex: null, handlerIndex: null })
+    expect(byTestId<HTMLTextAreaElement>(testIds.hookCommand)!.value).toBe('sh .claude/hooks/guard.sh')
+  })
+
+  it('offers no project Edit… without a project and reviews the trust of a plugin that is not trusted', async () => {
+    api.plugins.list.mockResolvedValue({ items: [pluginSummary({ id: 'hook-pack', name: 'Hook pack', state: 'untrusted' })] })
+    api.plugins.get.mockResolvedValue(pluginDetail({ id: 'hook-pack', name: 'Hook pack', state: 'untrusted' }))
+    await usePluginsStore().fetchAll()
+    await mountPanel()
+    await chooseFromMenu(row(element => element.dataset.source === 'plugin' && element.dataset.kind === 'command'), '[data-action="trust-plugin"]')
+    expect(wrapper!.findComponent({ name: 'TrustDialog' }).props('pluginId')).toBe('hook-pack')
   })
 })

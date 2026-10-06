@@ -18,6 +18,12 @@
 // running hook process groups right after the runs and then stops the project MCP runtimes (`SHUTDOWN_STEPS`), all
 // inside the shutdown timeout.
 //
+// Phase 12 (C43, frozen after Gate P12-0b): no new boot hook (marketplaces, the home-folder import and the project
+// definition editor are lazy; `<dataDir>/transcripts` is created by the first hook that needs a transcript). An invalid
+// `HF_CLAUDE_HOME` (not `0`, not absolute) or `HF_TEST_REMOTE_URL` (not `http://127.0.0.1:<port>`) fails the boot like
+// every invalid variable; an honored `HF_TEST_REMOTE_URL` (only with `HF_MOCK_PROVIDER=1`) is logged as a warning.
+// `stopDeps` drops the import plans first and aborts the marketplace fetches before the plugins (`SHUTDOWN_STEPS`).
+//
 // Bind safety: a non-loopback `HF_HOST` needs `HF_PASSWORD`, a password stored in the data directory, or
 // `HF_INSECURE=1`; otherwise the process exits with code 1 before any plugin starts or any port is opened. An invalid
 // `HF_TRUST_PROXY` (`1`, `true`, a hop count, an unknown token) fails the boot the same way, with the format explained;
@@ -234,6 +240,8 @@ async function main(): Promise<void> {
       return
     if (env.trustProxy !== null)
       logger.info('trusting reverse proxies (HF_TRUST_PROXY)', { trustProxy: env.trustProxy, ranges: trustedRanges(env.trustProxy) })
+    if (env.testRemoteUrl !== null)
+      logger.warn('plugin sources and marketplaces are fetched from the loopback test remote (test-only)', { testRemoteUrl: env.testRemoteUrl })
 
     state.started = true
     await bootStep(state, startDeps(deps))
