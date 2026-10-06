@@ -6,10 +6,13 @@
 // its input or output does not parse); the transient `data-activity` never becomes a block.
 // Phase 10 (C33 adds the kind and the helpers complete, W10.11 owns them in P10-A): `data-task-result` -> `task-result`
 // (TaskResultNote, ADR-046); `taskResultsOf` / `isTaskResultMessage` are the only readers of results on the web.
+// Phase 11 (C39 adds the kind, W11.12 owns it in P11-A): a valid `data-hook` record that no tool part of the same message
+// claims (`toolCallId`) -> `hook` (HookNote, ADR-048); tool-linked records render inside their tool row (`toolHooksOf`).
 import type {
   CompactionData,
   HarnessUIMessage,
   HarnessUIMessagePart,
+  HookData,
   ImageTurnMetadata,
   NoticeData,
   SteerData,
@@ -27,6 +30,7 @@ import type {
 } from 'ai'
 import { compactionDataSchema, steerDataSchema, TASK_RESULT_PART_TYPE, taskResultDataSchema } from '@harness-forge/shared'
 import { getToolName, isToolUIPart } from 'ai'
+import { hookDataOf } from './hooks/hook-notes'
 
 export type ToolPartLike = ToolUIPart | DynamicToolUIPart
 export type ToolState = ToolPartLike['state']
@@ -50,6 +54,11 @@ export type MessageBlock
     | { kind: 'task', key: string, index: number, part: ToolPartLike }
     /** + Phase 10: the delivered result of a background agent (`data-task-result`, ADR-046): TaskResultNote. */
     | { kind: 'task-result', key: string, index: number, part: TaskResultData }
+    /**
+     * + Phase 11: a hook record (`data-hook`, ADR-048) that is not linked to a tool part of the message (Stop, PreCompact,
+     * a PostToolUse record whose call is not there): an inline HookNote at the part's position.
+     */
+    | { kind: 'hook', key: string, index: number, data: HookData }
 
 /** Characters of a tool input / output shown before "Show all" (docs/UI.md 7.2). */
 export const TOOL_BODY_PREVIEW_CHARS = 4096
@@ -99,10 +108,17 @@ function isNoticeData(value: unknown): value is NoticeData {
  * unknown `data-*` and custom parts render nothing, `data-notice` becomes a notice row. Phase 9: a valid
  * `data-compaction` becomes a `compaction` block, a valid `data-steer` a `steer` block (invalid data renders nothing),
  * a tool part named `task` a `task` block; `data-activity` is transient and never a block. Phase 10: a valid
- * `data-task-result` becomes a `task-result` block (invalid data renders nothing).
+ * `data-task-result` becomes a `task-result` block (invalid data renders nothing). Phase 11: a valid `data-hook` record
+ * becomes a `hook` block unless its `toolCallId` names a tool part of the same message (those render inside the tool
+ * row or after the task block, `toolHooksOf`); invalid records render nothing.
  */
 export function messageBlocks(parts: readonly HarnessUIMessagePart[]): MessageBlock[] {
   const blocks: MessageBlock[] = []
+  const toolCallIds = new Set<string>()
+  for (const part of parts) {
+    if (isToolUIPart(part) && part.toolCallId)
+      toolCallIds.add(part.toolCallId)
+  }
   parts.forEach((part, index) => {
     if (part.type === 'text') {
       blocks.push({ kind: 'text', key: `text-${index}`, index, part })
@@ -151,6 +167,11 @@ export function messageBlocks(parts: readonly HarnessUIMessagePart[]): MessageBl
       const data = taskResultOf(part)
       if (data)
         blocks.push({ kind: 'task-result', key: `task-result-${data.taskId}-${index}`, index, part: data })
+    }
+    else if (part.type === 'data-hook') {
+      const data = hookDataOf(part)
+      if (data && !(data.toolCallId && toolCallIds.has(data.toolCallId)))
+        blocks.push({ kind: 'hook', key: `hook-${data.id}-${index}`, index, data })
     }
   })
   return blocks

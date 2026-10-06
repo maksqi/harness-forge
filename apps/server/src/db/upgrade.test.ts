@@ -25,6 +25,12 @@
 //   INDEX` statements (nothing else touched: foreign keys are on), both new tables start empty, every chat, message and
 //   project survives, a second personal definition of the same kind and name is a unique violation, and deleting a chat
 //   cascades into its `background_tasks` rows.
+// - v1.6 -> v1.7 through migration 0008 (C36-T11, ADR-048 / ADR-049 / ADR-051): a database with `0000` ... `0007`,
+//   projects, chats, messages (a delivered background result carrier, a command message), personal definitions and
+//   background tasks is migrated with the real folder; 0008 must be exactly two `CREATE TABLE` and one `ALTER TABLE
+//   \`projects\` ADD \`output_style\`` (no index, no rebuild: foreign keys are on), both new tables start empty,
+//   `output_style` is null on every project, every row survives, deleting a project cascades into its `project_trust`
+//   rows and a second (project, sha256) is a primary-key violation.
 import type { Database } from './client.ts'
 import { copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -35,7 +41,7 @@ import { LISTING_TTL_MS } from '../catalog/index.ts'
 import { buildTree, latestLeafUnder } from '../services/chats/tree.ts'
 import { createTestApp } from '../testing/create-test-app.ts'
 import { openDatabase } from './client.ts'
-import { uniqueViolation } from './constraint.test-util.ts'
+import { primaryKeyViolation, uniqueViolation } from './constraint.test-util.ts'
 import { migrateDatabase, resolveMigrationsFolder } from './migrate.ts'
 import { TABLE_NAMES } from './schema.ts'
 
@@ -62,6 +68,7 @@ const PROJECTS = JOURNAL.entries.find(entry => entry.tag.startsWith('0004_'))
 const CHECKPOINTS = JOURNAL.entries.find(entry => entry.tag.startsWith('0005_'))
 const SHELL_UNIQUE = JOURNAL.entries.find(entry => entry.tag.startsWith('0006_'))
 const CUSTOMIZATIONS = JOURNAL.entries.find(entry => entry.tag.startsWith('0007_'))
+const HOOKS_TRUST = JOURNAL.entries.find(entry => entry.tag.startsWith('0008_'))
 
 const opened: Database[] = []
 const tempDirs: string[] = []
@@ -793,8 +800,9 @@ describe('upgrade of a v1.2 database through migration 0004 (projects)', () => {
     expect(applied.rows.map(row => Number(row.created_at))).toEqual(JOURNAL.entries.map(entry => entry.when))
     const shape = await schemaShape(database)
     expect(shape.tables).toEqual([...TABLE_NAMES].sort())
-    // 16 tables of v1.3 plus the two of 0005 (Phase 8) and the two of 0007 (Phase 10), applied by the same run.
-    expect(shape.tables).toHaveLength(20)
+    // 16 tables of v1.3 plus the two of 0005 (Phase 8), the two of 0007 (Phase 10) and the two of 0008 (Phase 11),
+    // applied by the same run.
+    expect(shape.tables).toHaveLength(22)
     expect(shape.indexes.projects_path_idx).toEqual(['path'])
     expect(shape.indexes.chats_project_idx).toEqual(['project_id', 'archived', 'updated_at', 'id'])
     const fresh = await open(':memory:')
@@ -951,7 +959,8 @@ describe('upgrade of a v1.3 database through migration 0005 (workspace checkpoin
     const database = await open(path)
     await migrateDatabase(database.db)
 
-    expect(await rows(database, 'projects', 'id')).toEqual(before.projects)
+    // Phase 11 (0008): every project gains `output_style` (null).
+    expect(await rows(database, 'projects', 'id')).toEqual(before.projects.map(row => ({ ...row, output_style: null })))
     expect(await rows(database, 'chats', 'id')).toEqual(before.chats)
     expect(await rows(database, 'messages', 'chat_id, seq')).toEqual(before.messages)
     expect(await rows(database, 'chat_shares', 'id')).toEqual(before.chat_shares)
@@ -961,11 +970,11 @@ describe('upgrade of a v1.3 database through migration 0005 (workspace checkpoin
 
     const applied = await database.client.execute('SELECT created_at FROM __drizzle_migrations ORDER BY created_at')
     expect(applied.rows.map(row => Number(row.created_at))).toEqual(JOURNAL.entries.map(entry => entry.when))
-    // 0005 and every later migration (Phase 9: 0006; Phase 10: 0007).
-    expect(applied.rows).toHaveLength(8)
+    // 0005 and every later migration (Phase 9: 0006; Phase 10: 0007; Phase 11: 0008).
+    expect(applied.rows).toHaveLength(9)
     const shape = await schemaShape(database)
     expect(shape.tables).toEqual([...TABLE_NAMES].sort())
-    expect(shape.tables).toHaveLength(20)
+    expect(shape.tables).toHaveLength(22)
     const fresh = await open(':memory:')
     await migrateDatabase(fresh.db)
     expect(shape).toEqual(await schemaShape(fresh))
@@ -1231,8 +1240,9 @@ describe('upgrade of a v1.4 database through migration 0006 (unique shell rules)
       ['write_file', 0, 'deny'],
     ])
 
-    // Every project, chat, message, journal row and usage row survives as stored.
-    expect(await rows(database, 'projects', 'id')).toEqual(before.projects)
+    // Every project, chat, message, journal row and usage row survives as stored (Phase 11, 0008: projects gain a null
+    // `output_style`).
+    expect(await rows(database, 'projects', 'id')).toEqual(before.projects.map(row => ({ ...row, output_style: null })))
     expect(await rows(database, 'chats', 'id')).toEqual(before.chats)
     expect(await rows(database, 'messages', 'chat_id, seq')).toEqual(before.messages)
     expect(await rows(database, 'workspace_changes', 'id')).toEqual(before.workspace_changes)
@@ -1240,10 +1250,10 @@ describe('upgrade of a v1.4 database through migration 0006 (unique shell rules)
 
     const applied = await database.client.execute('SELECT created_at FROM __drizzle_migrations ORDER BY created_at')
     expect(applied.rows.map(row => Number(row.created_at))).toEqual(JOURNAL.entries.map(entry => entry.when))
-    // 0006 and every later migration (Phase 10: 0007).
-    expect(applied.rows).toHaveLength(8)
+    // 0006 and every later migration (Phase 10: 0007; Phase 11: 0008).
+    expect(applied.rows).toHaveLength(9)
     const shape = await schemaShape(database)
-    expect(shape.tables).toHaveLength(20)
+    expect(shape.tables).toHaveLength(22)
     const fresh = await open(':memory:')
     await migrateDatabase(fresh.db)
     expect(shape).toEqual(await schemaShape(fresh))
@@ -1416,7 +1426,8 @@ describe('upgrade of a v1.5 database through migration 0007 (customizations, bac
 
     expect(await scalar(database, 'SELECT count(*) AS n FROM customizations')).toBe(0)
     expect(await scalar(database, 'SELECT count(*) AS n FROM background_tasks')).toBe(0)
-    expect(await rows(database, 'projects', 'id')).toEqual(before.projects)
+    // Phase 11 (0008): every project gains `output_style` (null).
+    expect(await rows(database, 'projects', 'id')).toEqual(before.projects.map(row => ({ ...row, output_style: null })))
     expect(await rows(database, 'chats', 'id')).toEqual(before.chats)
     expect(await rows(database, 'messages', 'chat_id, seq')).toEqual(before.messages)
     expect(await rows(database, 'workspace_changes', 'id')).toEqual(before.workspace_changes)
@@ -1425,10 +1436,11 @@ describe('upgrade of a v1.5 database through migration 0007 (customizations, bac
 
     const applied = await database.client.execute('SELECT created_at FROM __drizzle_migrations ORDER BY created_at')
     expect(applied.rows.map(row => Number(row.created_at))).toEqual(JOURNAL.entries.map(entry => entry.when))
-    expect(applied.rows).toHaveLength(8)
+    // 0007 and every later migration (Phase 11: 0008).
+    expect(applied.rows).toHaveLength(9)
     const shape = await schemaShape(database)
     expect(shape.tables).toEqual([...TABLE_NAMES].sort())
-    expect(shape.tables).toHaveLength(20)
+    expect(shape.tables).toHaveLength(22)
     const fresh = await open(':memory:')
     await migrateDatabase(fresh.db)
     expect(shape).toEqual(await schemaShape(fresh))
@@ -1489,6 +1501,235 @@ describe('upgrade of a v1.5 database through migration 0007 (customizations, bac
       const stored = before.messages.find(row => row.id === 'msg_f100000000000001')
       expect(detail.messages[1]?.parts).toEqual(JSON.parse(String(stored?.parts)))
       expect((await t.deps.projects.list()).map(project => project.id)).toEqual([V15_PROJECT])
+    }
+    finally {
+      await t.close()
+    }
+  })
+})
+
+/** A migrations folder holding 0000 - 0007 (their SQL + an eight-entry journal): the schema of a v1.6 data directory. */
+function v16Folder(): string {
+  const entries = [INITIAL, TREE, REMEMBERED, REFRESH, PROJECTS, CHECKPOINTS, SHELL_UNIQUE, CUSTOMIZATIONS]
+  if (entries.includes(undefined))
+    throw new Error('a migration of 0000 - 0007 is missing from the journal')
+  const dir = tempDir()
+  mkdirSync(join(dir, 'meta'))
+  for (const entry of entries as JournalEntry[])
+    copyFileSync(join(REAL_FOLDER, `${entry.tag}.sql`), join(dir, `${entry.tag}.sql`))
+  writeFileSync(join(dir, 'meta', '_journal.json'), JSON.stringify({ ...JOURNAL, entries }))
+  return dir
+}
+
+/** The statements of migration 0008 without comments and blank lines (split like `migrate()` does). */
+function hooksTrustStatements(): string[] {
+  if (HOOKS_TRUST === undefined)
+    throw new Error('migration 0008 is missing from the journal')
+  return readFileSync(join(REAL_FOLDER, `${HOOKS_TRUST.tag}.sql`), 'utf8')
+    .split('--> statement-breakpoint')
+    .map(statement => statement.replace(/^--.*$/gm, '').trim())
+    .filter(Boolean)
+}
+
+const V16_PROJECT = 'prj_v16project000001'
+const V16_OTHER_PROJECT = 'prj_v16project000002'
+const CHAT_T1 = '0199a8f0-0000-7000-8000-0000000001a1'
+const CHAT_T2 = '0199a8f0-0000-7000-8000-0000000001a2'
+const V16_HASH_A = 'a'.repeat(64)
+const V16_HASH_B = 'b'.repeat(64)
+
+type V16Table = 'projects' | 'chats' | 'messages' | 'workspace_changes' | 'shell_rules' | 'usage' | 'customizations' | 'background_tasks'
+
+/**
+ * Creates a v1.6 database file (0000 - 0007) with two projects, a project chat holding a `/status` command message, a
+ * reply with a background `task` part and a delivered result carrier (`data-task-result`), a chat without a project, a
+ * journal row, a shell rule, a usage row, personal definitions and two background tasks; returns every row of the tables
+ * 0008 must not touch (besides the new `projects.output_style`).
+ */
+async function seedV16Database(path: string): Promise<Record<V16Table, Record<string, unknown>[]>> {
+  const database = await open(path)
+  await migrateDatabase(database.db, { migrationsFolder: v16Folder() })
+  const before = await database.client.execute(`SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('hooks', 'project_trust')`)
+  expect(before.rows).toHaveLength(0)
+  for (const [id, name] of [[V16_PROJECT, 'git-demo'], [V16_OTHER_PROJECT, 'untrusted']] as const) {
+    await database.client.execute({
+      sql: 'INSERT INTO projects (id, name, path, instructions, created_at, updated_at) VALUES (?, ?, ?, ?, 100, 200)',
+      args: [id, name, `/srv/projects/${name}`, id === V16_PROJECT ? 'Use pnpm.' : null],
+    })
+  }
+  const task = { status: 'completed', type: 'explore', description: 'Look around', modelRef: 'mock:background', steps: [], stepsOmitted: 0, report: 'Found 3 files.', startedAt: 1, finishedAt: 2 }
+  const turns: Array<[string, string | null, Array<['user' | 'assistant', unknown[], Record<string, unknown>]>]> = [
+    [CHAT_T1, V16_PROJECT, [
+      ['user', [{ type: 'text', text: 'Status now' }], { command: { name: 'status', source: 'project', input: 'now', expansion: 'Run !`git status --short` and read @README.md: now' } }],
+      ['assistant', [{ type: 'tool-task', toolCallId: 'mock_task_1', state: 'output-available', input: { description: 'Look around', prompt: 'List files', type: 'explore', background: true }, output: { status: 'running', taskId: 'bgt_v16task00000001' } }], { modelRef: 'mock:background', startedAt: 1 }],
+      ['user', [{ type: 'data-task-result', id: 'bgt_v16task00000001', data: { taskId: 'bgt_v16task00000001', toolCallId: 'mock_task_1', output: task } }], {}],
+      ['assistant', [{ type: 'text', text: 'The task found 3 files.' }], { modelRef: 'mock:background', startedAt: 3 }],
+    ]],
+    [CHAT_T2, null, [
+      ['user', [{ type: 'text', text: 'Hello' }], {}],
+      ['assistant', [{ type: 'text', text: 'Hi.' }], { modelRef: 'mock:echo', startedAt: 4 }],
+    ]],
+  ]
+  for (const [index, [chatId, projectId, messages]] of turns.entries()) {
+    const ids = messages.map((_, seq) => `msg_t${index + 1}${String(seq).padStart(14, '0')}`)
+    await database.client.execute({
+      sql: 'INSERT INTO chats (id, title, title_source, model_ref, settings, pinned, archived, pending_approval, active_leaf_id, project_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?)',
+      args: [chatId, `Chat ${index}`, 'user', 'mock:background', '{"toolMode":"ask"}', ids[ids.length - 1] ?? null, projectId, 1000 + index, 2000 + index],
+    })
+    for (const [seq, [role, parts, metadata]] of messages.entries()) {
+      await database.client.execute({
+        sql: 'INSERT INTO messages (id, chat_id, parent_id, selected_child_id, seq, role, parts, metadata, search_text, created_at, updated_at) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)',
+        args: [ids[seq] ?? null, chatId, seq === 0 ? null : (ids[seq - 1] ?? null), seq, role, JSON.stringify(parts), JSON.stringify(metadata), `${role} ${seq}`, 3000 + seq, 4000 + seq],
+      })
+    }
+  }
+  await database.client.execute({
+    sql: `INSERT INTO workspace_changes (chat_id, project_id, message_seq, message_id, tool_call_id, kind, tool, path, before_state, after_sha, after_size, created_at)
+          VALUES (?, ?, 1, 'msg_t100000000000001', 'call_1', 'edit', 'write_file', 'notes.txt', 'missing', ?, 1, 7)`,
+    args: [CHAT_T1, V16_PROJECT, 'e'.repeat(64)],
+  })
+  await database.client.execute({ sql: 'INSERT INTO shell_rules (id, project_id, prefix, created_at) VALUES (?, ?, ?, 8)', args: ['srl_v16rule000000001', V16_PROJECT, 'git status'] })
+  await database.client.execute({
+    sql: 'INSERT INTO usage (chat_id, message_id, purpose, provider_id, model_id, input, output, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    args: [CHAT_T1, 'msg_t100000000000001', 'subagent', 'mock', 'background', 3, 4, 5000],
+  })
+  for (const [id, kind, name] of [['cus_v16custom0000001', 'agent', 'reviewer'], ['cus_v16custom0000002', 'command', 'greet'], ['cus_v16custom0000003', 'skill', 'release-notes']] as const) {
+    await database.client.execute({
+      sql: 'INSERT INTO customizations (id, kind, name, description, content, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, 10, 11)',
+      args: [id, kind, name, `The ${name} ${kind}.`, `---\nname: ${name}\ndescription: The ${name} ${kind}.\n---\nBody of ${name}.`],
+    })
+  }
+  for (const [id, status, deliveredAt, deliveredMessageId] of [['bgt_v16task00000001', 'completed', 20, 'msg_t100000000000002'], ['bgt_v16task00000002', 'aborted', null, null]] as const) {
+    await database.client.execute({
+      sql: `INSERT INTO background_tasks (id, chat_id, message_id, tool_call_id, type, description, status, origin, output, created_at, finished_at, delivered_at, delivered_message_id)
+            VALUES (?, ?, 'msg_t100000000000001', 'mock_task_1', 'explore', 'Look around', ?, 'request', ?, 12, 13, ?, ?)`,
+      args: [id, CHAT_T1, status, JSON.stringify({ ...task, status }), deliveredAt, deliveredMessageId],
+    })
+  }
+  const seeded = {
+    projects: await rows(database, 'projects', 'id'),
+    chats: await rows(database, 'chats', 'id'),
+    messages: await rows(database, 'messages', 'chat_id, seq'),
+    workspace_changes: await rows(database, 'workspace_changes', 'id'),
+    shell_rules: await rows(database, 'shell_rules', 'id'),
+    usage: await rows(database, 'usage', 'id'),
+    customizations: await rows(database, 'customizations', 'id'),
+    background_tasks: await rows(database, 'background_tasks', 'id'),
+  }
+  database.close()
+  return seeded
+}
+
+describe('upgrade of a v1.6 database through migration 0008 (hooks, project trust, project output style)', () => {
+  it('0008 is two CREATE TABLE and one ALTER TABLE `projects` ADD `output_style`, never a rebuild, an index or a data change', () => {
+    const statements = hooksTrustStatements()
+    expect(statements).toHaveLength(3)
+    const tables = statements.filter(statement => statement.startsWith('CREATE TABLE '))
+    expect(tables.map(statement => statement.match(/^CREATE TABLE `(\w+)`/)?.[1]).sort()).toEqual(['hooks', 'project_trust'])
+    const alters = statements.filter(statement => /^ALTER\s+TABLE/i.test(statement))
+    expect(alters).toEqual(['ALTER TABLE `projects` ADD `output_style` text;'])
+    const sql = statements.join('\n')
+    // The only `UPDATE` allowed is the foreign key's `ON UPDATE no action`.
+    for (const forbidden of [/DROP\s+/i, /__new_/i, /PRAGMA/i, /\bINDEX\b/i, /\bDELETE\s+FROM\b/i, /\bUPDATE\s+`?\w+`?\s+SET\b/i, /\bINSERT\b/i])
+      expect(sql, String(forbidden)).not.toMatch(forbidden)
+    expect(sql.replaceAll('ON UPDATE no action', '')).not.toMatch(/\bUPDATE\b/i)
+    // The only foreign key: project_trust.project_id -> projects.id, cascading; the primary key is (project_id, sha256).
+    expect(sql.match(/FOREIGN KEY/g)).toHaveLength(1)
+    const trust = tables.find(statement => statement.includes('`project_trust`'))
+    expect(trust).toMatch(/FOREIGN KEY \(`project_id`\) REFERENCES `projects`\(`id`\) ON UPDATE no action ON DELETE cascade/)
+    expect(trust).toMatch(/PRIMARY KEY\(`project_id`, `sha256`\)/)
+    expect(tables.find(statement => statement.includes('`hooks`'))).toMatch(/`enabled` integer DEFAULT true NOT NULL/)
+    expect(JOURNAL.entries.slice(0, 9)).toEqual([INITIAL, TREE, REMEMBERED, REFRESH, PROJECTS, CHECKPOINTS, SHELL_UNIQUE, CUSTOMIZATIONS, HOOKS_TRUST])
+    expect(HOOKS_TRUST?.tag).toBe('0008_hooks_trust')
+  })
+
+  it('both tables exist and are empty; output_style is null on every project; every row survives; the schema matches a fresh one', async () => {
+    const path = join(tempDir(), 'harness.db')
+    const before = await seedV16Database(path)
+    const database = await open(path)
+    await migrateDatabase(database.db)
+
+    expect(await scalar(database, 'SELECT count(*) AS n FROM hooks')).toBe(0)
+    expect(await scalar(database, 'SELECT count(*) AS n FROM project_trust')).toBe(0)
+    expect(await scalar(database, 'SELECT count(*) AS n FROM projects WHERE output_style IS NOT NULL')).toBe(0)
+    expect(await rows(database, 'projects', 'id')).toEqual(before.projects.map(row => ({ ...row, output_style: null })))
+    expect(await rows(database, 'chats', 'id')).toEqual(before.chats)
+    expect(await rows(database, 'messages', 'chat_id, seq')).toEqual(before.messages)
+    expect(await rows(database, 'workspace_changes', 'id')).toEqual(before.workspace_changes)
+    expect(await rows(database, 'shell_rules', 'id')).toEqual(before.shell_rules)
+    expect(await rows(database, 'usage', 'id')).toEqual(before.usage)
+    expect(await rows(database, 'customizations', 'id')).toEqual(before.customizations)
+    expect(await rows(database, 'background_tasks', 'id')).toEqual(before.background_tasks)
+
+    const applied = await database.client.execute('SELECT created_at FROM __drizzle_migrations ORDER BY created_at')
+    expect(applied.rows.map(row => Number(row.created_at))).toEqual(JOURNAL.entries.map(entry => entry.when))
+    expect(applied.rows).toHaveLength(9)
+    const shape = await schemaShape(database)
+    expect(shape.tables).toEqual([...TABLE_NAMES].sort())
+    expect(shape.tables).toHaveLength(22)
+    const fresh = await open(':memory:')
+    await migrateDatabase(fresh.db)
+    expect(shape).toEqual(await schemaShape(fresh))
+    expect(shape.foreignKeys.project_trust?.map(key => (key as unknown[]).slice(0, 4).join(' '))).toEqual(['project_id projects id CASCADE'])
+    expect(shape.foreignKeys.hooks).toEqual([])
+    expect((await database.client.execute('PRAGMA foreign_key_check')).rows).toEqual([])
+    expect((await database.client.execute('PRAGMA integrity_check')).rows.map(row => String(row.integrity_check))).toEqual(['ok'])
+
+    // Idempotent: migrating again applies nothing.
+    await migrateDatabase(database.db)
+    expect(await scalar(database, 'SELECT count(*) AS n FROM __drizzle_migrations')).toBe(JOURNAL.entries.length)
+  })
+
+  it('a second (project, sha256) is a primary-key violation; deleting a project cascades to its project_trust rows only', async () => {
+    const path = join(tempDir(), 'harness.db')
+    await seedV16Database(path)
+    const database = await open(path)
+    await migrateDatabase(database.db)
+
+    const approve = (projectId: string, sha256: string, kind = 'hook'): Promise<unknown> => database.client.execute({
+      sql: 'INSERT INTO project_trust (project_id, sha256, kind, label, created_at) VALUES (?, ?, ?, ?, 1)',
+      args: [projectId, sha256, kind, 'sh .claude/hooks/guard.sh'],
+    })
+    await approve(V16_PROJECT, V16_HASH_A)
+    await approve(V16_PROJECT, V16_HASH_B, 'mcp')
+    await approve(V16_OTHER_PROJECT, V16_HASH_A)
+    expect(await primaryKeyViolation(approve(V16_PROJECT, V16_HASH_A, 'command'))).toBe('UNIQUE constraint failed: project_trust.project_id, project_trust.sha256')
+    // An approval of a project that does not exist is refused (foreign keys are on).
+    await expect(approve('prj_v16missing000001', V16_HASH_A)).rejects.toThrow()
+    await database.client.execute({
+      sql: `INSERT INTO hooks (id, event, matcher, command, timeout, enabled, created_at, updated_at) VALUES ('hok_v16hook000000001', 'PreToolUse', 'Bash', 'sh guard.sh', NULL, 1, 1, 1)`,
+      args: [],
+    })
+
+    // The project service detaches its chats itself; the schema cascades into project_trust (and, since 0005, the
+    // journal rows and shell rules).
+    await database.client.execute({ sql: 'UPDATE chats SET project_id = NULL WHERE project_id = ?', args: [V16_PROJECT] })
+    await database.client.execute({ sql: 'DELETE FROM projects WHERE id = ?', args: [V16_PROJECT] })
+    expect((await rows(database, 'project_trust', 'project_id, sha256')).map(row => [row.project_id, row.sha256])).toEqual([[V16_OTHER_PROJECT, V16_HASH_A]])
+    // Personal hooks are configuration: a project delete never touches them.
+    expect(await scalar(database, 'SELECT count(*) AS n FROM hooks')).toBe(1)
+    expect((await database.client.execute('PRAGMA foreign_key_check')).rows).toEqual([])
+  })
+
+  it('boots on the upgraded database: every chat is served with its stored parts and metadata; projects answer outputStyle null', async () => {
+    const dataDir = tempDir()
+    const databasePath = join(dataDir, 'harness.db')
+    const before = await seedV16Database(databasePath)
+    const t = await createTestApp({ dataDir, databasePath, start: false })
+    try {
+      const list = cursorPageSchema(chatSummarySchema).parse(await (await t.request('/api/chats')).json())
+      expect(list.items.map(chat => [chat.id, chat.projectId]).sort()).toEqual([[CHAT_T1, V16_PROJECT], [CHAT_T2, null]])
+      const detail = chatDetailSchema.parse(await (await t.request(`/api/chats/${CHAT_T1}`)).json())
+      const stored = before.messages.filter(row => row.chat_id === CHAT_T1)
+      expect(detail.messages.map(message => message.id)).toEqual(stored.map(row => row.id))
+      for (const [index, message] of detail.messages.entries()) {
+        expect(message.parts, String(message.id)).toEqual(JSON.parse(String(stored[index]?.parts)))
+        expect(message.metadata?.command, String(message.id)).toEqual((JSON.parse(String(stored[index]?.metadata)) as { command?: unknown }).command)
+      }
+      expect((await t.deps.projects.list()).map(project => [project.id, project.outputStyle])).toEqual([[V16_PROJECT, null], [V16_OTHER_PROJECT, null]])
+      // The Phase 11 stubs answer empty: nothing was approved, nothing runs.
+      expect(await t.deps.projectTrust.approved(V16_PROJECT)).toEqual(new Set())
+      expect((await t.deps.hooks.list({})).items).toEqual([])
     }
     finally {
       await t.close()

@@ -58,6 +58,13 @@ const CHECKPOINT_JOURNAL_REASON = 'checkpoint journal / shell rules: ids, paths,
 const BACKGROUND_TASK_REASON = 'background tasks: ids, enums, the agent type and the description (the snapshot `output` is scanned)'
 
 /**
+ * Why the columns of `hooks` and `project_trust` (Phase 11, ADR-048 / ADR-049, migration `0008`) are not scanned: ids,
+ * enums, shell command text, matchers, hashes and short labels of executable items; never a data/files id. Neither table
+ * is ever in a backup.
+ */
+const HOOKS_TRUST_REASON = 'hooks / project trust: ids, enums, shell commands, matchers, hashes and labels; never a data/files id'
+
+/**
  * `table.column` -> why it is not scanned: every text, JSON or blob column outside `REFERENCE_SOURCES`. A new column
  * must be added to one of the two lists (the schema-coverage test).
  */
@@ -149,6 +156,16 @@ export const UNSCANNED_COLUMNS: Readonly<Record<string, string>> = {
   'background_tasks.status': BACKGROUND_TASK_REASON,
   'background_tasks.origin': BACKGROUND_TASK_REASON,
   'background_tasks.delivered_message_id': BACKGROUND_TASK_REASON,
+  // Phase 11 (ADR-048 / ADR-049 / ADR-051, migration `0008`).
+  'hooks.id': HOOKS_TRUST_REASON,
+  'hooks.event': HOOKS_TRUST_REASON,
+  'hooks.matcher': HOOKS_TRUST_REASON,
+  'hooks.command': HOOKS_TRUST_REASON,
+  'project_trust.project_id': HOOKS_TRUST_REASON,
+  'project_trust.sha256': HOOKS_TRUST_REASON,
+  'project_trust.kind': HOOKS_TRUST_REASON,
+  'project_trust.label': HOOKS_TRUST_REASON,
+  'projects.output_style': 'an output style name (`AGENT_NAME_PATTERN`)',
 }
 
 /** `table.column` names of the scanned columns. */

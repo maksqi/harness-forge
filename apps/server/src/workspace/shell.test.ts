@@ -1,23 +1,41 @@
 // Shell runner tests (POSIX `sh` syntax only: CI runs Linux, where `/bin/sh` may be dash). Every kill is proven with
 // `process.kill(pid, 0)` throwing ESRCH; temp folders are canonical (`realpath(mkdtemp())`). The end folder report
-// (`reportCwd`, ADR-038) runs under `/bin/sh`, `/bin/bash` and `/bin/dash`, whichever exist.
+// (`reportCwd`, ADR-038) runs under `/bin/sh`, `/bin/bash` and `/bin/dash`, whichever exist. Phase 11 (C38): `input`
+// (stdin), `env` (extra variables) and the hook scripts of `testing/hook-scripts.ts`, each run as `sh <relative path>`
+// (and with `dash` / `busybox sh` when they exist) and read with the shared `readHookOutput`.
+import type { HookEvent, HookPayloadInput } from '@harness-forge/shared'
+import type { HookScriptName } from '../testing/hook-scripts.ts'
 import type { ShellRunResult } from './shell.ts'
 import { Buffer } from 'node:buffer'
 import { spawn } from 'node:child_process'
 import { accessSync, constants } from 'node:fs'
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { delimiter, join } from 'node:path'
 import process from 'node:process'
 import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { WORKSPACE_LIMITS } from '@harness-forge/shared'
+import { buildHookPayload, readHookOutput, WORKSPACE_LIMITS } from '@harness-forge/shared'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import {
+  HOOK_SCRIPT_DIR,
+  HOOK_SCRIPT_NAMES,
+  HOOK_SCRIPT_TEXT,
+  hookScriptCommand,
+  hookScriptPath,
+  hookScriptSource,
+  readHookEnv,
+  readHookLog,
+  readSleepPids,
+  writeHookScript,
+  writeHookScripts,
+} from '../testing/hook-scripts.ts'
 import {
   capturedText,
   killLiveShellGroups,
   killProcessGroup,
   liveShellGroups,
+  mergeShellEnvironment,
   normalizeTerminalText,
   omissionMarker,
   parseCwdReport,
@@ -25,9 +43,12 @@ import {
   redactShellCommand,
   runShellCommand,
   SHELL_CWD_TRAP,
+  SHELL_ENV_RESERVED,
   shellBinary,
   shrinkCaptured,
   StreamCapture,
+  trackProcessGroup,
+  untrackProcessGroup,
   withCwdReport,
 } from './shell.ts'
 
@@ -561,5 +582,313 @@ describe('redactShellCommand', () => {
     expect(redactShellCommand('OPENAI_API_KEY=sk-abc123456789xyz curl -H "Authorization: Bearer abcdefgh12345678" x')).not.toMatch(/sk-abc|abcdefgh12345678/)
     expect(redactShellCommand('ls -la')).toBe('ls -la')
     expect(redactShellCommand('x'.repeat(5000))).toHaveLength(1003)
+  })
+})
+
+// ---------- Phase 11 (C38-T1): stdin input and extra environment ----------
+
+describe.skipIf(!posix)('runShellCommand input (stdin)', () => {
+  it('writes the input to stdin and closes it', async () => {
+    const result = await run('cat; echo; echo done', { input: 'hello\nworld' })
+    expect(result.exitCode).toBe(0)
+    expect(out(result)).toBe('hello\nworld\ndone\n')
+  })
+
+  it('passes a large input completely (more than one pipe buffer)', async () => {
+    const result = await run('wc -c', { input: 'x'.repeat(300_000) })
+    expect(out(result).trim()).toBe('300000')
+  })
+
+  it('is fine when the command never reads its input or closes stdin first (EPIPE swallowed)', async () => {
+    const big = 'y'.repeat(1_000_000)
+    await expect(run('true', { input: big })).resolves.toMatchObject({ exitCode: 0, timedOut: false })
+    const closed = await run('exec 0<&-; echo closed', { input: big })
+    expect(closed.exitCode).toBe(0)
+    expect(out(closed)).toBe('closed\n')
+    const exited = await run('exit 4', { input: big })
+    expect(exited.exitCode).toBe(4)
+    expect(liveShellGroups()).toEqual([])
+  })
+
+  it('an empty input is an empty, closed stdin', async () => {
+    const result = await run('cat; echo end', { input: '' })
+    expect(out(result)).toBe('end\n')
+  })
+
+  it('works together with reportCwd (four pipes)', async () => {
+    await mkdir(join(cwd, 'sub'))
+    const result = await run('cd sub; cat', { input: 'piped', reportCwd: true, shell: '/bin/sh' })
+    expect(out(result)).toBe('piped')
+    expect(result.endCwd).toBe(join(cwd, 'sub'))
+  })
+
+  it('still kills the group on abort while the input is pending', async () => {
+    const controller = new AbortController()
+    let pid = 0
+    const pending = run('sleep 30', {
+      input: 'z'.repeat(500_000),
+      signal: controller.signal,
+      onSpawn: (value) => {
+        pid = value
+      },
+    })
+    await delay(100)
+    controller.abort()
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+    await expectGone(pid)
+    expect(liveShellGroups()).toEqual([])
+  })
+})
+
+describe.skipIf(!posix)('runShellCommand env (extra variables)', () => {
+  it('adds the extra variables after the allowlisted and fixed ones', async () => {
+    const env = { HARNESS_PROJECT_DIR: cwd, CLAUDE_PROJECT_DIR: cwd, WITH_SPACE: 'a b  c' }
+    const result = await run('env', { env, parentEnv: { PATH: process.env.PATH, HOME: '/home/someone', HF_PASSWORD: 'secret-1' }, shell: '/bin/sh' })
+    const lines = out(result).split('\n')
+    for (const line of [`HARNESS_PROJECT_DIR=${cwd}`, `CLAUDE_PROJECT_DIR=${cwd}`, 'WITH_SPACE=a b  c', 'HOME=/home/someone', 'TERM=dumb', 'NO_COLOR=1', 'SHELL=/bin/sh'])
+      expect(lines).toContain(line)
+    expect(out(result)).not.toContain('HF_PASSWORD')
+    expect(out(result)).not.toContain('secret-1')
+  })
+
+  it('refuses to override any reserved key and spawns nothing', async () => {
+    expect(SHELL_ENV_RESERVED).toEqual([
+      'HOME',
+      'LOGNAME',
+      'USER',
+      'PATH',
+      'LANG',
+      'LC_ALL',
+      'LC_CTYPE',
+      'TZ',
+      'TMPDIR',
+      'TERM',
+      'NO_COLOR',
+      'PAGER',
+      'GIT_PAGER',
+      'GIT_TERMINAL_PROMPT',
+      'SHELL',
+      'CDPATH',
+      'ENV',
+      'BASH_ENV',
+    ])
+    for (const key of SHELL_ENV_RESERVED) {
+      let spawned = false
+      await expect(run('echo ran > ran', { env: { [key]: '/tmp/x' }, onSpawn: () => {
+        spawned = true
+      } }), key).rejects.toThrow(`The shell environment variable "${key}" is set by the runner and cannot be overridden.`)
+      expect(spawned, key).toBe(false)
+    }
+    await expect(readFile(join(cwd, 'ran'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(liveShellGroups()).toEqual([])
+  })
+
+  it('refuses invalid names and values with a NUL', async () => {
+    for (const key of ['', '1X', 'A-B', 'A=B', 'A B', 'BASH_FUNC_x%%'])
+      await expect(run('true', { env: { [key]: 'v' } }), key).rejects.toThrow(/is not valid/)
+    await expect(run('true', { env: { GOOD: 'a\0b' } })).rejects.toThrow(/without NUL characters/)
+    await expect(run('true', { env: { GOOD: 1 as unknown as string } })).rejects.toThrow(/must be text/)
+  })
+
+  it('mergeShellEnvironment keeps the base and is case-sensitive', () => {
+    const base = { PATH: '/bin', TERM: 'dumb' }
+    expect(mergeShellEnvironment(base, undefined)).toEqual(base)
+    expect(mergeShellEnvironment(base, { path: 'lower-case is another variable', X_1: 'y' })).toEqual({ ...base, path: 'lower-case is another variable', X_1: 'y' })
+    expect(() => mergeShellEnvironment(base, { PATH: '/evil' })).toThrow(/cannot be overridden/)
+    expect(base).toEqual({ PATH: '/bin', TERM: 'dumb' })
+  })
+
+  it('trackProcessGroup / untrackProcessGroup register groups for the exit handler', () => {
+    trackProcessGroup(4_194_307)
+    expect(liveShellGroups()).toContain(4_194_307)
+    expect(process.listeners('exit')).toContain(killLiveShellGroups)
+    untrackProcessGroup(4_194_307)
+    expect(liveShellGroups()).not.toContain(4_194_307)
+  })
+})
+
+// ---------- Phase 11 (C38-T6): the hook scripts ----------
+
+/** The interpreters each hook script is smoke-tested with: `sh` (the command form), plus dash and busybox when present. */
+const SCRIPT_SHELLS: ReadonlyArray<readonly [label: string, prefix: string]> = posix
+  ? [
+      ['sh', 'sh'],
+      ...(isExecutable('/bin/dash') ? [['dash', '/bin/dash'] as const] : []),
+      ...((process.env.PATH ?? '').split(delimiter).filter(dir => dir.startsWith('/')).map(dir => join(dir, 'busybox')).filter(isExecutable).slice(0, 1).map(path => ['busybox', `${path} sh`] as const)),
+    ]
+  : []
+
+function payloadInput(extra: Partial<HookPayloadInput> = {}): HookPayloadInput {
+  return {
+    chatId: '0199a8f0-0000-7000-8000-000000000001',
+    projectId: 'prj_AAAAAAAAAAAAAAAA',
+    modelRef: 'mock:hooks',
+    origin: 'request',
+    cwd,
+    toolMode: 'auto',
+    source: 'personal',
+    tool: { name: 'shell', callId: 'mock_call_1', input: { command: 'ls' }, output: { exitCode: 0, stdout: 'a\n' } },
+    prompt: 'run ls',
+    ...extra,
+  }
+}
+
+/** Runs one written hook script like the hook runner: stdin payload, project env, project cwd. */
+async function runHook(name: HookScriptName, event: HookEvent, options: { prefix?: string, extra?: Partial<HookPayloadInput>, timeoutMs?: number } = {}) {
+  const payload = buildHookPayload(event, payloadInput(options.extra))
+  const command = options.prefix === undefined || options.prefix === 'sh' ? hookScriptCommand(name) : `${options.prefix} ${hookScriptPath(name)}`
+  const result = await run(command, {
+    input: payload.json,
+    env: { HARNESS_PROJECT_DIR: cwd, CLAUDE_PROJECT_DIR: cwd },
+    timeoutMs: options.timeoutMs ?? 10_000,
+    killGraceMs: 300,
+  })
+  const outcome = readHookOutput(event, {
+    exitCode: result.exitCode,
+    timedOut: result.timedOut,
+    stdout: capturedText(result.stdout),
+    stdoutTruncated: result.stdout.omittedBytes > 0,
+    stderr: capturedText(result.stderr),
+  })
+  return { result, outcome, payload: JSON.parse(payload.json) as Record<string, unknown> }
+}
+
+describe('hook scripts: names, paths and sources', () => {
+  it('has the twelve scripts of PROVIDERS.md 8, invoked as `sh <relative path>`', () => {
+    expect(HOOK_SCRIPT_NAMES).toEqual(['deny', 'ask', 'allow', 'rewrite', 'context', 'exit2', 'error', 'sleep', 'record', 'env', 'stop-once', 'prompt-block'])
+    expect(HOOK_SCRIPT_DIR).toBe('.harness/hooks')
+    expect(hookScriptCommand('deny')).toBe('sh .harness/hooks/deny.sh')
+    expect(hookScriptCommand('stop-once', { dir: '.claude/hooks', file: 'stop' })).toBe('sh .claude/hooks/stop.sh')
+    expect(hookScriptPath('env', { dir: '.' })).toBe('env.sh')
+    for (const dir of ['/abs', '../up', 'a/../b', 'a//b', 'a b'])
+      expect(() => hookScriptPath('deny', { dir }), dir).toThrow(TypeError)
+    expect(() => hookScriptPath('deny', { file: 'x/y' })).toThrow(TypeError)
+    expect(() => hookScriptPath('nope' as HookScriptName)).toThrow(TypeError)
+  })
+
+  it.each(HOOK_SCRIPT_NAMES.map(name => [name] as const))('%s: POSIX sh only, reads stdin first, no jq or bash syntax', (name) => {
+    const source = hookScriptSource(name)
+    const lines = source.split('\n')
+    expect(lines[0]).toBe('#!/bin/sh')
+    expect(lines[2]).toMatch(/^(?:cat > \/dev\/null|payload=\$\(cat\))$/)
+    expect(source).not.toMatch(/\bjq\b|\[\[|\$'|\bsource\b|\bfunction\b|<<<|\bdeclare\b|\blocal\b/)
+    expect(source).not.toMatch(/sh -c/)
+  })
+
+  it('texts can be replaced and are quoted safely', () => {
+    const source = hookScriptSource('exit2', { text: 'it\'s $HOME `x`' })
+    expect(source).toContain('printf \'%s\\n\' \'it\'\\\'\'s $HOME `x`\' >&2')
+    expect(() => hookScriptSource('deny', { text: 'a\0b' })).toThrow(TypeError)
+    expect(() => hookScriptSource('sleep', { seconds: 1.5 })).toThrow(TypeError)
+  })
+})
+
+describe.skipIf(!posix)('hook scripts: a smoke test per script', () => {
+  beforeEach(async () => {
+    await writeHookScripts(cwd)
+  })
+
+  it('writes every script into .harness/hooks (mode 0755) and returns the commands', async () => {
+    const commands = await writeHookScripts(cwd)
+    expect(commands.deny).toBe('sh .harness/hooks/deny.sh')
+    expect(await readFile(join(cwd, '.harness/hooks/context.sh'), 'utf8')).toBe(hookScriptSource('context'))
+  })
+
+  describe.each(SCRIPT_SHELLS.map(([label, prefix]) => [label, prefix] as const))('with %s', (_label, prefix) => {
+    it('deny / ask / allow: a PreToolUse permission decision with its reason', async () => {
+      await expect(runHook('deny', 'PreToolUse', { prefix }).then(run => run.outcome)).resolves.toMatchObject({ status: 'blocked', decision: 'deny', reason: HOOK_SCRIPT_TEXT.deny, diagnostics: [] })
+      await expect(runHook('ask', 'PreToolUse', { prefix }).then(run => run.outcome)).resolves.toMatchObject({ status: 'ok', decision: 'ask', reason: HOOK_SCRIPT_TEXT.ask, diagnostics: [] })
+      await expect(runHook('allow', 'PreToolUse', { prefix }).then(run => run.outcome)).resolves.toMatchObject({ status: 'ok', decision: 'allow', reason: HOOK_SCRIPT_TEXT.allow, diagnostics: [] })
+    })
+
+    it('rewrite: updatedInput {"command":"echo rewritten"}', async () => {
+      const { outcome } = await runHook('rewrite', 'PreToolUse', { prefix })
+      expect(outcome).toMatchObject({ status: 'ok', decision: null, updatedInput: { command: 'echo rewritten' }, diagnostics: [] })
+    })
+
+    it.each(['PostToolUse', 'UserPromptSubmit', 'SessionStart'] as const)('context: additionalContext for %s', async (event) => {
+      const { outcome } = await runHook('context', event, { prefix })
+      expect(outcome).toMatchObject({ status: 'ok', context: HOOK_SCRIPT_TEXT.context, diagnostics: [] })
+    })
+
+    it('exit2: blocks with stderr "nope"; error: a non-blocking error', async () => {
+      await expect(runHook('exit2', 'PreToolUse', { prefix }).then(run => run.outcome)).resolves.toMatchObject({ status: 'blocked', decision: 'deny', reason: 'nope' })
+      await expect(runHook('exit2', 'PostToolUse', { prefix }).then(run => run.outcome)).resolves.toMatchObject({ status: 'blocked', reason: 'nope' })
+      const failed = await runHook('error', 'PostToolUse', { prefix })
+      expect(failed.result.exitCode).toBe(1)
+      expect(capturedText(failed.result.stderr)).toBe(`${HOOK_SCRIPT_TEXT.error}\n`)
+      expect(failed.outcome).toMatchObject({ status: 'error', error: 'The hook failed with exit code 1.' })
+    })
+
+    it('record: appends one payload per run to $HARNESS_PROJECT_DIR/.hook-log', async () => {
+      const first = await runHook('record', 'PreToolUse', { prefix })
+      const second = await runHook('record', 'Stop', { prefix, extra: { stopHookActive: true } })
+      expect(first.outcome).toMatchObject({ status: 'ok', context: null })
+      expect(await readHookLog(cwd)).toEqual([first.payload, second.payload])
+      expect(second.payload).toMatchObject({ hook_event_name: 'Stop', stop_hook_active: true })
+    })
+
+    it('env: writes the environment to .hook-env (project variables, no HF_* or provider keys)', async () => {
+      const saved = process.env.OPENAI_API_KEY
+      process.env.OPENAI_API_KEY = 'sk-hook-env-0123456789'
+      try {
+        await runHook('env', 'SessionStart', { prefix })
+      }
+      finally {
+        if (saved === undefined)
+          delete process.env.OPENAI_API_KEY
+        else
+          process.env.OPENAI_API_KEY = saved
+      }
+      const env = await readHookEnv(cwd)
+      expect(env).toMatchObject({ HARNESS_PROJECT_DIR: cwd, CLAUDE_PROJECT_DIR: cwd, TERM: 'dumb', NO_COLOR: '1' })
+      expect(Object.keys(env).filter(key => key.startsWith('HF_') || key.endsWith('_API_KEY'))).toEqual([])
+    })
+
+    it('stop-once: blocks with "run the tests", then lets the agent stop once stop_hook_active is true', async () => {
+      const first = await runHook('stop-once', 'Stop', { prefix, extra: { stopHookActive: false } })
+      expect(first.outcome).toMatchObject({ status: 'blocked', reason: 'run the tests' })
+      const again = await runHook('stop-once', 'Stop', { prefix, extra: { stopHookActive: true } })
+      expect(again.outcome).toMatchObject({ status: 'ok', reason: null })
+      expect(capturedText(again.result.stdout)).toBe('')
+    })
+
+    it('prompt-block: a UserPromptSubmit block with its reason', async () => {
+      const { outcome } = await runHook('prompt-block', 'UserPromptSubmit', { prefix })
+      expect(outcome).toMatchObject({ status: 'blocked', reason: HOOK_SCRIPT_TEXT.promptBlock })
+    })
+  })
+
+  it('sleep: a timeout kills the hook and its grandchild (both pids dead) and reads as a timeout error', async () => {
+    const started = Date.now()
+    const { result, outcome } = await runHook('sleep', 'PreToolUse', { timeoutMs: 400 })
+    expect(Date.now() - started).toBeLessThan(5000)
+    expect(result.timedOut).toBe(true)
+    expect(outcome).toMatchObject({ status: 'error', error: 'The hook timed out.' })
+    const pids = await readSleepPids(cwd)
+    expect(pids).toHaveLength(2)
+    for (const pid of pids)
+      await expectGone(pid)
+    expect(liveShellGroups()).toEqual([])
+  })
+
+  it('sleep: an abort kills the hook and its grandchild as well', async () => {
+    await writeHookScript(cwd, 'sleep', { file: 'sleep-short', seconds: 20 })
+    const controller = new AbortController()
+    const pending = run(hookScriptCommand('sleep', { file: 'sleep-short' }), { input: '{}', env: { HARNESS_PROJECT_DIR: cwd }, signal: controller.signal })
+    const pids = await (async () => {
+      const deadline = Date.now() + 3000
+      for (;;) {
+        const found = await readSleepPids(cwd)
+        if (found.length >= 2 || Date.now() > deadline)
+          return found
+        await delay(20)
+      }
+    })()
+    expect(pids).toHaveLength(2)
+    controller.abort()
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+    for (const pid of pids)
+      await expectGone(pid)
   })
 })

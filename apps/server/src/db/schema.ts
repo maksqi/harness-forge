@@ -8,6 +8,7 @@ import type {
   CustomizationKind,
   HarnessErrorInit,
   HarnessUIMessage,
+  HookEvent,
   MessageMetadata,
   ModelInfo,
   PluginSource,
@@ -19,6 +20,7 @@ import type {
   TitleSource,
   ToolOverride,
   ToolPolicy,
+  TrustItemKind,
 } from '@harness-forge/shared'
 import { relations, sql } from 'drizzle-orm'
 import { blob, index, integer, primaryKey, real, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core'
@@ -319,6 +321,8 @@ export const projects = sqliteTable('projects', {
   path: text('path').notNull(),
   /** Project instructions, joined after AGENTS.md / CLAUDE.md of the folder; null = none. */
   instructions: text('instructions'),
+  /** Phase 11 (ADR-051, migration 0008): the project's output style name; null = the global setting `outputStyle`. */
+  outputStyle: text('output_style'),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
 }, table => [
@@ -433,6 +437,41 @@ export const backgroundTasks = sqliteTable('background_tasks', {
   index('background_tasks_pending_idx').on(table.deliveredAt, table.status),
 ])
 
+/**
+ * Personal command hooks (Phase 11, ADR-048): one row per hook handler in Claude Code's format (event, matcher,
+ * command, timeout in seconds). Created and changed with fresh auth; never in backups; kept by delete-all.
+ */
+export const hooks = sqliteTable('hooks', {
+  /** `hok_` + 16 chars. */
+  id: text('id').primaryKey(),
+  event: text('event').$type<HookEvent>().notNull(),
+  /** The safe matcher subset (`compileMatcher`); null = every target. */
+  matcher: text('matcher'),
+  /** The shell command (run through `runShellCommand`). */
+  command: text('command').notNull(),
+  /** Seconds (1 – 600); null = the default 60 s. */
+  timeout: integer('timeout', { mode: 'number' }),
+  enabled: bool('enabled').notNull().default(true),
+  createdAt: createdAt(),
+  updatedAt: updatedAt(),
+})
+
+/**
+ * Project trust (Phase 11, ADR-049): the sha256 of every approved executable item of a project folder (a hook, a
+ * `.mcp.json` server, a command file with `!` spans). Deleted with the project; never in backups; kept by delete-all.
+ */
+export const projectTrust = sqliteTable('project_trust', {
+  projectId: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+  /** sha256 (lowercase hex) of `trustHashInput(item)`. */
+  sha256: text('sha256').notNull(),
+  kind: text('kind').$type<TrustItemKind>().notNull(),
+  /** A short label of the item when it was approved (matches a changed item to its old approval). */
+  label: text('label').notNull(),
+  createdAt: createdAt(),
+}, table => [
+  primaryKey({ columns: [table.projectId, table.sha256] }),
+])
+
 // ---------- relations (relational query API: `db.query.chats.findFirst({ with: { messages: true } })`) ----------
 
 export const chatsRelations = relations(chats, ({ many }) => ({
@@ -453,7 +492,7 @@ export const usageRelations = relations(usage, ({ one }) => ({
   chat: one(chats, { fields: [usage.chatId], references: [chats.id] }),
 }))
 
-/** Every table name (the 20 tables of DECISIONS.md "Database tables"). */
+/** Every table name (the 22 tables of DECISIONS.md "Database tables"). */
 export const TABLE_NAMES = [
   'settings',
   'secrets',
@@ -475,6 +514,8 @@ export const TABLE_NAMES = [
   'shell_rules',
   'customizations',
   'background_tasks',
+  'hooks',
+  'project_trust',
 ] as const
 
 // ---------- row types ----------
@@ -499,3 +540,5 @@ export type ChatShareRow = typeof chatShares.$inferSelect
 export type ProjectRow = typeof projects.$inferSelect
 export type WorkspaceChangeRow = typeof workspaceChanges.$inferSelect
 export type ShellRuleRow = typeof shellRules.$inferSelect
+export type HookRow = typeof hooks.$inferSelect
+export type ProjectTrustRow = typeof projectTrust.$inferSelect

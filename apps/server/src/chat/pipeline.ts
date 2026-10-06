@@ -39,6 +39,24 @@
 // `run.started.modelRef` and the metadata name the model that ran. `run.started.userMessageId` is set for every
 // server-started turn (`queue`, and `task`: the carrier message). `data-task-result` chunks injected at a step boundary
 // (the steer step, W10.4) are tracked like steers: one the response lost is appended to the saved reply, once.
+// Phase 11 (C37 seams, ADR-048 / ADR-050 / ADR-051; COMPLETE and FROZEN after P11-0b):
+// - hooks: a model run takes ONE hook snapshot (`deps.hooks.snapshot({ chatId, projectId, workspace, toolMode, origin,
+//   modelRef })`) and builds its `RunHooks` (`hooks.ts`, `RunSession.hooks`): `PreToolUse` in the approval function,
+//   the `updatedInput` rewrite and `PostToolUse` in the tool wrapper, the hooks piece of the step composer (guard →
+//   hooks → steer), the extra `stopWhen` condition of a `continue: false` hook, the `hookGate` transform after
+//   `stepInjector` (`Stop`: holds `finish`, runs the hooks, may hand a follow-up turn to the runner through
+//   `RunSession.followUp` → `RunContext.onReleased(ending, awaitingApproval, followUp)`; only a completed run without a
+//   pending approval hands one over), the `Notification` hooks of a run released waiting for an approval (tracked,
+//   fire-and-forget) and the child hooks of sub-agents (`RunSession.hooks.forChild`). `data-hook`
+//   chunks injected at a step boundary or written by the gate are tracked like steers (by record id). Run origin
+//   `hook` = a `Stop` continuation (its carrier is the turn's user message, like `task`). Other streams (reply
+//   commands, failures, image turns, `/compact`) have no hooks (`RunSession.hooks` is an empty instance);
+// - project MCP: a run of a project chat with an open folder (tools on, a model with tools) asks
+//   `deps.projectMcp.toolsFor(projectId, { signal, waitMs: LIMITS.projectMcpConnectWaitMs })` and hands its tools and
+//   shadowed global server ids to `assembleTools({ extraTools, shadowedMcpServers })`; servers that were not ready add
+//   the notice `project-mcp-unavailable`;
+// - output styles: `PreparedRun.outputStyle` (`output-style.ts`, resolved while preparing) reaches `buildRunParams`
+//   (`RunParamsInput.outputStyle`; the main agent only).
 import type { HarnessError, HarnessUIMessage, HarnessUIMessagePart, MessageMetadata, NoticeData, ReasoningEffort, RunOrigin, ToolMode } from '@harness-forge/shared'
 import type { LanguageModelUsage, ModelMessage, TextStreamPart, Tool, ToolSet, UIMessageChunk, UIMessageStreamOnEndCallback, UIMessageStreamWriter } from 'ai'
 import type { Logger } from '../logger.ts'
@@ -51,10 +69,12 @@ import type { AgentRunScope } from './agent-scope.ts'
 import type { BackgroundTasks } from './background/types.ts'
 import type { HarnessUIMessageChunk } from './generated-files.ts'
 import type { RunEnding } from './history.ts'
+import type { RunHooks } from './hooks.ts'
 import type { PreparedRun } from './prepare.ts'
 import type { ChatQueue } from './queue.ts'
 import type { Run, RunRegistry } from './runs.ts'
-import { latestTodos, LIMITS, splitTaskResults } from '@harness-forge/shared'
+import type { RunReleaseFollowUp } from './types.ts'
+import { latestTodos, LIMITS, splitHooks, splitTaskResults } from '@harness-forge/shared'
 import {
   convertToModelMessages,
   createUIMessageStream,
@@ -79,6 +99,7 @@ import {
 import { prepareModelFiles } from './files.ts'
 import { GeneratedFiles, storeGeneratedFiles } from './generated-files.ts'
 import { finalizeParts, hasPendingApproval, plainText } from './history.ts'
+import { createRunHooks, noHookSnapshot, PERMISSION_PROMPT, permissionPromptMessage } from './hooks.ts'
 import { imageStream } from './images.ts'
 import { buildModelHistory } from './model-history.ts'
 import { NOTICES } from './notices.ts'
@@ -189,14 +210,18 @@ export interface RunContext {
   /**
    * Called once, right after the run left the registry (`registry.release`) and `run.finished` was emitted, with how
    * the run ended and whether its stored reply waits for an approval (Phase 9, W9.2: the queue's run end). Not called
-   * for a run released by a forced stop. A throw is logged.
+   * for a run released by a forced stop. A throw is logged. Phase 11 (ADR-048): `followUp` is what the run asks the
+   * runner to start next (`{ kind: 'hook', data }`: its `Stop` hooks blocked); only for a `completed` run without a
+   * pending approval, else undefined.
    */
-  onReleased: (ending: RunEnding, awaitingApproval: boolean) => void
+  onReleased: (ending: RunEnding, awaitingApproval: boolean, followUp?: RunReleaseFollowUp) => void
   /**
    * What started the run (Phase 9, ADR-042; `run.started.origin`): a `POST /chat` request (the default), the server with
    * the first queued message (`queue`), or (Phase 10, ADR-046) the server with the results of finished background tasks
-   * (`task`: the user message is the carrier of `data-task-result` parts). For `queue` and `task`, `run.started` also
-   * carries the new user message id as `userMessageId`. A background task launched by a `task` run never starts a turn.
+   * (`task`: the user message is the carrier of `data-task-result` parts), or (Phase 11, ADR-048) the server after a
+   * blocking `Stop` hook (`hook`: the user message is the carrier of `data-hook` parts; `stop_hook_active`). For `queue`,
+   * `task` and `hook`, `run.started` also carries the new user message id as `userMessageId`. A background task
+   * launched by a `task` run never starts a turn.
    */
   origin?: RunOrigin
   /**
@@ -206,7 +231,10 @@ export interface RunContext {
   background: BackgroundTasks
 }
 
-/** A data chunk of this app (`data-notice`, `data-compaction`, `data-steer`, `data-activity`, `data-task-result`). */
+/**
+ * A data chunk of this app (`data-notice`, `data-compaction`, `data-steer`, `data-activity`, `data-task-result`,
+ * `data-hook`).
+ */
 export type HarnessDataChunk = Extract<HarnessUIMessageChunk, { type: `data-${string}` }>
 
 /** How the run answers: a model run, a reply command, a failure before the model call, an image turn, `/compact`. */
@@ -261,10 +289,24 @@ export class RunSession {
   /** Chunks injected at step boundaries and not yet placed by `stepInjector`, in injection order. */
   #injections: { chunk: HarnessDataChunk, step: number }[] = []
   /**
-   * Every injected `data-steer` and (Phase 10) `data-task-result` chunk, in injection order (`finalMessage` appends one
-   * the response lost).
+   * Every injected `data-steer`, (Phase 10) `data-task-result` and (Phase 11) `data-hook` chunk, in injection order
+   * (`finalMessage` appends one the response lost).
    */
   readonly #injectedTracked: HarnessDataChunk[] = []
+  /**
+   * The step the run is in (Phase 11): `prepareStep`'s step number, recorded by the hooks piece of the step composer;
+   * -1 before the first model call (the approved calls of a continuation run before it). Hook records are placed for
+   * the next step (`RunHooks.record`).
+   */
+  stepNumber = -1
+  /**
+   * The command hooks of the run (Phase 11, `hooks.ts`): `modelStream` replaces this empty instance with the run's
+   * `RunHooks` over its one snapshot; the other streams keep it. A foreground sub-agent reaches it as its host's hooks
+   * (`ChildSession.hooks`).
+   */
+  hooks: RunHooks
+  /** What the run hands to the runner when it is released (Phase 11: a `Stop` continuation, set by the `hookGate`). */
+  followUp: RunReleaseFollowUp | null = null
   /** The writer of the run's UI stream (`bindWriter`), for transient chunks. */
   #writer: UIMessageStreamWriter<HarnessUIMessage> | null = null
   readonly ctx: RunContext
@@ -274,6 +316,20 @@ export class RunSession {
     this.tracker = new RunTracker(ctx.now)
     this.startedAt = ctx.now()
     this.generated = new GeneratedFiles(ctx.prepared.continued?.parts.filter(part => part.type === 'file').length ?? 0)
+    this.hooks = createRunHooks({
+      snapshot: noHookSnapshot({
+        chatId: ctx.run.chatId,
+        projectId: ctx.prepared.chat?.projectId ?? null,
+        workspace: null,
+        toolMode: ctx.toolMode,
+        origin: ctx.origin ?? 'request',
+        modelRef: ctx.prepared.resolved.modelRef,
+      }),
+      host: this,
+      continued: null,
+      messageId: ctx.prepared.assistantId,
+      logger: ctx.logger,
+    })
   }
 
   get chatId(): string {
@@ -376,12 +432,22 @@ export class RunSession {
    * Queues a chunk for the transcript at a step boundary (Phase 9): `stepInjector` emits it right before the
    * `start-step` of step `stepNumber` (the `prepareStep` step number; 0 = the first model call of this run), or when the
    * stream ends. Used for `data-steer` (W9.2), `data-compaction` and notices of the context guard (W9.1) and (Phase 10)
-   * `data-task-result` (the steer step, W10.4); not for transient chunks (`writeTransient`). Steers and task results
-   * are tracked: the saved reply holds each of them exactly once.
+   * `data-task-result` (the steer step, W10.4) and (Phase 11) `data-hook` (`RunHooks.record`); not for transient chunks
+   * (`writeTransient`). Steers, task results and hook records are tracked: the saved reply holds each of them exactly
+   * once.
    */
   inject(chunk: HarnessDataChunk, stepNumber: number): void {
     this.#injections.push({ chunk, step: stepNumber })
-    if (chunk.type === 'data-steer' || chunk.type === 'data-task-result')
+    this.track(chunk)
+  }
+
+  /**
+   * Tracks a `data-steer`, `data-task-result` or `data-hook` chunk that reaches the stream another way (Phase 11: the
+   * `Stop` record the `hookGate` writes before `finish`), so a saved reply that lost it still holds it once. Other
+   * chunks are ignored.
+   */
+  track(chunk: HarnessDataChunk): void {
+    if (chunk.type === 'data-steer' || chunk.type === 'data-task-result' || chunk.type === 'data-hook')
       this.#injectedTracked.push(chunk)
   }
 
@@ -527,12 +593,14 @@ export class RunSession {
   }
 
   /**
-   * Injected steers and task results the response does not hold (the stream ended before they were placed), as parts,
-   * in injection order. A steer is known by its id, a task result by its task id.
+   * Injected steers, task results and (Phase 11) hook records the response does not hold (the stream ended before they
+   * were placed), as parts, in injection order. A steer is known by its id, a task result by its task id, a hook record
+   * by its record id.
    */
   #missingInjections(parts: readonly HarnessUIMessagePart[]): HarnessUIMessagePart[] {
     const steers = new Set(parts.flatMap(part => (part.type === 'data-steer' ? [part.data.id] : [])))
     const results = new Set(parts.flatMap(part => (part.type === 'data-task-result' ? [part.data.taskId] : [])))
+    const records = new Set(parts.flatMap(part => (part.type === 'data-hook' ? [part.data.id] : [])))
     const missing: HarnessUIMessagePart[] = []
     for (const chunk of this.#injectedTracked) {
       if (chunk.type === 'data-steer' && !steers.has(chunk.data.id)) {
@@ -543,14 +611,25 @@ export class RunSession {
         results.add(chunk.data.taskId)
         missing.push({ type: 'data-task-result', ...(chunk.id === undefined ? {} : { id: chunk.id }), data: chunk.data })
       }
+      else if (chunk.type === 'data-hook' && !records.has(chunk.data.id)) {
+        records.add(chunk.data.id)
+        missing.push({ type: 'data-hook', ...(chunk.id === undefined ? {} : { id: chunk.id }), data: chunk.data })
+      }
     }
     return missing
   }
 
-  /** `RunContext.onReleased`, guarded. */
+  /**
+   * `RunContext.onReleased`, guarded. The follow-up (Phase 11) goes only with a completed run without a pending
+   * approval whose signal did not abort.
+   */
   #released(ending: RunEnding, awaitingApproval: boolean): void {
+    const followUp = ending === 'completed' && !awaitingApproval && !this.ctx.run.signal.aborted ? this.followUp : null
     try {
-      this.ctx.onReleased(ending, awaitingApproval)
+      if (followUp === null)
+        this.ctx.onReleased(ending, awaitingApproval)
+      else
+        this.ctx.onReleased(ending, awaitingApproval, followUp)
     }
     catch (error) {
       this.ctx.logger.error('run end: the release callback failed', { err: error })
@@ -643,10 +722,22 @@ export class RunSession {
           ...(ending === 'failed' && this.fatal !== null ? { error: errorInit(this.fatal) } : {}),
         })
         this.#released(ending, awaitingApproval)
+        if (awaitingApproval)
+          this.#notifyApproval(message)
       }
       if (message !== null)
         this.#fireMessageCompleted(message, ending)
     }
+  }
+
+  /**
+   * Phase 11 (ADR-048): the `Notification` hooks of a run released waiting for an approval (`permission_prompt`),
+   * fire-and-forget through the task tracker (aborted at shutdown); nothing without such hooks.
+   */
+  #notifyApproval(message: HarnessUIMessage | null): void {
+    const text = permissionPromptMessage(message)
+    if (text !== null && this.hooks.has('Notification'))
+      this.ctx.tasks.track(this.hooks.notification({ message: text, notificationType: PERMISSION_PROMPT }, this.ctx.lifecycle))
   }
 
   /** The cost of this run (model or image turn, plus the extra costs), for `message.completed`. */
@@ -720,7 +811,9 @@ export function errorStream(session: RunSession, error: HarnessError): ReadableS
  * The context guard's kept user message (Phase 9): the run's turn user message (the last user message of the path) as
  * the model sees it, after its command expansion and files and without any merged summary; converted on the first call
  * only. Null when the path has no user message. Phase 10: the carrier message of a `task` turn is read as its task
- * result texts (`splitTaskResults`, as `buildModelHistory` does).
+ * result texts (`splitTaskResults`, as `buildModelHistory` does); Phase 11: its hook records as their model text
+ * (`splitHooks`: a `UserPromptSubmit` / `SessionStart` context, the carrier of a `hook` turn), so they survive a
+ * compaction.
  */
 export function keptUserMessage(session: RunSession, model: ResolvedModel, tools: ToolSet): () => Promise<ModelMessage | null> {
   let converted: Promise<ModelMessage | null> | null = null
@@ -728,7 +821,7 @@ export function keptUserMessage(session: RunSession, model: ResolvedModel, tools
     converted ??= (async () => {
       const { deps, prepared, logger } = session.ctx
       const turn = prepared.history.findLast(message => message.role === 'user')
-      const [user] = turn === undefined ? [] : splitTaskResults([turn])
+      const [user] = turn === undefined ? [] : splitHooks(splitTaskResults([turn]))
       if (user === undefined)
         return null
       const files = await prepareModelFiles(applyCommandExpansions([user]), { capabilities: model.entry.capabilities, files: deps.files, logger })
@@ -767,6 +860,37 @@ export function conversionTools(deps: Pick<AppDeps, 'registry' | 'plugins'>, run
   }
 }
 
+/** The project MCP tools of a run (Phase 11, ADR-050): none for a chat without an open project folder. */
+export interface RunProjectTools {
+  readonly tools: readonly RegisteredTool[]
+  readonly shadowed: ReadonlySet<string>
+  readonly unavailable: readonly string[]
+  readonly names: ReadonlyMap<string, string>
+}
+
+const NO_PROJECT_TOOLS: RunProjectTools = Object.freeze({ tools: [], shadowed: new Set<string>(), unavailable: [], names: new Map<string, string>() })
+
+/**
+ * The project MCP tools of a model run (Phase 11): asked only for a chat whose project folder opened, with tools on and
+ * a model that supports tools (`toolsFor` waits at most `LIMITS.projectMcpConnectWaitMs`). A failure other than the
+ * run's abort runs the turn without them (logged).
+ */
+export async function runProjectMcpTools(session: RunSession, model: ResolvedModel): Promise<RunProjectTools> {
+  const { deps, run, prepared, logger, toolMode } = session.ctx
+  const workspace = prepared.workspace
+  if (workspace === null || toolMode === 'off' || !model.entry.capabilities.tools)
+    return NO_PROJECT_TOOLS
+  try {
+    return await deps.projectMcp.toolsFor(workspace.projectId, { signal: run.signal, waitMs: LIMITS.projectMcpConnectWaitMs })
+  }
+  catch (error) {
+    if (run.signal.aborted)
+      throw error
+    logger.warn('the project MCP tools are not available; the run goes on without them', { projectId: workspace.projectId, err: error })
+    return NO_PROJECT_TOOLS
+  }
+}
+
 /**
  * Tools, parameters, model messages and the `streamText` call of a model run, streamed through
  * `storeGeneratedFiles` inside `createUIMessageStream` (what is saved equals what is streamed, ADR-028).
@@ -782,6 +906,22 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
 
   // One scope per run (Phase 8): a continuation after an approval keeps the assistant message id.
   const scope = await createRunScope(deps, { chatId, messageId: session.assistantId, workspace: prepared.workspace, history: prepared.history, logger })
+  // The project MCP servers of a project chat (Phase 11, ADR-050): their tools join the run's candidates.
+  const projectTools = await runProjectMcpTools(session, resolved)
+  if (projectTools.unavailable.length > 0)
+    session.notices.push(NOTICES.projectMcpUnavailable(projectTools.unavailable))
+  // One hook snapshot per run (Phase 11, ADR-048): every hook seam of this run and its sub-agents reads it.
+  const origin = session.ctx.origin ?? 'request'
+  const snapshot = await deps.hooks.snapshot({
+    chatId,
+    projectId: prepared.chat.projectId,
+    workspace: prepared.workspace,
+    toolMode: session.ctx.toolMode,
+    origin,
+    modelRef,
+  }, { signal: run.signal })
+  const hooks = createRunHooks({ snapshot, host: session, continued: prepared.continued, messageId: session.assistantId, mcpServerNames: projectTools.names, logger })
+  session.hooks = hooks
   // The run's catalog snapshot (Phase 10): agent types, skills, background launches.
   const catalog = prepared.catalog
   // The agent scope (Phase 9): the run's mode, its sub-agent runner and todos, bound to every tool call of this run;
@@ -794,7 +934,7 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
     scope,
     catalog,
     background: session.ctx.background,
-    origin: session.ctx.origin ?? 'request',
+    origin,
   })
   const agent: AgentRunScope = {
     chatId,
@@ -825,6 +965,9 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
     agent,
     allowedTools: prepared.turnRestriction,
     skillsAvailable: skills.length > 0,
+    hooks,
+    extraTools: projectTools.tools,
+    shadowedMcpServers: projectTools.shadowed,
   })
   if (assembled.unsupported) {
     const notice = NOTICES.toolsUnsupported()
@@ -852,6 +995,8 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
     // The catalog's agent types and skills (Phase 10): their blocks, when `task` / `skill` are offered.
     agentTypes: catalog.agents(),
     skills,
+    // The output style of the run (Phase 11, ADR-051; the main agent only).
+    outputStyle: prepared.outputStyle ?? null,
     maxSteps: runMaxSteps(prepared.settings, prepared.chat.projectId),
     registry: deps.registry,
     logger,
@@ -878,11 +1023,12 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
   if (hooked === null)
     logger.warn('chat.messages hooks returned invalid messages; the original messages are sent')
 
-  // The step composer (Phase 9): the context guard, then the steer step, before every model call (step 0 included).
-  // The guard compacts the context above 80 % of the window, or trims the oldest turns before the first step when
-  // automatic compaction is off or failed (the v1.4 pre-stream trim moved there).
+  // The step composer (Phase 9): the context guard, then (Phase 11) the hooks piece, then the steer step, before every
+  // model call (step 0 included). The guard compacts the context above 80 % of the window, or trims the oldest turns
+  // before the first step when automatic compaction is off or failed (the v1.4 pre-stream trim moved there).
   const prepareStep = createPrepareStep({
     contextGuard: createContextGuard({ session, model: resolved, keptUser: keptUserMessage(session, resolved, assembled.tools) }),
+    hooks: hooks.stepPiece(),
     steer: createSteerStep({ session, model: resolved, tools: assembled.tools }),
     logger,
   })
@@ -906,9 +1052,11 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
       logger,
       workspace: assembled.workspace,
       scope: assembled.scope,
+      hooks,
     }),
     experimental_toolApprovalSecret: deps.keyring.subkey('approval'),
-    stopWhen: isStepCount(params.maxSteps),
+    // Phase 11: a `continue: false` hook stops the run after the current step.
+    stopWhen: [isStepCount(params.maxSteps), hooks.stopCondition],
     abortSignal: run.signal,
     maxRetries: MODEL_MAX_RETRIES,
     providerOptions: params.providerOptions,
@@ -949,8 +1097,19 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
     generateId: () => session.assistantId,
     execute: ({ writer }) => {
       session.bindWriter(writer)
-      // Chunks injected at step boundaries are placed before the step's `start-step` (Phase 9, `steer.ts`).
-      writer.merge(ui.pipeThrough(stepInjector(session)).pipeThrough(generatedFiles))
+      // Chunks injected at step boundaries are placed before the step's `start-step` (Phase 9, `steer.ts`); the `Stop`
+      // hooks hold the `finish` chunk (Phase 11, `hooks.ts`).
+      const gate = hooks.hookGate({
+        signal: run.signal,
+        origin,
+        history: prepared.history,
+        queued: () => session.ctx.queue.list(chatId).length > 0,
+        followUp: (followUp) => {
+          session.followUp = followUp
+        },
+        track: chunk => session.track(chunk),
+      })
+      writer.merge(ui.pipeThrough(stepInjector(session)).pipeThrough(gate).pipeThrough(generatedFiles))
     },
     onError: error => session.errorText(error),
     onEnd: session.onEnd,

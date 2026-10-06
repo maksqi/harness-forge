@@ -9,6 +9,10 @@
 // (`customizations.catalog(null)`, the plugin's entries of the kind). The catalog is fetched (at most
 // CATALOG_MAX_AGE_MS old) whenever the plugin contributes agents or skills; names without a catalog entry (still
 // loading, or the catalog could not be loaded) are name-only rows.
+// Phase 11 (plugin API 1.5.0; C39 mounts, W11.8 implements): the Hooks section is PluginHookList (the plugin's command
+// hooks from `useHooksStore().list(null)` and its code hooks), shown for code hooks (`contributions.hooks`) or command
+// hooks (`contributions.commandHooks`); an Output styles section ("How the agent writes its replies.") follows Skills
+// as a PluginCustomizationList of kind `style`.
 import type { PluginDetail } from '@harness-forge/shared'
 import { ArrowRightIcon, SettingsIcon } from '@lucide/vue'
 import { computed, onMounted, ref, watch } from 'vue'
@@ -17,11 +21,13 @@ import { Button } from '@/components/ui/button'
 import ProviderIcon from '~/components/providers/ProviderIcon.vue'
 import ProviderStatusBadge from '~/components/providers/ProviderStatusBadge.vue'
 import { useCustomizationsStore } from '~/stores/customizations'
+import { useHooksStore } from '~/stores/hooks'
 import { usePluginsStore } from '~/stores/plugins'
 import { useProvidersStore } from '~/stores/providers'
 import { countLabel } from '../list/plugin-display'
 import PluginCustomizationList from './PluginCustomizationList.vue'
 import PluginDetailSection from './PluginDetailSection.vue'
+import PluginHookList from './PluginHookList.vue'
 import PluginMcpServerList from './PluginMcpServerList.vue'
 import PluginToolsTable from './PluginToolsTable.vue'
 
@@ -33,6 +39,7 @@ const CATALOG_MAX_AGE_MS = 15_000
 const plugins = usePluginsStore()
 const providers = useProvidersStore()
 const customizations = useCustomizationsStore()
+const hooks = useHooksStore()
 
 /** A list that failed to load: fall back to the names in `contributions`. */
 const failed = ref({ tools: false, mcp: false, commands: false })
@@ -98,7 +105,7 @@ const commands = computed(() => {
 // ---------- agents and skills (Phase 10) ----------
 
 /** The contributed agent and skill names, as one key: a plugin reload that changes them fetches the catalog again. */
-const customizationNames = computed(() => [...contributions.value.agents, ...contributions.value.skills].join('\n'))
+const customizationNames = computed(() => [...contributions.value.agents, ...contributions.value.skills, ...contributions.value.outputStyles].join('\n'))
 
 watch(customizationNames, (names) => {
   if (names)
@@ -109,7 +116,7 @@ watch(customizationNames, (names) => {
  * The rows of one kind: the plugin's catalog entries of the names it contributes now (a catalog older than a plugin
  * reload may still list a removed one), and the contributed names the catalog does not know yet.
  */
-function customizationRows(kind: 'agent' | 'skill', names: readonly string[]) {
+function customizationRows(kind: 'agent' | 'skill' | 'style', names: readonly string[]) {
   const contributed = new Set(names)
   const entries = customizations.entriesOf(null, kind)
     .filter(entry => entry.source === 'plugin' && entry.pluginId === props.plugin.id && contributed.has(entry.name))
@@ -121,6 +128,16 @@ const agents = computed(() => customizationRows('agent', contributions.value.age
 const agentCount = computed(() => agents.value.entries.length + agents.value.missing.length)
 const skills = computed(() => customizationRows('skill', contributions.value.skills))
 const skillCount = computed(() => skills.value.entries.length + skills.value.missing.length)
+/** + Phase 11: the plugin's output styles. */
+const styles = computed(() => customizationRows('style', contributions.value.outputStyles))
+const styleCount = computed(() => styles.value.entries.length + styles.value.missing.length)
+
+// ---------- hooks (Phase 11) ----------
+
+/** The plugin's command hooks, from the global hook listing (W11.8 fetches it). */
+const commandHooks = computed(() => (hooks.list(null)?.items ?? [])
+  .filter(entry => entry.source === 'plugin' && entry.kind === 'command' && entry.pluginId === props.plugin.id))
+const hookCount = computed(() => Math.max(commandHooks.value.length, contributions.value.commandHooks) + contributions.value.hooks.length)
 
 const empty = computed(() => !isCoreMcp.value
   && providerRows.value.length === 0
@@ -131,7 +148,8 @@ const empty = computed(() => !isCoreMcp.value
   && commands.value.length === 0
   && agentCount.value === 0
   && skillCount.value === 0
-  && contributions.value.hooks.length === 0)
+  && styleCount.value === 0
+  && hookCount.value === 0)
 </script>
 
 <template>
@@ -235,17 +253,17 @@ const empty = computed(() => !isCoreMcp.value
       <PluginCustomizationList kind="skill" :plugin-id="plugin.id" :entries="skills.entries" :missing="skills.missing" />
     </PluginDetailSection>
 
+    <PluginDetailSection v-if="styleCount > 0" title="Output styles" :count="styleCount" description="How the agent writes its replies.">
+      <PluginCustomizationList kind="style" :plugin-id="plugin.id" :entries="styles.entries" :missing="styles.missing" />
+    </PluginDetailSection>
+
     <PluginDetailSection
-      v-if="contributions.hooks.length"
+      v-if="hookCount > 0"
       title="Hooks"
-      :count="contributions.hooks.length"
+      :count="hookCount"
       description="Hooks can read and change prompts, messages and tool calls."
     >
-      <div class="flex flex-wrap gap-1.5">
-        <Badge v-for="hook in contributions.hooks" :key="hook" variant="secondary" class="rounded-md px-1.5 font-mono text-[11px] font-normal">
-          {{ hook }}
-        </Badge>
-      </div>
+      <PluginHookList :entries="commandHooks" :code-hooks="contributions.hooks" />
     </PluginDetailSection>
 
     <div v-if="empty" class="flex items-center gap-3 rounded-xl border border-dashed px-4 py-6 text-sm text-muted-foreground">

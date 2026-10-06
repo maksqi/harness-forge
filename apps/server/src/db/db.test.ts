@@ -5,9 +5,9 @@ import { join } from 'node:path'
 import { eq, sql } from 'drizzle-orm'
 import { afterEach, describe, expect, it } from 'vitest'
 import { openDatabase } from './client.ts'
-import { uniqueViolation } from './constraint.test-util.ts'
+import { primaryKeyViolation, uniqueViolation } from './constraint.test-util.ts'
 import { migrateDatabase, resolveMigrationsFolder } from './migrate.ts'
-import { backgroundTasks, chats, chatShares, customizations, messages, projects, shellRules, TABLE_NAMES, usage, workspaceChanges } from './schema.ts'
+import { backgroundTasks, chats, chatShares, customizations, hooks, messages, projects, projectTrust, shellRules, TABLE_NAMES, usage, workspaceChanges } from './schema.ts'
 
 const opened: Database[] = []
 const tempDirs: string[] = []
@@ -68,10 +68,12 @@ describe('migrations', () => {
     expect(resolveMigrationsFolder()).toMatch(/[/\\]apps[/\\]server[/\\]drizzle$/)
   })
 
-  it('creates the 20 tables of the data model', async () => {
+  it('creates the 22 tables of the data model', async () => {
     const database = await freshDatabase()
     const tables = (await names(database, 'table')).filter(name => name !== '__drizzle_migrations')
-    expect(TABLE_NAMES).toHaveLength(20)
+    expect(TABLE_NAMES).toHaveLength(22)
+    expect(TABLE_NAMES).toContain('hooks')
+    expect(TABLE_NAMES).toContain('project_trust')
     expect(TABLE_NAMES).toContain('chat_shares')
     expect(TABLE_NAMES).toContain('projects')
     expect(TABLE_NAMES).toContain('workspace_changes')
@@ -108,7 +110,7 @@ describe('migrations', () => {
     expect(await indexColumns(database, 'chat_shares_chat_idx')).toEqual(['chat_id'])
   })
 
-  it('applies every migration: 0000 initial schema, 0001 message tree and chat_shares, 0002 remembered versions, 0003, 0004 projects, 0005 workspace checkpoints, 0006 shell rule unique, 0007 customizations', async () => {
+  it('applies every migration: 0000 initial schema, 0001 message tree and chat_shares, 0002 remembered versions, 0003, 0004 projects, 0005 workspace checkpoints, 0006 shell rule unique, 0007 customizations, 0008 hooks and trust', async () => {
     const database = await freshDatabase()
     const journal = JSON.parse(readFileSync(join(resolveMigrationsFolder(), 'meta', '_journal.json'), 'utf8')) as { entries: Array<{ tag: string }> }
     expect(journal.entries.map(entry => entry.tag)).toEqual([
@@ -120,6 +122,7 @@ describe('migrations', () => {
       '0005_workspace_checkpoints',
       '0006_shell_rule_unique',
       '0007_customizations',
+      '0008_hooks_trust',
     ])
     const applied = await database.client.execute('SELECT hash, created_at FROM __drizzle_migrations ORDER BY created_at')
     expect(applied.rows).toHaveLength(journal.entries.length)
@@ -230,7 +233,7 @@ describe('phase 6 schema (ADR-030 remembered versions)', () => {
 })
 
 describe('phase 7 schema (ADR-031 projects)', () => {
-  it('creates projects as documented: text id, unique canonical path, nullable instructions, timestamps', async () => {
+  it('creates projects as documented: text id, unique canonical path, nullable instructions, timestamps (Phase 11: output_style)', async () => {
     const database = await freshDatabase()
     const table = await columns(database, 'projects')
     expect(Object.values(table).map(column => [column.name, column.type, column.notnull, column.pk])).toEqual([
@@ -240,6 +243,8 @@ describe('phase 7 schema (ADR-031 projects)', () => {
       ['instructions', 'TEXT', 0, 0],
       ['created_at', 'INTEGER', 1, 0],
       ['updated_at', 'INTEGER', 1, 0],
+      // Phase 11 (0008, ADR-051): added by `ALTER TABLE ... ADD`, so it comes last.
+      ['output_style', 'TEXT', 0, 0],
     ])
     expect(await indexColumns(database, 'projects_path_idx')).toEqual(['path'])
     expect(await foreignKeys(database, 'projects')).toEqual([])
@@ -258,7 +263,7 @@ describe('phase 7 schema (ADR-031 projects)', () => {
     const { db } = await freshDatabase()
     await db.insert(projects).values({ id: 'prj_AAAAAAAAAAAAAAAA', name: 'Demo', path: '/srv/projects/demo', createdAt: 1, updatedAt: 2 })
     const [project] = await db.select().from(projects)
-    expect(project).toEqual({ id: 'prj_AAAAAAAAAAAAAAAA', name: 'Demo', path: '/srv/projects/demo', instructions: null, createdAt: 1, updatedAt: 2 })
+    expect(project).toEqual({ id: 'prj_AAAAAAAAAAAAAAAA', name: 'Demo', path: '/srv/projects/demo', instructions: null, outputStyle: null, createdAt: 1, updatedAt: 2 })
     await expect(db.insert(projects).values({ id: 'prj_BBBBBBBBBBBBBBBB', name: 'Copy', path: '/srv/projects/demo', createdAt: 1, updatedAt: 1 })).rejects.toThrow()
 
     const chatId = '0199a8f0-0000-7000-8000-000000000005'
@@ -504,6 +509,86 @@ describe('phase 10 schema (0007: ADR-044 personal definitions, ADR-046 backgroun
     await expect(db.insert(backgroundTasks).values(taskRow('bgt_DDDDDDDDDDDDDDDD', 'missing', 4))).rejects.toThrow()
     await db.delete(chats).where(eq(chats.id, CHAT_ID))
     expect((await db.select({ id: backgroundTasks.id }).from(backgroundTasks)).map(row => row.id)).toEqual(['bgt_CCCCCCCCCCCCCCCC'])
+  })
+})
+
+describe('phase 11 schema (0008: ADR-048 personal hooks, ADR-049 project trust, ADR-051 project output style)', () => {
+  const PROJECT = 'prj_AAAAAAAAAAAAAAAA'
+  const OTHER_PROJECT = 'prj_BBBBBBBBBBBBBBBB'
+  const HASH_A = 'a'.repeat(64)
+  const HASH_B = 'b'.repeat(64)
+
+  it('creates hooks as documented: text id, nullable matcher and timeout, enabled default true, no index or foreign key', async () => {
+    const database = await freshDatabase()
+    const info = await columns(database, 'hooks')
+    expect(Object.values(info).map(column => [column.name, column.type, column.notnull, column.pk])).toEqual([
+      ['id', 'TEXT', 1, 1],
+      ['event', 'TEXT', 1, 0],
+      ['matcher', 'TEXT', 0, 0],
+      ['command', 'TEXT', 1, 0],
+      ['timeout', 'INTEGER', 0, 0],
+      ['enabled', 'INTEGER', 1, 0],
+      ['created_at', 'INTEGER', 1, 0],
+      ['updated_at', 'INTEGER', 1, 0],
+    ])
+    expect(info.enabled?.dflt_value).toBe('true')
+    expect(info.matcher?.dflt_value).toBeNull()
+    expect(info.timeout?.dflt_value).toBeNull()
+    expect(await foreignKeys(database, 'hooks')).toEqual([])
+    const list = await database.client.execute(`PRAGMA index_list(hooks)`)
+    expect(list.rows.map(row => String(row.origin))).toEqual(['pk'])
+  })
+
+  it('creates project_trust as documented: primary key (project_id, sha256), cascading from projects, no other index', async () => {
+    const database = await freshDatabase()
+    const info = await columns(database, 'project_trust')
+    expect(Object.values(info).map(column => [column.name, column.type, column.notnull, column.pk])).toEqual([
+      ['project_id', 'TEXT', 1, 1],
+      ['sha256', 'TEXT', 1, 2],
+      ['kind', 'TEXT', 1, 0],
+      ['label', 'TEXT', 1, 0],
+      ['created_at', 'INTEGER', 1, 0],
+    ])
+    expect(await foreignKeys(database, 'project_trust')).toEqual(['project_id -> projects.id (CASCADE)'])
+    const list = await database.client.execute(`PRAGMA index_list(project_trust)`)
+    expect(list.rows.map(row => String(row.origin))).toEqual(['pk'])
+  })
+
+  it('stores personal hooks with their defaults', async () => {
+    const { db } = await freshDatabase()
+    await db.insert(hooks).values({ id: 'hok_AAAAAAAAAAAAAAAA', event: 'PreToolUse', matcher: 'Bash|Write', command: 'sh .claude/hooks/guard.sh', timeout: 30 })
+    await db.insert(hooks).values({ id: 'hok_BBBBBBBBBBBBBBBB', event: 'Stop', command: 'sh check.sh', enabled: false })
+    const rows = await db.select().from(hooks).orderBy(hooks.id)
+    expect(rows.map(({ createdAt, updatedAt, ...row }) => row)).toEqual([
+      { id: 'hok_AAAAAAAAAAAAAAAA', event: 'PreToolUse', matcher: 'Bash|Write', command: 'sh .claude/hooks/guard.sh', timeout: 30, enabled: true },
+      { id: 'hok_BBBBBBBBBBBBBBBB', event: 'Stop', matcher: null, command: 'sh check.sh', timeout: null, enabled: false },
+    ])
+    for (const row of rows) {
+      expect(row.createdAt).toBeGreaterThan(0)
+      expect(row.updatedAt).toBeGreaterThan(0)
+    }
+  })
+
+  it('stores approvals; a second (project, sha256) is a primary-key violation; deleting a project cascades to its rows only', async () => {
+    const { db } = await freshDatabase()
+    await db.insert(projects).values([
+      { id: PROJECT, name: 'Demo', path: '/srv/projects/demo' },
+      { id: OTHER_PROJECT, name: 'Other', path: '/srv/projects/other', outputStyle: 'learning' },
+    ])
+    await db.insert(projectTrust).values([
+      { projectId: PROJECT, sha256: HASH_A, kind: 'hook', label: 'sh .claude/hooks/guard.sh' },
+      { projectId: PROJECT, sha256: HASH_B, kind: 'mcp', label: 'github' },
+      // The same hash in another project is another approval.
+      { projectId: OTHER_PROJECT, sha256: HASH_A, kind: 'hook', label: 'sh .claude/hooks/guard.sh' },
+    ])
+    expect(await primaryKeyViolation(db.insert(projectTrust).values({ projectId: PROJECT, sha256: HASH_A, kind: 'command', label: '/status' })))
+      .toBe('UNIQUE constraint failed: project_trust.project_id, project_trust.sha256')
+    // The project must exist (foreign keys are on).
+    await expect(db.insert(projectTrust).values({ projectId: 'prj_CCCCCCCCCCCCCCCC', sha256: HASH_A, kind: 'hook', label: 'x' })).rejects.toThrow()
+    expect((await db.select({ outputStyle: projects.outputStyle }).from(projects).orderBy(projects.id)).map(row => row.outputStyle)).toEqual([null, 'learning'])
+
+    await db.delete(projects).where(eq(projects.id, PROJECT))
+    expect(await db.select({ projectId: projectTrust.projectId, sha256: projectTrust.sha256 }).from(projectTrust)).toEqual([{ projectId: OTHER_PROJECT, sha256: HASH_A }])
   })
 })
 

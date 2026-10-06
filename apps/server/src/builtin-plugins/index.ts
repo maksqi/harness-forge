@@ -1,7 +1,9 @@
 // The builtin plugins (PLUGINS.md 1 and 11), statically imported, in load order: `core-providers`, `core-tools`,
 // `core-commands`, `core-mcp`, `core-workspace` (Phase 7, ADR-032), `core-agent` (Phase 9, ADR-041 / ADR-043), then
-// `mock` only with `HF_MOCK_PROVIDER=1`. FROZEN after Phase 0 (opened for C14 in P7-0b and for C27 in P9-0b). Each
-// module default-exports its `definePlugin(...)` module and exports its `manifest` (builtins have no `plugin.json`).
+// `mock` only with `HF_MOCK_PROVIDER=1`. FROZEN after Phase 0 (opened for C14 in P7-0b, for C27 in P9-0b and for C38 in
+// P11-0b: the list is unchanged in Phase 11; the builtin output styles live in `core-agent/styles.ts` and the mock model
+// `mock:hooks` in `mock/hooks.ts`). Each module default-exports its `definePlugin(...)` module and exports its
+// `manifest` (builtins have no `plugin.json`). No builtin registers an output style or a command hook through `ctx`.
 import type { BuiltinPlugin } from '../plugins/types.ts'
 import coreAgent, { manifest as coreAgentManifest } from './core-agent/index.ts'
 import coreCommands, { manifest as coreCommandsManifest } from './core-commands/index.ts'

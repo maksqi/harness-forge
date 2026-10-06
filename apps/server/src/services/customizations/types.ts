@@ -7,6 +7,9 @@
 // `task`, `skill`; W10.2 - W10.5), `GET /commands?projectId` (W10.2), the backup and restore of `customizations.json`
 // (W10.6) and shutdown (`stopDeps`: `stop()` right after the runs stopped). Test double: `createFakeCustomizationService`
 // (`testing/fake-customizations.ts`), installed with `createTestApp({ customizations: 'fake' })`.
+// Phase 11 (ADR-051; C36): the fourth kind `style` (output styles: builtins `default` / `explanatory` / `learning`,
+// plugin styles of `registry.styles`, personal rows, `.claude/output-styles` and `.harness/output-styles`), read by
+// `CustomizationCatalog.styles()` / `style(name)` (the run's style resolution, `chat/output-style.ts`, W11.6).
 //
 // Definition files are untrusted input: they are read only through `resolveWorkspacePath` / `openWorkspaceFile`
 // (`workspace/paths.ts`; no link on the path, regular files only, binary skipped, byte caps before parsing) and parsed
@@ -63,6 +66,11 @@ export interface CustomizationCatalog {
   /** The active skills, sorted by name. */
   readonly skills: () => readonly CustomizationEntry[]
   /**
+   * The active output styles (Phase 11, ADR-051: kind `style`), sorted by name; the builtins `default`, `explanatory`
+   * and `learning` unless shadowed.
+   */
+  readonly styles: () => readonly CustomizationEntry[]
+  /**
    * The active agent of that name, the aliases of `AGENT_TYPE_ALIASES` resolved (`general-purpose` → `general`); null
    * when there is none (a shadowed, invalid or turned-off entry is never returned).
    */
@@ -71,6 +79,11 @@ export interface CustomizationCatalog {
   readonly command: (name: string) => CustomizationEntry | null
   /** The active skill of that name, else null. */
   readonly skill: (name: string) => CustomizationEntry | null
+  /**
+   * The active output style of that name (Phase 11, ADR-051), else null (an unknown, shadowed, invalid or turned-off
+   * style: the run falls back to `default` with the notice `output-style-unavailable`).
+   */
+  readonly style: (name: string) => CustomizationEntry | null
 }
 
 /**

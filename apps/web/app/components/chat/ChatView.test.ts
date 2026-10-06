@@ -41,7 +41,7 @@ import { createMockApi } from '~/utils/testing/mock-api'
 import { stubLocalStorage } from '~/utils/testing/storage'
 import TodoStrip from './agent/TodoStrip.vue'
 import { announcedTasks } from './background/background-agents'
-import { AGENT_TASK_CONTEXT } from './chat-context'
+import { AGENT_TASK_CONTEXT, CHAT_VIEW_ACTIONS, HOOK_ACTIVITY } from './chat-context'
 import ChatTranscript from './ChatTranscript.vue'
 import ChatView from './ChatView.vue'
 import { TOOL_APPROVAL_CONTEXT } from './parts/tool-approval-context'
@@ -52,7 +52,14 @@ type TodoStateFn = (messages: readonly HarnessUIMessage[]) => TodoState | null
 const mock = vi.hoisted(() => ({
   api: null as unknown,
   fetch: null as unknown,
-  composer: { setText: null as unknown as Mock, openModelPicker: null as unknown as Mock, focus: null as unknown as Mock, restoreQueued: null as unknown as Mock },
+  composer: {
+    setText: null as unknown as Mock,
+    openModelPicker: null as unknown as Mock,
+    focus: null as unknown as Mock,
+    restoreQueued: null as unknown as Mock,
+    showRefusal: null as unknown as Mock,
+    restoreInput: null as unknown as Mock,
+  },
   /** `todoState` of the todo helpers (W9.10's): the real one unless a test replaces it. */
   todoState: null as unknown as Mock<TodoStateFn>,
   realTodoState: null as TodoStateFn | null,
@@ -119,14 +126,16 @@ vi.mock('~/components/chat/composer/ChatComposer.vue', async () => {
   return {
     default: define({
       name: 'ChatComposer',
-      props: ['chatId', 'status', 'modelRef', 'reasoningEffort', 'toolMode', 'usage', 'chatCostUsd', 'disabled', 'placeholder', 'previousImages', 'projectId'],
-      emits: ['update:modelRef', 'update:reasoningEffort', 'update:toolMode', 'submit', 'stop', 'edit-last'],
+      props: ['chatId', 'status', 'modelRef', 'reasoningEffort', 'toolMode', 'usage', 'chatCostUsd', 'disabled', 'placeholder', 'previousImages', 'projectId', 'outputStyle'],
+      emits: ['update:modelRef', 'update:reasoningEffort', 'update:toolMode', 'update:outputStyle', 'submit', 'stop', 'edit-last'],
       setup(props, { emit, expose }) {
         expose({
           focus: () => mock.composer.focus(),
           setText: (text: string) => mock.composer.setText(text),
           openModelPicker: () => mock.composer.openModelPicker(),
           restoreQueued: (items: readonly QueueItem[]) => mock.composer.restoreQueued(items),
+          showRefusal: (refusal: unknown) => mock.composer.showRefusal(refusal),
+          restoreInput: (input: unknown) => mock.composer.restoreInput(input),
         })
         return () => render('form', {
           'data-testid': 'composer',
@@ -137,6 +146,7 @@ vi.mock('~/components/chat/composer/ChatComposer.vue', async () => {
           'data-previous-images': String(props.previousImages),
           'data-project-id': props.projectId ?? 'none',
           'data-tool-mode': props.toolMode,
+          'data-output-style': props.outputStyle ?? 'automatic',
           'onSubmit': (event: Event) => {
             event.preventDefault()
             emit('submit', { text: 'Hello', files: [] })
@@ -187,6 +197,8 @@ beforeEach(() => {
   mock.composer.openModelPicker = vi.fn()
   mock.composer.focus = vi.fn()
   mock.composer.restoreQueued = vi.fn()
+  mock.composer.showRefusal = vi.fn()
+  mock.composer.restoreInput = vi.fn()
   mock.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
     const body = typeof init?.body === 'string' ? JSON.parse(init.body) as ChatRequestBody : null
@@ -1556,5 +1568,79 @@ describe('chatView: background agents (Phase 10)', () => {
     await flushPromises()
     expect(announced(wrapper)).toBe('')
     expect(dockAnnouncer()).toBe('Background agent finished: Find flaky tests')
+  })
+})
+
+describe('chatView: hooks, project trust and output styles (Phase 11, P11-0b mounts)', () => {
+  const U1 = 'msg_user000000000001'
+
+  beforeEach(() => {
+    api.chatQueue.list.mockResolvedValue({ items: [] })
+    api.chats.get.mockResolvedValue(chatDetail({ id: chatId(41), modelRef: MODEL, projectId: projectId(1), settings: { outputStyle: 'learning' }, messages: [userMessage(U1, 'Hi')] }))
+  })
+
+  it('hosts the trust and MCP dialogs of the chat\'s project (CHAT_VIEW_ACTIONS) and provides the hook activity', async () => {
+    useProjectsStore().items = [projectSummary({ id: projectId(1), name: 'website' })]
+    api.projects.list.mockResolvedValue({ items: [projectSummary({ id: projectId(1), name: 'website' })] })
+    let actions: { openProjectTrust: (focusKey?: string) => void, openProjectMcp: (serverId?: string) => void } | null = null
+    let hookActivity: unknown = 'absent'
+    const Probe = defineComponent({
+      setup() {
+        actions = inject(CHAT_VIEW_ACTIONS, null)
+        hookActivity = inject(HOOK_ACTIVITY, null)?.value
+        return () => null
+      },
+    })
+    const wrapper = mount(defineComponent({
+      setup: () => () => h(TooltipProvider, null, { default: () => h(ChatView, { chatId: chatId(41) }, { header: () => h(Probe) }) }),
+    }), { attachTo: document.body, global: { stubs: { NuxtLink: { template: '<a><slot /></a>' } } } })
+    mounted.push(wrapper)
+    await until(() => wrapper.findAll(`[data-testid="${testIds.messageUser}"]`).length === 1)
+    expect(hookActivity).toBeNull()
+    expect(document.body.querySelector(`[data-testid="${testIds.projectTrustDialog}"]`)).toBeNull()
+    actions!.openProjectTrust()
+    await until(() => document.body.querySelector(`[data-testid="${testIds.projectTrustDialog}"]`) !== null)
+    expect(document.body.querySelector(`[data-testid="${testIds.projectTrustDialog}"]`)!.textContent).toContain('Review website')
+    actions!.openProjectMcp('memory')
+    await until(() => document.body.querySelector(`[data-testid="${testIds.projectMcpDialog}"]`) !== null)
+  })
+
+  it('passes the chat\'s own output style to the composer and saves its choice', async () => {
+    const { wrapper } = mountView({ chatId: chatId(41) })
+    await until(() => wrapper.get('[data-testid="composer"]').attributes('data-output-style') === 'learning')
+    api.chats.update.mockResolvedValue(chatDetail({ id: chatId(41) }))
+    wrapper.getComponent({ name: 'ChatComposer' }).vm.$emit('update:outputStyle', null)
+    await flushPromises()
+    expect(wrapper.get('[data-testid="composer"]').attributes('data-output-style')).toBe('automatic')
+    expect(api.chats.update).toHaveBeenCalledWith({ params: { id: chatId(41) }, body: { settings: { outputStyle: null } } })
+  })
+
+  it('a queued message refused by a hook goes back into the composer with the refusal', async () => {
+    const { wrapper } = mountView({ chatId: chatId(41) })
+    await until(() => wrapper.findAll(`[data-testid="${testIds.messageUser}"]`).length === 1)
+    const gate = deferred()
+    replies.push(gatedReply('Working on it', gate.promise))
+    await wrapper.get('[data-testid="composer"]').trigger('submit')
+    await until(() => wrapper.get('[data-testid="composer"]').attributes('data-status') === 'streaming')
+    api.chatQueue.add.mockRejectedValueOnce(new HarnessError({ code: 'conflict', message: 'No secrets, please.', details: { reason: 'hook-blocked' } }))
+    await wrapper.get('[data-testid="composer"]').trigger('submit')
+    await until(() => mock.composer.showRefusal.mock.calls.length === 1)
+    expect(mock.composer.restoreInput).toHaveBeenCalledWith({ text: 'Hello', files: [] })
+    expect(mock.composer.showRefusal).toHaveBeenCalledWith({ code: 'hook-blocked', reason: 'No secrets, please.', event: null, source: null, command: null })
+    expect(mock.toast).not.toHaveBeenCalled()
+    gate.resolve()
+    await until(() => wrapper.get('[data-testid="composer"]').attributes('data-status') === 'ready')
+  })
+
+  it('a new turn refused by a hook (409 before streaming) goes back into the composer with the refusal', async () => {
+    const { wrapper } = mountView({ chatId: chatId(41) })
+    await until(() => wrapper.findAll(`[data-testid="${testIds.messageUser}"]`).length === 1)
+    replies.push(() => new Response(JSON.stringify({ error: { code: 'conflict', message: 'Blocked by policy.', details: { reason: 'hook-blocked' } } }), { status: 409, headers: { 'content-type': 'application/json' } }))
+    await wrapper.get('[data-testid="composer"]').trigger('submit')
+    await until(() => mock.composer.showRefusal.mock.calls.length === 1)
+    expect(mock.composer.showRefusal.mock.calls[0]![0]).toMatchObject({ code: 'hook-blocked', reason: 'Blocked by policy.' })
+    expect(mock.composer.restoreInput).toHaveBeenCalledWith({ text: 'Hello', files: [] })
+    // Nothing was stored: the refused message left the transcript.
+    expect(wrapper.findAll(`[data-testid="${testIds.messageUser}"]`)).toHaveLength(1)
   })
 })

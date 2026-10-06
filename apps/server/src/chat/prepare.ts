@@ -24,15 +24,32 @@
 // finished background tasks (`origin: 'task'`): only a new message whose parts are all `data-task-result` parts is
 // accepted; its parts skip `normalizeUserParts` (which refuses data parts) and the message is checked with
 // `validateMessage`; it resolves no command.
+// Phase 11 (C37 seams, ADR-048 / ADR-051 / ADR-052; the call sites are frozen after P11-0b, the features are W11.2's,
+// W11.5's and W11.6's):
+// - a server-built carrier may also hold only `data-hook` parts (the carrier of a `Stop` continuation, `origin: 'hook'`;
+//   `carrierParts`: all `data-task-result` parts or all `data-hook` parts, never mixed);
+// - `ensureChat` saves `ChatRequestBody.outputStyle` as `settings.outputStyle` when the request creates the chat (an
+//   existing chat keeps its style);
+// - the command resolution gets `CommandContext.expansion` (the chat's project folder opened lazily once, the shell
+//   switch, the trust check of project command files: `!` / `@` spans, W11.5);
+// - right after the project folder opened, `runPromptHooks` (`hooks-prompt.ts`, W11.2) runs `SessionStart` and
+//   `UserPromptSubmit` (`PrepareRunOptions.origin`, `.hookRecords` of a queued turn): their records are appended to the
+//   new user message as `data-hook` parts; a block is the 409 `hook-blocked` before anything but the chat row is written,
+//   and the chat row is removed again when this request created it (open point 14: a blocked first message on `/`
+//   leaves no chat; `chat.created` is followed by `chat.deleted`);
+// - then `resolveRunOutputStyle` (`output-style.ts`, W11.6) gives `PreparedRun.outputStyle` for a chat-model run that
+//   calls the model (null for image turns and command replies) and its notices.
 import type {
   CatalogModel,
   ChatRequestBody,
   HarnessUIMessage,
   HarnessUIMessagePart,
+  HookData,
   ImageAspectRatio,
   ImageOptions,
   MessageMetadata,
   NoticeData,
+  RunOrigin,
   Settings,
 } from '@harness-forge/shared'
 import type { Logger } from '../logger.ts'
@@ -42,13 +59,15 @@ import type { CustomizationCatalog } from '../services/customizations/types.ts'
 import type { FilesService } from '../services/files/types.ts'
 import type { OpenWorkspace } from '../services/projects/types.ts'
 import type { AppDeps } from '../types.ts'
-import type { CommandResolution } from './commands.ts'
+import type { CommandExpansionHost, CommandResolution } from './commands.ts'
 import type { RequestKind } from './history.ts'
+import type { RunOutputStyle } from './output-style.ts'
 import type { Run } from './runs.ts'
 import {
   createMessageId,
   harnessDataSchemas,
   HarnessError,
+  HOOK_PART_TYPE,
   isHarnessError,
   LIMITS,
   messageMetadataSchema,
@@ -62,8 +81,10 @@ import { applyCommandExpansions } from './context.ts'
 import { normalizeUserParts } from './files.ts'
 import { isGeneratedImageType } from './generated-files.ts'
 import { badRequest, classifyRequest, mergeApprovalDecisions, notFound, supersedeApprovals } from './history.ts'
+import { isHookBlockedError, runPromptHooks } from './hooks-prompt.ts'
 import { checkPlanApprovalMode } from './modes.ts'
 import { NOTICES } from './notices.ts'
+import { resolveRunOutputStyle } from './output-style.ts'
 
 /** A message write of the history transaction. */
 export interface MessageWrite {
@@ -155,6 +176,11 @@ export interface PreparedRun {
    * Passed to `assembleTools({ allowedTools })`.
    */
   turnRestriction: readonly string[] | null
+  /**
+   * The output style of the run (Phase 11, ADR-051; `resolveRunOutputStyle`): for a chat-model run that calls the
+   * model; null for image turns and command replies (and absent in v1.6 test doubles: no style).
+   */
+  outputStyle?: RunOutputStyle | null
 }
 
 /** Options of `prepareRun`. */
@@ -167,6 +193,16 @@ export interface PrepareRunOptions {
    * continuation is a `validation_error`). It resolves no command.
    */
   readonly serverMessage?: boolean
+  /**
+   * What started the run (Phase 11; `run.started.origin`, default `request`): the prompt hooks run `UserPromptSubmit`
+   * for `request` turns and `SessionStart` for `request` and `queue` turns (`hooks-prompt.ts`).
+   */
+  readonly origin?: RunOrigin
+  /**
+   * The `UserPromptSubmit` records of a queued turn (Phase 11, ADR-048): the hooks ran when the message was queued;
+   * they are attached to the new user message instead of running again.
+   */
+  readonly hookRecords?: readonly HookData[]
 }
 
 /** The request was stopped before its history was stored. */
@@ -320,29 +356,59 @@ interface PrepareContext {
   serverMessage: boolean
 }
 
+/** The part types a server-built carrier message may hold (one kind per carrier). */
+const CARRIER_PART_TYPES: ReadonlySet<string> = new Set([TASK_RESULT_PART_TYPE, HOOK_PART_TYPE])
+
 /**
- * The parts of a server-built carrier message (Phase 10, ADR-046): one or more `data-task-result` parts, kept as
- * `{ type, id?, data }` (`validateMessage` checks the data); anything else is a `validation_error` on the part.
+ * The parts of a server-built carrier message (Phase 10, ADR-046): one or more `data-task-result` parts or (Phase 11,
+ * ADR-048, the carrier of a `Stop` continuation) one or more `data-hook` parts, never mixed, kept as `{ type, id?, data }`
+ * (`validateMessage` checks the data); anything else is a `validation_error` on the part.
  */
-function carrierParts(parts: readonly unknown[]): HarnessUIMessagePart[] {
+export function carrierParts(parts: readonly unknown[]): HarnessUIMessagePart[] {
   if (parts.length === 0)
-    throw badRequest('A server-started turn needs at least one background task result.', ['message', 'parts'])
+    throw badRequest('A server-started turn needs at least one background task result or hook record.', ['message', 'parts'])
+  let kind: string | null = null
   return parts.map((raw, index): HarnessUIMessagePart => {
     const part = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>
-    if (part.type !== TASK_RESULT_PART_TYPE)
-      throw badRequest('A server-started turn can only carry background task results.', ['message', 'parts', index])
-    return { type: TASK_RESULT_PART_TYPE, ...(typeof part.id === 'string' ? { id: part.id } : {}), data: part.data } as HarnessUIMessagePart
+    if (typeof part.type !== 'string' || !CARRIER_PART_TYPES.has(part.type) || (kind !== null && part.type !== kind))
+      throw badRequest('A server-started turn can only carry background task results or hook records (one kind).', ['message', 'parts', index])
+    kind = part.type
+    return { type: part.type, ...(typeof part.id === 'string' ? { id: part.id } : {}), data: part.data } as HarnessUIMessagePart
   })
 }
 
+/**
+ * The expansion host of a command resolution (Phase 11, ADR-052; `CommandContext.expansion`): the chat's project folder
+ * opened once on first use, the shell switch, the trust check of project command files.
+ */
+export function commandExpansionHost(deps: Pick<AppDeps, 'env' | 'projects' | 'projectTrust'>, projectId: string | null): CommandExpansionHost {
+  let opened: Promise<OpenWorkspace | null> | null = null
+  return {
+    projectId,
+    shellEnabled: deps.env.workspaceShell,
+    workspace: () => {
+      opened ??= projectId === null
+        ? Promise.resolve(null)
+        : deps.projects.openWorkspace(projectId).then(result => (result.ok ? result.workspace : null))
+      return opened
+    },
+    trusted: async (id, sha256) => (await deps.projectTrust.approved(id)).has(sha256),
+  }
+}
+
 /** The stored form of the new user message (server metadata, command invocation; a carrier's parts as built). */
-async function buildUserMessage(context: PrepareContext): Promise<{ message: HarnessUIMessage, command: CommandResolution | null }> {
+async function buildUserMessage(context: PrepareContext, chat: ChatRecord): Promise<{ message: HarnessUIMessage, command: CommandResolution | null }> {
   const { deps, run, body, request } = context
   const metadata: MessageMetadata = { modelRef: request.model.modelRef, startedAt: run.acceptedAt }
   if (context.serverMessage)
     return { message: { id: body.message.id, role: 'user', parts: carrierParts(body.message.parts), metadata }, command: null }
   const parts = await normalizeUserParts(body.message.parts, deps.files)
-  const command = await resolveCommand(deps, firstTextOf(parts), { chatId: body.chatId, signal: run.signal, catalog: context.catalog })
+  const command = await resolveCommand(deps, firstTextOf(parts), {
+    chatId: body.chatId,
+    signal: run.signal,
+    catalog: context.catalog,
+    expansion: commandExpansionHost(deps, chat.projectId),
+  })
   return { message: { id: body.message.id, role: 'user', parts, metadata: { ...metadata, ...(command === null ? {} : { command: command.invocation }) } }, command }
 }
 
@@ -377,12 +443,25 @@ function pathWrites(changed: readonly HarnessUIMessage[], path: readonly Harness
  * keeps its project whatever the request says (moves go through `PATCH /chats/:id`).
  */
 export async function ensureChat(deps: Pick<AppDeps, 'chats'>, body: ChatRequestBody): Promise<ChatRecord> {
-  const { chat } = await deps.chats.ensure(body.chatId, {
+  return (await ensureRunChat(deps, body)).chat
+}
+
+/**
+ * `ensureChat` with whether this request created the chat (Phase 11). A new chat also gets the request's
+ * `outputStyle` (ADR-051: a style name; null or absent = automatic) as `settings.outputStyle`; an existing chat keeps
+ * its own.
+ */
+export async function ensureRunChat(deps: Pick<AppDeps, 'chats'>, body: ChatRequestBody): Promise<{ chat: ChatRecord, created: boolean }> {
+  const ensured = await deps.chats.ensure(body.chatId, {
     modelRef: body.modelRef,
     settings: { toolMode: body.toolMode, reasoningEffort: body.reasoningEffort },
     ...(body.projectId === undefined ? {} : { projectId: body.projectId }),
   })
-  return chat
+  const outputStyle = body.outputStyle
+  if (!ensured.created || typeof outputStyle !== 'string')
+    return ensured
+  await deps.chats.touch(body.chatId, { settings: { outputStyle } })
+  return { chat: { ...ensured.chat, settings: { ...ensured.chat.settings, outputStyle } }, created: true }
 }
 
 /**
@@ -480,23 +559,92 @@ export async function resolveTurnModel(
  * the other resolution errors) before anything but the chat row is written.
  */
 export async function prepareRun(deps: AppDeps, run: Run, body: ChatRequestBody, logger: Logger, options: PrepareRunOptions = {}): Promise<PreparedRun> {
-  const planned = await planRun(deps, run, body, logger, options)
+  const { planned, created } = await planRun(deps, run, body, logger, options)
   const opened = await openRunWorkspace(deps, planned.chat, planned.target, planned.command, logger)
-  return {
+  const prepared: PreparedRun = {
     ...planned,
     workspace: opened.workspace,
     notices: [...planned.notices, ...opened.notices],
     turnRestriction: turnToolRestriction(planned.history),
   }
+  // Phase 11 (ADR-048): `SessionStart` / `UserPromptSubmit`; a block stores nothing (the chat row of this request goes).
+  let hooked: PreparedRun
+  try {
+    const prompt = await runPromptHooks({
+      deps,
+      prepared,
+      body,
+      origin: options.origin ?? 'request',
+      serverMessage: options.serverMessage === true,
+      ...(options.hookRecords === undefined ? {} : { precomputed: options.hookRecords }),
+      signal: run.signal,
+      logger,
+    })
+    hooked = await withHookRecords(prepared, prompt.records)
+  }
+  catch (error) {
+    if (created && isHookBlockedError(error))
+      await removeCreatedChat(deps, body.chatId, logger)
+    throw error
+  }
+  // Phase 11 (ADR-051): the output style of a run that calls a chat model.
+  if (hooked.target.kind !== 'chat' || hooked.command !== null)
+    return { ...hooked, outputStyle: null }
+  const style = await resolveRunOutputStyle({
+    deps,
+    catalog: hooked.catalog,
+    chat: hooked.chat,
+    settings: hooked.settings,
+    history: hooked.history,
+    modelRef: hooked.resolved.modelRef,
+    signal: run.signal,
+    logger,
+  })
+  return { ...hooked, outputStyle: style.style, notices: [...hooked.notices, ...style.notices] }
 }
 
-/** `prepareRun` without the workspace and the tool restriction (`notices`: the turn model's). */
-async function planRun(deps: AppDeps, run: Run, body: ChatRequestBody, logger: Logger, options: PrepareRunOptions): Promise<Omit<PreparedRun, 'workspace' | 'turnRestriction'>> {
+/**
+ * The prepared run with `records` appended to its new user message as `data-hook` parts (Phase 11; the history, the
+ * new message and its write all carry them). Without records, or without a new user message, the run as it is.
+ */
+export async function withHookRecords(prepared: PreparedRun, records: readonly HookData[]): Promise<PreparedRun> {
+  const message = prepared.userMessage
+  if (records.length === 0 || message === null)
+    return prepared
+  const hooked: HarnessUIMessage = { ...message, parts: [...message.parts, ...records.map(data => ({ type: HOOK_PART_TYPE, data }) as HarnessUIMessagePart)] }
+  await validateMessage(hooked)
+  const append = prepared.writes.append
+  return {
+    ...prepared,
+    userMessage: hooked,
+    history: prepared.history.map(entry => (entry === message ? hooked : entry)),
+    writes: { ...prepared.writes, append: append !== null && append.message === message ? { ...append, message: hooked } : append },
+  }
+}
+
+/** Removes the chat row a blocked request created (Phase 11, open point 14); a failure is logged. */
+async function removeCreatedChat(deps: Pick<AppDeps, 'chats'>, chatId: string, logger: Logger): Promise<void> {
+  try {
+    await deps.chats.remove(chatId)
+  }
+  catch (error) {
+    logger.warn('the chat of a blocked first message could not be removed', { err: error })
+  }
+}
+
+/** What `planRun` plans (`notices`: the turn model's) and whether the request created the chat. */
+interface PlannedRun {
+  planned: Omit<PreparedRun, 'workspace' | 'turnRestriction'>
+  created: boolean
+}
+
+/** `prepareRun` without the workspace, the tool restriction, the prompt hooks and the output style. */
+async function planRun(deps: AppDeps, run: Run, body: ChatRequestBody, logger: Logger, options: PrepareRunOptions): Promise<PlannedRun> {
   const kind = classifyRequest(body)
   const serverMessage = options.serverMessage === true
   if (serverMessage && kind !== 'new')
     throw badRequest('A server-started turn sends a new user message.', ['message'])
-  const chat = await ensureChat(deps, body)
+  const { chat, created } = await ensureRunChat(deps, body)
   // One catalog snapshot per run (never rejects but for an abort: an unavailable folder only adds a diagnostic).
   const catalog = await deps.customizations.catalog(chat.projectId, { signal: run.signal })
   // The request's model first (its errors before anything else); a command's model may run the turn instead.
@@ -511,7 +659,7 @@ async function planRun(deps: AppDeps, run: Run, body: ChatRequestBody, logger: L
   const planned = await planHistory(context, kind, chat, turnModel)
   const resolved: ResolvedModelBase = planned.target.model
   deps.catalog.markUsed(resolved.providerId, resolved.modelId).catch((error: unknown) => logger.debug('cannot record the model use', { err: error }))
-  return { ...planned, kind, chat, resolved, settings, catalog, requestModelRef: request.model.modelRef }
+  return { planned: { ...planned, kind, chat, resolved, settings, catalog, requestModelRef: request.model.modelRef }, created }
 }
 
 /** What `planHistory` decides (the rest of `PreparedRun` comes from `planRun`). */
@@ -532,7 +680,7 @@ async function planHistory(
       // The path the message continues: `parentId`, or the active leaf when it is omitted (`not_found` when unknown).
       const parentId = body.parentId === undefined ? chat.activeLeafId : body.parentId
       const path = await deps.chats.listPath(body.chatId, parentId)
-      const { message, command } = await buildUserMessage(context)
+      const { message, command } = await buildUserMessage(context, chat)
       await validateMessage(message)
       // Only the approvals of this path: those of other versions stay pending.
       const superseded = supersedeApprovals(path)

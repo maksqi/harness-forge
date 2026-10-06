@@ -6,7 +6,7 @@ import type { ChatRunner } from './chat/types.ts'
 import type { Db } from './db/client.ts'
 import type { Env } from './env.ts'
 import type { Logger } from './logger.ts'
-import type { McpManager, ToolService } from './mcp/types.ts'
+import type { McpManager, ProjectMcpManager, ToolService } from './mcp/types.ts'
 import type { BuiltinPlugin, PluginDrafts, PluginFiles, PluginHost, PluginInstaller } from './plugins/types.ts'
 import type { IconService, ProviderService } from './providers/types.ts'
 import type { Registry } from './registry/types.ts'
@@ -18,10 +18,13 @@ import type { CustomizationService } from './services/customizations/types.ts'
 import type { DataService } from './services/data/types.ts'
 import type { EventBus } from './services/events/types.ts'
 import type { FilesService } from './services/files/types.ts'
+import type { HookService } from './services/hooks/types.ts'
 import type { ImageService } from './services/images/types.ts'
 import type { KeyService } from './services/keys/types.ts'
 import type { MaintenanceService } from './services/maintenance/types.ts'
+import type { ProjectConfigService } from './services/project-config/types.ts'
 import type { ProjectFileService } from './services/project-files/types.ts'
+import type { ProjectTrustService } from './services/project-trust/types.ts'
 import type { ProjectService } from './services/projects/types.ts'
 import type { CredentialService, SecretStore } from './services/secrets/types.ts'
 import type { SettingsService } from './services/settings/types.ts'
@@ -124,6 +127,26 @@ export interface AppServices {
    * the runs stopped.
    */
   readonly customizations: CustomizationService
+  /**
+   * Command hooks (personal rows, approved project settings-file hooks, plugin `contributes.hooks`) and the plugin code
+   * hooks of the Phase 11 events, merged into one snapshot per run and per prepare; the personal hooks and the run log
+   * (Phase 11, ADR-048; C36 stub, W11.1). No boot step (lazy); `stop()` right after the runs stopped, before the project
+   * MCP runtimes.
+   */
+  readonly hooks: HookService
+  /**
+   * The executable items of a project folder's settings files and `.mcp.json` with their trust hashes, and the
+   * verify-before-run check (Phase 11, ADR-049 / ADR-050; C36 stub, W11.3). No boot step; `stop()` after the
+   * customizations.
+   */
+  readonly projectConfig: ProjectConfigService
+  /** The approved hashes of project items, the review list, approve and revoke (Phase 11, ADR-049; C36 stub, W11.3). */
+  readonly projectTrust: ProjectTrustService
+  /**
+   * The servers of a project's `.mcp.json`, offered only in that project's chats (Phase 11, ADR-050; C36 stub, W11.4).
+   * Lazy (no boot step); `stop()` right after the hooks.
+   */
+  readonly projectMcp: ProjectMcpManager
 }
 
 export interface AppDeps extends AppBase, AppServices {}

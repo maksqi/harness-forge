@@ -266,6 +266,22 @@ describe('referenced file ids: schema coverage', () => {
     expect(new Set(fromSchema.map(column => column.split('.')[0]))).toEqual(new Set(schema.TABLE_NAMES))
   })
 
+  it('phase 11 (migration 0008): every column of hooks and project_trust and projects.output_style is unscanned', () => {
+    const phase11 = Object.keys(UNSCANNED_COLUMNS).filter(column => /^(?:hooks|project_trust)\./.test(column) || column === 'projects.output_style')
+    expect(phase11.sort()).toEqual([
+      'hooks.command',
+      'hooks.event',
+      'hooks.id',
+      'hooks.matcher',
+      'project_trust.kind',
+      'project_trust.label',
+      'project_trust.project_id',
+      'project_trust.sha256',
+      'projects.output_style',
+    ])
+    expect(scanned.filter(column => /^(?:hooks|project_trust)\./.test(column) || column === 'projects.output_style')).toEqual([])
+  })
+
   it('reports a column that is in neither list', () => {
     expect(uncovered(['messages.parts', 'messages.attachments', 'files.thumbnail'])).toEqual(['messages.attachments', 'files.thumbnail'])
   })

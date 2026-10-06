@@ -44,6 +44,11 @@
 //   snapshots, the usage row under the launching message, writes journaled through the copied run scope with
 //   `<launching call>/<child call>` ids) without the run's slots, the per-run cap and the 570 s deadline, under the task's
 //   own signal (`aborted` with `BACKGROUND_STOPPED_TEXT`; its `deadline` ends it `limit`).
+// Phase 11 (C37 seam, ADR-048; W11.2 adds `SubagentStop`): a child takes its hooks from its host
+// (`session.hooks?.forChild(childCallIdPrefix(toolCallId))`): `childTools({ hooks })` runs `PreToolUse` in its approval
+// function (an `ask` is denied) and the `updatedInput` rewrite and `PostToolUse` in its tool wrapper, its step composer
+// gets the hooks piece (guard → hooks → finalize: a `PostToolUse` context reaches the child's next step) and a
+// `continue: false` hook stops it (an extra `stopWhen` condition); nothing of it is stored. A host without hooks: none.
 import type { AgentDefinitionFields, CustomizationEntry, RunOrigin, Settings, TaskAgent, TaskInput, TaskOutput, TaskStatus, TaskType, ToolMode } from '@harness-forge/shared'
 import type { ModelMessage, TextStreamPart, ToolSet } from 'ai'
 import type { ResolvedModel } from '../../providers/types.ts'
@@ -66,7 +71,7 @@ import { buildRunParams, joinInstructions, orderAgentTypes } from '../params.ts'
 import { createPrepareStep, noopStepPiece } from '../steps.ts'
 import { RunTracker, toMessageUsage } from '../usage.ts'
 import { oneLine, resultPreview, TaskProgress } from './progress.ts'
-import { childToolMode, childTools } from './tools.ts'
+import { childCallIdPrefix, childToolMode, childTools } from './tools.ts'
 
 /** The preamble of every child's instructions (before the global instructions); the mocks recognize the marker. */
 export const SUBAGENT_PREAMBLE = [
@@ -562,6 +567,9 @@ async function* executeChild(host: ChildHost, task: TaskInput, choice: AgentChoi
     const settings = session.ctx.prepared.settings
     const mode = childToolMode(choice.base, host.toolMode)
     const maxSteps = settings.subagentMaxSteps
+    // Phase 11 (C37, ADR-048): the child's hooks (PreToolUse, PostToolUse; SubagentStop is W11.2's), none without a host
+    // handle.
+    const hooks = session.hooks?.forChild(childCallIdPrefix(host.toolCallId)) ?? null
     const tools = await childTools({
       session,
       type: choice.base,
@@ -572,6 +580,7 @@ async function* executeChild(host: ChildHost, task: TaskInput, choice: AgentChoi
       parentCallId: host.toolCallId,
       signal,
       allowlist: definition?.tools ?? null,
+      hooks,
     })
     // The preamble (its marker first), then the agent's body (a builtin: the read-only line of `explore`), then the
     // user's global instructions.
@@ -596,6 +605,7 @@ async function* executeChild(host: ChildHost, task: TaskInput, choice: AgentChoi
     let finalized = false
     const prepareStep = createPrepareStep({
       contextGuard: createContextGuard({ session, model, keptUser: async () => user, silent: true, signal }),
+      ...(hooks === null ? {} : { hooks: hooks.stepPiece() }),
       steer: noopStepPiece,
       finalize: finalizeStep(maxSteps, () => {
         finalized = true
@@ -610,7 +620,7 @@ async function* executeChild(host: ChildHost, task: TaskInput, choice: AgentChoi
       ...(hasTools ? { tools: tools.tools } : {}),
       prepareStep,
       toolApproval: tools.toolApproval,
-      stopWhen: isStepCount(maxSteps),
+      stopWhen: hooks === null ? isStepCount(maxSteps) : [isStepCount(maxSteps), hooks.stopCondition],
       abortSignal: signal,
       maxRetries: CHILD_MAX_RETRIES,
       providerOptions: params.providerOptions,

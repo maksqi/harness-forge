@@ -15,15 +15,17 @@ import type { BackgroundTasks } from '../background/types.ts'
 import type { RunSession } from '../pipeline.ts'
 import type { ChildSession, HostSession } from './host.ts'
 import type { SubagentRunner, SubagentRunnerInput, SubagentRunnerLimits } from './index.ts'
-import { HarnessError, LIMITS, taskOutputSchema } from '@harness-forge/shared'
+import { HarnessError, hookModelText, LIMITS, taskOutputSchema } from '@harness-forge/shared'
 import { convertArrayToReadableStream, MockLanguageModelV4 } from 'ai/test'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
-import { createMemoryLogger } from '../../logger.ts'
+import { createMemoryLogger, createSilentLogger } from '../../logger.ts'
 import { createFakeBackgroundTasks } from '../../testing/fake-background-tasks.ts'
 import { catalogEntryKey, createFakeCustomizationService } from '../../testing/fake-customizations.ts'
+import { createFakeHookSnapshot, fakeHookRecord, fakeHookResult, hookTargetKey } from '../../testing/fake-hooks.ts'
 import { agentScopeOf } from '../agent-scope.ts'
 import { BACKGROUND_STOPPED_TEXT } from '../background/types.ts'
+import { createRunHooks, detachedHooks } from '../hooks.ts'
 import { SUBAGENT_INSTRUCTIONS_MARKER } from '../markers.ts'
 import { catalogEntry, testCatalog } from '../testing.ts'
 import { createDetachedSession } from './host.ts'
@@ -970,5 +972,48 @@ describe('the structural host (Phase 10, subagent/host.ts)', () => {
     const quiet = createDetachedSession({ ...{ deps: h.session.ctx.deps, chatId: 'chat', messageId: MESSAGE_ID, settings: h.session.ctx.prepared.settings, reasoningEffort: 'auto' as const, signal: controller.signal, logger: h.logs.logger }, chatInstructions: undefined })
     expect(() => quiet.addExtraCost(1)).not.toThrow()
     expect(quiet.ctx.prepared.chat.settings).toEqual({})
+  })
+})
+
+describe('child hooks (Phase 11, C37-T7)', () => {
+  it('a foreground child runs PreToolUse / PostToolUse through its host\'s hooks with prefixed call ids; nothing is stored', async () => {
+    const h = harness()
+    const record = fakeHookRecord('PostToolUse', 'context', { toolCallId: 'call_parent/c2', toolName: 'probe', context: 'probe noted' })
+    const snapshot = createFakeHookSnapshot({
+      targets: {
+        [hookTargetKey('PreToolUse', 'probe')]: input => (input.tool?.callId === 'call_parent/c1' ? fakeHookResult({ decision: 'deny', reason: 'not this one' }) : fakeHookResult()),
+        [hookTargetKey('PostToolUse', 'probe')]: fakeHookResult({ context: 'probe noted', record }),
+      },
+    })
+    const injected: unknown[] = []
+    const hooks = createRunHooks({ snapshot, host: { stepNumber: 0, inject: chunk => void injected.push(chunk), writeTransient: () => {} }, continued: null, messageId: MESSAGE_ID, logger: createSilentLogger() })
+    Object.assign(h.session, { hooks })
+    const { model, calls } = scripted((_options, call) => {
+      if (call === 1)
+        return callParts('c1', 'probe', { path: 'a' })
+      if (call === 2)
+        return callParts('c2', 'probe', { path: 'b' })
+      return textParts('Done.')
+    })
+    const outputs = await collect(runner(h, model, 'auto').run(TASK, callOptions()))
+    expect(outputs.at(-1)?.status).toBe('completed')
+    expect(snapshot.calls.map(call => [call.event, call.input.tool?.callId])).toEqual([
+      ['PreToolUse', 'call_parent/c1'],
+      ['PreToolUse', 'call_parent/c2'],
+      ['PostToolUse', 'call_parent/c2'],
+    ])
+    // The denied call never ran; the context reached the child's next step as a user message.
+    expect(h.toolContexts.map(entry => entry.c.toolCallId)).toEqual(['call_parent/c2'])
+    const last = calls.at(-1)!.prompt.at(-1)
+    expect(last).toMatchObject({ role: 'user', content: [{ type: 'text', text: hookModelText(record, 'assistant') }] })
+    expect(injected).toEqual([])
+  })
+
+  it('a child without a host handle runs no hook; a detached host carries the one it was given', () => {
+    const h = harness()
+    const base = { deps: h.session.ctx.deps, chatId: 'chat', messageId: MESSAGE_ID, settings: h.session.ctx.prepared.settings, chatInstructions: undefined, reasoningEffort: 'auto' as const, signal: new AbortController().signal, logger: createSilentLogger() }
+    expect(createDetachedSession(base).hooks).toBeNull()
+    const source = detachedHooks({ snapshot: createFakeHookSnapshot(), messageId: MESSAGE_ID, logger: createSilentLogger() })
+    expect(createDetachedSession({ ...base, hooks: source }).hooks).toBe(source)
   })
 })

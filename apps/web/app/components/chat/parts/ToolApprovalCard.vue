@@ -11,6 +11,9 @@
 // access `execute` (the builtin shell) shows "Always allow commands starting with" below the warning; Run with it
 // checked carries `allowRules` (the shell rules the session creates before the approval is sent; Deny ignores it), and
 // Run is disabled while the box is checked with an invalid prefix.
+// Phase 11 (ADR-048; C39 declares the prop, W11.12 implements the banner; frozen from Gate P11-0b): `hookReason` = the
+// reason of a PreToolUse hook that answered `ask` (the call's `asked` hook record): the banner "A hook asks you to
+// confirm this call: {reason}" (`tool-approval-hook`, `Webhook`) above the buttons. The stub shows the plain line.
 import type { WorkspaceAccess } from '@harness-forge/shared'
 import type { ToolPartLike } from '../chat-format'
 import type { AllowRules } from '~/components/workspace/allowlist/allow-rule'
@@ -40,8 +43,14 @@ const props = withDefaults(defineProps<{
    * 'write' offers "Accept all edits in this chat" (tool-approval-accept-edits).
    */
   workspace?: WorkspaceAccess | null
+  /**
+   * + Phase 11 (C39 declares it, W11.12 uses it): the reason of a PreToolUse hook that asked for this confirmation
+   * (`tool-approval-hook` banner); null = no hook asked.
+   */
+  hookReason?: string | null
 }>(), {
   workspace: null,
+  hookReason: null,
 })
 
 const emit = defineEmits<{
@@ -119,6 +128,9 @@ function decide(approved: boolean) {
         </p>
         <span v-if="source" class="shrink-0 text-xs text-muted-foreground">from {{ source }}</span>
       </div>
+      <p v-if="hookReason !== null" :data-testid="testIds.toolApprovalHook" class="min-w-0 text-sm break-words">
+        A hook asks you to confirm this call: {{ hookReason }}
+      </p>
       <ToolApprovalPreview v-if="previewKind" :tool-name="toolName" :input="part.input" />
       <AllowRuleOption
         v-if="offersRule"

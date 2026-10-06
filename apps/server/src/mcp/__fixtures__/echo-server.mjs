@@ -5,6 +5,9 @@
 // Tools: `echo` (read-only), `wipe` (destructive), `plain` (no annotations), `env` / `args` / `cwd` / `pid` (process
 // introspection), `headers` (HTTP request headers), `fail` (isError result), `stderr` (writes a stderr line), `exit`
 // (terminates the process), `dotted.name` (sanitized name) and a name longer than 64 characters (truncated name).
+// Phase 11 (C38-T3): `env` without a `name` lists every variable name (sorted, never a value), so a `.mcp.json` probe
+// can prove that no `HF_*` variable or provider key reaches a project server; `pid` reads the process id for the
+// process-group checks. A dependency-free variant lives in `mcp-min.mjs`.
 import process from 'node:process'
 import { pathToFileURL } from 'node:url'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
@@ -28,8 +31,8 @@ export const ECHO_TOOLS = [
   { name: 'plain', description: 'A tool without annotations.', inputSchema: EMPTY_OBJECT },
   {
     name: 'env',
-    description: 'Returns the value of an environment variable (or null).',
-    inputSchema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] },
+    description: 'Returns the value of an environment variable (or null); without a name, every variable name.',
+    inputSchema: { type: 'object', properties: { name: { type: 'string' } } },
     annotations: { readOnlyHint: true },
   },
   { name: 'args', description: 'Returns the command line arguments.', inputSchema: EMPTY_OBJECT, annotations: { readOnlyHint: true } },
@@ -65,7 +68,9 @@ export function createEchoServer(options = {}) {
       case 'plain':
         return text('plain')
       case 'env':
-        return text({ value: process.env[String(args.name)] ?? null })
+        if (typeof args.name !== 'string')
+          return text({ names: Object.keys(process.env).sort() })
+        return text({ value: process.env[args.name] ?? null })
       case 'args':
         return text({ args: process.argv.slice(2) })
       case 'cwd':

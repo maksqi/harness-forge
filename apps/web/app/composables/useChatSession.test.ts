@@ -19,6 +19,7 @@ import {
   chatDetail,
   chatId,
   chatSummary,
+  hookCarrier,
   messageBranch,
   messageId,
   projectId,
@@ -295,6 +296,12 @@ describe('buildChatRequestBody', () => {
     // A regenerate and an approval continuation never create a chat.
     expect(buildChatRequestBody({ ...base, messages: [user], trigger: 'regenerate-message', messageId: undefined, projectId: project })).not.toHaveProperty('projectId')
     expect(buildChatRequestBody({ ...base, messages: [user, assistant], trigger: 'submit-message', messageId: ASSISTANT_ID, projectId: project })).not.toHaveProperty('projectId')
+  })
+
+  it('sends the output style with a new user message only; Automatic sends none (Phase 11)', () => {
+    expect(buildChatRequestBody({ ...base, messages: [user], trigger: 'submit-message', messageId: undefined, outputStyle: 'learning' }).outputStyle).toBe('learning')
+    expect(buildChatRequestBody({ ...base, messages: [user], trigger: 'submit-message', messageId: undefined, outputStyle: null })).not.toHaveProperty('outputStyle')
+    expect(buildChatRequestBody({ ...base, messages: [user], trigger: 'regenerate-message', messageId: undefined, outputStyle: 'learning' })).not.toHaveProperty('outputStyle')
   })
 })
 
@@ -2279,5 +2286,79 @@ describe('useChatSession: background agents (Phase 10)', () => {
       disposePinia(piniaB)
       setActivePinia(pinia)
     }
+  })
+})
+
+describe('useChatSession: hooks and output styles (Phase 11, P11-0b)', () => {
+  const U1 = 'msg_user000000000001'
+  const CARRIER = messageId('hookcarrier1')
+  const A2 = 'msg_assistant0000002'
+
+  it('outputStyle: the chat\'s own choice from its settings, saved on the chat and never pinned', async () => {
+    api.chatQueue.list.mockResolvedValue({ items: [] })
+    const session = await loadedSession(21, { messages: [userMessage(U1, 'q'), assistantMessage(ASSISTANT_ID, 'a')], settings: { outputStyle: 'explanatory' } })
+    expect(session.outputStyle.value).toBe('explanatory')
+    session.outputStyle.value = null
+    expect(session.outputStyle.value).toBeNull()
+    expect(api.chats.update).toHaveBeenCalledWith({ params: { id: chatId(21) }, body: { settings: { outputStyle: null } } })
+    // A send pins the model, the effort and the mode, not the style.
+    server.reply(textReply('done', A2))
+    await session.submit({ text: 'again', files: [] })
+    await until(() => session.chat.status.value === 'ready', 'ready')
+    expect(session.outputStyle.value).toBeNull()
+    expect(chatBodies()[0]).not.toHaveProperty('outputStyle')
+  })
+
+  it('a new chat sends its output style with the first request only', async () => {
+    const session = newSession(22)
+    session.outputStyle.value = 'learning'
+    expect(api.chats.update).not.toHaveBeenCalled()
+    server.reply(textReply('first', ASSISTANT_ID))
+    await session.submit({ text: 'hello', files: [] })
+    await until(() => session.chat.status.value === 'ready', 'ready')
+    server.reply(textReply('second', A2))
+    await session.submit({ text: 'and again', files: [] })
+    await until(() => session.chat.messages.value.at(-1)?.id === A2 && session.chat.status.value === 'ready', 'second')
+    expect(chatBodies().map(body => body.outputStyle)).toEqual(['learning', undefined])
+  })
+
+  it('the transient hook activity drives `activity` and `hookActivity`', async () => {
+    const session = newSession(23)
+    const gate = deferred()
+    const reached = deferred()
+    server.reply(async (write) => {
+      write({ type: 'start', messageId: ASSISTANT_ID, messageMetadata: { modelRef: MODEL, startedAt: 1 } })
+      write({ type: 'data-activity', data: { kind: 'hooks', event: 'PreToolUse', toolCallId: 'call_1' }, transient: true } as UIMessageChunk)
+      reached.resolve()
+      await gate.promise
+      write({ type: 'finish', finishReason: 'stop' })
+    })
+    expect(session.hookActivity.value).toBeNull()
+    const sending = session.submit({ text: 'go', files: [] })
+    await reached.promise
+    await until(() => session.activity.value === 'hooks', 'hooks')
+    expect(session.hookActivity.value).toEqual({ event: 'PreToolUse', toolCallId: 'call_1' })
+    gate.resolve()
+    await sending
+    await nextTick()
+    expect(session.activity.value).toBeNull()
+    expect(session.hookActivity.value).toBeNull()
+  })
+
+  it('follows a turn a Stop hook started (origin hook) like a task-started turn', async () => {
+    api.chatQueue.list.mockResolvedValue({ items: [] })
+    const session = await loadedSession(24, { messages: [userMessage(U1, 'q'), assistantMessage(ASSISTANT_ID, 'a')] })
+    const carrier = hookCarrier(CARRIER)
+    api.chats.get.mockResolvedValueOnce(chatDetail({ id: chatId(24), modelRef: MODEL, running: true, messages: [userMessage(U1, 'q'), assistantMessage(ASSISTANT_ID, 'a'), carrier] }))
+    api.chats.get.mockResolvedValueOnce(chatDetail({ id: chatId(24), modelRef: MODEL, messages: [userMessage(U1, 'q'), assistantMessage(ASSISTANT_ID, 'a'), carrier, assistantMessage(A2, 'The tests pass now')] }))
+    let shownAtResume: string[] = []
+    server.resume((write) => {
+      shownAtResume = session.chat.messages.value.map(message => message.id)
+      return textReply('The tests pass now', A2)(write)
+    })
+    dispatchServerEvent(createServerEvent('run.started', { chatId: chatId(24), messageId: A2, modelRef: MODEL, origin: 'hook', userMessageId: CARRIER }))
+    await until(() => session.chat.messages.value.at(-1)?.id === A2 && session.chat.status.value === 'ready', 'resumed')
+    expect(shownAtResume).toEqual([U1, ASSISTANT_ID, CARRIER])
+    expect(chatBodies()).toHaveLength(0)
   })
 })

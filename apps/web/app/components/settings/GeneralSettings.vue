@@ -8,6 +8,9 @@
 // (docs/UI.md 9.8, ADR-024); a single chat is still exported from its chat menus.
 // Phase 9: the Agent section (AgentSettingsSection, docs/UI.md 9.11: compaction and sub-agents) sits between the Chat
 // section and Custom instructions.
+// Phase 11 (ADR-051; C39 adds the field, W11.8 implements it): "Output style" (`settings-output-style`, the setting
+// `outputStyle`) after the default effort: the built-in styles and the active personal and plugin styles of the global
+// catalog (`styleOptions`), saved at once.
 import type { ReasoningEffort, SendKey, Settings, ToolMode } from '@harness-forge/shared'
 import type { DraftField } from './general'
 import { computed, useId } from 'vue'
@@ -17,7 +20,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/u
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import { styleOptions } from '~/components/chat/composer/output-style'
 import { isApplePlatform } from '~/components/common/keys'
+import { useCustomizationsStore } from '~/stores/customizations'
 import { useSettingsStore } from '~/stores/settings'
 import { testIds } from '~/utils/testids'
 import AgentSettingsSection from './agent/AgentSettingsSection.vue'
@@ -42,6 +47,7 @@ import SettingsLoadError from './SettingsLoadError.vue'
 import SettingsSection from './SettingsSection.vue'
 
 const settings = useSettingsStore()
+const customizations = useCustomizationsStore()
 const resolved = computed(() => settings.resolved)
 
 const ids = {
@@ -49,6 +55,7 @@ const ids = {
   sendKey: useId(),
   toolMode: useId(),
   effort: useId(),
+  outputStyle: useId(),
   maxSteps: useId(),
   projectMaxSteps: useId(),
   altShortcuts: useId(),
@@ -89,6 +96,15 @@ function onToolMode(value: unknown) {
 function onEffort(value: unknown) {
   if (typeof value === 'string' && value !== resolved.value.defaultReasoningEffort)
     void save({ defaultReasoningEffort: value as ReasoningEffort })
+}
+
+/** + Phase 11: the styles of the global catalog (the built-ins before it loads). */
+const outputStyles = computed(() => styleOptions(customizations.entriesOf(null, 'style')))
+const outputStyleLabel = computed(() => outputStyles.value.find(option => option.name === resolved.value.outputStyle)?.label ?? resolved.value.outputStyle)
+
+function onOutputStyle(value: unknown) {
+  if (typeof value === 'string' && value !== resolved.value.outputStyle)
+    void save({ outputStyle: value })
 }
 
 // ---------- text fields (save on blur / Enter) ----------
@@ -233,6 +249,33 @@ const instructionsCount = computed(() => `${instructions.draft.value.length.toLo
             <SelectItem v-for="option in EFFORT_OPTIONS" :key="option.value" :value="option.value" :data-value="option.value">
               <span>{{ option.label }}</span>
               <span v-if="option.description" class="text-xs text-muted-foreground">{{ option.description }}</span>
+            </SelectItem>
+          </SelectContent>
+        </Select>
+      </Field>
+
+      <Field orientation="responsive">
+        <FieldContent>
+          <FieldLabel :for="ids.outputStyle">
+            Output style
+          </FieldLabel>
+          <FieldDescription>How replies are written in chats that don't choose one. Projects can choose their own.</FieldDescription>
+        </FieldContent>
+        <Select :model-value="resolved.outputStyle" @update:model-value="onOutputStyle">
+          <SelectTrigger
+            :id="ids.outputStyle"
+            class="@md/field-group:w-48!"
+            :data-testid="testIds.settingsOutputStyle"
+            :data-value="resolved.outputStyle"
+          >
+            <span class="min-w-0 truncate">{{ outputStyleLabel }}</span>
+          </SelectTrigger>
+          <SelectContent position="popper" align="end" class="w-72">
+            <SelectItem v-for="option in outputStyles" :key="option.name" :value="option.name" :data-value="option.name">
+              <span class="flex flex-col gap-0.5">
+                <span>{{ option.label }}</span>
+                <span class="text-xs text-muted-foreground">{{ option.description }}</span>
+              </span>
             </SelectItem>
           </SelectContent>
         </Select>

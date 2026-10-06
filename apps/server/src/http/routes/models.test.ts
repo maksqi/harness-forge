@@ -44,10 +44,10 @@ describe('gET /api/models', () => {
     const visible = listSchema.parse(await (await send('GET', '/api/models?providerId=mock')).json())
     // Phase 6: the media models of the mock provider are hidden by default (non-chat kinds); image-chat and image-tool
     // (and workspace, Phase 7; checkpoint and shell, Phase 8; the five agent mocks, Phase 9; agents and background,
-    // Phase 10) are chat models.
-    expect(visible.items.map(item => item.id)).toEqual(['agents', 'background', 'checkpoint', 'compact', 'echo', 'image', 'image-chat', 'image-tool', 'plan', 'reasoning', 'shell', 'steer', 'subagent', 'todo', 'tool-approval', 'workspace'])
+    // Phase 10; hooks, Phase 11) are chat models.
+    expect(visible.items.map(item => item.id)).toEqual(['agents', 'background', 'checkpoint', 'compact', 'echo', 'hooks', 'image', 'image-chat', 'image-tool', 'plan', 'reasoning', 'shell', 'steer', 'subagent', 'todo', 'tool-approval', 'workspace'])
     const all = listSchema.parse(await (await send('GET', '/api/models?providerId=mock&includeHidden=true')).json())
-    expect(all.items.map(item => item.id).sort()).toEqual(['agents', 'background', 'checkpoint', 'compact', 'echo', 'error', 'image', 'image-chat', 'image-tool', 'plan', 'reasoning', 'shell', 'speech', 'steer', 'subagent', 'todo', 'tool-approval', 'transcribe', 'workspace'])
+    expect(all.items.map(item => item.id).sort()).toEqual(['agents', 'background', 'checkpoint', 'compact', 'echo', 'error', 'hooks', 'image', 'image-chat', 'image-tool', 'plan', 'reasoning', 'shell', 'speech', 'steer', 'subagent', 'todo', 'tool-approval', 'transcribe', 'workspace'])
     const unknown = await send('GET', '/api/models?providerId=nope')
     expect(unknown.status).toBe(404)
     expect(await errorCode(unknown)).toBe('not_found')
@@ -61,10 +61,10 @@ describe('pOST /api/providers/:id/models/refresh', () => {
     const response = await send('POST', '/api/providers/mock/models/refresh')
     expect(response.status).toBe(200)
     const { items } = listSchema.parse(await response.json())
-    // Sorted by name: Mock Agents, Mock Background, Mock Checkpoint, Mock Compact, Mock Echo, Mock Error, Mock Image,
+    // Sorted by name: Mock Agents, Mock Background, Mock Checkpoint, Mock Compact, Mock Echo, Mock Error, Mock Hooks, Mock Image,
     // Mock Image Chat, Mock Image Tool, Mock Plan, Mock Reasoning, Mock Shell, Mock Speech, Mock Steer, Mock Sub-agent,
     // Mock Todo, Mock Tool Approval, Mock Transcribe, Mock Workspace (hidden models included).
-    const names = ['agents', 'background', 'checkpoint', 'compact', 'echo', 'error', 'image', 'image-chat', 'image-tool', 'plan', 'reasoning', 'shell', 'speech', 'steer', 'subagent', 'todo', 'tool-approval', 'transcribe', 'workspace']
+    const names = ['agents', 'background', 'checkpoint', 'compact', 'echo', 'error', 'hooks', 'image', 'image-chat', 'image-tool', 'plan', 'reasoning', 'shell', 'speech', 'steer', 'subagent', 'todo', 'tool-approval', 'transcribe', 'workspace']
     expect(items.map(item => [item.id, item.source])).toEqual(names.map(id => [id, 'live']))
     expect(t.events.ofType('catalog.changed').map(event => event.data)).toContainEqual({ providerId: 'mock' })
     expect(t.events.ofType('provider.changed').map(event => event.data.id)).toContain('mock')

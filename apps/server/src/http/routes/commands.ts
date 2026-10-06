@@ -9,6 +9,8 @@
 // so a plugin command shadowed by a project command is shadowed only in that project's list; without `projectId` only
 // the global entries (personal and plugin commands). Command files carry `namespace`, `argumentHint` and `modelRef`
 // when they declare them. An unavailable project folder lists no project commands (the catalog reports it).
+// Phase 11 (C37-T9, ADR-052): every item carries `kind` (`command` for the entries above; W11.5 adds the
+// user-invocable skills as `kind: 'skill'` with their `argumentHint`).
 import type { CommandSummary, ListResponse } from '@harness-forge/shared'
 import type { CustomizationCatalog } from '../../services/customizations/types.ts'
 import type { AppDeps } from '../../types.ts'

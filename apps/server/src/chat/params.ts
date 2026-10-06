@@ -9,12 +9,17 @@
 // project file (`AGENTS.md`, else `CLAUDE.md`) → the project's own instructions → the chat instructions. Steps:
 // `projectMaxSteps` for a chat with a project, else `maxSteps`; the `chat.params` output is clamped to
 // 1..`LIMITS.stepsMax` (200).
+// Phase 11 (C37 seams, ADR-051; W11.6 implements them): `RunParamsInput.outputStyle` (the run's output style,
+// `output-style.ts`; accepted, not used yet: its block will go first and `keepCodingInstructions: false` will drop the
+// workspace tool rules and the coding hints) and `agentBlocks(…, { codingHints })` (false leaves out the todo and `task`
+// hints; the plan block and the listings stay).
 import type { ProviderOptions, ReasoningLevel, ReasoningParams } from '@harness-forge/plugin-sdk'
 import type { AgentToolName, CustomizationEntry, ImageAspectRatio, ReasoningEffort, Settings, ToolMode } from '@harness-forge/shared'
 import type { Logger } from '../logger.ts'
 import type { ResolvedModelBase } from '../providers/types.ts'
 import type { Registry } from '../registry/types.ts'
 import type { OpenWorkspace } from '../services/projects/types.ts'
+import type { RunOutputStyle } from './output-style.ts'
 import process from 'node:process'
 import { AGENT_NAME_PATTERN, AGENT_TOOL_NAMES, BUILTIN_AGENT_TYPES, HTTP_HEADER_NAME_PATTERN, LIMITS } from '@harness-forge/shared'
 import { CORE_AGENT_PLUGIN_ID } from '../builtin-plugins/core-agent/index.ts'
@@ -223,21 +228,33 @@ export interface AgentListings {
   readonly skills?: readonly ListedEntry[]
 }
 
+/** Options of `agentBlocks` (Phase 11). */
+export interface AgentBlockOptions {
+  /**
+   * The coding hints (the todo hint, the `task` hint); default true. An output style with `keep-coding-instructions:
+   * false` turns them off (ADR-051); the plan block and the listings stay.
+   */
+  readonly codingHints?: boolean
+}
+
 /**
  * The agent blocks of a run, in order (each one or none): the plan block (`toolMode` `plan`), the todo hint
  * (`todo_write` offered), the `task` hint and right after it the "Agent types" block (`task` offered; the block only
  * with `listings.agentTypes`), and the skills block (`skill` offered and `listings.skills` not empty). `agentTools`: the
- * offered `core-agent` tools (`offeredAgentTools`); default none.
+ * offered `core-agent` tools (`offeredAgentTools`); default none. Phase 11: `options.codingHints: false` leaves out the
+ * todo and `task` hints.
  */
-export function agentBlocks(toolMode: ToolMode | undefined, agentTools: readonly string[] = [], listings: AgentListings = {}): string[] {
+export function agentBlocks(toolMode: ToolMode | undefined, agentTools: readonly string[] = [], listings: AgentListings = {}, options: AgentBlockOptions = {}): string[] {
   const offered = new Set(agentTools)
+  const codingHints = options.codingHints !== false
   const blocks: string[] = []
   if (toolMode === 'plan')
     blocks.push(planModeBlock(offered.has('exit_plan_mode')))
-  if (offered.has('todo_write'))
+  if (codingHints && offered.has('todo_write'))
     blocks.push(TODO_HINT)
   if (offered.has('task')) {
-    blocks.push(TASK_HINT)
+    if (codingHints)
+      blocks.push(TASK_HINT)
     const types = agentTypesBlock(listings.agentTypes ?? [])
     if (types !== '')
       blocks.push(types)
@@ -398,6 +415,12 @@ export interface RunParamsInput {
   skills?: readonly Pick<CustomizationEntry, 'name' | 'description'>[]
   /** The OS named in the workspace block; default `process.platform`. */
   platform?: NodeJS.Platform
+  /**
+   * The output style of the run (Phase 11, ADR-051; `PreparedRun.outputStyle`, the main agent only); null or absent =
+   * none. Accepted, not used yet (W11.6: its block first, `keepCodingInstructions: false` drops the workspace tool rules
+   * and the coding hints).
+   */
+  outputStyle?: RunOutputStyle | null
   /** The step limit before the hooks (`runMaxSteps`). */
   maxSteps: number
   registry: Pick<Registry, 'hooks'>

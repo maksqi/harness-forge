@@ -1,7 +1,7 @@
 import type { CommandDefinition } from '@harness-forge/plugin-sdk'
 import type { CommandInvocation, CustomizationEntry, HarnessUIMessage } from '@harness-forge/shared'
 import type { FakeCustomizationService } from '../testing/fake-customizations.ts'
-import type { CommandResolution, CommandServices } from './commands.ts'
+import type { CommandExpansionHost, CommandResolution, CommandServices } from './commands.ts'
 import type { ChatQueueDeps } from './queue.ts'
 import { HarnessError, LIMITS } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
@@ -190,7 +190,7 @@ describe('resolveCommand: /compact (Phase 9)', () => {
   })
 
   it('lists compact for GET /commands under the agent tools plugin', () => {
-    expect(HARNESS_COMMAND_SUMMARIES).toEqual([{ name: 'compact', description: 'Summarize the conversation to free up context', source: 'harness', pluginId: 'core-agent' }])
+    expect(HARNESS_COMMAND_SUMMARIES).toEqual([{ name: 'compact', kind: 'command', description: 'Summarize the conversation to free up context', source: 'harness', pluginId: 'core-agent' }])
   })
 })
 
@@ -429,10 +429,10 @@ describe('listServerCommands (W10.2-T6)', () => {
     const plugins = [{ pluginId: 'demo', definition: pluginReview }, { pluginId: 'demo', definition: { name: 'tldr', description: 'TL;DR.', template: 'T' } }, { pluginId: 'demo', definition: { name: 'compact', description: 'Forged.', template: 'X' } }]
     const listed = { ...registry, commands: { ...registry.commands, list: () => plugins } } as unknown as Parameters<typeof listServerCommands>[0]
     expect(listServerCommands(listed, await fake.catalog(PROJECT))).toEqual([
-      { name: 'compact', description: 'Summarize the conversation to free up context', source: 'harness', pluginId: 'core-agent' },
-      { name: 'mine', description: 'Mine.', source: 'user' },
-      { name: 'review', description: 'The review command.', source: 'project', namespace: 'code', argumentHint: '<files>', modelRef: 'mock:agents' },
-      { name: 'tldr', description: 'TL;DR.', source: 'plugin', pluginId: 'demo' },
+      { name: 'compact', kind: 'command', description: 'Summarize the conversation to free up context', source: 'harness', pluginId: 'core-agent' },
+      { name: 'mine', kind: 'command', description: 'Mine.', source: 'user' },
+      { name: 'review', kind: 'command', description: 'The review command.', source: 'project', namespace: 'code', argumentHint: '<files>', modelRef: 'mock:agents' },
+      { name: 'tldr', kind: 'command', description: 'TL;DR.', source: 'plugin', pluginId: 'demo' },
     ])
     expect(listServerCommands(listed, await fake.catalog(OTHER_PROJECT)).map(item => `${item.name}:${item.source}`)).toEqual(['compact:harness', 'mine:user', 'review:plugin', 'tldr:plugin'])
     expect(listServerCommands(listed, null).map(item => `${item.name}:${item.source}`)).toEqual(['compact:harness', 'review:plugin', 'tldr:plugin'])
@@ -458,5 +458,31 @@ describe('the queue marks queued command files turnOnly (W10.2-T4 through create
     expect((await add('chat-b', 'msg_q000000000000002', '/review a.ts')).turnOnly).toBe(false)
     expect((await add('chat-a', 'msg_q000000000000003', '/model mock:echo')).turnOnly).toBe(false)
     expect((await add('chat-a', 'msg_q000000000000004', 'please /review')).turnOnly).toBe(false)
+  })
+})
+
+describe('commandContext.expansion (Phase 11, C37-T8: accepted, not used yet)', () => {
+  it('resolves exactly as without it: a body stays text and the host is never asked', async () => {
+    const fake = createFakeCustomizationService()
+    await fake.create({ kind: 'command', content: '---\nname: status\ndescription: Status.\n---\nRun !`git status --short` and read @README.md for $ARGUMENTS' })
+    const asked: string[] = []
+    const expansion: CommandExpansionHost = {
+      projectId: null,
+      shellEnabled: true,
+      workspace: async () => {
+        asked.push('workspace')
+        return null
+      },
+      trusted: async () => {
+        asked.push('trusted')
+        return true
+      },
+    }
+    const catalog = await fake.catalog(null)
+    const withHost = await resolveCommand(fileServices(fake, {}), '/status now', { ...context, catalog, expansion })
+    const without = await resolveCommand(fileServices(fake, {}), '/status now', { ...context, catalog })
+    expect(withHost).toEqual(without)
+    expect(expansionOf(withHost)).toBe('Run !`git status --short` and read @README.md for now')
+    expect(asked).toEqual([])
   })
 })

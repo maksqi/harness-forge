@@ -10,6 +10,10 @@
 //
 // The model reads the content; for a project skill then "Base folder: <baseDir> — read supporting files with
 // read_file" and the supporting files as project-relative paths (`files` are relative to `baseDir`).
+//
+// Phase 11 (ADR-052, C38): the description says that only the listed skills can be loaded: a skill with
+// `disable-model-invocation: true` is left out of the "Skills" block and refused by `loadSkill` (W11.6); the user
+// starts it with its slash command.
 import type { ToolDefinition, ToolResultOutput } from '@harness-forge/plugin-sdk'
 import type { SkillInput, SkillOutput } from '@harness-forge/shared'
 import { skillInputSchema, skillOutputSchema } from '@harness-forge/shared'
@@ -18,7 +22,7 @@ import { SKILL_TIMEOUT_MS, textModelOutput } from './common.ts'
 
 export const SKILL_TOOL_NAME = 'skill'
 
-export const SKILL_DESCRIPTION = 'Load a skill: instructions for one kind of task, written by the user, a plugin or the project. The "Skills" block of your instructions lists the available skills with what each one is for. When a request matches a skill\'s description, call this tool with its name before you start and follow the instructions it returns. A project skill can come with supporting files in its folder (templates, references, scripts): the result names them, read them with read_file when the instructions point at them. Load a skill once; its instructions stay in the conversation. Do not load skills that do not match the task, and never guess names that are not listed.'
+export const SKILL_DESCRIPTION = 'Load a skill: instructions for one kind of task, written by the user, a plugin or the project. The "Skills" block of your instructions lists the available skills with what each one is for. When a request matches a skill\'s description, call this tool with its name before you start and follow the instructions it returns. Only the listed skills can be loaded: skills the user keeps for their own slash commands are not listed. A project skill can come with supporting files in its folder (templates, references, scripts): the result names them, read them with read_file when the instructions point at them. Load a skill once; its instructions stay in the conversation. Do not load skills that do not match the task, and never guess names that are not listed.'
 
 /**
  * The tool error of a call without an agent scope (a sub-agent, which is never offered `skill`, or a context outside a

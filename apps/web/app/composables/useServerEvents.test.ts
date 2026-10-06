@@ -8,8 +8,11 @@ import { useBackgroundTasksStore } from '~/stores/background-tasks'
 import { useChatQueueStore } from '~/stores/chat-queue'
 import { useChatsStore } from '~/stores/chats'
 import { useCustomizationsStore } from '~/stores/customizations'
+import { useHooksStore } from '~/stores/hooks'
 import { useModelsStore } from '~/stores/models'
 import { usePluginsStore } from '~/stores/plugins'
+import { useProjectMcpStore } from '~/stores/project-mcp'
+import { useProjectTrustStore } from '~/stores/project-trust'
 import { useProjectsStore } from '~/stores/projects'
 import { useProvidersStore } from '~/stores/providers'
 import { useShellRulesStore } from '~/stores/shell-rules'
@@ -198,6 +201,28 @@ describe('dispatchServerEvent', () => {
     expect(applied.mock.calls).toEqual([[changed], [plugin]])
   })
 
+  it('routes the Phase 11 events to the hooks, project trust and project MCP stores', () => {
+    const hooks = vi.spyOn(useHooksStore(), 'applyEvent')
+    const trust = vi.spyOn(useProjectTrustStore(), 'applyEvent')
+    const mcp = vi.spyOn(useProjectMcpStore(), 'applyEvent')
+    vi.spyOn(useCustomizationsStore(), 'applyEvent').mockImplementation(() => {})
+    for (const store of [usePluginsStore(), useProvidersStore(), useModelsStore(), useProjectsStore(), useChatsStore(), useWorkspaceStore(), useShellRulesStore()])
+      vi.spyOn(store, 'applyEvent').mockImplementation(() => {})
+    const hooksChanged = createServerEvent('hooks.changed', { projectId: null }, 1)
+    const trustChanged = createServerEvent('project-trust.changed', { projectId: projectId(1), pending: 2 }, 2)
+    const mcpChanged = createServerEvent('project-mcp.changed', { projectId: projectId(1), servers: [] }, 3)
+    const plugin = createServerEvent('plugin.changed', { id: 'hook-pack', plugin: null }, 4)
+    const customization = createServerEvent('customization.changed', { kind: 'style', id: customizationId(1) }, 5)
+    const deleted = createServerEvent('project.changed', { id: projectId(1), project: null }, 6)
+    for (const event of [hooksChanged, trustChanged, mcpChanged, plugin, customization, deleted])
+      dispatchServerEvent(event)
+    expect(hooks.mock.calls).toEqual([[hooksChanged], [trustChanged], [plugin], [customization], [deleted]])
+    expect(trust.mock.calls).toEqual([[trustChanged], [deleted]])
+    expect(mcp.mock.calls).toEqual([[trustChanged], [mcpChanged], [deleted]])
+    // The pending count of the event, then dropped with the project.
+    expect(useProjectTrustStore().pending(projectId(1))).toBeNull()
+  })
+
   it('refetches the open changes 300 ms after workspace.changed, and drops a deleted project\'s chats before the chats store detaches them (Phase 8)', async () => {
     const workspace = useWorkspaceStore()
     const chats = useChatsStore()
@@ -376,6 +401,16 @@ describe('refetchLoadedStores', () => {
     const refresh = vi.spyOn(useChatQueueStore(), 'refreshLoaded')
     await refetchLoadedStores()
     expect(refresh).toHaveBeenCalledTimes(1)
+  })
+
+  it('refreshes the loaded hook, project trust and project MCP lists (Phase 11)', async () => {
+    const hooks = vi.spyOn(useHooksStore(), 'refreshLoaded')
+    const trust = vi.spyOn(useProjectTrustStore(), 'refreshLoaded')
+    const mcp = vi.spyOn(useProjectMcpStore(), 'refreshLoaded')
+    await refetchLoadedStores()
+    expect(hooks).toHaveBeenCalledTimes(1)
+    expect(trust).toHaveBeenCalledTimes(1)
+    expect(mcp).toHaveBeenCalledTimes(1)
   })
 
   it('refreshes the loaded background task and customization lists (Phase 10)', async () => {

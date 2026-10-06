@@ -42,6 +42,17 @@
 // that list and `stopBackgroundTask()` stops one (`backgroundTasks.stop`; the chat's own `stop()` never touches them). A
 // turn the server started for finished background agents (`run.started` with `origin: 'task'` and a carrier
 // `userMessageId` the shown path lacks) is followed exactly like a queue-started turn: reload first, then resume.
+//
+// Hooks and output styles (Phase 11, ADR-048, ADR-051; C39 declares, W11.11 implements; frozen from Gate P11-0b):
+// `outputStyle` is the chat's own output style (`ChatDetail.settings.outputStyle`; null = Automatic): writing it saves it
+// on a persisted chat (`chats.update(id, { settings: { outputStyle } })`) and a new chat sends it with its first request
+// (`ChatRequestBody.outputStyle`); `pinChoices()` never pins it, so an Automatic chat follows later changes of its
+// project's style or the global default. `activity` widens to 'compacting' | 'hooks' | null and `hookActivity` is the
+// event (and the tool call) of the command hooks running now (the transient `data-activity { kind: 'hooks' }`; null
+// otherwise and once the stream ended). A turn the server started after a Stop hook blocked (`run.started` with
+// `origin: 'hook'` and a carrier `userMessageId` the shown path lacks) is followed like a task-started turn. A submit
+// refused with 409 `hook-blocked` / `untrusted` stays unstored (`isUnstoredFailure`), so ChatView puts it back into the
+// composer with the refusal.
 import type { UseChatHelpers } from '@ai-sdk/vue'
 import type {
   BackgroundTask,
@@ -52,6 +63,7 @@ import type {
   ChatUpdatedData,
   FileRef,
   HarnessUIMessage,
+  HookEvent,
   ImageOptions,
   MessageBranch,
   QueueItem,
@@ -269,9 +281,20 @@ export interface ChatSession {
   todos: ComputedRef<TodoState | null>
   /**
    * + Phase 9 (ADR-040): the transient `data-activity` of the current stream: 'compacting' while a summary is written,
-   * null when idle or after the stream ended.
+   * null when idle or after the stream ended. + Phase 11 (ADR-048): 'hooks' while command hooks of an event run.
    */
-  activity: Readonly<Ref<'compacting' | null>>
+  activity: Readonly<Ref<'compacting' | 'hooks' | null>>
+  /**
+   * + Phase 11 (ADR-048; W11.11): the command hooks running now: their event and, for PreToolUse / PostToolUse, the tool
+   * call (`data-activity { kind: 'hooks', event, toolCallId? }`); null otherwise and once the stream ended.
+   */
+  hookActivity: Readonly<Ref<{ event: HookEvent, toolCallId: string | null } | null>>
+  /**
+   * + Phase 11 (ADR-051; W11.11): the chat's own output style (`settings.outputStyle`); null = Automatic (the project's
+   * style, else the global default). Writing it saves it on a persisted chat; a new chat sends it with its first
+   * request. Never pinned by the first send (an Automatic chat stays automatic).
+   */
+  outputStyle: WritableComputedRef<string | null>
   /**
    * + Phase 10 (ADR-046; W10.10): the chat's background agents, newest first (`backgroundTasks.tasks(id)`; fetched when
    * the chat loads, kept current by `task.changed`).
@@ -334,6 +357,11 @@ export function buildChatRequestBody(input: {
    * it when the request creates the chat). The caller passes it only while the chat is not persisted.
    */
   projectId?: string | null
+  /**
+   * + Phase 11 (ADR-051): the output style of a chat the server does not know yet (null = Automatic, left out): sent with
+   * a new user message only, like `projectId`.
+   */
+  outputStyle?: string | null
 }): ChatRequestBody {
   const message = input.messages.at(-1)
   if (!message)
@@ -357,6 +385,8 @@ export function buildChatRequestBody(input: {
     body.imageOptions = input.imageOptions
   if (kind === 'new' && input.projectId)
     body.projectId = input.projectId
+  if (kind === 'new' && input.outputStyle)
+    body.outputStyle = input.outputStyle
   return body
 }
 
@@ -537,6 +567,22 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
     },
   })
 
+  /**
+   * + Phase 11 (ADR-051): the chat's own output style: the user's pick (undefined = none), else what the chat stored.
+   * Kept apart from the choices `pinChoices()` pins, so Automatic (null) stays automatic.
+   */
+  const storedStyle = shallowRef<string | null>(null)
+  const pickedStyle = shallowRef<string | null | undefined>(undefined)
+  const outputStyle = computed<string | null>({
+    get: () => (pickedStyle.value !== undefined ? pickedStyle.value : storedStyle.value),
+    set: (value) => {
+      pickedStyle.value = value
+      // Best effort, like the other choices; a new chat sends it with its first request.
+      if (persisted.value)
+        chats.update(id, { settings: { outputStyle: value } }).catch(() => {})
+    },
+  })
+
   /** Requests use the values of the moment they were sent; later default changes must not move this chat. */
   function pinChoices() {
     stored.value = { modelRef: modelRef.value, reasoningEffort: reasoningEffort.value, toolMode: toolMode.value }
@@ -588,7 +634,9 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
    */
   let queuedTurn: string | null = null
   /** The transient `data-activity` of the current stream (`onData`); null when idle or once the stream ended. */
-  const activity = ref<'compacting' | null>(null)
+  const activity = ref<'compacting' | 'hooks' | null>(null)
+  /** + Phase 11: the event (and tool call) of the command hooks running now; null otherwise. */
+  const hookActivity = shallowRef<{ event: HookEvent, toolCallId: string | null } | null>(null)
 
   // ---------- project (ADR-031) ----------
 
@@ -647,6 +695,8 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
         imageOptions: imageOptions.forModel(modelRef.value ? models.byRef(modelRef.value) : null),
         // Only a request that creates the chat sets its project; later ones move nothing.
         projectId: firstRequest ? projectId.value : null,
+        // + Phase 11: the same for the chat's output style.
+        outputStyle: firstRequest ? outputStyle.value : null,
       })
       const kind = chatRequestKind(trigger, body.message)
       request = { kind, userMessageId: kind === 'new' ? body.message.id : null }
@@ -671,7 +721,7 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
       if (part.type === 'data-steer')
         chatQueue.markDelivered(id, part.data.id)
       else if (part.type === 'data-activity')
-        activity.value = part.data.kind === 'compacting' ? 'compacting' : null
+        applyActivity(part.data)
     },
     // Called before `chat.error` is set, only for the requests of this session (a failed resume has no `request`).
     onError: (error) => {
@@ -693,6 +743,22 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
       }
     },
   })
+
+  /** + Phase 11: a transient activity chunk: `compacting`, `hooks` (with the event and the tool call) or `idle`. */
+  function applyActivity(data: { kind: string, event?: HookEvent, toolCallId?: string }) {
+    if (data.kind === 'compacting') {
+      activity.value = 'compacting'
+      hookActivity.value = null
+    }
+    else if (data.kind === 'hooks') {
+      activity.value = 'hooks'
+      hookActivity.value = data.event ? { event: data.event, toolCallId: data.toolCallId ?? null } : null
+    }
+    else {
+      activity.value = null
+      hookActivity.value = null
+    }
+  }
 
   const busy = computed(() => chat.status.value === 'submitted' || chat.status.value === 'streaming')
   const runState = computed<ChatSessionRunState>(() => {
@@ -724,6 +790,7 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
       reasoningEffort: detail.settings.reasoningEffort,
       toolMode: detail.settings.toolMode,
     }
+    storedStyle.value = detail.settings.outputStyle ?? null
     if (busy.value)
       return
     chat.messages.value = options.keepPrefix ? mergePath(chat.messages.value, detail.messages) : [...detail.messages]
@@ -956,10 +1023,10 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
   // + Phase 9 (ADR-042): a turn the server started from the queue. Its user message carries the queued id; a path that
   // does not show it yet is reloaded before the reply is followed (once idle when a request or a resume is in flight).
   // + Phase 10 (ADR-046): a turn the server started for finished background agents (`origin: 'task'`, its carrier
-  // message) is followed the same way.
+  // message) is followed the same way. + Phase 11 (ADR-048): so is a turn a Stop hook started (`origin: 'hook'`).
   events.on('run.started', (event) => {
     const { chatId, origin, userMessageId } = event.data
-    if (chatId !== id || (origin !== 'queue' && origin !== 'task') || !userMessageId || onPath(userMessageId))
+    if (chatId !== id || (origin !== 'queue' && origin !== 'task' && origin !== 'hook') || !userMessageId || onPath(userMessageId))
       return
     queuedTurn = userMessageId
     if (!busy.value && !resuming)
@@ -967,8 +1034,10 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
   })
   watch(busy, (isBusy) => {
     // The activity belongs to the stream that just ended.
-    if (!isBusy)
+    if (!isBusy) {
       activity.value = null
+      hookActivity.value = null
+    }
     if (isBusy || resuming)
       return
     if (queuedTurn !== null) {
@@ -1409,6 +1478,8 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
     cancelQueued,
     todos,
     activity: readonly(activity),
+    hookActivity: readonly(hookActivity),
+    outputStyle,
     backgroundTasks: backgroundTaskList,
     stopBackgroundTask,
   }

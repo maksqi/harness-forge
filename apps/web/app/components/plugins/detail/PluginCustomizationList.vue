@@ -7,6 +7,8 @@
 // tools" / "{n} tools"). Contributed names without a catalog entry (the catalog is loading or could not be loaded)
 // are name-only rows. The footer link "Open in Customize" opens Settings -> Customize on the kind's tab.
 // Props and the root test id (`plugin-customizations`, `data-kind`, `data-count`) are frozen from Gate P10-0b (C33).
+// Phase 11 (ADR-051, plugin API 1.5.0; C39 widens `kind`, W11.8 implements the rows): `kind` 'style' lists a plugin's
+// output styles; "Open in Customize" opens the Output styles tab.
 import type { CustomizationEntry } from '@harness-forge/shared'
 import { ArrowRightIcon, EyeOffIcon } from '@lucide/vue'
 import { computed } from 'vue'
@@ -18,7 +20,8 @@ import { testIds } from '~/utils/testids'
 import { customizationMeta, customizeRoute, shadowedNote } from '../list/plugin-display'
 
 const props = defineProps<{
-  kind: 'agent' | 'skill'
+  /** + Phase 11: `style` (output styles). */
+  kind: 'agent' | 'skill' | 'style'
   pluginId: string
   /** `customizations.catalog(null)` filtered by the plugin and the kind. */
   entries: readonly CustomizationEntry[]
@@ -60,7 +63,8 @@ const rows = computed<Row[]>(() => {
   ].sort((a, b) => a.name.localeCompare(b.name))
 })
 
-const route = computed(() => customizeRoute(props.kind))
+// + Phase 11: the Output styles tab (W11.8 moves it into `customizeRoute`).
+const route = computed(() => (props.kind === 'style' ? { path: '/settings/customize', query: { tab: 'output-styles' } } : customizeRoute(props.kind)))
 </script>
 
 <template>

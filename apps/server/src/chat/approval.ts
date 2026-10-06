@@ -18,6 +18,18 @@
 // call context with `workspace` (the run's project folder) and, in a run with a workspace (Phase 8), the run scope bound
 // to that context object (`runScopeOf(c)`: the shell rules and the working folder of `shellPolicy`); a throw or timeout
 // counts as `always`. The approval function never throws: an unexpected failure asks the user.
+// Phase 11 (C37, ADR-048; COMPLETE and FROZEN after P11-0b): command hooks `PreToolUse` run in `createToolApproval`
+// right after "unknown → denied" and the plan card, before the user override (`ToolApprovalContext.hooks`, the run's
+// `RunHooks` or a child's `ChildHooks`, `hooks.ts`): once per tool call, never again for a call answered in the continued
+// message (the SDK re-runs this function on approved continuations; the stored decision is replayed). The harness result
+// (steps 1-6) is computed as before and combined with the hook decision (`applyHookDecision`): a harness `denied` wins;
+// hook `deny` (or a blocking exit 2) → denied "Blocked by hook: <reason>"; hook `ask` → user-approval (a child's approval
+// wrapper turns it into a denial, `denyUserApproval`); hook `allow` → approved only when the harness would ask, the
+// tool's workspace access is not `execute` and its policy is `safe` or `ask` (narrower than Claude Code: a hook never
+// skips the card of the shell or of a hidden-path write, whose policy is `always`); otherwise the harness result. The
+// hook record is stored by the hooks (`data-hook`); its `updatedInput` is applied by the tool wrapper (`tools.ts`), so
+// the tool part and the approval signature keep the model's input. Plan mode is unchanged (its tool set is `modes.ts`'s;
+// the plan card is decided before the hooks).
 import type { ToolCallContext, ToolDefinition, ToolWorkspace, ToolWorkspaceAccess } from '@harness-forge/plugin-sdk'
 import type { ToolMode, ToolOverride, ToolPolicy } from '@harness-forge/shared'
 import type { ModelMessage, ToolApprovalStatus, ToolSet } from 'ai'
@@ -26,6 +38,7 @@ import type { ToolPref } from '../mcp/types.ts'
 import type { PluginHost } from '../plugins/types.ts'
 import type { Registry } from '../registry/types.ts'
 import type { WorkspaceRunScope, WorkspaceRunScopeInit } from '../workspace/run-scope.ts'
+import type { PreToolUseDecision, ToolHooks } from './hooks.ts'
 import { CORE_AGENT_PLUGIN_ID, EXIT_PLAN_MODE_TOOL_NAME } from '../builtin-plugins/core-agent/index.ts'
 import { GUARD_TIMEOUTS } from '../plugins/guard.ts'
 import { bindRunScope } from '../workspace/run-scope.ts'
@@ -55,6 +68,14 @@ export const DENIED_BY_HOOK = 'Denied by a plugin.'
 export const DENIED_BY_POLICY = 'Denied by the tool policy.'
 export const DENIED_TOOLS_OFF = 'Tools are turned off for this chat.'
 export const DENIED_UNAVAILABLE = 'The tool is not available in this chat.'
+/** Phase 11: the reason of a call a `PreToolUse` hook denied without a reason. */
+export const BLOCKED_BY_HOOK = 'Blocked by hook.'
+
+/** The denial reason of a `PreToolUse` hook: "Blocked by hook: <reason>" (`BLOCKED_BY_HOOK` without a reason). */
+export function blockedByHookReason(reason: string | null | undefined): string {
+  const text = typeof reason === 'string' ? reason.trim() : ''
+  return text === '' ? BLOCKED_BY_HOOK : `Blocked by hook: ${text}`
+}
 
 const DECISIONS: Readonly<Record<HookDecision, ApprovalOutcome>> = {
   allow: 'approved',
@@ -145,6 +166,11 @@ export interface ToolApprovalContext {
    * policy function. Null or absent = nothing is bound.
    */
   scope?: WorkspaceRunScopeInit | null
+  /**
+   * The command hooks of the run (Phase 11, `RunHooks` / `ChildHooks` of `hooks.ts`): `PreToolUse` per call (see the
+   * module comment). Null or absent = no hooks.
+   */
+  hooks?: Pick<ToolHooks, 'preToolUse'> | null
 }
 
 /**
@@ -211,6 +237,91 @@ export async function evaluatePolicy(
   }
 }
 
+/** The harness result of one call (steps 1-6) and the policy it evaluated (null when an override or hook decided). */
+export interface HarnessApproval {
+  readonly result: ApprovalResult
+  readonly policy: EffectivePolicy | null
+}
+
+/**
+ * Combines the harness result of a call with its `PreToolUse` decision (Phase 11, see the module comment): a harness
+ * `denied` wins; `deny` → denied "Blocked by hook: …"; `ask` → user-approval; `allow` → approved only when the harness
+ * result is `user-approval`, `workspace` is not `execute` and `policy` is `safe` or `ask` (an `allow` with an unknown
+ * policy, null, keeps the harness result); no decision → the harness result.
+ */
+export function applyHookDecision(
+  harness: ApprovalResult,
+  hook: Pick<PreToolUseDecision, 'decision' | 'reason'> | null,
+  workspace: ToolWorkspaceAccess | null,
+  policy: EffectivePolicy | null,
+): ApprovalResult {
+  if (hook === null || hook.decision === null || harness.outcome === 'denied')
+    return harness
+  switch (hook.decision) {
+    case 'deny':
+      return { outcome: 'denied', reason: blockedByHookReason(hook.reason) }
+    case 'ask':
+      return { outcome: 'user-approval' }
+    case 'allow':
+      return harness.outcome === 'user-approval' && workspace !== 'execute' && (policy === 'safe' || policy === 'ask')
+        ? { outcome: 'approved' }
+        : harness
+    default:
+      return harness
+  }
+}
+
+/** A tool call as the approval function receives it. */
+interface ApprovalCall {
+  readonly toolName: string
+  readonly toolCallId: string
+  readonly input: unknown
+}
+
+/** The tool's policy for one call (`evaluatePolicy` with the run's call context and scope). */
+function callPolicy(context: ToolApprovalContext, tool: ApprovalTool, toolCall: ApprovalCall, messages: ModelMessage[]): Promise<EffectivePolicy> {
+  return evaluatePolicy(
+    tool,
+    toolCall.input,
+    {
+      chatId: context.chatId,
+      modelRef: context.modelRef,
+      toolCallId: toolCall.toolCallId,
+      messages,
+      ...(context.workspace == null ? {} : { workspace: context.workspace }),
+    },
+    context.plugins,
+    context.signal,
+    context.scope == null ? null : { ...context.scope, toolCallId: toolCall.toolCallId },
+  )
+}
+
+/** Steps 1-6 of the module comment for one call (the v1.6 approval, unchanged). */
+async function harnessApproval(
+  context: ToolApprovalContext,
+  tool: ApprovalTool,
+  workspace: ToolWorkspaceAccess | null,
+  toolCall: ApprovalCall,
+  messages: ModelMessage[],
+): Promise<HarnessApproval> {
+  const override = effectiveOverride(context.prefs.get(toolCall.toolName)?.override ?? null, workspace)
+  if (override !== null)
+    return { result: resolveApproval({ override, hookDecision: undefined, toolMode: context.toolMode, policy: 'ask', workspace }), policy: null }
+
+  const hookOutput: { decision?: HookDecision } = {}
+  await context.registry.hooks.run(
+    'tool.approve',
+    { chatId: context.chatId, modelRef: context.modelRef, tool: toolCall.toolName, toolCallId: toolCall.toolCallId, input: toolCall.input },
+    hookOutput,
+  )
+  const hookDecision = isHookDecision(hookOutput.decision) ? hookOutput.decision : undefined
+  if (hookDecision !== undefined)
+    return { result: resolveApproval({ override: null, hookDecision, toolMode: context.toolMode, policy: 'ask', workspace }), policy: null }
+
+  const policy = await callPolicy(context, tool, toolCall, messages)
+  return { result: resolveApproval({ override: null, hookDecision: undefined, toolMode: context.toolMode, policy, workspace }), policy }
+}
+
 /** The approval function passed as `streamText({ toolApproval })` (and re-run by the SDK on approved continuations). */
 export function createToolApproval(context: ToolApprovalContext) {
   return async (options: { toolCall: { toolName: string, toolCallId: string, input: unknown }, messages: ModelMessage[], tools?: ToolSet }): Promise<ToolApprovalStatus> => {
@@ -227,35 +338,18 @@ export function createToolApproval(context: ToolApprovalContext) {
       if (isPlanExitTool(tool))
         return 'user-approval'
       const workspace = toolWorkspaceAccess(tool.definition)
-      const override = effectiveOverride(context.prefs.get(toolCall.toolName)?.override ?? null, workspace)
-      if (override !== null)
-        return toApprovalStatus(resolveApproval({ override, hookDecision: undefined, toolMode: context.toolMode, policy: 'ask', workspace }))
-
-      const hookOutput: { decision?: HookDecision } = {}
-      await context.registry.hooks.run(
-        'tool.approve',
-        { chatId: context.chatId, modelRef: context.modelRef, tool: toolCall.toolName, toolCallId: toolCall.toolCallId, input: toolCall.input },
-        hookOutput,
-      )
-      const hookDecision = isHookDecision(hookOutput.decision) ? hookOutput.decision : undefined
-      if (hookDecision !== undefined)
-        return toApprovalStatus(resolveApproval({ override: null, hookDecision, toolMode: context.toolMode, policy: 'ask', workspace }))
-
-      const policy = await evaluatePolicy(
-        tool,
-        toolCall.input,
-        {
-          chatId: context.chatId,
-          modelRef: context.modelRef,
-          toolCallId: toolCall.toolCallId,
-          messages: options.messages,
-          ...(context.workspace == null ? {} : { workspace: context.workspace }),
-        },
-        context.plugins,
-        context.signal,
-        context.scope == null ? null : { ...context.scope, toolCallId: toolCall.toolCallId },
-      )
-      return toApprovalStatus(resolveApproval({ override: null, hookDecision: undefined, toolMode: context.toolMode, policy, workspace }))
+      // Phase 11: `PreToolUse` once per call (replayed for a call answered in the continued message).
+      const hook = context.hooks == null
+        ? null
+        : await context.hooks.preToolUse({ toolName: toolCall.toolName, toolCallId: toolCall.toolCallId, input: toolCall.input }, context.signal)
+      const harness = await harnessApproval(context, tool, workspace, toolCall, options.messages)
+      if (hook === null || hook.decision === null)
+        return toApprovalStatus(harness.result)
+      // An `allow` needs the tool's policy: evaluated now when an override or a `tool.approve` hook decided.
+      const policy = hook.decision === 'allow' && harness.result.outcome === 'user-approval' && harness.policy === null
+        ? await callPolicy(context, tool, toolCall, options.messages)
+        : harness.policy
+      return toApprovalStatus(applyHookDecision(harness.result, hook, workspace, policy))
     }
     catch (error) {
       context.logger.warn('tool approval failed, asking the user', { tool: toolCall.toolName, err: error })

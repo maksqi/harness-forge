@@ -7,6 +7,9 @@
 // text carries the same lines. Model names come from the injected MODEL_LABEL_RESOLVER (the model id without one);
 // only a plugin command reads the plugins store, for the plugin's name (the share page never passes a source, so it
 // stays store-free).
+// Phase 11 (ADR-052; C39 declares the prop, W11.12 implements it; frozen from Gate P11-0b): `kind` (else the invocation's
+// `kind`) names a skill invocation: the screen reader text says "Skill" instead of "Command"; W11.12 adds the icon and
+// the tooltip lines "Ran {n} shell commands" / "Included {paths}" from `metadata.command.inlined`.
 import type { CommandInvocation } from '@harness-forge/shared'
 import { safeParseModelRef } from '@harness-forge/shared'
 import { SquareTerminalIcon } from '@lucide/vue'
@@ -24,11 +27,16 @@ const props = withDefaults(defineProps<{
   name: string
   /** + Phase 10: the message's command (`metadata.command`): its source, model and tool limit. */
   command?: CommandInvocation | null
+  /** + Phase 11: what the name invoked (default: the invocation's `kind`, else a command). */
+  kind?: 'command' | 'skill'
 }>(), {
   command: null,
+  kind: undefined,
 })
 
 const resolveModel = inject(MODEL_LABEL_RESOLVER, null)
+/** + Phase 11: "Skill" for a skill invocation, else "Command". */
+const kindLabel = computed(() => ((props.kind ?? props.command?.kind) === 'skill' ? 'Skill' : 'Command'))
 // Only a plugin command needs the plugins store (the plugin's name); the source is absent on share pages.
 const plugins = props.command?.source === 'plugin' && getActivePinia() ? usePluginsStore() : null
 
@@ -63,12 +71,12 @@ const srDetails = computed(() => [lines.value.source, lines.value.model, lines.v
         data-slot="command-badge"
         tabindex="0"
         role="note"
-        :aria-label="srDetails ? `Command /${name}, ${srDetails}` : `Command /${name}`"
+        :aria-label="srDetails ? `${kindLabel} /${name}, ${srDetails}` : `${kindLabel} /${name}`"
         v-bind="$attrs"
         class="inline-flex h-6 max-w-full min-w-0 items-center gap-1.5 rounded-md border bg-card px-2 font-mono text-xs text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
       >
         <SquareTerminalIcon aria-hidden="true" class="size-3.5 shrink-0" />
-        <span class="sr-only">Command</span>
+        <span class="sr-only">{{ kindLabel }}</span>
         <span class="truncate">/{{ name }}</span>
         <span v-if="modelName" data-slot="command-badge-model" class="min-w-0 truncate font-sans" aria-hidden="true">· {{ modelName }}</span>
         <span class="sr-only">, {{ srDetails }}</span>
@@ -87,6 +95,6 @@ const srDetails = computed(() => [lines.value.source, lines.value.model, lines.v
     class="inline-flex h-6 items-center gap-1.5 rounded-md border bg-card px-2 font-mono text-xs text-muted-foreground"
   >
     <SquareTerminalIcon aria-hidden="true" class="size-3.5" />
-    <span class="sr-only">Command</span>/{{ name }}
+    <span class="sr-only">{{ kindLabel }}</span>/{{ name }}
   </span>
 </template>

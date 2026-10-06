@@ -40,6 +40,13 @@
 // with `origin: 'task'`) announces "Background agent finished: {description}" for each result of its carrier once the
 // carrier shows (the session reloads the path, then resumes), unless the dock already announced that agent's ending in
 // this tab (`announcedTasks`: one announcement per agent and tab).
+// Phase 11 (ADR-048 - ADR-051; C39 mounts, W11.11 implements; frozen from Gate P11-0b): the view hosts the project trust
+// and project MCP dialogs of the chat's project (CHAT_VIEW_ACTIONS `openProjectTrust(focusKey?)` / `openProjectMcp
+// (serverId?)`, used by the header's trust chip, the chat-chip menu, the composer refusal's Review… and the notices),
+// provides the session's `hookActivity` (HOOK_ACTIVITY: the tool rows' "Running hook…"), passes the chat's own output
+// style to the composer (`session.outputStyle`, never pinned), and puts a submit refused with 409 `hook-blocked` /
+// `untrusted` (`refusalOf`) back into the composer (`restoreInput`, text and files) with its refusal (`showRefusal`),
+// for a new turn (the `error` watcher) and for a queued message (`onSubmitFailed`).
 import type { HarnessError, MessageBranch, ReasoningEffort, RestoreResult, ToolMode } from '@harness-forge/shared'
 import type { FileUIPart } from 'ai'
 import type { ChatComposerExposed, ComposerSubmitInput } from '~/components/chat/composer/types'
@@ -52,9 +59,12 @@ import { toast } from 'vue-sonner'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import ChatComposer from '~/components/chat/composer/ChatComposer.vue'
+import { refusalOf } from '~/components/chat/composer/output-style'
 import { toolModeOption } from '~/components/chat/composer/permission'
 import ConfirmDialog from '~/components/common/ConfirmDialog.vue'
 import { toHarnessErrorView } from '~/components/common/harness-error'
+import ProjectMcpDialog from '~/components/projects/mcp/ProjectMcpDialog.vue'
+import ProjectTrustDialog from '~/components/projects/trust/ProjectTrustDialog.vue'
 import { REWIND_DIALOG_HOST, REWIND_RUN_ACTIVE_MESSAGE, runningChatOf } from '~/components/workspace/rewind/rewind'
 import { useRewindResultToast } from '~/components/workspace/rewind/rewind-toast'
 import RewindDialog from '~/components/workspace/rewind/RewindDialog.vue'
@@ -80,7 +90,7 @@ import {
   visibleTasks,
 } from './background/background-agents'
 import BackgroundAgents from './background/BackgroundAgents.vue'
-import { AGENT_TASK_CONTEXT, BACKGROUND_TASK_INPUT, CHAT_VIEW_ACTIONS } from './chat-context'
+import { AGENT_TASK_CONTEXT, BACKGROUND_TASK_INPUT, CHAT_VIEW_ACTIONS, HOOK_ACTIVITY } from './chat-context'
 import { imageFileParts, isTaskResultMessage, messageText, PLAN_TOOL_NAME, taskResultsOf, toolNameOf } from './chat-format'
 import ChatNotFound from './ChatNotFound.vue'
 import ChatTranscript from './ChatTranscript.vue'
@@ -144,6 +154,8 @@ const projectId = session.projectId
 const queue = session.queue
 const todos = session.todos
 const activity = session.activity
+/** + Phase 11: the chat's own output style (null = Automatic). */
+const outputStyle = session.outputStyle
 /** A run of this chat is active (this tab's request, or one the chats store reports). */
 const runActive = computed(() => session.busy.value || chats.runState[props.chatId] === 'running')
 /** Queued messages wait for the next run while the chat awaits an approval. */
@@ -196,9 +208,33 @@ const chatCostUsd = computed(() => {
   return known ? total : null
 })
 
+// ---------- project trust and project MCP dialogs (Phase 11, ADR-049, ADR-050; W11.11 implements) ----------
+
+/** The trust dialog of the chat's project and the item it opens on (a sha256). */
+const trustOpen = ref(false)
+const trustFocusKey = ref<string | null>(null)
+/** The project MCP dialog of the chat's project and the server it opens on. */
+const mcpOpen = ref(false)
+const mcpFocusServerId = ref<string | null>(null)
+
+function openProjectTrust(focusKey?: string) {
+  trustFocusKey.value = focusKey ?? null
+  trustOpen.value = true
+}
+
+function openProjectMcp(serverId?: string) {
+  mcpFocusServerId.value = serverId ?? null
+  mcpOpen.value = true
+}
+
 provide(CHAT_VIEW_ACTIONS, {
   openModelPicker: () => composer.value?.openModelPicker(),
+  openProjectTrust,
+  openProjectMcp,
 })
+
+// + Phase 11: the hooks running in this chat's stream, for the tool rows (they are `v-memo`ed: no props).
+provide(HOOK_ACTIVITY, session.hookActivity)
 
 // ---------- background agents (Phase 10, ADR-046; W10.10 implements) ----------
 
@@ -413,12 +449,29 @@ watch(() => chats.runState[props.chatId] === 'running', (running) => {
     void session.resumeIfRunning()
 })
 
+/** + Phase 11: the last input sent from this view (a refused submit goes back into the composer with its files). */
+let lastInput: ComposerSubmitInput | null = null
+
 // `409 conflict` (`run-active`): a reply is already running here; show the live run. `404 not_found`: the shown path
 // is stale (the chat changed elsewhere) and the session reloads it. `409 conflict` (`busy`): a master-key rotation
 // holds off new runs. In every case a message the server never stored goes back into the composer.
 watch(error, (value) => {
   if (!value)
     return
+  // + Phase 11: a hook blocked the turn, or a command runs unapproved shell lines: nothing was stored, so the input goes
+  // back into the composer with the refusal.
+  const refusal = refusalOf(value)
+  if (refusal) {
+    const unsent = session.takeBackUnstored()
+    const text = unsent ? messageText(unsent) : lastInput?.text ?? ''
+    // The composer's own input (with its files) when the refused message is the one it sent; else its text (an edit).
+    const input = lastInput && lastInput.text === text ? lastInput : { text, files: [] }
+    lastInput = null
+    session.chat.clearError()
+    composer.value?.restoreInput(input)
+    composer.value?.showRefusal(refusal)
+    return
+  }
   const stale = toHarnessError(value).code === 'not_found'
   const busy = isBusyConflict(value)
   if (!stale && !busy && !isRunActiveConflict(value))
@@ -453,6 +506,7 @@ function onSubmit(input: ComposerSubmitInput) {
     return
   }
   const first = props.isNew && messages.value.length === 0
+  lastInput = input
   // + Phase 9 (ADR-042): while a run is active the session queues the message (it never enters the transcript).
   const queueing = runActive.value
   const submitting = session.submit(input)
@@ -470,6 +524,13 @@ function onSubmit(input: ComposerSubmitInput) {
 
 /** A message that was neither sent nor queued: its text goes back into the composer (which cleared itself). */
 function onSubmitFailed(input: ComposerSubmitInput, failure: unknown) {
+  // + Phase 11: a hook refused the queued message at enqueue (or it runs unapproved shell lines).
+  const refusal = refusalOf(failure)
+  if (refusal) {
+    composer.value?.restoreInput(input)
+    composer.value?.showRefusal(refusal)
+    return
+  }
   if (input.text)
     composer.value?.setText(input.text)
   const error = toHarnessError(failure)
@@ -694,6 +755,11 @@ function onToolModeChange(value: ToolMode) {
   toolMode.value = value
 }
 
+/** + Phase 11: the chat's own output style (null = Automatic); applies from the next turn. */
+function onOutputStyleChange(value: string | null) {
+  outputStyle.value = value
+}
+
 /** The new-chat picker: local until the first send (a saved chat moves through `PATCH`, which can fail). */
 function setProject(value: string | null) {
   session.setProject(value).catch(failure => reportFailure('Could not move the chat', failure))
@@ -724,11 +790,13 @@ function setProject(value: string | null) {
             :chat-cost-usd="chatCostUsd"
             :previous-images="previousImages"
             :project-id="projectId"
+            :output-style="outputStyle"
             :disabled="noProvider"
             placeholder="Ask anything…"
             @update:model-ref="onModelChange"
             @update:reasoning-effort="onEffortChange"
             @update:tool-mode="onToolModeChange"
+            @update:output-style="onOutputStyleChange"
             @submit="onSubmit"
             @stop="onStop"
             @edit-last="onEditLast"
@@ -804,11 +872,13 @@ function setProject(value: string | null) {
               :chat-cost-usd="chatCostUsd"
               :previous-images="previousImages"
               :project-id="projectId"
+              :output-style="outputStyle"
               :disabled="noProvider"
               placeholder="Reply…"
               @update:model-ref="onModelChange"
               @update:reasoning-effort="onEffortChange"
               @update:tool-mode="onToolModeChange"
+              @update:output-style="onOutputStyleChange"
               @submit="onSubmit"
               @stop="onStop"
               @edit-last="onEditLast"
@@ -836,6 +906,9 @@ function setProject(value: string | null) {
       @update:open="onRewindOpenChange"
       @restored="onRewindRestored"
     />
+
+    <ProjectTrustDialog v-model:open="trustOpen" :project-id="projectId" :focus-key="trustFocusKey" />
+    <ProjectMcpDialog v-model:open="mcpOpen" :project-id="projectId" :focus-server-id="mcpFocusServerId" />
 
     <div class="sr-only" role="status" aria-live="polite" aria-atomic="true">
       {{ announcement }}

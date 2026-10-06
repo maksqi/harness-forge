@@ -11,6 +11,9 @@
 // Add project (project-add). Phase 10: Agents, commands and skills… (project-customizations, WandSparkles) opens
 // Settings -> Customize with the project selected (`/settings/customize?project=<id>`, also for a project whose folder
 // is missing: the page explains it). The menu items are 40px tall on coarse pointers (docs/UI.md 14.5).
+// Phase 11 (ADR-049, ADR-050; C39 adds them, W11.9 owns them): Review commands and hooks… (project-trust, ShieldCheck ->
+// ProjectTrustDialog) and MCP servers… (project-mcp, ServerCog -> ProjectMcpDialog), and the meta badge "{n} to review"
+// (project-trust-pending, data-count; `useProjectTrustStore().pending(id)`, fetched lazily per row by W11.9).
 // A skeleton shows while the projects load; a failure shows SettingsLoadError "Could not load the projects" with Retry.
 // `?add=1` (the page's header action, the palette's "Add project…") opens the AddProjectDialog, and the query parameter
 // is dropped at once, so the same link works again. The list reloads on every visit (chat counts and folder states).
@@ -18,7 +21,7 @@
 // pages/settings/projects.vue inside SettingsPage, which renders the PageHeader "Projects" with the Add project action.
 import type { ProjectSummary } from '@harness-forge/shared'
 import { createServerEvent, LIMITS } from '@harness-forge/shared'
-import { FileTextIcon, FolderPlusIcon, FolderXIcon, MoreHorizontalIcon, PencilIcon, ShieldCheckIcon, Trash2Icon, WandSparklesIcon } from '@lucide/vue'
+import { FileTextIcon, FolderPlusIcon, FolderXIcon, MoreHorizontalIcon, PencilIcon, ServerCogIcon, ShieldCheckIcon, ShieldQuestionMarkIcon, Trash2Icon, WandSparklesIcon } from '@lucide/vue'
 import { computed, nextTick, onMounted, ref, shallowRef, useTemplateRef, watch } from 'vue'
 import { toast } from 'vue-sonner'
 import { Badge } from '@/components/ui/badge'
@@ -35,10 +38,13 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import ConfirmDialog from '~/components/common/ConfirmDialog.vue'
 import InlineRename from '~/components/common/InlineRename.vue'
 import AddProjectDialog from '~/components/projects/AddProjectDialog.vue'
+import ProjectMcpDialog from '~/components/projects/mcp/ProjectMcpDialog.vue'
 import ProjectInstructionsDialog from '~/components/projects/ProjectInstructionsDialog.vue'
+import ProjectTrustDialog from '~/components/projects/trust/ProjectTrustDialog.vue'
 import { allowedCommandsLabel } from '~/components/workspace/allowlist/allowlist'
 import AllowlistDialog from '~/components/workspace/allowlist/AllowlistDialog.vue'
 import { useChatsStore } from '~/stores/chats'
+import { useProjectTrustStore } from '~/stores/project-trust'
 import { useProjectsStore } from '~/stores/projects'
 import { useShellRulesStore } from '~/stores/shell-rules'
 import { hasErrorCode } from '~/utils/errors'
@@ -47,7 +53,7 @@ import { toastError } from '../notify'
 import { useRoute, useRouter } from '../nuxt-imports'
 import SettingsLoadError from '../SettingsLoadError.vue'
 
-type RowAction = 'rename' | 'instructions' | 'allowlist' | 'delete'
+type RowAction = 'rename' | 'instructions' | 'allowlist' | 'trust' | 'mcp' | 'delete'
 
 /** The row menu items: 40px touch targets on coarse pointers. */
 const ITEM_CLASS = 'pointer-coarse:min-h-10'
@@ -55,6 +61,7 @@ const ITEM_CLASS = 'pointer-coarse:min-h-10'
 const projects = useProjectsStore()
 const chats = useChatsStore()
 const shellRules = useShellRulesStore()
+const trust = useProjectTrustStore()
 const route = useRoute()
 const router = useRouter()
 const list = useTemplateRef<HTMLElement>('list')
@@ -66,6 +73,11 @@ const instructionsProject = shallowRef<ProjectSummary | null>(null)
 const instructionsOpen = ref(false)
 const allowlistProject = shallowRef<ProjectSummary | null>(null)
 const allowlistOpen = ref(false)
+/** + Phase 11: the project whose trust review / MCP servers dialog is open. */
+const trustProjectId = ref<string | null>(null)
+const trustOpen = ref(false)
+const mcpProjectId = ref<string | null>(null)
+const mcpOpen = ref(false)
 const deleteTarget = shallowRef<ProjectSummary | null>(null)
 const deleteOpen = ref(false)
 const deleting = ref(false)
@@ -77,6 +89,11 @@ const showError = computed(() => loadError.value !== null && !projects.loaded)
 
 function chatsLabel(count: number): string {
   return `${count} ${count === 1 ? 'chat' : 'chats'}`
+}
+
+/** + Phase 11: the "{n} to review" badge of a row (null or 0: no badge). */
+function pendingCount(id: string): number {
+  return trust.pending(id) ?? 0
 }
 
 /** "{n} allowed commands" of a row; null without rules. */
@@ -154,6 +171,14 @@ function onMenuCloseAutoFocus(event: Event): void {
     else if (chosen.action === 'allowlist') {
       allowlistProject.value = chosen.project
       allowlistOpen.value = true
+    }
+    else if (chosen.action === 'trust') {
+      trustProjectId.value = chosen.project.id
+      trustOpen.value = true
+    }
+    else if (chosen.action === 'mcp') {
+      mcpProjectId.value = chosen.project.id
+      mcpOpen.value = true
     }
     else {
       deleteTarget.value = chosen.project
@@ -300,6 +325,16 @@ function openAdd(): void {
             <span aria-hidden="true" class="hidden sm:inline">·</span>
             <span>{{ rulesLabel(project.id) }}</span>
           </template>
+          <Badge
+            v-if="pendingCount(project.id) > 0"
+            variant="outline"
+            :data-testid="testIds.projectTrustPending"
+            :data-count="pendingCount(project.id)"
+            class="gap-1 font-normal text-warning"
+          >
+            <ShieldQuestionMarkIcon aria-hidden="true" />
+            {{ pendingCount(project.id) }} to review
+          </Badge>
         </span>
         <DropdownMenu>
           <DropdownMenuTrigger as-child>
@@ -331,6 +366,14 @@ function openAdd(): void {
               <WandSparklesIcon aria-hidden="true" />
               Agents, commands and skills…
             </DropdownMenuItem>
+            <DropdownMenuItem :data-testid="testIds.projectTrust" :class="ITEM_CLASS" @select="choose(project, 'trust')">
+              <ShieldCheckIcon aria-hidden="true" />
+              Review commands and hooks…
+            </DropdownMenuItem>
+            <DropdownMenuItem :data-testid="testIds.projectMcp" :class="ITEM_CLASS" @select="choose(project, 'mcp')">
+              <ServerCogIcon aria-hidden="true" />
+              MCP servers…
+            </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem variant="destructive" :data-testid="testIds.projectDelete" :class="ITEM_CLASS" @select="choose(project, 'delete')">
               <Trash2Icon aria-hidden="true" />
@@ -344,6 +387,8 @@ function openAdd(): void {
     <AddProjectDialog v-model:open="addOpen" />
     <ProjectInstructionsDialog v-model:open="instructionsOpen" :project="instructionsProject" />
     <AllowlistDialog v-model:open="allowlistOpen" :project="allowlistProject" />
+    <ProjectTrustDialog v-model:open="trustOpen" :project-id="trustProjectId" />
+    <ProjectMcpDialog v-model:open="mcpOpen" :project-id="mcpProjectId" />
     <ConfirmDialog
       :open="deleteOpen"
       :title="`Delete ${deleteTarget?.name ?? 'project'}?`"

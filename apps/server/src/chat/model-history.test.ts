@@ -1,11 +1,12 @@
-// The model history builder (Phase 9, C26-T3; Phase 10, C31-T3): the stage order applyCompaction → splitSteers →
-// splitTaskResults → reduceAgentOutputs → applyCommandExpansions → the summary merge, with fake stages; and
-// `buildModelHistory` with the real stages (a v1.4 / v1.5 path comes back unchanged, a delivered task result and a
-// carrier message become user text).
+// The model history builder (Phase 9, C26-T3; Phase 10, C31-T3; Phase 11, C37-T6): the stage order applyCompaction →
+// splitSteers → splitTaskResults → splitHooks → reduceAgentOutputs → applyCommandExpansions → the summary merge, with
+// fake stages; and `buildModelHistory` with the real stages (a v1.4 – v1.6 path comes back unchanged, a delivered task
+// result and a carrier message become user text, hook records become model text).
 import type { HarnessUIMessage } from '@harness-forge/shared'
 import type { ModelHistoryStages } from './model-history.ts'
-import { splitSteers, splitTaskResults, taskResultText } from '@harness-forge/shared'
+import { hookModelText, splitHooks, splitSteers, splitTaskResults, taskResultText } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
+import { fakeHookRecord } from '../testing/fake-hooks.ts'
 import { applyCommandExpansions } from './context.ts'
 import { buildModelHistory, COMPACTION_SUMMARY_MESSAGE_ID, composeModelHistory, mergeSummary, MODEL_HISTORY_STAGES } from './model-history.ts'
 
@@ -47,13 +48,14 @@ describe('composeModelHistory', () => {
       },
       splitSteers: tag('split'),
       splitTaskResults: tag('results'),
+      splitHooks: tag('hooks'),
       reduceAgentOutputs: tag('reduce'),
       applyCommandExpansions: tag('expand'),
     }
     const result = composeModelHistory([user('msg_u0', 'old'), user('msg_u1', 'kept')], stages)
-    expect(order).toEqual(['compaction', 'split', 'results', 'reduce', 'expand'])
+    expect(order).toEqual(['compaction', 'split', 'results', 'hooks', 'reduce', 'expand'])
     expect(result).toEqual([
-      user('msg_u1', 'SUMMARY', { parts: [{ type: 'text', text: 'SUMMARY' }, { type: 'text', text: 'kept' }, { type: 'text', text: 'split' }, { type: 'text', text: 'results' }, { type: 'text', text: 'reduce' }, { type: 'text', text: 'expand' }] }),
+      user('msg_u1', 'SUMMARY', { parts: [{ type: 'text', text: 'SUMMARY' }, { type: 'text', text: 'kept' }, { type: 'text', text: 'split' }, { type: 'text', text: 'results' }, { type: 'text', text: 'hooks' }, { type: 'text', text: 'reduce' }, { type: 'text', text: 'expand' }] }),
     ])
   })
 
@@ -182,5 +184,63 @@ describe('buildModelHistory: background task results (Phase 10, C31-T3)', () => 
     const history = buildModelHistory([user('msg_u5', 'start it'), assistant('msg_a5', { type: 'text', text: 'started' }), carrier])
     expect(history.at(-1)).toEqual({ id: 'msg_c000000000000001', role: 'user', parts: [{ type: 'text', text: taskResultText(result) }] })
     expect(history.at(-1)!.parts[0]).toMatchObject({ text: expect.stringContaining('<background-task id="bgt_0000000000000001"') })
+  })
+})
+
+describe('buildModelHistory: hook records (Phase 11, C37-T6)', () => {
+  const sessionStart = fakeHookRecord('SessionStart', 'context', { context: 'Branch: main' })
+  const postContext = fakeHookRecord('PostToolUse', 'context', { toolCallId: 'call_1', toolName: 'current_time', context: 'lint ok' })
+  const preDenied = fakeHookRecord('PreToolUse', 'denied', { toolCallId: 'call_1', toolName: 'current_time', reason: 'no' })
+  const stopRecord = fakeHookRecord('Stop', 'continued', { reason: 'run the tests' })
+
+  /** A v1.6 path: the v1.4 path plus a delivered steer and a task carrier (no hook record). */
+  const V16_PATH: HarnessUIMessage[] = [
+    ...V14_PATH,
+    user('msg_u000000000000003', 'go on'),
+    assistant('msg_a000000000000003', { type: 'step-start' }, { type: 'text', text: 'one' }, { type: 'data-steer', data: steerData }, { type: 'step-start' }, { type: 'text', text: 'two' }),
+  ]
+
+  it('leaves a v1.6 path as the Phase 10 stages built it (the same message objects)', () => {
+    const phase10 = composeModelHistory(V16_PATH, { ...MODEL_HISTORY_STAGES, splitHooks: messages => [...messages] })
+    expect(buildModelHistory(V16_PATH)).toEqual(phase10)
+    const split = splitTaskResults(splitSteers(V16_PATH))
+    for (const [index, message] of splitHooks(split).entries())
+      expect(message).toBe(split[index])
+  })
+
+  it('splits a reply at a PostToolUse context; display-only records leave no trace', () => {
+    const reply = assistant(
+      'msg_a6',
+      { type: 'step-start' },
+      { type: 'tool-current_time', toolCallId: 'call_1', state: 'output-available', input: {}, output: { iso: 'x' } } as unknown as HarnessUIMessage['parts'][number],
+      { type: 'data-hook', data: preDenied },
+      { type: 'data-hook', data: postContext },
+      { type: 'step-start' },
+      { type: 'text', text: 'done' },
+    )
+    const history = buildModelHistory([user('msg_u6', 'go'), reply])
+    expect(history.map(message => [message.id, message.role])).toEqual([['msg_u6', 'user'], ['msg_a6', 'assistant'], [postContext.id, 'user'], ['msg_a6~h1', 'assistant']])
+    expect(history[2]!.parts).toEqual([{ type: 'text', text: hookModelText(postContext, 'assistant') }])
+    expect(JSON.stringify(history)).not.toContain(preDenied.id)
+  })
+
+  it('turns a hook carrier into a <hook-feedback> user text and a SessionStart context into text on its user message', () => {
+    const carrier: HarnessUIMessage = { id: 'msg_c000000000000002', role: 'user', parts: [{ type: 'data-hook', data: stopRecord }] }
+    const first = user('msg_u7', 'hi', { parts: [{ type: 'text', text: 'hi' }, { type: 'data-hook', data: sessionStart }] })
+    const history = buildModelHistory([first, assistant('msg_a7', { type: 'text', text: 'done' }), carrier])
+    expect(history[0]!.parts).toEqual([{ type: 'text', text: 'hi' }, { type: 'text', text: hookModelText(sessionStart, 'user') }])
+    expect(history.at(-1)).toEqual({ id: 'msg_c000000000000002', role: 'user', parts: [{ type: 'text', text: '<hook-feedback event="Stop">\nrun the tests\n</hook-feedback>' }] })
+  })
+
+  it('keeps a SessionStart context on the kept user message of a compaction', () => {
+    const turn = user('msg_u8', 'continue', { parts: [{ type: 'text', text: 'continue' }, { type: 'data-hook', data: sessionStart }] })
+    const marker = {
+      type: 'data-compaction' as const,
+      data: { trigger: 'auto' as const, keep: 'last-user' as const, summary: 'SUMMARY', modelRef: 'mock:compact', messagesCompacted: 2, tokensBefore: 100, tokensAfter: 10, createdAt: 1 },
+    }
+    const reply = assistant('msg_a8', { type: 'step-start' }, marker, { type: 'step-start' }, { type: 'text', text: 'after' })
+    const history = buildModelHistory([user('msg_u0', 'old'), assistant('msg_a0', { type: 'text', text: 'old reply' }), turn, reply])
+    const kept = history.find(message => message.id === 'msg_u8')!
+    expect(kept.parts.map(part => (part.type === 'text' ? part.text : part.type))).toEqual([expect.stringContaining('SUMMARY'), 'continue', hookModelText(sessionStart, 'user')])
   })
 })

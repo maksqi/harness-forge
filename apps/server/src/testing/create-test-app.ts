@@ -25,6 +25,12 @@
 // real chat runner (`'fake'`: `createFakeBackgroundTasks({ events })` of ./fake-background-tasks.ts, or a ready manager;
 // through `createChatRunnerWith(deps, { backgroundTasks })`), exposed as `TestApp.backgroundTasks`. `overrides` and
 // `factories` of the same name (`customizations`, `runs`) win.
+// Phase 11 (C36-T10): `hooks` installs the hook service (`'fake'`: `createFakeHookService({ events })` of ./fake-hooks.ts:
+// scripted snapshots, personal hooks in memory), `projectConfig` the project config reader (`'fake'`:
+// `createFakeProjectConfigService()` of ./fake-project-config.ts), `projectTrust` project trust (`'fake'`:
+// `createFakeProjectTrustService({ events })` of ./fake-project-trust.ts, an in-memory approved set) and `projectMcp` the
+// project MCP manager (`'fake'`: `createFakeProjectMcpManager()` of ./fake-project-mcp.ts, scripted tools), or ready
+// services; `overrides` and `factories` of the same name win.
 import type { ApiClient } from '@harness-forge/shared'
 import type { Hono } from 'hono'
 import type { BackgroundTasks } from '../chat/background/types.ts'
@@ -33,10 +39,14 @@ import type { ServiceFactories } from '../deps.ts'
 import type { Env } from '../env.ts'
 import type { AppEnv } from '../http/types.ts'
 import type { MemoryLogger } from '../logger.ts'
+import type { ProjectMcpManager } from '../mcp/types.ts'
 import type { BuiltinPlugin } from '../plugins/types.ts'
 import type { CheckpointService } from '../services/checkpoints/types.ts'
 import type { CustomizationService } from '../services/customizations/types.ts'
+import type { HookService } from '../services/hooks/types.ts'
+import type { ProjectConfigService } from '../services/project-config/types.ts'
 import type { ProjectFileService } from '../services/project-files/types.ts'
+import type { ProjectTrustService } from '../services/project-trust/types.ts'
 import type { ShellRuleService } from '../services/shell-rules/types.ts'
 import type { AppDeps, AppServices } from '../types.ts'
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
@@ -55,7 +65,11 @@ import { createRedactor } from '../security/redact.ts'
 import { createFakeBackgroundTasks } from './fake-background-tasks.ts'
 import { createFakeCheckpointService } from './fake-checkpoints.ts'
 import { createFakeCustomizationService } from './fake-customizations.ts'
+import { createFakeHookService } from './fake-hooks.ts'
+import { createFakeProjectConfigService } from './fake-project-config.ts'
 import { createFakeProjectFileService } from './fake-project-files.ts'
+import { createFakeProjectMcpManager } from './fake-project-mcp.ts'
+import { createFakeProjectTrustService } from './fake-project-trust.ts'
 import { createFakeShellRuleService } from './fake-shell-rules.ts'
 import { createFakeKeyring } from './fakes.ts'
 
@@ -123,6 +137,26 @@ export interface TestAppOptions {
    * option is ignored).
    */
   backgroundTasks?: 'fake' | BackgroundTasks
+  /**
+   * Phase 11: the hook service: `'fake'` = `createFakeHookService({ events: deps.events })` (scripted snapshots, personal
+   * hooks in memory), or a ready service; default: the real one. `overrides.hooks` / `factories.hooks` win.
+   */
+  hooks?: 'fake' | HookService
+  /**
+   * Phase 11: the project config reader: `'fake'` = `createFakeProjectConfigService()` (snapshots the test sets), or a
+   * ready service; default: the real one. `overrides` / `factories` win.
+   */
+  projectConfig?: 'fake' | ProjectConfigService
+  /**
+   * Phase 11: project trust: `'fake'` = `createFakeProjectTrustService({ events: deps.events })` (an in-memory approved
+   * set), or a ready service; default: the real one. `overrides` / `factories` win.
+   */
+  projectTrust?: 'fake' | ProjectTrustService
+  /**
+   * Phase 11: the project MCP manager: `'fake'` = `createFakeProjectMcpManager()` (scripted tools and lists), or a ready
+   * manager; default: the real one. `overrides` / `factories` win.
+   */
+  projectMcp?: 'fake' | ProjectMcpManager
 }
 
 export interface TestRequestOptions {
@@ -167,12 +201,18 @@ function usesFakeKeyring(options: TestAppOptions): boolean {
 }
 
 /**
- * The Phase 8 - 10 service options as factories (`overrides` and `factories` of the same name win). `background` receives
+ * The Phase 8 - 11 service options as factories (`overrides` and `factories` of the same name win). `background` receives
  * the manager that `backgroundTasks` installs once the runner is built.
  */
 function serviceOptionFactories(options: TestAppOptions, background: { manager: BackgroundTasks | null }): Partial<ServiceFactories> {
-  const { checkpoints, shellRules, projectFiles, customizations, backgroundTasks } = options
+  const { checkpoints, shellRules, projectFiles, customizations, backgroundTasks, hooks, projectConfig, projectTrust, projectMcp } = options
   return {
+    ...(hooks === undefined ? {} : { hooks: (deps: AppDeps) => (hooks === 'fake' ? createFakeHookService({ events: deps.events }) : hooks) }),
+    ...(projectConfig === undefined ? {} : { projectConfig: () => (projectConfig === 'fake' ? createFakeProjectConfigService() : projectConfig) }),
+    ...(projectTrust === undefined
+      ? {}
+      : { projectTrust: (deps: AppDeps) => (projectTrust === 'fake' ? createFakeProjectTrustService({ events: deps.events }) : projectTrust) }),
+    ...(projectMcp === undefined ? {} : { projectMcp: () => (projectMcp === 'fake' ? createFakeProjectMcpManager() : projectMcp) }),
     ...(checkpoints === undefined ? {} : { checkpoints: () => (checkpoints === 'fake' ? createFakeCheckpointService() : checkpoints) }),
     ...(shellRules === undefined ? {} : { shellRules: (deps: AppDeps) => (shellRules === 'fake' ? createFakeShellRuleService(deps) : shellRules) }),
     ...(projectFiles === undefined ? {} : { projectFiles: () => (projectFiles === 'fake' ? createFakeProjectFileService() : projectFiles) }),

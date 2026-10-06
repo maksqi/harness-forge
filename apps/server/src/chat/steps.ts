@@ -1,13 +1,17 @@
 // The step composer of a run (Phase 9, ADR-040 / ADR-042 / ADR-043, ARCHITECTURE.md 6.20). FROZEN after P9-0b (C26,
-// complete).
+// complete); Phase 11 (C37) adds the hooks piece; FROZEN again after P11-0b.
 //
-// `createPrepareStep({ contextGuard, steer, finalize? })` builds the `prepareStep` function of `streamText`, which the
-// AI SDK calls before every model call (step 0 included, never after a step without tool calls or with an open
-// approval). Three features share it without editing one hot function; its pieces run in this fixed order on one step
-// input, each seeing the messages the previous piece returned:
+// `createPrepareStep({ contextGuard, hooks?, steer, finalize? })` builds the `prepareStep` function of `streamText`,
+// which the AI SDK calls before every model call (step 0 included, never after a step without tool calls or with an
+// open approval). Several features share it without editing one hot function; its pieces run in this fixed order on
+// one step input, each seeing the messages the previous piece returned:
 //   1. the context guard (`compaction/guard.ts`, W9.1): may replace `messages` with a compacted history;
-//   2. the steer step (`steer.ts`, W9.2): appends the queued messages as user messages;
-//   3. the finalize nudge (sub-agents only, `subagent/index.ts`, W9.5): `activeTools` and `instructions` of the last
+//   2. the hooks piece (Phase 11, ADR-048, `hooks.ts`; C37, FROZEN after P11-0b): records the step number on the run
+//      (`session.stepNumber`, where hook records are placed) and appends the model texts of the hooks that ran since the
+//      previous step (`PostToolUse` contexts and block reasons) as user messages, before any steer, so the in-run order
+//      equals what `splitHooks` rebuilds from the saved reply; absent = none (a sub-agent passes its own);
+//   3. the steer step (`steer.ts`, W9.2): appends the queued messages as user messages;
+//   4. the finalize nudge (sub-agents only, `subagent/index.ts`, W9.5): `activeTools` and `instructions` of the last
 //      allowed step.
 // The result carries `messages` only when a piece changed them (a piece that returns the array it was given changes
 // nothing), plus `activeTools` / `instructions` from the finalize piece; nothing (undefined) otherwise, so the SDK
@@ -49,9 +53,11 @@ export const noopStepPiece: StepPiece = () => undefined
 export interface StepComposerInput {
   /** 1. The context guard (`createContextGuard`). */
   contextGuard: StepPiece
-  /** 2. The steer step (`createSteerStep`). */
+  /** 2. The hooks piece (Phase 11, `RunHooks.stepPiece()` / `ChildHooks.stepPiece()`); absent = none. */
+  hooks?: StepPiece
+  /** 3. The steer step (`createSteerStep`). */
   steer: StepPiece
-  /** 3. The finalize nudge of a sub-agent; absent for chat runs. */
+  /** 4. The finalize nudge of a sub-agent; absent for chat runs. */
   finalize?: StepPiece
   /** Warnings about a piece that threw (anything but an abort). */
   logger: Logger
@@ -71,7 +77,7 @@ export function instructionsText(instructions: Instructions | undefined): string
 }
 
 /** The names of the pieces, in their order (log fields). */
-type PieceName = 'contextGuard' | 'steer' | 'finalize'
+type PieceName = 'contextGuard' | 'hooks' | 'steer' | 'finalize'
 
 /**
  * The composer over one `StepInput` (see the module comment): what `createPrepareStep` runs for every SDK call, also
@@ -80,6 +86,7 @@ type PieceName = 'contextGuard' | 'steer' | 'finalize'
 export function composeSteps(input: StepComposerInput): (step: StepInput) => Promise<ComposedStep> {
   const pieces: ReadonlyArray<readonly [name: PieceName, piece: StepPiece | undefined]> = [
     ['contextGuard', input.contextGuard],
+    ['hooks', input.hooks],
     ['steer', input.steer],
     ['finalize', input.finalize],
   ]
@@ -122,7 +129,7 @@ export function composeSteps(input: StepComposerInput): (step: StepInput) => Pro
   }
 }
 
-/** The `prepareStep` of `streamText`: the pieces in the fixed order guard → steer → finalize (module comment). */
+/** The `prepareStep` of `streamText`: the pieces in the fixed order guard → hooks → steer → finalize (module comment). */
 export function createPrepareStep(input: StepComposerInput): PrepareStepFunction<ToolSet> {
   const compose = composeSteps(input)
   return options => compose({

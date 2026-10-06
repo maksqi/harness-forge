@@ -20,6 +20,7 @@ import { createSilentLogger } from '../logger.ts'
 import { createRedactor } from '../security/redact.ts'
 import { createTestApp } from '../testing/create-test-app.ts'
 import { fakeCatalogEntry } from '../testing/fake-customizations.ts'
+import { fakeHookRecord } from '../testing/fake-hooks.ts'
 import { agentScopeOf } from './agent-scope.ts'
 import { createBackgroundTasks } from './background/index.ts'
 import { assistant, seedChat, user } from './compaction/testing.ts'
@@ -985,5 +986,38 @@ describe('modelStream: Phase 10 seams (C31-T1)', () => {
       provider.dispose()
       await skillApp.close()
     }
+  })
+})
+
+describe('runSession: hook records (Phase 11, C37-T5)', () => {
+  it('appends an injected or gate-written data-hook record the response lost, once; other chunks are not tracked', () => {
+    const s = session()
+    expect(s.stepNumber).toBe(-1)
+    expect(s.followUp).toBeNull()
+    const placed = { type: 'data-hook' as const, data: fakeHookRecord('PostToolUse', 'context', { toolCallId: 'call_1', context: 'a' }) }
+    const lost = { type: 'data-hook' as const, data: fakeHookRecord('PreToolUse', 'denied', { toolCallId: 'call_2' }) }
+    const gate = { type: 'data-hook' as const, data: fakeHookRecord('Stop', 'continued', { reason: 'again' }) }
+    s.inject(placed, 1)
+    s.inject(lost, 2)
+    s.track(gate)
+    s.track({ type: 'data-notice', data: NOTICES.hookContinuationLimit() })
+    const response: HarnessUIMessage = { id: s.assistantId, role: 'assistant', parts: [{ type: 'step-start' }, { type: 'data-hook', data: placed.data }] }
+    const saved = s.finalMessage(response, 'completed')
+    expect(saved.parts).toEqual([...response.parts, { type: 'data-hook', data: lost.data }, { type: 'data-hook', data: gate.data }])
+    expect(s.finalMessage(saved, 'completed').parts.filter(part => part.type === 'data-hook')).toHaveLength(3)
+  })
+
+  it('hands the follow-up to onReleased only for a completed run without a pending approval', async () => {
+    const calls: unknown[][] = []
+    const record = fakeHookRecord('Stop', 'continued', { reason: 'again' })
+    const s = session(undefined, { now: 1000 }, { onReleased: (...args) => calls.push(args) })
+    s.followUp = { kind: 'hook', data: record }
+    await s.finalize({ id: s.assistantId, role: 'assistant', parts: [{ type: 'text', text: 'done', state: 'done' }] }, false)
+    expect(calls).toEqual([['completed', false, { kind: 'hook', data: record }]])
+    const aborted: unknown[][] = []
+    const t = session(undefined, { now: 1000 }, { onReleased: (...args) => aborted.push(args) })
+    t.followUp = { kind: 'hook', data: record }
+    await t.finalize(undefined, true)
+    expect(aborted).toEqual([['aborted', false]])
   })
 })

@@ -8,8 +8,12 @@
 // `stopTasks`, `hasTasks`) behind the `chatTasks` routes (API.md 4.29 / 5.30) and the project-busy guards, and the boot
 // hook `boot()` (the boot sweep of `background_tasks`); implemented by delegation to the runner's background manager
 // (`chat/background/types.ts` `BackgroundTasks`; wired by C31, implemented by W10.4); `stopAll` stops the background
-// tasks between the queues and the runs.
-import type { BackgroundTask, ChatRequestBody, QueueAddBody, QueueItem, QueueRemovalReason } from '@harness-forge/shared'
+// tasks between the queues and the runs. Phase 11 (C36, ADR-048): the run origin `hook` (`RunOrigin`, shared: a Stop
+// continuation, a server-started turn from a user-role carrier message that holds only `data-hook` parts) and
+// `RunReleaseFollowUp`, what a released run hands to the runner (`RunContext.onReleased(ending, awaitingApproval,
+// followUp)`, `chat/pipeline.ts`); the runner starts the hook turn itself (`startHookTurn` in `chat/index.ts`), so
+// `ChatRunner` gains no member.
+import type { BackgroundTask, ChatRequestBody, HookData, QueueAddBody, QueueItem, QueueRemovalReason } from '@harness-forge/shared'
 import type { Logger } from '../logger.ts'
 
 /** An active run (at most one per chat), kept in memory. */
@@ -27,6 +31,15 @@ export interface ChatRunOptions {
   logger: Logger
   requestId: string
 }
+
+/**
+ * What a released run asks the runner to do next (Phase 11, ADR-048): `hook` = the `Stop` hooks blocked the end of the
+ * run, so a follow-up turn with run origin `hook` starts from a carrier user message holding `data` (the `data-hook`
+ * record of the `Stop` event, outcome `continued`). Priority when a run ends: a queued item, then the hook turn, then
+ * the idle background delivery; never while an approval is pending; a lost start (409 `run-active`) drops it. Absent
+ * (undefined) = nothing to follow.
+ */
+export interface RunReleaseFollowUp { readonly kind: 'hook', readonly data: HookData }
 
 /**
  * Why `clearQueue` empties a chat's queue (the `reason` of every `QueueRemoval` of the `queue.changed` event):

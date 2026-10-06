@@ -5,6 +5,9 @@ import {
   backgroundTaskId,
   compactionData,
   compactionPart,
+  hookData,
+  hookPart,
+  hookRecordId,
   steerData,
   steerPart,
   taskPart,
@@ -175,6 +178,27 @@ describe('background agent results (Phase 10)', () => {
     expect(isTaskResultMessage({ role: 'user', parts: [taskResultPart(), { type: 'text', text: 'and more' }] })).toBe(false)
     expect(isTaskResultMessage({ role: 'user', parts: [invalid] })).toBe(false)
     expect(isTaskResultMessage(userMessage('u2', 'Hello'))).toBe(false)
+  })
+})
+
+describe('hook records (Phase 11)', () => {
+  it('turns a record that no tool part claims into a hook block; tool-linked and invalid records render nothing', () => {
+    const toolCall = { type: 'tool-write_file', toolCallId: 'call_write_1', state: 'output-denied', input: { path: 'dist/a.js' }, approval: { id: 'a1', approved: false } } as unknown as HarnessUIMessagePart
+    const stop = hookData({ id: hookRecordId(2), event: 'Stop', outcome: 'stopped', toolCallId: undefined, toolName: undefined, reason: 'Build is red.' })
+    const orphan = hookData({ id: hookRecordId(3), event: 'PostToolUse', outcome: 'context', toolCallId: 'call_gone', context: 'x' })
+    const blocks = messageBlocks([
+      toolCall,
+      hookPart(),
+      { type: 'text', text: 'Done', state: 'done' },
+      { type: 'data-hook', id: stop.id, data: stop },
+      { type: 'data-hook', id: orphan.id, data: orphan },
+      { type: 'data-hook', id: 'bad', data: { id: 'bad' } } as unknown as HarnessUIMessagePart,
+    ])
+    expect(blocks.map(block => block.kind)).toEqual(['tool', 'text', 'hook', 'hook'])
+    expect(blocks[2]).toMatchObject({ kind: 'hook', index: 3, data: stop })
+    expect(blocks[3]).toMatchObject({ kind: 'hook', index: 4, data: orphan })
+    // A record is never part of the reply's own text (Copy, Read aloud).
+    expect(messageText({ parts: [{ type: 'text', text: 'Before', state: 'done' }, hookPart()] })).toBe('Before')
   })
 })
 

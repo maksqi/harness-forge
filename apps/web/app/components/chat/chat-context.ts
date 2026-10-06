@@ -1,11 +1,18 @@
 // Chat-wide actions offered by ChatView to deeply nested transcript pieces (e.g. the "Choose model" error action),
 // so the message contract stays small.
-import type { BackgroundTask, TaskInput, TaskResultData } from '@harness-forge/shared'
-import type { InjectionKey } from 'vue'
+import type { BackgroundTask, HookEvent, TaskInput, TaskResultData } from '@harness-forge/shared'
+import type { InjectionKey, Ref } from 'vue'
 
 export interface ChatViewActions {
   /** Opens the composer's model picker. */
   openModelPicker: () => void
+  /**
+   * Opens the project trust dialog of the chat's project (Phase 11, ADR-049; docs/UI.md 7.33), focused on the item
+   * whose sha256 is `focusKey` when given (the trust chip, the chat-chip menu, the composer refusal's Review…).
+   */
+  openProjectTrust: (focusKey?: string) => void
+  /** Opens the project MCP dialog of the chat's project, focused on `serverId` when given (docs/UI.md 7.33). */
+  openProjectMcp: (serverId?: string) => void
 }
 
 export const CHAT_VIEW_ACTIONS: InjectionKey<ChatViewActions> = Symbol('hf-chat-view-actions')
@@ -50,3 +57,11 @@ export const AGENT_TASK_CONTEXT: InjectionKey<AgentTaskContext> = Symbol('hf-age
 export type BackgroundTaskInput = (task: BackgroundTask) => TaskInput | null
 
 export const BACKGROUND_TASK_INPUT: InjectionKey<BackgroundTaskInput> = Symbol('hf-background-task-input')
+
+/**
+ * The hooks running right now in the chat's stream (Phase 11, ADR-048; docs/UI.md 7.31, 11.8): the session's
+ * `hookActivity` (`{ event, toolCallId }` from the transient `data-activity { kind: 'hooks' }`, null otherwise). ChatView
+ * provides it; ToolPart injects it for its "Running hook…" status (the transcript rows are `v-memo`ed, so per-tool
+ * activity cannot come through props). Absent on share pages (inject with a null default).
+ */
+export const HOOK_ACTIVITY: InjectionKey<Readonly<Ref<{ event: HookEvent, toolCallId: string | null } | null>>> = Symbol('hf-hook-activity')

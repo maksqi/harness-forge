@@ -3,13 +3,17 @@
 // `createCredentialService(deps)` in `services/secrets/credentials.ts`.
 import type { CredentialField, CredentialState, CredentialValues } from '@harness-forge/shared'
 
-/** `provider:<id>` | `plugin:<id>` | `mcp:<id>` | `auth`. */
-export type SecretScope = `provider:${string}` | `plugin:${string}` | `mcp:${string}` | 'auth'
+/**
+ * `provider:<id>` | `plugin:<id>` | `mcp:<id>` | `auth` | `project:<projectId>` (Phase 11, ADR-050: the `.mcp.json`
+ * variables of a project, names `mcp.var.<NAME>`; deleted with the project, re-encrypted by a key rotation like every
+ * other scope, never in backups).
+ */
+export type SecretScope = `provider:${string}` | `plugin:${string}` | `mcp:${string}` | 'auth' | `project:${string}`
 
 /** Metadata of a stored secret; never the value. */
 export interface SecretEntry {
   scope: SecretScope
-  /** e.g. `apiKey`, `settings.<key>`, `header.<Name>`, `env.<NAME>`, `password`. */
+  /** e.g. `apiKey`, `settings.<key>`, `header.<Name>`, `env.<NAME>`, `password`, `mcp.var.<NAME>` (Phase 11). */
   name: string
   /** Masked hint computed at write time (`sk-…9fQ2`); null for short values. */
   hint: string | null
@@ -32,7 +36,7 @@ export interface SecretStore {
   readonly set: (scope: SecretScope, name: string, value: string) => Promise<void>
   /** Deletes one secret; true when it existed. */
   readonly delete: (scope: SecretScope, name: string) => Promise<boolean>
-  /** Deletes every secret of a scope (plugin uninstall, MCP server delete); returns the count. */
+  /** Deletes every secret of a scope (plugin uninstall, MCP server delete, Phase 11: project delete); returns the count. */
   readonly deleteScope: (scope: SecretScope) => Promise<number>
   /** Metadata of every secret of a scope, sorted by name. */
   readonly list: (scope: SecretScope) => Promise<SecretEntry[]>

@@ -19,6 +19,13 @@
 // and `plugin.changed` to the customizations store (every cached catalog and command list is stale), and a reconnect
 // refreshes the loaded lists of both stores. `run.started` with `origin: 'task'` (a turn the server started for finished
 // background agents) reaches the chat's session through `on()`, like a queue-started turn.
+// Phase 11 (ADR-048 - ADR-050; C39 wires it, W11.11 owns it): `hooks.changed` goes to the hooks store,
+// `project-trust.changed` to the project-trust store (the pending count), the hooks store (project rows change state)
+// and the project-mcp store (a loaded project is refetched), `project-mcp.changed` to the project-mcp store (the servers
+// after the change); `plugin.changed` and `customization.changed` also to the hooks store (plugin hooks), and
+// `project.changed` to the three stores (a deleted project is dropped); a reconnect refreshes the loaded lists of the
+// three stores. `run.started` with `origin: 'hook'` (a turn the server started after a Stop hook blocked) reaches the
+// chat's session through `on()`, like a task-started turn.
 import type { ServerEvent, ServerEventOf, ServerEventType } from '@harness-forge/shared'
 import type { Ref } from 'vue'
 import type { EventStreamStatus } from '~/utils/event-stream'
@@ -30,8 +37,11 @@ import { useBackgroundTasksStore } from '~/stores/background-tasks'
 import { useChatQueueStore } from '~/stores/chat-queue'
 import { useChatsStore } from '~/stores/chats'
 import { useCustomizationsStore } from '~/stores/customizations'
+import { useHooksStore } from '~/stores/hooks'
 import { useModelsStore } from '~/stores/models'
 import { usePluginsStore } from '~/stores/plugins'
+import { useProjectMcpStore } from '~/stores/project-mcp'
+import { useProjectTrustStore } from '~/stores/project-trust'
 import { useProjectsStore } from '~/stores/projects'
 import { useProvidersStore } from '~/stores/providers'
 import { useSettingsStore } from '~/stores/settings'
@@ -120,7 +130,9 @@ function applyKeyRotated(): void {
  * -> plugins; `project.changed` -> projects + chats + workspace + shell rules; `workspace.changed` -> workspace (and
  * `run.finished` / `chat.deleted` -> workspace too); `key.rotated` -> the chat list reloads, toast; `queue.changed` /
  * `chat.deleted` -> chat queue (Phase 9); `task.changed` / `chat.deleted` -> background tasks, `customization.changed` /
- * `plugin.changed` -> customizations (Phase 10). Then leaves `/chat/<id>` when the open chat was deleted, and notifies
+ * `plugin.changed` -> customizations (Phase 10); `hooks.changed` -> hooks, `project-trust.changed` -> project trust + hooks +
+ * project MCP, `project-mcp.changed` -> project MCP, `plugin.changed` / `customization.changed` / `project.changed` -> hooks
+ * (and `project.changed` -> project trust + project MCP) (Phase 11). Then leaves `/chat/<id>` when the open chat was deleted, and notifies
  * `useServerEvents().on()` subscribers (the chat sessions listed by `key.rotated` reload their path there).
  */
 export function dispatchServerEvent(event: ServerEvent, options: DispatchOptions = {}): void {
@@ -152,6 +164,7 @@ export function dispatchServerEvent(event: ServerEvent, options: DispatchOptions
       safely(() => useProvidersStore().applyEvent(event))
       safely(() => useModelsStore().applyEvent(event))
       safely(() => useCustomizationsStore().applyEvent(event))
+      safely(() => useHooksStore().applyEvent(event))
       break
     case 'plugin.log':
       safely(() => usePluginsStore().applyEvent(event))
@@ -162,6 +175,9 @@ export function dispatchServerEvent(event: ServerEvent, options: DispatchOptions
       safely(() => useWorkspaceStore().applyEvent(event))
       safely(() => useChatsStore().applyEvent(event))
       safely(() => useShellRulesStore().applyEvent(event))
+      safely(() => useHooksStore().applyEvent(event))
+      safely(() => useProjectTrustStore().applyEvent(event))
+      safely(() => useProjectMcpStore().applyEvent(event))
       break
     case 'workspace.changed':
       safely(() => useWorkspaceStore().applyEvent(event))
@@ -177,6 +193,18 @@ export function dispatchServerEvent(event: ServerEvent, options: DispatchOptions
       break
     case 'customization.changed':
       safely(() => useCustomizationsStore().applyEvent(event))
+      safely(() => useHooksStore().applyEvent(event))
+      break
+    case 'hooks.changed':
+      safely(() => useHooksStore().applyEvent(event))
+      break
+    case 'project-trust.changed':
+      safely(() => useProjectTrustStore().applyEvent(event))
+      safely(() => useHooksStore().applyEvent(event))
+      safely(() => useProjectMcpStore().applyEvent(event))
+      break
+    case 'project-mcp.changed':
+      safely(() => useProjectMcpStore().applyEvent(event))
       break
   }
   if (event.type === 'chat.deleted' && options.navigate && useUiStore().activeChatId === event.data.id)
@@ -192,7 +220,8 @@ export function dispatchServerEvent(event: ServerEvent, options: DispatchOptions
  * settings, and the providers / models / plugins / chats / projects / shell rules data that was loaded before, plus the
  * loaded entries of the changes panel (`workspace.refreshLoaded()`), the loaded chat queues
  * (`chatQueue.refreshLoaded()`, Phase 9), and the loaded background task lists and customization lists
- * (`backgroundTasks.refreshLoaded()`, `customizations.refreshLoaded()`, Phase 10).
+ * (`backgroundTasks.refreshLoaded()`, `customizations.refreshLoaded()`, Phase 10), and the loaded hook listings, project
+ * trust lists and project MCP lists (`hooks`, `projectTrust`, `projectMcp` `.refreshLoaded()`, Phase 11).
  */
 export async function refetchLoadedStores(): Promise<void> {
   const auth = useAuthStore()
@@ -207,6 +236,9 @@ export async function refetchLoadedStores(): Promise<void> {
   const chatQueue = useChatQueueStore()
   const backgroundTasks = useBackgroundTasksStore()
   const customizations = useCustomizationsStore()
+  const hooks = useHooksStore()
+  const projectTrust = useProjectTrustStore()
+  const projectMcp = useProjectMcpStore()
   const tasks: Array<Promise<unknown>> = [
     auth.fetchStatus(),
     settings.fetch(),
@@ -215,6 +247,9 @@ export async function refetchLoadedStores(): Promise<void> {
     chatQueue.refreshLoaded(),
     backgroundTasks.refreshLoaded(),
     customizations.refreshLoaded(),
+    hooks.refreshLoaded(),
+    projectTrust.refreshLoaded(),
+    projectMcp.refreshLoaded(),
   ]
   if (providers.loaded)
     tasks.push(providers.fetchAll())

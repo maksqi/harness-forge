@@ -8,6 +8,10 @@
 // Phase 10 (plugin API 1.4.0, ADR-045; C30, W10.7): the agent and skill registries (`./agents.ts`, `./skills.ts`, on
 // `./definitions.ts`) share the change listeners (kinds `agent`, `skill`), feed the contributions `agents` / `skills`
 // (sorted by name) and are part of `removeOwner`.
+// Phase 11 (plugin API 1.5.0, ADR-048 / ADR-051; C36, W11.7): the output style and command hook registries
+// (`./styles.ts`, `./hook-commands.ts`; empty until W11.7) share the change listeners (kinds `style`, `hookCommands`),
+// feed the contributions `outputStyles` (sorted by name) / `commandHooks` (the handler count) and are part of
+// `removeOwner`.
 import type {
   CommandDefinition,
   Disposable,
@@ -40,9 +44,11 @@ import type {
 import { isGuardTimeout } from '../plugins/guard.ts'
 import { createAgentRegistry } from './agents.ts'
 import { toDisposable } from './disposable.ts'
+import { createHookCommandRegistry } from './hook-commands.ts'
 import { runHookEntries } from './hooks.ts'
 import { comparePluginIds, compareRegistrations } from './order.ts'
 import { createSkillRegistry } from './skills.ts'
+import { createStyleRegistry } from './styles.ts'
 import {
   duplicate,
   HOOK_NAMES,
@@ -113,6 +119,9 @@ export function createRegistryCore(services: () => RegistryServices): PluginRegi
   // Phase 10 (plugin API 1.4.0, ADR-045): agent types and skills of plugins.
   const agents = createAgentRegistry({ onChange, notify: notifyChange })
   const skills = createSkillRegistry({ onChange, notify: notifyChange })
+  // Phase 11 (plugin API 1.5.0, ADR-048 / ADR-051): output styles and command hooks of plugins.
+  const styles = createStyleRegistry({ onChange, notify: notifyChange })
+  const hookCommands = createHookCommandRegistry({ onChange, notify: notifyChange })
 
   function sorted<T>(entries: Iterable<Entry<T>>): T[] {
     return [...entries].sort(compareRegistrations).map(entry => entry.value)
@@ -260,6 +269,8 @@ export function createRegistryCore(services: () => RegistryServices): PluginRegi
 
     agents,
     skills,
+    styles,
+    hookCommands,
 
     onChange,
 
@@ -281,10 +292,9 @@ export function createRegistryCore(services: () => RegistryServices): PluginRegi
         // Plugin API 1.4.0 (ADR-045): sorted by name (the registries list by name).
         agents: agents.list().filter(agent => agent.pluginId === pluginId).map(agent => agent.definition.name),
         skills: skills.list().filter(skill => skill.pluginId === pluginId).map(skill => skill.definition.name),
-        // Plugin API 1.5.0 (ADR-048, ADR-051): P11-0a seam; the command hooks and output styles join the registry
-        // (`hookCommands`, `styles`) in P11-0b / P11-A.
-        commandHooks: 0,
-        outputStyles: [],
+        // Plugin API 1.5.0 (ADR-048, ADR-051): the registered command hook handlers and the style names (sorted by name).
+        commandHooks: hookCommands.get(pluginId)?.hooks.length ?? 0,
+        outputStyles: styles.list().filter(style => style.pluginId === pluginId).map(style => style.definition.name),
       }
       return contributions
     },
@@ -305,6 +315,7 @@ export function createRegistryCore(services: () => RegistryServices): PluginRegi
       dropKeyed(commands, 'command')
       dropKeyed(mcpServers, 'mcpServer')
       removed += agents.removeOwner(pluginId) + skills.removeOwner(pluginId)
+      removed += styles.removeOwner(pluginId) + hookCommands.removeOwner(pluginId)
       for (const entry of [...models]) {
         if (entry.pluginId === pluginId) {
           models.delete(entry)

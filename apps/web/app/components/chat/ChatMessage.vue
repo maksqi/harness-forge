@@ -21,7 +21,14 @@
 // TaskResultNote (variant inline) at the part's position; a carrier user message (`isTaskResultMessage`: only
 // `data-task-result` parts, the turn the server started for finished background agents) renders its notes (variant
 // turn) left-aligned with the caption "Sent to the agent", and no bubble, actions, edit, versions or rewind.
-import type { HarnessUIMessage, MessageBranch } from '@harness-forge/shared'
+// Phase 11 (ADR-048; C39 declares and wires, W11.12 implements; frozen from Gate P11-0b): block kind `hook` renders
+// HookNote (variant inline) at the part's position; tool-linked records (`toolHooksOf`) go to their ToolPart (`hooks`)
+// and, for a `task` call, render inline right after its TaskBlock; the `data-hook` parts of a user message
+// (UserPromptSubmit / SessionStart context) render as inline notes under the bubble (right-aligned, like the
+// attachments); a hook carrier (`isHookCarrierMessage`: only `data-hook` parts, the turn the server started after a
+// Stop hook blocked) renders its notes (variant turn) left-aligned with the caption "Sent to the agent", and no bubble,
+// actions, edit, versions or rewind. `activity` widens to 'compacting' | 'hooks' | null ("Running hooks…").
+import type { HarnessUIMessage, HookData, MessageBranch } from '@harness-forge/shared'
 import type { FileUIPart, TextUIPart } from 'ai'
 import type { AllowRules } from '~/components/workspace/allowlist/allow-rule'
 import { isFileUIPart } from 'ai'
@@ -35,6 +42,8 @@ import BranchSwitcher from './BranchSwitcher.vue'
 import { isTaskResultMessage, messageBlocks, messageText, taskResultsOf } from './chat-format'
 import { messageCompaction } from './compaction/compaction'
 import CompactionDivider from './compaction/CompactionDivider.vue'
+import { hookDataOf, isHookCarrierMessage, toolHooksOf } from './hooks/hook-notes'
+import HookNote from './hooks/HookNote.vue'
 import MessageActions from './MessageActions.vue'
 import MessageEditor from './MessageEditor.vue'
 import MessageMeta from './MessageMeta.vue'
@@ -80,9 +89,9 @@ const props = withDefaults(defineProps<{
   compacted?: boolean
   /**
    * + Phase 9: the session's transient activity while this reply streams ('compacting': "Compacting conversation…"
-   * instead of "Thinking…"); default null.
+   * instead of "Thinking…"); + Phase 11: 'hooks' ("Running hooks…"); default null.
    */
-  activity?: 'compacting' | null
+  activity?: 'compacting' | 'hooks' | null
 }>(), {
   busy: false,
   commandReply: false,
@@ -119,9 +128,21 @@ const carrier = computed(() => isTaskResultMessage(props.message))
 /** The results a carrier holds, in part order. */
 const carrierResults = computed(() => (carrier.value ? [...taskResultsOf([props.message]).values()] : []))
 
+/** + Phase 11: the carrier of a turn the server started after a Stop hook blocked (never edited). */
+const hookCarrier = computed(() => !carrier.value && isHookCarrierMessage(props.message))
+/** + Phase 11: the hook records of a user message (a carrier's, or the context records under a bubble), in part order. */
+const userHooks = computed<HookData[]>(() => (props.message.role === 'user'
+  ? props.message.parts.flatMap((part) => {
+      const data = hookDataOf(part)
+      return data ? [data] : []
+    })
+  : []))
+/** + Phase 11: the tool-linked hook records of a reply, by tool call id. */
+const toolHooks = computed(() => (props.message.role === 'assistant' ? toolHooksOf(props.message.parts) : new Map<string, HookData[]>()))
+
 /** Opens the editor on a user message (Edit button, ↑ in an empty composer); never on a carrier. */
 function startEdit() {
-  if (props.message.role === 'user' && !props.busy && !carrier.value)
+  if (props.message.role === 'user' && !props.busy && !carrier.value && !hookCarrier.value)
     editing.value = true
 }
 
@@ -249,6 +270,20 @@ const actionsClass = computed(() => {
   </div>
 
   <div
+    v-else-if="hookCarrier"
+    :data-testid="testIds.messageUser"
+    :data-message-id="message.id"
+    data-status="done"
+    :data-compacted="compacted || undefined"
+    :class="cn('flex min-w-0 flex-col items-start gap-1', compactedClass)"
+  >
+    <HookNote v-for="data in userHooks" :key="data.id" :data="data" variant="turn" />
+    <p aria-hidden="true" class="text-xs text-muted-foreground">
+      Sent to the agent
+    </p>
+  </div>
+
+  <div
     v-else-if="message.role === 'user'"
     :data-testid="testIds.messageUser"
     :data-message-id="message.id"
@@ -259,6 +294,9 @@ const actionsClass = computed(() => {
     <MessageEditor v-if="editing" :text="copyText()" :files="fileParts" @save="onSave" @cancel="editing = false" />
     <template v-else>
       <UserMessageBubble :message="message" />
+      <div v-if="userHooks.length > 0" data-slot="user-hook-notes" class="flex max-w-[85%] min-w-0 flex-col items-end gap-1">
+        <HookNote v-for="data in userHooks" :key="data.id" :data="data" variant="inline" />
+      </div>
       <div data-slot="message-action-row" class="flex h-7 max-w-full min-w-0 items-center justify-end gap-0.5 pointer-coarse:h-10">
         <BranchSwitcher
           v-if="branch"
@@ -311,6 +349,7 @@ const actionsClass = computed(() => {
         :part="block.part"
         :streaming="streaming"
         :superseded="!isLast"
+        :hooks="toolHooks.get(block.part.toolCallId)"
         @approval="emit('approval', $event)"
       />
       <ImageGallery
@@ -332,14 +371,23 @@ const actionsClass = computed(() => {
       />
       <SteerNote v-else-if="block.kind === 'steer'" :class="blockClass(block.index)" :steer="block.steer" />
       <TaskResultNote v-else-if="block.kind === 'task-result'" :class="blockClass(block.index)" :result="block.part" variant="inline" />
-      <TaskBlock
-        v-else-if="block.kind === 'task'"
-        :class="blockClass(block.index)"
-        :part="block.part"
-        :streaming="streaming"
-        :superseded="!isLast"
-        @approval="emit('approval', $event)"
-      />
+      <HookNote v-else-if="block.kind === 'hook'" :class="blockClass(block.index)" :data="block.data" variant="inline" />
+      <template v-else-if="block.kind === 'task'">
+        <TaskBlock
+          :class="blockClass(block.index)"
+          :part="block.part"
+          :streaming="streaming"
+          :superseded="!isLast"
+          @approval="emit('approval', $event)"
+        />
+        <HookNote
+          v-for="data in toolHooks.get(block.part.toolCallId) ?? []"
+          :key="data.id"
+          :class="blockClass(block.index)"
+          :data="data"
+          variant="inline"
+        />
+      </template>
     </template>
     <GeneratingImages
       v-if="generatingImages"

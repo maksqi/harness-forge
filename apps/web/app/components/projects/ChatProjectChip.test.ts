@@ -5,6 +5,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, disposePinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { NuxtLinkStub } from '~/components/app-shell/chat-nav/testing'
+import { CHAT_VIEW_ACTIONS } from '~/components/chat/chat-context'
 import { useChatsStore } from '~/stores/chats'
 import { useProjectsStore } from '~/stores/projects'
 import { testIds } from '~/utils/testids'
@@ -105,6 +106,35 @@ describe('chatProjectChip', () => {
     await flushPromises()
     expect(api.chats.update).toHaveBeenCalledWith({ params: { id: chatId(1) }, body: { projectId: null } })
     expect((mocks.toast.custom.mock.lastCall?.[1] as { componentProps: { title: string } }).componentProps.title).toBe('Moved out of Website')
+    wrapper.unmount()
+  })
+
+  it('offers the project trust review and the project MCP servers inside a chat view (Phase 11)', async () => {
+    const actions = { openModelPicker: vi.fn(), openProjectTrust: vi.fn(), openProjectMcp: vi.fn() }
+    const wrapper = mount(ChatProjectChip, {
+      props: { chatId: chatId(1), projectId: projectId(1) },
+      attachTo: document.body,
+      global: { plugins: [pinia], stubs: { NuxtLink: NuxtLinkStub }, provide: { [CHAT_VIEW_ACTIONS as symbol]: actions } },
+    })
+    wrapper.get(root).element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await flushPromises()
+    document.body.querySelector<HTMLElement>(`[data-testid="${testIds.chatProjectTrust}"]`)!.click()
+    await flushPromises()
+    expect(actions.openProjectTrust).toHaveBeenCalledTimes(1)
+    wrapper.get(root).element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await flushPromises()
+    document.body.querySelector<HTMLElement>(`[data-testid="${testIds.chatProjectMcp}"]`)!.click()
+    await flushPromises()
+    expect(actions.openProjectMcp).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('leaves the trust and MCP items out outside a chat view', async () => {
+    const wrapper = mountChip(projectId(1))
+    wrapper.get(root).element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await flushPromises()
+    expect(document.body.querySelector(`[data-testid="${testIds.chatProjectTrust}"]`)).toBeNull()
+    expect(document.body.querySelector(`[data-testid="${testIds.chatProjectMcp}"]`)).toBeNull()
     wrapper.unmount()
   })
 })

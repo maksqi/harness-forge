@@ -1,11 +1,11 @@
 // The shell runner of the `shell` tool (ADR-033, ARCHITECTURE.md 6.13 "The shell runner"). This is the ONLY place in
 // the server that starts a shell: everything else spawns argument arrays without a shell.
 //
-// `runShellCommand({ command, cwd, timeoutMs, signal })`:
+// `runShellCommand({ command, cwd, timeoutMs, signal, input?, env? })`:
 //   - `spawn(sh, ['-c', command], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true, shell: false })`, `sh`
 //     = `/bin/bash` when executable, else `/bin/sh`; `env` = `shellEnvironment` (./shell-env.ts: an allowlist, never
-//     `HF_*`, provider keys or `NODE_ENV`); no stdin. `detached` makes the shell the leader of its own process group,
-//     so one signal reaches everything it started.
+//     `HF_*`, provider keys or `NODE_ENV`) plus the caller's `env`; no stdin unless `input` is given (below).
+//     `detached` makes the shell the leader of its own process group, so one signal reaches everything it started.
 //   - The kill (`killProcessGroup`): `process.kill(-pid, 'SIGTERM')`, then `SIGKILL` after 2 s, repeated until the
 //     group is gone (ESRCH; repeating catches processes forked meanwhile). It fires on the timeout (a normal result with
 //     `timedOut: true`), on the abort signal (the promise rejects with an `AbortError` once the group is gone), and when
@@ -21,6 +21,15 @@
 //     Stop, any signal), the command's own EXIT trap and a syntax error report nothing (`endCwd: null`: the folder
 //     stays as it was). Subshells (`(cd x)`, `cd x | cat`) leave the folder unchanged, as in a terminal. The command
 //     inherits fd 3; whatever it writes there is only a folder candidate the caller clamps to the project.
+//   - `input` (Phase 11, ADR-048: the stdin payload of a command hook): stdin becomes a pipe, the input is written and
+//     the pipe closed at once; a command that never reads it (or exits first) is fine, the write error (EPIPE) is
+//     swallowed. Without `input` stdin stays `ignore` (the `shell` tool, `!` spans).
+//   - `env` (Phase 11: `HARNESS_PROJECT_DIR`, `CLAUDE_PROJECT_DIR`, the plugin root of a plugin hook): extra variables
+//     merged after `shellEnvironment` (`mergeShellEnvironment`). A key of `SHELL_ENV_RESERVED` (the allowlist, the fixed
+//     set, `SHELL`, and `CDPATH` / `ENV` / `BASH_ENV`, which the runner never sets), an invalid name or a value with a
+//     NUL is refused: the promise rejects before anything is spawned.
+//   - `trackProcessGroup` (Phase 11): the MCP stdio transport runs its servers in their own process groups too and
+//     registers them here, so the process-exit handler stops them as well.
 //
 // Accepted risk (ADR-033): a process that calls `setsid` leaves the group and escapes the kill; its pipes are then
 // closed by force so the call still ends.
@@ -34,7 +43,7 @@ import process from 'node:process'
 import { setTimeout as delay } from 'node:timers/promises'
 import { WORKSPACE_LIMITS } from '@harness-forge/shared'
 import { createRedactor } from '../security/redact.ts'
-import { shellEnvironment } from './shell-env.ts'
+import { SHELL_ENV_ALLOWLIST, SHELL_ENV_FIXED, shellEnvironment } from './shell-env.ts'
 
 /** Time between `SIGTERM` and the first `SIGKILL` of a process group. */
 export const SHELL_KILL_GRACE_MS = 2000
@@ -354,17 +363,69 @@ export function killLiveShellGroups(): void {
   }
 }
 
-/** Process group ids of the shell commands still alive (tests, diagnostics). */
+/** Process group ids of the shell commands (and MCP stdio servers) still alive (tests, diagnostics). */
 export function liveShellGroups(): number[] {
   return [...liveGroups]
 }
 
-function trackGroup(pgid: number): void {
+/**
+ * Registers a process group this process started (the shell runner; Phase 11: the MCP stdio transport), so the
+ * process-exit handler SIGKILLs it; `killProcessGroup` forgets it once it is gone.
+ */
+export function trackProcessGroup(pgid: number): void {
   liveGroups.add(pgid)
   if (!exitHandlerInstalled) {
     exitHandlerInstalled = true
     process.on('exit', killLiveShellGroups)
   }
+}
+
+/** Forgets a tracked process group (it is known to be gone). */
+export function untrackProcessGroup(pgid: number): void {
+  liveGroups.delete(pgid)
+}
+
+// ---------- extra environment ----------
+
+/**
+ * Variables `RunShellOptions.env` may not set: the allowlist (`SHELL_ENV_ALLOWLIST`), the fixed set (`SHELL_ENV_FIXED`),
+ * `SHELL`, and `CDPATH` / `ENV` / `BASH_ENV` (the runner never sets them: `cd` must not leave the checked folder, and a
+ * shell must not source a startup file).
+ */
+export const SHELL_ENV_RESERVED: readonly string[] = Object.freeze([
+  ...SHELL_ENV_ALLOWLIST,
+  ...Object.keys(SHELL_ENV_FIXED),
+  'SHELL',
+  'CDPATH',
+  'ENV',
+  'BASH_ENV',
+])
+
+const RESERVED_ENV_KEYS: ReadonlySet<string> = new Set(SHELL_ENV_RESERVED)
+const ENV_NAME = /^[A-Z_]\w*$/i
+
+/**
+ * `base` (a `shellEnvironment`) plus `extra`. Throws when `extra` sets a reserved key (`SHELL_ENV_RESERVED`), a name that
+ * is not `[A-Za-z_][A-Za-z0-9_]*`, or a value that is not a string or holds a NUL.
+ */
+export function mergeShellEnvironment(
+  base: Readonly<Record<string, string>>,
+  extra: Readonly<Record<string, string>> | undefined,
+): Record<string, string> {
+  const env: Record<string, string> = { ...base }
+  if (extra === undefined)
+    return env
+  for (const key of Object.keys(extra)) {
+    const value: unknown = extra[key]
+    if (!ENV_NAME.test(key))
+      throw new Error(`The shell environment variable name ${JSON.stringify(key.slice(0, 64))} is not valid.`)
+    if (RESERVED_ENV_KEYS.has(key))
+      throw new Error(`The shell environment variable "${key}" is set by the runner and cannot be overridden.`)
+    if (typeof value !== 'string' || value.includes('\0'))
+      throw new Error(`The value of the shell environment variable "${key}" must be text without NUL characters.`)
+    env[key] = value
+  }
+  return env
 }
 
 // ---------- the runner ----------
@@ -396,6 +457,16 @@ export interface RunShellOptions {
    * see the module comment). Default false: the command runs as given, with three pipes.
    */
   reportCwd?: boolean
+  /**
+   * Text written to the command's stdin, which is then closed (Phase 11: a hook's JSON payload). A command that does not
+   * read it is fine (the write error is swallowed). Absent: stdin is not connected (`ignore`).
+   */
+  input?: string
+  /**
+   * Extra variables merged after `shellEnvironment` (Phase 11: `HARNESS_PROJECT_DIR` and the like). A reserved key
+   * (`SHELL_ENV_RESERVED`), an invalid name or a value with a NUL rejects the call before anything is spawned.
+   */
+  env?: Readonly<Record<string, string>>
 }
 
 export interface ShellRunResult {
@@ -523,19 +594,22 @@ export async function runShellCommand(options: RunShellOptions): Promise<ShellRu
   if (signal?.aborted)
     throw shellAbortError(signal)
   const sh = options.shell ?? shellBinary()
+  const env = mergeShellEnvironment(shellEnvironment(sh, options.parentEnv), options.env)
   const killOptions: KillProcessGroupOptions = { graceMs: options.killGraceMs }
   const stdout = new StreamCapture(options.headBytes, options.tailBytes)
   const stderr = new StreamCapture(options.headBytes, options.tailBytes)
   const reportCwd = options.reportCwd === true
   const cwdReport = new TailBytes(SHELL_CWD_REPORT_MAX_BYTES)
+  const input = options.input
+  const stdin = input === undefined ? 'ignore' : 'pipe'
 
   const begin = performance.now()
   let child: ChildProcess
   try {
     child = spawn(sh, ['-c', reportCwd ? withCwdReport(options.command) : options.command], {
       cwd: options.cwd,
-      env: shellEnvironment(sh, options.parentEnv),
-      stdio: reportCwd ? ['ignore', 'pipe', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe'],
+      env,
+      stdio: reportCwd ? [stdin, 'pipe', 'pipe', 'pipe'] : [stdin, 'pipe', 'pipe'],
       detached: true,
       shell: false,
       windowsHide: true,
@@ -546,6 +620,10 @@ export async function runShellCommand(options: RunShellOptions): Promise<ShellRu
   }
   // Later 'error' events (a failed kill) must not crash the process; the kill checks the group itself.
   child.on('error', () => {})
+  // The input is written at once and stdin closed; EPIPE (the command exited or closed stdin first) is not an error.
+  child.stdin?.on('error', () => {})
+  if (input !== undefined)
+    child.stdin?.end(input)
   child.stdout?.on('data', (chunk: Buffer) => stdout.push(chunk))
   child.stderr?.on('data', (chunk: Buffer) => stderr.push(chunk))
   const cwdStream = reportCwd ? (child.stdio[3] as Readable | null | undefined) ?? null : null
@@ -553,6 +631,7 @@ export async function runShellCommand(options: RunShellOptions): Promise<ShellRu
   cwdStream?.on('data', (chunk: Buffer) => cwdReport.push(chunk))
   const pipes = [child.stdout, child.stderr, cwdStream]
   const destroyPipes = (): void => {
+    child.stdin?.destroy()
     for (const pipe of pipes)
       pipe?.destroy()
   }
@@ -569,7 +648,7 @@ export async function runShellCommand(options: RunShellOptions): Promise<ShellRu
     destroyPipes()
     throw startError(error)
   }
-  trackGroup(pid)
+  trackProcessGroup(pid)
   options.onSpawn?.(pid)
 
   let timedOut = false
@@ -633,6 +712,8 @@ export async function runShellCommand(options: RunShellOptions): Promise<ShellRu
   finally {
     clearTimeout(timer)
     signal?.removeEventListener('abort', onAbort)
+    // An input the command never read must not keep the pipe (and its buffered bytes) alive.
+    child.stdin?.destroy()
   }
 }
 

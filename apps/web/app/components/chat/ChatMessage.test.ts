@@ -8,7 +8,20 @@ import { defineComponent, h, nextTick, ref } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { useSettingsStore } from '~/stores/settings'
 import { testIds } from '~/utils/testids'
-import { backgroundTaskId, compactionPart, planApprovalPart, steerPart, taskPart, taskResultCarrier, taskResultData, taskResultPart } from '~/utils/testing/fixtures'
+import {
+  backgroundTaskId,
+  compactionPart,
+  hookCarrier,
+  hookData,
+  hookPart,
+  hookRecordId,
+  planApprovalPart,
+  steerPart,
+  taskPart,
+  taskResultCarrier,
+  taskResultData,
+  taskResultPart,
+} from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import TaskBlock from './agent/TaskBlock.vue'
 import ChatMessage from './ChatMessage.vue'
@@ -640,6 +653,58 @@ describe('chatMessage: background agent results (Phase 10)', () => {
     expect(caption.attributes('aria-hidden')).toBe('true')
     await row.get(`[data-testid="${testIds.taskResultToggle}"]`).trigger('click')
     expect(row.find(`[data-testid="${testIds.taskResultReport}"]`).exists()).toBe(true)
+  })
+})
+
+describe('chatMessage: hook records (Phase 11, P11-0b mounts)', () => {
+  it('renders an unlinked record as an inline note at its position and gives tool-linked records to their row', () => {
+    const tool = { type: 'tool-write_file', toolCallId: 'call_write_1', state: 'output-denied', input: { path: 'dist/a.js' }, approval: { id: 'a1', approved: false } } as unknown as HarnessUIMessage['parts'][number]
+    const stop = hookData({ id: hookRecordId(2), event: 'Stop', outcome: 'stopped', toolCallId: undefined, toolName: undefined, reason: 'Build is red.' })
+    const message = assistant({ parts: [tool, hookPart(), { type: 'text', text: 'Done.', state: 'done' }, { type: 'data-hook', id: stop.id, data: stop }] })
+    const { wrapper } = mountMessage({ message, isLast: true, streaming: false, showThinking: false })
+    const reply = wrapper.get(`[data-testid="${testIds.messageAssistant}"]`)
+    const notes = reply.findAll(`[data-testid="${testIds.hookNote}"]`)
+    // The tool's notes are in its (closed) body; the Stop record is a note of the reply.
+    expect(notes.map(note => [note.attributes('data-event'), note.attributes('data-variant')])).toEqual([['Stop', 'inline']])
+    expect(wrapper.getComponent(ToolPart).props('hooks')).toEqual([hookData()])
+    expect(reply.get(`[data-testid="${testIds.toolRowHook}"]`).attributes('data-value')).toBe('denied')
+  })
+
+  it('renders the records of a task call right after its block', () => {
+    const record = hookData({ toolCallId: 'call_task_1', toolName: 'task', outcome: 'context', context: 'Use the fixtures.' })
+    const message = assistant({ parts: [taskPart(), { type: 'data-hook', id: record.id, data: record }] })
+    const { wrapper } = mountMessage({ message, isLast: true, streaming: false, showThinking: false })
+    expect(wrapper.findComponent(TaskBlock).exists()).toBe(true)
+    expect(wrapper.get(`[data-testid="${testIds.hookNote}"]`).attributes('data-variant')).toBe('inline')
+  })
+
+  it('renders the records of a user message under its bubble', () => {
+    const context = hookData({ event: 'UserPromptSubmit', outcome: 'context', toolCallId: undefined, toolName: undefined, context: 'Branch: main' })
+    const message: HarnessUIMessage = { ...user, parts: [...user.parts, { type: 'data-hook', id: context.id, data: context }] }
+    const { wrapper } = mountMessage({ message, isLast: false, streaming: false, showThinking: false })
+    const row = wrapper.get(`[data-testid="${testIds.messageUser}"]`)
+    expect(row.find('[data-slot="user-message"]').exists()).toBe(true)
+    expect(row.get(`[data-testid="${testIds.hookNote}"]`).attributes()).toMatchObject({ 'data-event': 'UserPromptSubmit', 'data-variant': 'inline' })
+    expect(row.find('[data-slot="message-action-row"]').exists()).toBe(true)
+  })
+
+  it('renders a hook carrier as its notes with "Sent to the agent", without bubble, actions, edit or rewind', async () => {
+    const { wrapper, instance } = mountMessage({ message: hookCarrier('msg_carrier000000003'), isLast: false, streaming: false, showThinking: false, canRewind: true })
+    const row = wrapper.get(`[data-testid="${testIds.messageUser}"]`)
+    expect(row.findAll(`[data-testid="${testIds.hookNote}"]`).map(note => note.attributes('data-variant'))).toEqual(['turn'])
+    expect(row.text()).toContain('Run the tests first.')
+    expect(row.text()).toContain('Sent to the agent')
+    expect(row.find('[data-slot="user-message"]').exists()).toBe(false)
+    expect(row.find('[data-slot="message-action-row"]').exists()).toBe(false)
+    expect(wrapper.find(`[data-testid="${testIds.messageRewind}"]`).exists()).toBe(false)
+    instance.value?.startEdit()
+    await nextTick()
+    expect(wrapper.find(`[data-testid="${testIds.messageEditInput}"]`).exists()).toBe(false)
+  })
+
+  it('shows "Running hooks…" for the hooks activity of a streaming reply without blocks', () => {
+    const { wrapper } = mountMessage({ message: assistant({ parts: [] }), isLast: true, streaming: true, showThinking: false, activity: 'hooks' })
+    expect(wrapper.get(`[data-testid="${testIds.submittedPlaceholder}"]`).text()).toBe('Running hooks…')
   })
 })
 

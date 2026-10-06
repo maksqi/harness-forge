@@ -17,6 +17,26 @@ describe('reserved command names', () => {
     expect(isReservedCommandName('remember')).toBe(true)
   })
 
+  it('treats /output-style (Phase 11, the style picker) as taken', () => {
+    expect(CLIENT_COMMANDS).toContain('output-style')
+    expect(isReservedCommandName('output-style')).toBe(true)
+    for (const name of ['output-styles', 'output', 'style'])
+      expect(isReservedCommandName(name), name).toBe(false)
+  })
+
+  it('pins the reserved command names of Phase 11: the seven client commands and /compact', () => {
+    expect([...CLIENT_COMMANDS]).toEqual(['new', 'model', 'effort', 'mode', 'help', 'remember', 'output-style'])
+    expect([...HARNESS_COMMANDS]).toEqual(['compact'])
+  })
+
+  it('the command pack never picks a reserved name: a registry that takes every short name falls back to suffixes', () => {
+    const registry: NameRegistry = { ...EMPTY_NAME_REGISTRY, command: name => name === 'tldr' || name === 'wordcount' }
+    const names = pickTemplateNames('acme', 'command-pack', registry).commands
+    expect(names).toEqual({ summary: 'tldr-2', count: 'wordcount-2' })
+    for (const name of Object.values(names))
+      expect(isReservedCommandName(name), name).toBe(false)
+  })
+
   it('the command pack still picks its short names, with suffixes when taken', () => {
     expect(pickTemplateNames('acme', 'command-pack').commands).toEqual({ summary: 'tldr', count: 'wordcount' })
     const registry: NameRegistry = { ...EMPTY_NAME_REGISTRY, command: name => name === 'tldr' }

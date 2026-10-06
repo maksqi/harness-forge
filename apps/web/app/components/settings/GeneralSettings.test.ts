@@ -273,6 +273,14 @@ describe('generalSettings', () => {
     expect(api.settings.update).not.toHaveBeenCalled()
   })
 
+  it('shows the global output style after the default effort (Phase 11)', async () => {
+    const wrapper = await mountGeneral()
+    const trigger = wrapper.get(`[data-testid="${testIds.settingsOutputStyle}"]`)
+    expect(trigger.attributes('data-value')).toBe('default')
+    expect(trigger.text()).toBe('Default')
+    expect(wrapper.text()).toContain('How replies are written in chats that don\'t choose one. Projects can choose their own.')
+  })
+
   it('saves choices at once', async () => {
     const wrapper = await mountGeneral()
     await wrapper.get(`[data-testid="${testIds.settingsSendKey}"] [data-value="mod-enter"]`).trigger('click')

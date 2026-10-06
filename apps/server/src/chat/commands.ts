@@ -19,11 +19,17 @@
 // text: `!` lines are never run and `@file` references never expanded. A plugin command (also when the catalog lists it)
 // keeps the v1.5 path through the registry. `isServerCommandFor(deps, projectId, text)` tells the queue which queued
 // texts are server commands of the chat's project (`turnOnly`). Bodies and expansions are never logged.
+// Phase 11 (C37 seams, ADR-052; W11.5 implements the features): `CommandContext.expansion` (`CommandExpansionHost`,
+// built by `prepare.ts`) carries what `` !`cmd` `` spans and `@path` references of a command file need: the chat's
+// project folder (opened lazily, once), the shell switch and the trust check of a project command file's hash
+// (accepted, not used yet: a body is still text). `GET /commands` items carry `kind: 'command'` (user-invocable skills
+// join the list as `kind: 'skill'` in W11.5).
 import type { CommandDefinition, CommandRunResult } from '@harness-forge/plugin-sdk'
 import type { CommandInvocation, CommandSource, CommandSummary, CustomizationEntry, HarnessUIMessage } from '@harness-forge/shared'
 import type { PluginHost } from '../plugins/types.ts'
 import type { Registry } from '../registry/types.ts'
 import type { CustomizationCatalog, CustomizationService, LoadedDefinition } from '../services/customizations/types.ts'
+import type { OpenWorkspace } from '../services/projects/types.ts'
 import type { AppDeps } from '../types.ts'
 import { Buffer } from 'node:buffer'
 import {
@@ -73,7 +79,7 @@ export type CommandResolution
 
 /** The harness commands as `GET /commands` lists them (Phase 9; `pluginId` names the plugin of the agent tools). */
 export const HARNESS_COMMAND_SUMMARIES: readonly CommandSummary[] = Object.freeze([
-  Object.freeze({ name: 'compact', description: 'Summarize the conversation to free up context', source: 'harness', pluginId: 'core-agent' }),
+  Object.freeze({ name: 'compact', kind: 'command', description: 'Summarize the conversation to free up context', source: 'harness', pluginId: 'core-agent' }),
 ])
 
 export interface CommandServices {
@@ -81,6 +87,21 @@ export interface CommandServices {
   plugins: Pick<PluginHost, 'guard'>
   /** Phase 10: the bodies of command files and personal commands (`load(entry, signal)`). */
   customizations: Pick<CustomizationService, 'load'>
+}
+
+/**
+ * What `!` spans and `@path` references of a command file need (Phase 11, ADR-052; `CommandContext.expansion`, built by
+ * `prepare.ts` with `commandExpansionHost`).
+ */
+export interface CommandExpansionHost {
+  /** The chat's project folder, opened once on first use; null without a project or when the folder is not available. */
+  readonly workspace: () => Promise<OpenWorkspace | null>
+  /** `HF_WORKSPACE_SHELL` (`env.workspaceShell`): spans may run (else 409 `disabled`). */
+  readonly shellEnabled: boolean
+  /** The trust hash `sha256` of a project command file is approved for `projectId` (`ProjectTrustService.approved`). */
+  readonly trusted: (projectId: string, sha256: string) => Promise<boolean>
+  /** The chat's project, or null (spans and references need one: else 400). */
+  readonly projectId: string | null
 }
 
 /** The call-specific values of `resolveCommand`. */
@@ -93,6 +114,11 @@ export interface CommandContext {
    * personal commands, by precedence. Absent = the harness command and the plugin registry only.
    */
   catalog?: CustomizationCatalog
+  /**
+   * Phase 11 (ADR-052): what `!` spans and `@path` references of a command file need (`prepare.ts`); absent = they are
+   * text (a regenerate re-resolves only reply commands). Accepted, not used yet (W11.5).
+   */
+  expansion?: CommandExpansionHost
 }
 
 function tooLong(name: string): HarnessError {
@@ -270,7 +296,8 @@ export async function resolveCommand(
  * The effective server-side commands of a scope (`GET /commands`), sorted by name: `/compact`, then one entry per name
  * of the catalog's project and personal commands and the plugin registry (a project or personal command wins its name
  * over a plugin command: the catalog's precedence). Plugin commands come from the live registry (a catalog that still
- * lists a disposed plugin's command does not bring it back); client and harness names are never taken.
+ * lists a disposed plugin's command does not bring it back); client and harness names are never taken. Every entry is
+ * `kind: 'command'` (Phase 11).
  */
 export function listServerCommands(registry: Pick<Registry, 'commands'>, catalog: CustomizationCatalog | null): CommandSummary[] {
   const byName = new Map<string, CommandSummary>()
@@ -278,7 +305,7 @@ export function listServerCommands(registry: Pick<Registry, 'commands'>, catalog
     const name = entry.definition.name
     if (isClientCommand(name) || isHarnessCommand(name) || byName.has(name))
       continue
-    byName.set(name, { name, description: entry.definition.description, source: 'plugin', pluginId: entry.pluginId })
+    byName.set(name, { name, kind: 'command', description: entry.definition.description, source: 'plugin', pluginId: entry.pluginId })
   }
   for (const listed of catalog?.commands() ?? []) {
     // The name's active entry, when it is a command file or a personal command (plugin entries: the registry above).
@@ -288,6 +315,7 @@ export function listServerCommands(registry: Pick<Registry, 'commands'>, catalog
     const modelRef = typeof entry.modelRef === 'string' ? commandModelRef(entry.modelRef) : undefined
     byName.set(entry.name, {
       name: entry.name,
+      kind: 'command',
       description: entry.description,
       source: entry.source,
       ...(entry.namespace === undefined ? {} : { namespace: entry.namespace }),

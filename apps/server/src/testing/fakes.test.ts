@@ -26,6 +26,10 @@ import { messageInsertValues } from '../services/chats/store.ts'
 import { createFilesService } from '../services/files/index.ts'
 import { seedStoredFile } from '../services/files/store.test-util.ts'
 import { createTestApp } from './create-test-app.ts'
+import { createFakeHookService, createFakeHookSnapshot, fakeHookRecord, fakeHookResult, hookTargetKey } from './fake-hooks.ts'
+import { createFakeProjectConfigService, fakeProjectConfigSnapshot, fakeProjectHookItem, fakeProjectMcpServerItem } from './fake-project-config.ts'
+import { createFakeProjectMcpManager, fakeProjectMcpTool, fakeProjectMcpTools } from './fake-project-mcp.ts'
+import { createFakeProjectTrustService, trustItemOf } from './fake-project-trust.ts'
 import {
   createFakeAudioService,
   createFakeBackgroundTasks,
@@ -1021,5 +1025,183 @@ describe('createFakePluginHost: ctx.images', () => {
     // `provider_not_configured` (Phase 7, as on chat).
     const error: unknown = await ctx!.images.generate({ prompt: 'x', modelRef: 'mock:image' }).then(() => null, (reason: unknown) => reason)
     expect(error).toMatchObject({ code: 'provider_not_configured' })
+  })
+})
+
+describe('phase 11 fakes: hooks', () => {
+  const signal = new AbortController().signal
+
+  it('createFakeHookSnapshot: results per event and target, function results, the call log, has, abort', async () => {
+    const deny = fakeHookResult({ decision: 'deny', reason: 'no shell', record: fakeHookRecord('PreToolUse', 'denied', { toolCallId: 'c1', toolName: 'shell' }) })
+    const snapshot = createFakeHookSnapshot({
+      results: { PostToolUse: input => fakeHookResult({ context: `saw ${input.tool?.name}` }) },
+      targets: { [hookTargetKey('PreToolUse', 'shell')]: deny },
+      present: ['Notification'],
+    })
+    expect(['PreToolUse', 'PostToolUse', 'Notification', 'Stop'].map(event => snapshot.has(event as 'Stop'))).toEqual([true, true, true, false])
+    expect(await snapshot.run('PreToolUse', { tool: { name: 'shell', callId: 'c1', input: {} } }, { signal })).toBe(deny)
+    // Another target of the event has no scripted result: nothing ran.
+    expect((await snapshot.run('PreToolUse', { tool: { name: 'read_file', callId: 'c2', input: {} } }, { signal })).ran).toBe(false)
+    // `options.target` wins over the tool name.
+    expect(await snapshot.run('PreToolUse', { tool: { name: 'other', callId: 'c3', input: {} } }, { signal, target: 'shell' })).toBe(deny)
+    expect((await snapshot.run('PostToolUse', { tool: { name: 'write_file', callId: 'c4', input: {}, output: 'ok' } }, { signal })).context).toBe('saw write_file')
+    expect(await snapshot.run('Notification', { message: 'waiting', notificationType: 'permission_prompt' }, { signal })).toMatchObject({ ran: false, record: null })
+    expect(snapshot.calls.map(call => [call.event, call.input.tool?.callId ?? null])).toEqual([['PreToolUse', 'c1'], ['PreToolUse', 'c2'], ['PreToolUse', 'c3'], ['PostToolUse', 'c4'], ['Notification', null]])
+    expect(snapshot.scope).toMatchObject({ projectId: null, toolMode: 'ask', origin: 'request' })
+
+    const aborted = new AbortController()
+    aborted.abort(new Error('stopped'))
+    await expect(snapshot.run('Stop', {}, { signal: aborted.signal })).rejects.toThrow('stopped')
+    expect(snapshot.calls).toHaveLength(6)
+    expect(deny.record).toMatchObject({ event: 'PreToolUse', outcome: 'denied', hooks: [{ source: 'personal', exitCode: 0 }] })
+    expect(deny.record?.id).toMatch(/^hev_/)
+  })
+
+  it('createFakeHookService: snapshots read the live scripts; personal hooks follow the contract; list, runs, invalidate', async () => {
+    const events = createRecordingEventBus()
+    const service = createFakeHookService({ events, switches: { setting: false } })
+    const snapshot = await service.snapshot({ chatId: chatId(9), projectId: null, workspace: null, toolMode: 'auto', origin: 'hook', modelRef: 'mock:hooks' })
+    expect(snapshot.has('Stop')).toBe(false)
+    service.results.set('Stop', fakeHookResult({ block: true, reason: 'run the tests' }))
+    expect(snapshot.has('Stop')).toBe(true)
+    expect(await snapshot.run('Stop', { stopHookActive: true }, { signal })).toMatchObject({ block: true, reason: 'run the tests' })
+    expect(service.runCalls.map(call => [call.event, call.input.stopHookActive])).toEqual([['Stop', true]])
+    expect(service.snapshots).toEqual([snapshot])
+
+    let fresh = 0
+    const sensitive = { requireFreshAuth: () => void (fresh += 1) }
+    const created = await service.create({ event: 'PreToolUse', matcher: 'Bash', command: 'sh guard.sh' }, sensitive)
+    expect(created).toMatchObject({ event: 'PreToolUse', matcher: 'Bash', timeout: null, enabled: true })
+    expect(created.id).toMatch(/^hok_/)
+    await service.update(created.id, { enabled: false }, sensitive)
+    expect(fresh).toBe(1)
+    await service.update(created.id, { command: 'sh other.sh' }, sensitive)
+    expect(fresh).toBe(2)
+    const list = await service.list({ projectId: 'prj_AAAAAAAAAAAAAAAA' })
+    expect(list.switches).toEqual({ setting: false, shell: true, safeMode: false })
+    expect(list.items.map(item => [item.key, item.state])).toEqual([[`personal:${created.id}`, 'off']])
+    expect(list.project).toMatchObject({ id: 'prj_AAAAAAAAAAAAAAAA', available: true })
+    await service.remove(created.id)
+    await expect(service.remove(created.id)).rejects.toMatchObject({ code: 'not_found' })
+    await expect(service.update(created.id, { enabled: true })).rejects.toMatchObject({ code: 'not_found' })
+    expect(events.ofType('hooks.changed').map(event => event.data)).toEqual([{ projectId: null }, { projectId: null }, { projectId: null }, { projectId: null }])
+
+    for (let index = 0; index < LIMITS.personalHooksMax; index++)
+      await service.create({ event: 'Stop', command: `sh stop-${index}.sh` })
+    await expect(service.create({ event: 'Stop', command: 'sh one-more.sh' })).rejects.toMatchObject({ code: 'conflict' })
+
+    service.runLog.push({ id: 'hev_AAAAAAAAAAAAAAAA', at: 1, event: 'Stop', source: 'personal', label: 'sh stop.sh', exitCode: 2, timedOut: false, durationMs: 3, outcome: 'continued' })
+    expect(service.runs(1).map(run => run.id)).toEqual(['hev_AAAAAAAAAAAAAAAA'])
+    service.invalidate('prj_AAAAAAAAAAAAAAAA')
+    service.invalidate(null)
+    expect(service.invalidated).toEqual(['prj_AAAAAAAAAAAAAAAA', null])
+    await service.stop()
+    expect(service.calls).toMatchObject({ snapshot: 1, list: 1, runs: 1, invalidate: 2, stop: 1 })
+  })
+})
+
+describe('phase 11 fakes: project config, trust and MCP', () => {
+  const PROJECT = 'prj_AAAAAAAAAAAAAAAA'
+
+  it('createFakeProjectConfigService: scripted snapshots, a default empty one, verify with the real hash', async () => {
+    const hook = fakeProjectHookItem({ event: 'Stop', command: 'sh .claude/hooks/tests.sh' }, { refs: [{ path: '.claude/hooks/tests.sh', sha256: 'c'.repeat(64) }] })
+    const server = fakeProjectMcpServerItem('github')
+    const config = createFakeProjectConfigService({ snapshots: { [PROJECT]: fakeProjectConfigSnapshot(PROJECT, { hooks: [hook], mcpServers: [server] }) } })
+    const snapshot = await config.snapshot(PROJECT, { refresh: true })
+    expect(snapshot).toMatchObject({ available: true, settingsFiles: ['.claude/settings.json'], mcpFile: true })
+    expect(snapshot.hooks[0]?.spec).toMatchObject({ event: 'Stop', matcher: null, timeoutSec: null, file: '.claude/settings.json' })
+    expect(snapshot.mcpServers[0]?.server).toMatchObject({ id: 'github', name: 'github', transport: { type: 'stdio', command: 'node' } })
+    expect(await config.snapshot('prj_BBBBBBBBBBBBBBBB')).toMatchObject({ available: true, hooks: [], mcpServers: [] })
+    expect(config.reads).toEqual([{ projectId: PROJECT, refresh: true }, { projectId: 'prj_BBBBBBBBBBBBBBBB', refresh: false }])
+
+    expect(await config.verify(PROJECT, hook)).toBe(true)
+    expect(await config.verify(PROJECT, { ...hook, hashItem: { ...hook.hashItem, command: 'sh evil.sh' } })).toBe(false)
+    config.changed.add(server.sha256)
+    expect(await config.verify(PROJECT, server)).toBe(false)
+    expect(config.verified.map(entry => entry.sha256)).toEqual([hook.sha256, hook.sha256, server.sha256])
+    config.invalidate(PROJECT)
+    config.stop()
+    expect(config.calls).toMatchObject({ snapshot: 2, verify: 3, invalidate: 1, stop: 1 })
+  })
+
+  it('createFakeProjectTrustService: an in-memory approved set; stale hashes; fresh auth; events; pending and orphaned', async () => {
+    const events = createRecordingEventBus()
+    const hook = fakeProjectHookItem({ command: 'sh guard.sh' })
+    // eslint-disable-next-line no-template-curly-in-string -- `.mcp.json` variable references are test data
+    const server = fakeProjectMcpServerItem('docs', { type: 'http', url: 'https://${DOCS_HOST:-docs.example.com}/mcp', headers: { Authorization: 'Bearer ${DOCS_TOKEN}' } })
+    const trust = createFakeProjectTrustService({ events, items: { [PROJECT]: [trustItemOf(hook), trustItemOf(server)] }, approved: { [PROJECT]: ['f'.repeat(64)] } })
+    expect(trustItemOf(server)).toMatchObject({ kind: 'mcp', detail: { id: 'docs', transport: 'http', headerNames: ['Authorization'], variables: ['DOCS_HOST', 'DOCS_TOKEN'] } })
+    expect(await trust.pending(PROJECT)).toBe(2)
+    expect(await trust.list(PROJECT)).toMatchObject({ orphaned: 1, available: true, items: [{ state: 'pending' }, { state: 'pending' }] })
+
+    let fresh = 0
+    await expect(trust.approve(PROJECT, [{ kind: 'mcp', sha256: hook.sha256 }], { requireFreshAuth: () => void (fresh += 1) })).rejects.toMatchObject({ code: 'conflict', details: { reason: 'stale' } })
+    expect(await trust.approved(PROJECT)).toEqual(new Set(['f'.repeat(64)]))
+    const approved = await trust.approve(PROJECT, [{ kind: 'hook', sha256: hook.sha256 }], { requireFreshAuth: () => void (fresh += 1) })
+    expect(fresh).toBe(2)
+    expect(approved.items.map(item => item.state)).toEqual(['approved', 'pending'])
+    expect(await trust.pending(PROJECT)).toBe(1)
+    await trust.revoke(PROJECT, hook.sha256)
+    await trust.revoke(PROJECT, hook.sha256)
+    expect(await trust.approved(PROJECT)).toEqual(new Set(['f'.repeat(64)]))
+    expect(events.ofType('project-trust.changed').map(event => event.data.pending)).toEqual([1, 2, 2])
+    expect(events.ofType('hooks.changed').map(event => event.data)).toEqual([{ projectId: PROJECT }, { projectId: PROJECT }, { projectId: PROJECT }])
+
+    // Without scripted items every hash is accepted.
+    await trust.approve('prj_BBBBBBBBBBBBBBBB', [{ kind: 'command', sha256: 'e'.repeat(64) }])
+    expect(await trust.approved('prj_BBBBBBBBBBBBBBBB')).toEqual(new Set(['e'.repeat(64)]))
+    expect(trust.calls).toMatchObject({ approve: 3, revoke: 2 })
+  })
+
+  it('createFakeProjectMcpManager: scripted tools and lists, variables in memory, reconnect, stops', async () => {
+    const tool = fakeProjectMcpTool('docs', 'search', { text: 'found' })
+    expect(tool).toMatchObject({ pluginId: 'core-mcp', mcpServerId: 'docs', title: null })
+    expect(tool.definition.name).toBe('mcp__docs__search')
+    const manager = createFakeProjectMcpManager({
+      tools: { [PROJECT]: fakeProjectMcpTools([tool], { shadowed: ['docs'], unavailable: ['Slow Server'], names: { docs: 'Docs' } }) },
+      lists: {
+        [PROJECT]: {
+          items: [{ id: 'docs', name: 'Docs', transport: 'http', state: 'connected', sha256: 'a'.repeat(64), tools: ['mcp__docs__search'], missingVariables: [] }],
+          variables: [{ name: 'DOCS_TOKEN', set: false, hint: null, usedBy: ['docs'] }],
+        },
+      },
+    })
+    const signal = new AbortController().signal
+    const tools = await manager.toolsFor(PROJECT, { signal, waitMs: 5000 })
+    expect(tools.tools).toEqual([tool])
+    expect([...tools.shadowed]).toEqual(['docs'])
+    expect(tools.unavailable).toEqual(['Slow Server'])
+    expect(tools.names.get('docs')).toBe('Docs')
+    expect(await manager.toolsFor('prj_BBBBBBBBBBBBBBBB', { signal, waitMs: 0 })).toEqual({ tools: [], shadowed: new Set(), unavailable: [], names: new Map() })
+    const aborted = new AbortController()
+    aborted.abort(new Error('stopped'))
+    await expect(manager.toolsFor(PROJECT, { signal: aborted.signal, waitMs: 5000 })).rejects.toThrow('stopped')
+    expect(manager.toolsCalls).toEqual([{ projectId: PROJECT, waitMs: 5000 }, { projectId: 'prj_BBBBBBBBBBBBBBBB', waitMs: 0 }, { projectId: PROJECT, waitMs: 5000 }])
+
+    let fresh = 0
+    const updated = await manager.setVariables(PROJECT, { DOCS_TOKEN: 'secret' }, { requireFreshAuth: () => void (fresh += 1) })
+    expect(fresh).toBe(1)
+    expect(updated.variables).toEqual([{ name: 'DOCS_TOKEN', set: true, hint: null, usedBy: ['docs'] }])
+    expect((await manager.setVariables(PROJECT, { DOCS_TOKEN: null })).variables[0]?.set).toBe(false)
+    expect(await manager.reconnect(PROJECT, 'docs')).toMatchObject({ id: 'docs', state: 'connected' })
+    await expect(manager.reconnect(PROJECT, 'missing')).rejects.toMatchObject({ code: 'not_found' })
+    expect(await manager.list('prj_BBBBBBBBBBBBBBBB')).toEqual({ items: [], variables: [] })
+    await manager.stopProject(PROJECT)
+    await manager.stop()
+    expect(manager.stoppedProjects).toEqual([PROJECT])
+    expect(manager.calls).toMatchObject({ toolsFor: 3, setVariables: 2, reconnect: 2, list: 1, stopProject: 1, stop: 1 })
+  })
+
+  it('createTestApp installs the Phase 11 fakes; the fake hooks and trust emit on the app event bus', async () => {
+    const t = await createTestApp({ start: false, hooks: 'fake', projectConfig: 'fake', projectTrust: 'fake', projectMcp: 'fake' })
+    apps.push(t)
+    const hooks = t.deps.hooks as ReturnType<typeof createFakeHookService>
+    const seen: string[] = []
+    t.deps.events.subscribe(event => seen.push(event.type))
+    await hooks.create({ event: 'Stop', command: 'sh stop.sh' })
+    await t.deps.projectTrust.approve(PROJECT, [{ kind: 'hook', sha256: 'a'.repeat(64) }])
+    expect(seen).toEqual(['hooks.changed', 'project-trust.changed', 'hooks.changed'])
+    expect((t.deps.projectConfig as ReturnType<typeof createFakeProjectConfigService>).snapshots).toBeInstanceOf(Map)
+    expect((t.deps.projectMcp as ReturnType<typeof createFakeProjectMcpManager>).toolsCalls).toEqual([])
   })
 })

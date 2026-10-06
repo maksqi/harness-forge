@@ -1,17 +1,27 @@
 import type { PluginContext, ToolDefinition } from '@harness-forge/plugin-sdk'
 import { PLUGIN_API_VERSION } from '@harness-forge/plugin-sdk'
-import { AGENT_TOOL_NAMES, BUILTIN_PLUGIN_IDS, isReservedPluginId, pluginManifestBaseSchema, WORKSPACE_TOOL_NAMES } from '@harness-forge/shared'
+import { AGENT_TOOL_NAMES, BUILTIN_OUTPUT_STYLE_NAMES, BUILTIN_PLUGIN_IDS, isReservedPluginId, pluginManifestBaseSchema, WORKSPACE_TOOL_NAMES } from '@harness-forge/shared'
 import semver from 'semver'
 import { describe, expect, it } from 'vitest'
+import { BUILTIN_STYLE_DEFINITIONS } from './core-agent/styles.ts'
 import { BUILTIN_PLUGINS, getBuiltinPlugins } from './index.ts'
+import { MOCK_MODEL_IDS, mockModels } from './mock/index.ts'
+
+/** Output styles registered through `ctx.outputStyles` by any builtin (there must be none). */
+const registeredStyles: string[] = []
 
 /** The tool names every builtin registers in `setup`, through a context that records them (no other side effects). */
 async function registeredTools(): Promise<Record<string, string[]>> {
   const byPlugin: Record<string, string[]> = {}
+  registeredStyles.length = 0
   for (const plugin of BUILTIN_PLUGINS) {
     const tools: string[] = []
     const ignore = { register: () => ({ dispose() {} }) }
     const ctx = {
+      outputStyles: { register: (definition: { name: string }) => {
+        registeredStyles.push(definition.name)
+        return { dispose() {} }
+      } },
       tools: { register: (definition: ToolDefinition) => {
         tools.push(definition.name)
         return { dispose() {} }
@@ -59,6 +69,15 @@ describe('builtin plugins', () => {
     })
     expect(tools['core-agent']).toEqual([...AGENT_TOOL_NAMES])
     expect(Object.values(tools).flat()).toHaveLength(shell ? 15 : 14)
+    // Phase 11: the builtin output styles are catalog builtins read from core-agent/styles.ts, never registered.
+    expect(registeredStyles).toEqual([])
+  })
+
+  it('phase 11 pins (C38): the three builtin output styles of core-agent and the 17th mock model, hooks', () => {
+    expect(BUILTIN_STYLE_DEFINITIONS.map(style => style.name)).toEqual([...BUILTIN_OUTPUT_STYLE_NAMES])
+    expect(MOCK_MODEL_IDS).toHaveLength(17)
+    expect(MOCK_MODEL_IDS.at(-1)).toBe('hooks')
+    expect(mockModels().map(model => model.id).at(-1)).toBe('hooks')
   })
 
   it.each(BUILTIN_PLUGINS.map(plugin => [plugin.id, plugin] as const))('%s has a valid manifest and module', (id, plugin) => {

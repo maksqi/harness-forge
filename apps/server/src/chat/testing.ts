@@ -58,6 +58,9 @@ export function testCatalog(entries: readonly CustomizationEntry[] = [catalogEnt
     agent: name => named('agent', Object.hasOwn(AGENT_TYPE_ALIASES, name) ? AGENT_TYPE_ALIASES[name] ?? name : name),
     command: name => named('command', name),
     skill: name => named('skill', name),
+    // Phase 11 (ADR-051; C36 compile fix): output styles.
+    styles: () => active('style'),
+    style: name => named('style', name),
   }
 }
 

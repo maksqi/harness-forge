@@ -8,7 +8,8 @@
 // `mock:compact` (./compact.ts), `mock:plan` (./plan-mode.ts), `mock:todo` (./todo.ts), `mock:subagent`
 // (./subagent.ts) and `mock:steer` (./steer.ts), with the shared rules in ./turn.ts; Phase 10 (the customization
 // mocks, PROVIDERS.md 8 "Customization mocks (Phase 10)", FROZEN after Gate P10-0b): `mock:agents` (./agents.ts) and
-// `mock:background` (./background.ts).
+// `mock:background` (./background.ts); Phase 11 (PROVIDERS.md 8 "Hook mocks (Phase 11)", FROZEN after Gate P11-0b):
+// `mock:hooks` (./hooks.ts), the 17th language model.
 import type { HarnessErrorInit, ModelInfo, PluginManifest, ProviderDefinition, ReasoningLevel, ToolDefinition } from '@harness-forge/plugin-sdk'
 import { APICallError } from '@ai-sdk/provider'
 import { definePlugin } from '@harness-forge/plugin-sdk'
@@ -73,6 +74,30 @@ export {
   MOCK_SUMMARY_PREFIX,
   mockFiller,
 } from './compact.ts'
+export {
+  MOCK_HOOKS_CHILD_CONTINUED_PREFIX,
+  MOCK_HOOKS_CHILD_DONE,
+  MOCK_HOOKS_CONTINUATION_PREFIX,
+  MOCK_HOOKS_DETAIL_MAX_CHARS,
+  MOCK_HOOKS_MODEL_ID,
+  MOCK_HOOKS_PREFIX,
+  MOCK_HOOKS_STYLE_HEADER,
+  MOCK_HOOKS_TASK_DESCRIPTION,
+  MOCK_HOOKS_TODO_HINT,
+  MOCK_HOOKS_WORKSPACE_RULE,
+  mockHookBlocks,
+  mockHookBlocksOf,
+  mockHooksCall,
+  mockHooksCallInput,
+  mockHooksDetail,
+  mockHooksPlan,
+  mockHooksStyleText,
+  mockHooksTaskInput,
+  mockHooksTrigger,
+  mockHooksTurn,
+  mockHooksUserText,
+} from './hooks.ts'
+export type { MockHookBlock } from './hooks.ts'
 export {
   createMockWav,
   MOCK_IMAGE_MODEL_ID,
@@ -149,13 +174,14 @@ function mockModel(id: string, name: string, capabilities: Partial<Record<MockCa
 }
 
 /**
- * The nineteen mock models (listing and seeds): the four chat models of v1, then the Phase 6 models in the order of
+ * The twenty mock models (listing and seeds): the four chat models of v1, then the Phase 6 models in the order of
  * PROVIDERS.md 8, then `workspace` (Phase 7), `checkpoint` and `shell` (Phase 8), then the agent mocks of Phase 9
  * (`compact` with a 2000-token context window, `plan`, `todo`, `subagent`, `steer`; the `tools` capability only), then
- * the customization mocks of Phase 10 (`agents`, `background`; the `tools` capability only). The media models carry
- * explicit kinds: `image` (vision, the same cost), `transcription` and `speech` (with `voices`). `image-chat`,
- * `image-tool`, `workspace`, `checkpoint`, `shell` and the agent and customization mocks say `kind: 'chat'`
- * explicitly: an explicit kind always wins over `classify()`, so their ids can never be read as dedicated image models.
+ * the customization mocks of Phase 10 (`agents`, `background`; the `tools` capability only), then `hooks` (Phase 11;
+ * the `tools` capability only). The media models carry explicit kinds: `image` (vision, the same cost),
+ * `transcription` and `speech` (with `voices`). `image-chat`, `image-tool`, `workspace`, `checkpoint`, `shell` and the
+ * agent, customization and hook mocks say `kind: 'chat'` explicitly: an explicit kind always wins over `classify()`, so
+ * their ids can never be read as dedicated image models.
  */
 export function mockModels(): ModelInfo[] {
   return [
@@ -178,6 +204,7 @@ export function mockModels(): ModelInfo[] {
     mockModel('steer', 'Mock Steer', { tools: true }, { kind: 'chat' }),
     mockModel('agents', 'Mock Agents', { tools: true }, { kind: 'chat' }),
     mockModel('background', 'Mock Background', { tools: true }, { kind: 'chat' }),
+    mockModel('hooks', 'Mock Hooks', { tools: true }, { kind: 'chat' }),
   ]
 }
 

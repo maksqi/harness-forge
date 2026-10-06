@@ -1,5 +1,8 @@
 // Validation of registrations (PLUGINS.md 9 and 14): provider definitions, models, tools, commands, hooks and MCP server
-// declarations, and (plugin API 1.4.0, ADR-045) agent types and skills. Invalid shapes throw `validation_error`;
+// declarations, (plugin API 1.4.0, ADR-045) agent types and skills, and (plugin API 1.5.0, ADR-051) output styles.
+// Reserved names: client commands (`/remember` since Phase 10, `/output-style` since Phase 11, through
+// `CLIENT_COMMANDS`) and harness commands are no plugin commands; the builtin agent types and the builtin output styles
+// (`default`, `explanatory`, `learning`) are no plugin definitions. Invalid shapes throw `validation_error`;
 // duplicate names and the reserved `mcp__` tool prefix throw `conflict` (checked by the registry). Plugin code reaches
 // these checks through `ctx`, so messages name the field.
 import type {
@@ -8,6 +11,7 @@ import type {
   HookName,
   McpServerDecl,
   ModelInfo,
+  OutputStyleDefinition,
   ProviderDefinition,
   SkillDefinition,
   ToolDefinition,
@@ -15,12 +19,15 @@ import type {
 import type { ToolRegisterOptions } from './types.ts'
 import { Buffer } from 'node:buffer'
 import {
+  BUILTIN_OUTPUT_STYLE_NAMES,
   COMMAND_NAME_PATTERN,
   credentialFieldSchema,
   declarativeAgentSchema,
+  declarativeOutputStyleSchema,
   declarativeSkillSchema,
   HarnessError,
   httpUrlSchema,
+  isBuiltinOutputStyle,
   isClientCommand,
   isHarnessCommand,
   isPluginNamespacedId,
@@ -255,8 +262,9 @@ export function validateToolDefinition(definition: ToolDefinition, options: Tool
 // ---------- commands ----------
 
 /**
- * Checks a command: name (not client-only, `/remember` included since Phase 10, ADR-047; not a harness command:
- * `/compact` is run by the server itself, Phase 9, ADR-040), description and exactly one of `template` / `run`.
+ * Checks a command: name (not client-only, `/remember` included since Phase 10, ADR-047, and `/output-style` since
+ * Phase 11, ADR-051; not a harness command: `/compact` is run by the server itself, Phase 9, ADR-040), description and
+ * exactly one of `template` / `run`.
  */
 export function validateCommandDefinition(definition: CommandDefinition): void {
   if (!isObject(definition))
@@ -347,4 +355,26 @@ export function validateSkillDefinition(definition: SkillDefinition): SkillDefin
     throw withPrefix(`Skill ${describeValue(definition.name)}`, validationError(parsed.error))
   const { name, description, content } = parsed.data
   return Object.freeze({ name, description, content })
+}
+
+// ---------- output styles (plugin API 1.5.0, ADR-051) ----------
+
+/**
+ * Checks an output style like `contributes.outputStyles` (`declarativeOutputStyleSchema`): the name pattern
+ * `AGENT_NAME_PATTERN`, not a builtin style (`default`, `explanatory`, `learning`: `validation_error` naming the
+ * field), the description (1 to `LIMITS.customizationDescriptionMaxChars` characters after trimming), the content (1
+ * character to 64 KiB of UTF-8) and `keepCodingInstructions` (a boolean, default false); unknown keys are refused.
+ * Returns a frozen copy (the description trimmed, `keepCodingInstructions` filled in), so a plugin cannot change a style
+ * after it was checked. A name another plugin registered is the registry's `conflict`.
+ */
+export function validateOutputStyleDefinition(definition: OutputStyleDefinition): Required<OutputStyleDefinition> {
+  if (!isObject(definition) || Array.isArray(definition))
+    throw invalid('An output style definition must be an object.')
+  if (typeof definition.name === 'string' && isBuiltinOutputStyle(definition.name))
+    throw invalid(`The output style "${definition.name}" is a builtin style (${BUILTIN_OUTPUT_STYLE_NAMES.join(', ')}); choose another name.`, ['name'])
+  const parsed = declarativeOutputStyleSchema.safeParse(definition)
+  if (!parsed.success)
+    throw withPrefix(`Output style ${describeValue(definition.name)}`, validationError(parsed.error))
+  const { name, description, content, keepCodingInstructions } = parsed.data
+  return Object.freeze({ name, description, content, keepCodingInstructions: keepCodingInstructions ?? false })
 }

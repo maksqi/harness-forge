@@ -6,7 +6,11 @@ import type { ShellRuleService } from './services/shell-rules/types.ts'
 import type { FakeBackgroundTasks } from './testing/fake-background-tasks.ts'
 import type { FakeCheckpointService } from './testing/fake-checkpoints.ts'
 import type { FakeCustomizationService } from './testing/fake-customizations.ts'
+import type { FakeHookService } from './testing/fake-hooks.ts'
+import type { FakeProjectConfigService } from './testing/fake-project-config.ts'
 import type { FakeProjectFileService } from './testing/fake-project-files.ts'
+import type { FakeProjectMcpManager } from './testing/fake-project-mcp.ts'
+import type { FakeProjectTrustService } from './testing/fake-project-trust.ts'
 import type { FakeProjectService } from './testing/fake-projects.ts'
 import type { FakeShellRuleService } from './testing/fake-shell-rules.ts'
 import type { AppDeps } from './types.ts'
@@ -21,18 +25,26 @@ import { openDatabase } from './db/client.ts'
 import { BOOT_STEPS, createDeps, SERVICE_FACTORIES, SERVICE_NAMES, SHUTDOWN_STEPS, startDeps, stopDeps } from './deps.ts'
 import { EnvError, loadEnv } from './env.ts'
 import { createMemoryLogger } from './logger.ts'
+import { createProjectMcpManager } from './mcp/project.ts'
 import { createPluginInstaller } from './plugins/install/index.ts'
 import { createRedactor } from './security/redact.ts'
 import { createCheckpointService } from './services/checkpoints/index.ts'
 import { createCustomizationService } from './services/customizations/index.ts'
 import { createDataService } from './services/data/index.ts'
+import { createHookService } from './services/hooks/index.ts'
+import { createProjectConfigService } from './services/project-config/index.ts'
 import { createProjectFileService } from './services/project-files/index.ts'
+import { createProjectTrustService } from './services/project-trust/index.ts'
 import { createProjectService } from './services/projects/index.ts'
 import { SAMPLE_SHARE_TOKEN } from './testing/api-samples.ts'
 import { createTestApp } from './testing/create-test-app.ts'
 import { createFakeBackgroundTasks } from './testing/fake-background-tasks.ts'
 import { createFakeCustomizationService } from './testing/fake-customizations.ts'
+import { createFakeHookService } from './testing/fake-hooks.ts'
+import { createFakeProjectConfigService } from './testing/fake-project-config.ts'
 import { createFakeProjectFileService } from './testing/fake-project-files.ts'
+import { createFakeProjectMcpManager } from './testing/fake-project-mcp.ts'
+import { createFakeProjectTrustService } from './testing/fake-project-trust.ts'
 import { createFakeProjectService } from './testing/fake-projects.ts'
 import {
   createFakeAudioService,
@@ -530,7 +542,7 @@ describe('phase 8 skeleton (checkpoints, shell rules, the data service lifecycle
     expect(order).toEqual([...BOOT_STEPS])
   })
 
-  it('stopDeps order: data (first) -> runs -> customizations -> projectFiles -> checkpoints -> plugins -> mcp -> catalog -> events; a failing step still lets the next run', async () => {
+  it('stopDeps order: data (first) -> runs -> hooks -> projectMcp -> customizations -> projectConfig -> projectFiles -> checkpoints -> plugins -> mcp -> catalog -> events; a failing step still lets the next run', async () => {
     const t = await createTestApp()
     cleanups.push(() => t.close())
     const order: string[] = []
@@ -544,8 +556,13 @@ describe('phase 8 skeleton (checkpoints, shell rules, the data service lifecycle
         switch (key) {
           case 'data': return { ...target.data, stop: step('data', true) }
           case 'runs': return { ...target.runs, stopAll: step('runs') }
+          // Phase 11: the hook processes, then the project MCP runtimes, right after the runs.
+          case 'hooks': return { ...target.hooks, stop: step('hooks', true) }
+          case 'projectMcp': return { ...target.projectMcp, stop: step('projectMcp') }
           // Phase 10: the catalog caches right after the runs (a synchronous `stop()`).
           case 'customizations': return { ...target.customizations, stop: () => void order.push('customizations') }
+          // Phase 11: the project config caches (a synchronous `stop()`).
+          case 'projectConfig': return { ...target.projectConfig, stop: () => void order.push('projectConfig') }
           // Phase 9: a synchronous `stop()` that throws is a failed step like an async one.
           case 'projectFiles': return { ...target.projectFiles, stop: () => {
             order.push('projectFiles')
@@ -561,10 +578,10 @@ describe('phase 8 skeleton (checkpoints, shell rules, the data service lifecycle
       },
     })
     await expect(stopDeps(deps)).resolves.toBeUndefined()
-    expect(order).toEqual(['data', 'runs', 'customizations', 'projectFiles', 'checkpoints', 'plugins', 'mcp', 'catalog', 'events'])
+    expect(order).toEqual(['data', 'runs', 'hooks', 'projectMcp', 'customizations', 'projectConfig', 'projectFiles', 'checkpoints', 'plugins', 'mcp', 'catalog', 'events'])
     expect(order).toEqual([...SHUTDOWN_STEPS])
     const failures = t.logs.records.filter(record => record.msg === 'shutdown step failed').map(record => record.step)
-    expect(failures).toEqual(['data', 'projectFiles', 'checkpoints'])
+    expect(failures).toEqual(['data', 'hooks', 'projectFiles', 'checkpoints'])
   })
 
   it('startDeps logs HF_TEST_FILE_SWEEP_DELAY_MS without HF_MOCK_PROVIDER=1 as a warning (ignored)', async () => {
@@ -644,9 +661,10 @@ describe('phase 9 skeleton (project files, the steer queue members, the stop ord
   })
 
   it('the stop order: the runs (queues first, inside stopAll) -> the file index -> checkpoints', async () => {
-    // Phase 10: the customization catalog sits between the runs and the file index.
-    expect(SHUTDOWN_STEPS).toEqual(['data', 'runs', 'customizations', 'projectFiles', 'checkpoints', 'plugins', 'mcp', 'catalog', 'events'])
-    expect(SHUTDOWN_STEPS.indexOf('projectFiles')).toBe(SHUTDOWN_STEPS.indexOf('runs') + 2)
+    // Phase 10: the customization catalog sits between the runs and the file index; Phase 11: the hook processes, the
+    // project MCP runtimes and the project config caches too.
+    expect(SHUTDOWN_STEPS).toEqual(['data', 'runs', 'hooks', 'projectMcp', 'customizations', 'projectConfig', 'projectFiles', 'checkpoints', 'plugins', 'mcp', 'catalog', 'events'])
+    expect(SHUTDOWN_STEPS.indexOf('projectFiles')).toBe(SHUTDOWN_STEPS.indexOf('runs') + 5)
     // A runner's stopAll runs to its end (queues cleared, runs stopped) before the index is dropped.
     const t = await createTestApp()
     cleanups.push(() => t.close())
@@ -873,5 +891,86 @@ describe('phase 10 skeleton (customizations, the background task members, the bo
     expect(touched).toEqual([])
     await t.close()
     expect(touched).toEqual(['stop'])
+  })
+})
+
+describe('phase 11 skeleton (hooks, project config, project trust, project MCP, the stop order)', () => {
+  const PHASE_11 = ['hooks', 'projectConfig', 'projectTrust', 'projectMcp'] as const
+
+  it('wires the four services with the C36 stub factories; the stubs answer "nothing runs"', async () => {
+    const t = await createTestApp()
+    cleanups.push(() => t.close())
+    for (const name of PHASE_11)
+      expect(SERVICE_NAMES, name).toContain(name)
+    expect(SERVICE_FACTORIES.hooks).toBe(createHookService)
+    expect(SERVICE_FACTORIES.projectConfig).toBe(createProjectConfigService)
+    expect(SERVICE_FACTORIES.projectTrust).toBe(createProjectTrustService)
+    expect(SERVICE_FACTORIES.projectMcp).toBe(createProjectMcpManager)
+
+    const signal = new AbortController().signal
+    const snapshot = await t.deps.hooks.snapshot({ chatId: testChatId(1), projectId: null, workspace: null, toolMode: 'ask', origin: 'request', modelRef: 'mock:echo' })
+    expect(snapshot.has('PreToolUse')).toBe(false)
+    expect((await snapshot.run('Stop', { stopHookActive: false }, { signal })).ran).toBe(false)
+    expect(await t.deps.hooks.list({})).toEqual({ items: [], diagnostics: [], switches: { setting: true, shell: true, safeMode: false } })
+    expect(t.deps.hooks.runs()).toEqual([])
+    expect(await t.deps.projectConfig.snapshot('prj_AAAAAAAAAAAAAAAA')).toMatchObject({ available: false, hooks: [], mcpServers: [] })
+    expect(await t.deps.projectTrust.approved('prj_AAAAAAAAAAAAAAAA')).toEqual(new Set())
+    expect(await t.deps.projectTrust.pending('prj_AAAAAAAAAAAAAAAA')).toBe(0)
+    expect(await t.deps.projectMcp.toolsFor('prj_AAAAAAAAAAAAAAAA', { signal, waitMs: 5000 })).toEqual({ tools: [], shadowed: new Set(), unavailable: [], names: new Map() })
+    // The registry has the Phase 11 registries (empty until W11.7).
+    expect(t.deps.registry.styles.list()).toEqual([])
+    expect(t.deps.registry.hookCommands.list()).toEqual([])
+  })
+
+  it('no boot step (BOOT_STEPS unchanged): startDeps never touches them; shutdown stops hooks, projectMcp and projectConfig', async () => {
+    expect(BOOT_STEPS).toEqual(['projects', 'checkpoints', 'runs', 'installer', 'plugins', 'catalog', 'mcp', 'data'])
+    const touched: string[] = []
+    const watched = <K extends typeof PHASE_11[number]>(name: K, make: (d: AppDeps) => AppDeps[K]) => (d: AppDeps): AppDeps[K] => new Proxy(make(d), {
+      get(target, key, receiver) {
+        touched.push(`${name}.${String(key)}`)
+        return Reflect.get(target, key, receiver) as unknown
+      },
+    })
+    const t = await createTestApp({
+      factories: {
+        hooks: watched('hooks', createHookService),
+        projectConfig: watched('projectConfig', createProjectConfigService),
+        projectTrust: watched('projectTrust', createProjectTrustService),
+        projectMcp: watched('projectMcp', createProjectMcpManager),
+      },
+    })
+    cleanups.push(() => t.close())
+    expect(touched).toEqual([])
+    await t.close()
+    expect(touched).toEqual(['hooks.stop', 'projectMcp.stop', 'projectConfig.stop'])
+  })
+
+  it('sHUTDOWN_STEPS: the hook processes and the project MCP runtimes stop right after the runs; project config after the customizations', () => {
+    expect(SHUTDOWN_STEPS).toEqual(['data', 'runs', 'hooks', 'projectMcp', 'customizations', 'projectConfig', 'projectFiles', 'checkpoints', 'plugins', 'mcp', 'catalog', 'events'])
+    expect(SHUTDOWN_STEPS.indexOf('hooks')).toBe(SHUTDOWN_STEPS.indexOf('runs') + 1)
+    expect(SHUTDOWN_STEPS.indexOf('projectMcp')).toBe(SHUTDOWN_STEPS.indexOf('hooks') + 1)
+    expect(SHUTDOWN_STEPS.indexOf('projectConfig')).toBeGreaterThan(SHUTDOWN_STEPS.indexOf('customizations'))
+    expect(SHUTDOWN_STEPS).not.toContain('projectTrust')
+  })
+
+  it('createTestApp accepts hooks, projectConfig, projectTrust and projectMcp: the fakes and ready services; overrides and factories win', async () => {
+    const t = await createTestApp({ start: false, hooks: 'fake', projectConfig: 'fake', projectTrust: 'fake', projectMcp: 'fake' })
+    cleanups.push(() => t.close())
+    expect((t.deps.hooks as FakeHookService).calls.snapshot).toBe(0)
+    expect((t.deps.projectConfig as FakeProjectConfigService).snapshots.size).toBe(0)
+    expect((t.deps.projectTrust as FakeProjectTrustService).approvedHashes.size).toBe(0)
+    expect((t.deps.projectMcp as FakeProjectMcpManager).toolsCalls).toEqual([])
+
+    const ready = { hooks: createFakeHookService(), projectConfig: createFakeProjectConfigService(), projectTrust: createFakeProjectTrustService(), projectMcp: createFakeProjectMcpManager() }
+    const u = await createTestApp({ start: false, ...ready })
+    cleanups.push(() => u.close())
+    for (const name of PHASE_11)
+      expect(u.deps[name], name).toBe(ready[name])
+
+    const override = createFakeHookService()
+    const v = await createTestApp({ start: false, hooks: 'fake', projectMcp: 'fake', overrides: { hooks: override }, factories: { projectMcp: createProjectMcpManager } })
+    cleanups.push(() => v.close())
+    expect(v.deps.hooks).toBe(override)
+    expect('toolsCalls' in v.deps.projectMcp).toBe(false)
   })
 })

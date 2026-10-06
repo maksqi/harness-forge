@@ -9,6 +9,8 @@
 // there when it closes.
 // Phase 8 (C20 mounts it, W8.8 implements it): ChangesToggle between the project chip and `⋯` (docs/UI.md 2.15, 7.21);
 // it renders nothing without a project.
+// Phase 11 (C39 mounts it, W11.9 implements it): ProjectTrustChip right after the project chip (docs/UI.md 5.6, 7.33);
+// it renders nothing unless the project has items waiting for a review.
 import {
   BrainIcon,
   FileJsonIcon,
@@ -42,6 +44,7 @@ import KbdCombo from '~/components/common/KbdCombo.vue'
 import ChatProjectChip from '~/components/projects/ChatProjectChip.vue'
 import { useMoveChat } from '~/components/projects/move-chat'
 import ProjectMenuItems from '~/components/projects/ProjectMenuItems.vue'
+import ProjectTrustChip from '~/components/projects/trust/ProjectTrustChip.vue'
 import ChangesToggle from '~/components/workspace/changes/ChangesToggle.vue'
 import { useProjectsStore } from '~/stores/projects'
 import { useUiStore } from '~/stores/ui'
@@ -173,6 +176,7 @@ function move(projectId: string | null) {
     </div>
 
     <ChatProjectChip v-if="projectId" :chat-id="chatId" :project-id="projectId" />
+    <ProjectTrustChip v-if="projectId" :project-id="projectId" />
     <ChangesToggle :chat-id="chatId" :project-id="projectId" />
 
     <DropdownMenu>

@@ -37,6 +37,14 @@ afterEach(() => {
 })
 
 describe('commandBadge', () => {
+  it('names a skill invocation "Skill" (Phase 11: the invocation\'s kind, or the kind prop)', () => {
+    const wrapper = badge(invocation({ name: 'deploy', kind: 'skill' }))
+    expect(wrapper.get('[data-slot="command-badge"]').text()).toBe('Skill/deploy')
+    wrapper.unmount()
+    const explicit = mount(CommandBadge, { props: { name: 'deploy', kind: 'skill' } })
+    expect(explicit.get('[data-slot="command-badge"]').text()).toBe('Skill/deploy')
+  })
+
   it('stays a plain badge without a command (share pages) or a command from before v1.6', () => {
     for (const command of [null, invocation()]) {
       const wrapper = badge(command)

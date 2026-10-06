@@ -5,10 +5,14 @@
 // (`isTaskResultMessage`; ChatMessage renders its notes instead), so this renders nothing for one. The command badge
 // gets the whole `metadata.command` (its source, model and tool limit, docs/UI.md 7.28); a shared message carries only
 // the name.
+// Phase 11 (ADR-048; C39, W11.12 owns it): never a bubble for a hook carrier (`isHookCarrierMessage`, the turn the
+// server started after a Stop hook blocked) either; the `data-hook` parts of a user message render as notes under the
+// bubble (ChatMessage), never inside it.
 import type { HarnessUIMessage } from '@harness-forge/shared'
 import type { FileUIPart } from 'ai'
 import { computed } from 'vue'
 import { isTaskResultMessage } from './chat-format'
+import { isHookCarrierMessage } from './hooks/hook-notes'
 import CommandBadge from './parts/CommandBadge.vue'
 import FilePart from './parts/FilePart.vue'
 
@@ -19,7 +23,7 @@ const text = computed(() => props.message.parts
   .flatMap(part => (part.type === 'text' ? [part.text] : []))
   .join('\n\n'))
 const command = computed(() => props.message.metadata?.command ?? null)
-const carrier = computed(() => isTaskResultMessage(props.message))
+const carrier = computed(() => isTaskResultMessage(props.message) || isHookCarrierMessage(props.message))
 </script>
 
 <template>

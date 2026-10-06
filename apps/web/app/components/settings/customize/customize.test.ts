@@ -6,6 +6,8 @@ import {
   bodyDiagnostics,
   bodyError,
   builtinCommandEntries,
+  CUSTOMIZE_TAB_ORDER,
+  CUSTOMIZE_TAB_VALUES,
   deleteCopy,
   descriptionError,
   diagnosticField,
@@ -33,6 +35,7 @@ import {
   shadowedTooltip,
   sizeLabel,
   stateBadge,
+  tabOf,
 } from './customize'
 
 const pluginName = (id: string) => (id === 'db-tools' ? 'DB tools' : id)
@@ -63,6 +66,26 @@ describe('customize sections', () => {
     expect(kindOfTab(['skills'])).toBe('skill')
     expect(kindOfTab('nope')).toBe('agent')
     expect(kindOfTab(undefined)).toBe('agent')
+  })
+
+  it('reads the Phase 11 tabs: the four kinds and the hooks, in order', () => {
+    expect(CUSTOMIZE_TAB_ORDER.map(tab => CUSTOMIZE_TAB_VALUES[tab])).toEqual(['agents', 'commands', 'skills', 'output-styles', 'hooks'])
+    expect(tabOf('hooks')).toBe('hook')
+    expect(tabOf(['output-styles'])).toBe('style')
+    expect(tabOf('nope')).toBe('agent')
+    expect(tabOf(undefined)).toBe('agent')
+    // The definition kind of the hooks tab falls back to agents (the page's New button, W11.8).
+    expect(kindOfTab('hooks')).toBe('agent')
+    expect(kindFolders(['.harness/output-styles', '.claude/output-styles', '.harness/agents'], 'style')).toEqual(['.harness/output-styles', '.claude/output-styles'])
+  })
+
+  it('keeps the style and skill fields of a parsed definition in the draft and writes them back (Phase 11)', () => {
+    const style = draftFromDefinition({ kind: 'style', fields: { name: 'terse', label: 'terse', description: 'Short', keepCodingInstructions: true, content: 'Be short.' } })
+    expect(style).toMatchObject({ kind: 'style', keepCodingInstructions: true, body: 'Be short.' })
+    expect(draftDefinition(style)).toEqual({ kind: 'style', fields: { name: 'terse', label: 'terse', description: 'Short', keepCodingInstructions: true, content: 'Be short.' } })
+    const skill = draftFromDefinition({ kind: 'skill', fields: { name: 'deploy', description: 'Deploy', content: 'Ship it.', userInvocable: false, modelInvocable: false, argumentHint: '<env>' } })
+    expect(skill).toMatchObject({ userInvocable: false, modelInvocable: false, argumentHint: '<env>' })
+    expect(draftDefinition(skill)).toEqual({ kind: 'skill', fields: { name: 'deploy', description: 'Deploy', content: 'Ship it.', userInvocable: false, modelInvocable: false, argumentHint: '<env>' } })
   })
 })
 

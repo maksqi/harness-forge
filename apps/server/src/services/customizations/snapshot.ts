@@ -95,9 +95,11 @@ export function createCatalogSnapshot(input: CatalogSnapshotInput): Customizatio
     agents: () => lists.agent,
     commands: () => lists.command,
     skills: () => lists.skill,
+    styles: () => lists.style,
     agent: (name: string) => active.agent.get(resolveAgentAlias(name)) ?? null,
     command: (name: string) => active.command.get(name.startsWith('/') ? name.slice(1) : name) ?? null,
     skill: (name: string) => active.skill.get(name) ?? null,
+    style: (name: string) => active.style.get(name) ?? null,
   })
 }
 

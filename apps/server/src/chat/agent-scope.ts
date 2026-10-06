@@ -11,6 +11,9 @@
 // The binding lives in a module-private `WeakMap` keyed by the context object: nothing is added to the object (no
 // property, no symbol), so a third-party plugin that receives the same context cannot reach the sub-agent runner (the
 // plugin API 1.3.0 has no `ToolCallContext.agent`), and a context that is no longer referenced releases its scope.
+// Phase 11 (C37, ADR-048; FROZEN again after P11-0b): the scope gains nothing. A run's command hooks reach its
+// sub-agents through the host (`ChildSession.hooks`, `subagent/host.ts`: `RunSession.hooks.forChild(…)` when the runner
+// starts a child), never through this scope or the call context, so no plugin tool can run or skip a hook.
 import type { ToolCallContext } from '@harness-forge/plugin-sdk'
 import type { ExitPlanModeOutput, SkillOutput, TaskInput, TaskOutput, TodoState, ToolMode } from '@harness-forge/shared'
 

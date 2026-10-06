@@ -33,6 +33,7 @@ import {
   settledCallRecord,
   toolWorkspace,
   utf8Prefix,
+  withExtraTools,
   wrapToModelOutput,
   wrapToolExecute,
 } from './tools.ts'
@@ -992,5 +993,127 @@ describe('restrictTools (Phase 10)', () => {
     })
     expect(isSkillTool(tool('core-agent', 'skill'))).toBe(true)
     expect(isSkillTool(tool('demo', 'skill'))).toBe(false)
+  })
+})
+
+describe('wrapToolExecute: command hooks (Phase 11, C37-T3)', () => {
+  /** Tool hooks with scripted rewrites; every PostToolUse call is recorded. */
+  function toolHooks(rewrites: Record<string, unknown> = {}) {
+    const post: Array<{ toolName: string, toolCallId: string, input: unknown, output: unknown }> = []
+    const hooks: NonNullable<ToolWrapContext['hooks']> = {
+      updatedInput: toolCallId => (Object.hasOwn(rewrites, toolCallId) ? { input: rewrites[toolCallId] } : null),
+      postToolUse: async (result) => {
+        post.push(result)
+      },
+    }
+    return { hooks, post }
+  }
+
+  it('runs the tool with the rewritten input (before tool.before, re-validated); PostToolUse sees it and the output', async () => {
+    const seen: unknown[] = []
+    const run: HookRun = async (name, ...args) => {
+      if (name === 'tool.before')
+        seen.push((args[1] as { input: unknown }).input)
+    }
+    const { hooks, post } = toolHooks({ call_1: { text: 'rewritten' } })
+    const wrapped = wrapToolExecute({ pluginId: 'demo', definition: definition() }, { ...wrapContext({ run }), hooks })
+    expect(await wrapped({ text: 'model' }, options)).toEqual({ echoed: 'rewritten' })
+    expect(seen).toEqual([{ text: 'rewritten' }])
+    expect(post).toEqual([{ toolName: 'demo_tool', toolCallId: 'call_1', input: { text: 'rewritten' }, output: { echoed: 'rewritten' } }])
+    // Another call keeps the model's input.
+    expect(await wrapped({ text: 'model' }, { ...options, toolCallId: 'call_2' })).toEqual({ echoed: 'model' })
+  })
+
+  it('fails closed: an invalid, too large or unserializable rewrite never runs the tool', async () => {
+    const execute = vi.fn(async () => 'ran')
+    const tooLarge = { text: 'x'.repeat(LIMITS.hookUpdatedInputBytes + 1) }
+    const cyclic: Record<string, unknown> = {}
+    cyclic.self = cyclic
+    const { hooks, post } = toolHooks({ c_invalid: { text: 1 }, c_large: tooLarge, c_cyclic: cyclic })
+    const wrapped = wrapToolExecute({ pluginId: 'demo', definition: definition({ execute }) }, { ...wrapContext(), hooks })
+    await expect(wrapped({ text: 'ok' }, { ...options, toolCallId: 'c_invalid' })).rejects.toThrow(/^The input changed by a hook is invalid: /)
+    await expect(wrapped({ text: 'ok' }, { ...options, toolCallId: 'c_large' })).rejects.toThrow(`The input changed by a hook is larger than ${LIMITS.hookUpdatedInputBytes / 1024} KB.`)
+    await expect(wrapped({ text: 'ok' }, { ...options, toolCallId: 'c_cyclic' })).rejects.toBeInstanceOf(ToolFailure)
+    expect(execute).not.toHaveBeenCalled()
+    expect(post).toEqual([])
+  })
+
+  it('runs PostToolUse after tool.after and before the cap, on success only', async () => {
+    const order: string[] = []
+    const run: HookRun = async (name, ...args) => {
+      order.push(name)
+      if (name === 'tool.after')
+        (args[1] as { output: unknown }).output = { after: true }
+    }
+    const post: unknown[] = []
+    const hooks: NonNullable<ToolWrapContext['hooks']> = {
+      updatedInput: () => null,
+      postToolUse: async (result) => {
+        order.push('PostToolUse')
+        post.push(result.output)
+      },
+    }
+    const ok = wrapToolExecute({ pluginId: 'demo', definition: definition({ execute: async () => 'y'.repeat(LIMITS.toolOutputBytes + 10) }) }, { ...wrapContext({ run }), hooks })
+    expect(await ok({ text: 'a' }, options)).toEqual({ after: true })
+    expect(order).toEqual(['tool.before', 'tool.after', 'PostToolUse'])
+    expect(post).toEqual([{ after: true }])
+    const failing = wrapToolExecute({ pluginId: 'demo', definition: definition({ execute: async () => {
+      throw new Error('broken')
+    } }) }, { ...wrapContext({ run }), hooks })
+    await expect(failing({ text: 'a' }, options)).rejects.toBeInstanceOf(ToolFailure)
+    expect(post).toHaveLength(1)
+  })
+
+  it('a streaming tool runs PostToolUse once, on the final value; the prefixed call id reaches the hooks', async () => {
+    const { hooks, post } = toolHooks({ 'call_t/call_1': { text: 'child' } })
+    const tool = definition({
+      async* execute(input) {
+        yield { step: 1 }
+        yield { step: 2, text: (input as { text: string }).text }
+      },
+    })
+    const values = await collect(wrapToolExecute({ pluginId: 'demo', definition: tool }, { ...streamingContext({ callIdPrefix: 'call_t/' }), hooks })({ text: 'model' }, options))
+    expect(values.at(-1)).toEqual({ step: 2, text: 'child' })
+    expect(post).toEqual([{ toolName: 'demo_tool', toolCallId: 'call_t/call_1', input: { text: 'child' }, output: { step: 2, text: 'child' } }])
+  })
+})
+
+describe('assembleTools: project MCP tools and shadowed servers (Phase 11, C37-T3)', () => {
+  const project = (name: string, serverId = 'docs', policy: ToolDefinition['policy'] = 'ask') => registered(`mcp__${serverId}__${name}`, { pluginId: 'core-mcp', mcpServerId: serverId, definition: definition({ name: `mcp__${serverId}__${name}`, policy }) })
+
+  it('withExtraTools drops the tools of shadowed servers and adds the extras whose names are free', () => {
+    const tools = [registered('local'), registered('mcp__docs__search', { mcpServerId: 'docs' }), registered('mcp__up__a', { mcpServerId: 'up' })]
+    expect(withExtraTools(tools, [], null)).toEqual(tools)
+    expect(withExtraTools(tools, [], new Set())).toEqual(tools)
+    const extra = [project('search'), project('local', 'x'), { ...registered('local'), pluginId: 'core-mcp' }]
+    expect(withExtraTools(tools, extra, new Set(['docs'])).map(tool => tool.definition.name)).toEqual(['local', 'mcp__up__a', 'mcp__docs__search', 'mcp__x__local'])
+  })
+
+  it('offers the project tools (connected by definition) with the registry tools, minus the shadowed server', async () => {
+    const tools = [registered('local'), registered('mcp__docs__search', { mcpServerId: 'docs' }), registered('mcp__up__a', { mcpServerId: 'up' })]
+    const servers = [{ id: 'docs', status: 'connected' }, { id: 'up', status: 'connected' }] as McpServer[]
+    const result = await assembleTools(assemblyInput({ tools, servers, extraTools: [project('search'), project('read')], shadowedMcpServers: new Set(['docs']) }))
+    expect(Object.keys(result.tools).sort()).toEqual(['local', 'mcp__docs__read', 'mcp__docs__search', 'mcp__up__a'])
+    expect(result.byName.get('mcp__docs__search')?.pluginId).toBe('core-mcp')
+    expect(result.tools.mcp__docs__read).toMatchObject({ type: 'dynamic', metadata: { mcpServerId: 'docs' } })
+    // The global manager does not know the project server: its tools are kept.
+    const unknown = await assembleTools(assemblyInput({ tools: [registered('local')], servers: [], extraTools: [project('read', 'proj')] }))
+    expect(Object.keys(unknown.tools).sort()).toEqual(['local', 'mcp__proj__read'])
+  })
+
+  it('passes the extras through the preferences, the mode and the turn restriction like registry tools', async () => {
+    const extraTools = [project('read'), project('write'), project('gone')]
+    const prefs = new Map<string, ToolPref>([['mcp__docs__gone', { enabled: false, override: null }]])
+    const result = await assembleTools(assemblyInput({ tools: [], extraTools, prefs, allowedTools: ['mcp__docs__read', 'mcp__docs__gone'] }))
+    expect(Object.keys(result.tools)).toEqual(['mcp__docs__read'])
+    expect((await assembleTools(assemblyInput({ tools: [], extraTools, toolMode: 'off' }))).tools).toEqual({})
+  })
+
+  it('gives every wrapped tool the hooks of the run', async () => {
+    const post: string[] = []
+    const hooks: NonNullable<ToolAssemblyInput['hooks']> = { updatedInput: () => null, postToolUse: async result => void post.push(result.toolName) }
+    const result = await assembleTools(assemblyInput({ hooks }))
+    await (result.tools.alpha as { execute: (input: unknown, options: ToolExecutionOptions<unknown>) => Promise<unknown> }).execute({ text: 'x' }, options)
+    expect(post).toEqual(['alpha'])
   })
 })

@@ -8,6 +8,9 @@
 // `HF_WORKSPACE_ROOTS`, default `<dataDir>/workspaces`); a chat optionally belongs to one (`chats.project_id`, no
 // foreign key). The service owns the two cross-table queries on `chats.project_id`: the detach in `remove` and the
 // `chatCount` of the summaries. Projects are configuration: not in backups or chat exports, kept by delete-all.
+// Phase 11 (ADR-051, migration `0008`): a project's output style (`projects.output_style`, `ProjectSummary.outputStyle`
+// / `ProjectUpdate.outputStyle`; null = the global setting `outputStyle`); deleting a project cascades to its
+// `project_trust` rows (ADR-049) and drops its secret scope `project:<projectId>` (ADR-050, the project MCP manager).
 import type { ProjectBrowse, ProjectCreate, ProjectInstructionsFile, ProjectSummary, ProjectUpdate } from '@harness-forge/shared'
 import type { SensitiveOperationOptions } from '../../types.ts'
 
@@ -67,7 +70,10 @@ export interface ProjectService {
   readonly start: () => Promise<void>
   /** The checked roots (canonical realpaths, `env.workspaceRoots` order). */
   readonly roots: () => Promise<readonly string[]>
-  /** `GET /projects`: every project, sorted by name (`available`, `issue`, `instructionsFile`, `chatCount` computed now). */
+  /**
+   * `GET /projects`: every project, sorted by name (`available`, `issue`, `instructionsFile`, `chatCount` computed now;
+   * Phase 11: `outputStyle` from the row).
+   */
   readonly list: () => Promise<ProjectSummary[]>
   /** One project (as listed); `not_found`. */
   readonly get: (id: string) => Promise<ProjectSummary>
@@ -80,7 +86,11 @@ export interface ProjectService {
    * call created is removed again. Emits `project.changed`.
    */
   readonly create: (input: ProjectCreate, sensitive?: SensitiveOperationOptions) => Promise<ProjectSummary>
-  /** `PATCH /projects/:id`: name and instructions (`null` or `''` removes them); the path never changes. Emits `project.changed`. */
+  /**
+   * `PATCH /projects/:id`: name and instructions (`null` or `''` removes them) and, Phase 11, the output style (a style
+   * name, stored as given: an unknown name falls back to `default` at run time with the notice
+   * `output-style-unavailable`; null = the global setting); the path never changes. Emits `project.changed`.
+   */
   readonly update: (id: string, patch: ProjectUpdate) => Promise<ProjectSummary>
   /**
    * `DELETE /projects/:id`: `conflict` (`run-active`) while a chat of the project holds a run (`deps.runs.hasRun`); one

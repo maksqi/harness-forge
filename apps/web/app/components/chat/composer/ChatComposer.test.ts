@@ -25,6 +25,7 @@ import { installFakeMedia } from '~/utils/testing/fake-media'
 import { catalogModel, chatId, chatSummary, messageId, projectFileEntry, projectId, projectSummary, queueItem, rememberResult } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { stubLocalStorage } from '~/utils/testing/storage'
+import { CHAT_VIEW_ACTIONS } from '../chat-context'
 import ChatComposer from './ChatComposer.vue'
 import { anthropic, bodyAll, byTestId, haiku, llama, NuxtLinkStub, ollama, openai, seedStores, sonnet } from './composer-test-utils'
 import ComposerAddMenu from './ComposerAddMenu.vue'
@@ -1644,6 +1645,69 @@ describe('chatComposer', () => {
       expect(off.defaultPrevented).toBe(false)
       await flushPromises()
       expect(state.toolMode).toBe('ask')
+      wrapper.unmount()
+    })
+  })
+
+  describe('output style and refusal (Phase 11, P11-0b seams)', () => {
+    it('mounts OutputStyleMenu right after EffortMenu with the chat\'s style; hidden for image models', async () => {
+      seedStores()
+      const { wrapper } = mountComposer()
+      const trigger = wrapper.get(byTestId(testIds.outputStyleTrigger))
+      expect(trigger.attributes()).toMatchObject({ 'data-value': 'default', 'data-source': 'automatic' })
+      const order = [...wrapper.element.querySelectorAll('[data-testid]')].map(node => node.getAttribute('data-testid'))
+      expect(order.indexOf(testIds.effortMenuTrigger)).toBeLessThan(order.indexOf(testIds.outputStyleTrigger))
+      wrapper.unmount()
+
+      seedStores({ models: [sonnet, gptImage] })
+      const image = mountComposer({ modelRef: gptImage.ref })
+      expect(image.wrapper.find(byTestId(testIds.outputStyleTrigger)).exists()).toBe(false)
+      image.wrapper.unmount()
+    })
+
+    it('passes the outputStyle prop to the menu and re-emits its choice as update:outputStyle', async () => {
+      seedStores()
+      const wrapper = mount({
+        render: () => h(TooltipProvider, null, {
+          default: () => h(ChatComposer, { chatId: chatId(1), status: 'ready', modelRef: sonnet.ref, reasoningEffort: 'auto', toolMode: 'ask', outputStyle: 'learning' }),
+        }),
+      }, { attachTo: document.body, global: { plugins: [pinia], stubs: { NuxtLink: NuxtLinkStub } } })
+      expect(wrapper.get(byTestId(testIds.outputStyleTrigger)).attributes()).toMatchObject({ 'data-value': 'learning', 'data-source': 'chat' })
+      wrapper.findComponent({ name: 'OutputStyleMenu' }).vm.$emit('update:modelValue', null)
+      expect(wrapper.findComponent(ChatComposer).emitted('update:outputStyle')).toEqual([[null]])
+      wrapper.unmount()
+    })
+
+    it('exposes showRefusal and restoreInput: the refusal shows above the text until the next send or its ×', async () => {
+      seedStores()
+      const actions = { openModelPicker: vi.fn(), openProjectTrust: vi.fn(), openProjectMcp: vi.fn() }
+      const wrapper = mount({
+        render: () => h(TooltipProvider, null, {
+          default: () => h(ChatComposer, { chatId: chatId(1), status: 'ready', modelRef: sonnet.ref, reasoningEffort: 'auto', toolMode: 'ask' }),
+        }),
+      }, { attachTo: document.body, global: { plugins: [pinia], stubs: { NuxtLink: NuxtLinkStub }, provide: { [CHAT_VIEW_ACTIONS as symbol]: actions } } })
+      const composer = wrapper.findComponent(ChatComposer)
+      const exposed = composer.vm as unknown as ChatComposerExposed
+      const shot = fileRef('shot.png', 'image/png')
+      exposed.restoreInput({ text: 'Here is my key', files: [shot] })
+      exposed.showRefusal({ code: 'untrusted', reason: 'Approve it first.', event: null, source: null, command: 'deploy' })
+      await flushPromises()
+      expect(wrapper.get<HTMLTextAreaElement>(byTestId(testIds.composerInput)).element.value).toBe('Here is my key')
+      expect(wrapper.get(byTestId(testIds.composerAttachment)).attributes('data-state')).toBe('done')
+      const refusal = wrapper.get(byTestId(testIds.composerRefusal))
+      expect(refusal.attributes('data-code')).toBe('untrusted')
+      await wrapper.get(byTestId(testIds.composerRefusalReview)).trigger('click')
+      expect(actions.openProjectTrust).toHaveBeenCalledTimes(1)
+      await wrapper.get(byTestId(testIds.composerRefusalDismiss)).trigger('click')
+      expect(wrapper.find(byTestId(testIds.composerRefusal)).exists()).toBe(false)
+
+      exposed.showRefusal({ code: 'hook-blocked', reason: 'No keys.', event: 'UserPromptSubmit', source: 'personal', command: null })
+      await flushPromises()
+      expect(wrapper.find(byTestId(testIds.composerRefusal)).exists()).toBe(true)
+      press(wrapper.get(byTestId(testIds.composerInput)).element, { key: 'Enter' })
+      await flushPromises()
+      expect(composer.emitted('submit')).toHaveLength(1)
+      expect(wrapper.find(byTestId(testIds.composerRefusal)).exists()).toBe(false)
       wrapper.unmount()
     })
   })

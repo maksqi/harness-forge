@@ -1,12 +1,12 @@
-import type { AgentDefinition, ProviderDefinition, SkillDefinition, ToolDefinition } from '@harness-forge/plugin-sdk'
+import type { AgentDefinition, OutputStyleDefinition, ProviderDefinition, SkillDefinition, ToolDefinition } from '@harness-forge/plugin-sdk'
 import type { ToolRegisterOptions } from './types.ts'
-import { CLIENT_COMMANDS, HARNESS_COMMANDS, HarnessError, WORKSPACE_TOOL_ACCESS } from '@harness-forge/shared'
+import { BUILTIN_OUTPUT_STYLE_NAMES, CLIENT_COMMANDS, HARNESS_COMMANDS, HarnessError, WORKSPACE_TOOL_ACCESS } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import { PROVIDER_DEFINITIONS } from '../builtin-plugins/core-providers/index.ts'
 import { createWorkspaceTools } from '../builtin-plugins/core-workspace/index.ts'
 import { createMemoryLogger } from '../logger.ts'
-import { validateAgentDefinition, validateCommandDefinition, validateProviderDefinition, validateSkillDefinition, validateToolDefinition } from './validate.ts'
+import { validateAgentDefinition, validateCommandDefinition, validateOutputStyleDefinition, validateProviderDefinition, validateSkillDefinition, validateToolDefinition } from './validate.ts'
 
 function unused(): never {
   throw new Error('unused')
@@ -142,8 +142,18 @@ describe('validateCommandDefinition: reserved names', () => {
     expect(error.message).toBe('The command "/remember" is reserved by the app.')
   })
 
+  it('refuses /output-style (Phase 11, ADR-051: the client command of the style picker, through CLIENT_COMMANDS)', () => {
+    expect(CLIENT_COMMANDS).toContain('output-style')
+    for (const definition of [{ name: 'output-style', description: 'Mine.', template: '{{input}}' }, { name: 'output-style', description: 'Mine.', run: async () => ({ type: 'reply' as const, markdown: 'x' }) }]) {
+      const error = thrown(() => validateCommandDefinition(definition))
+      expect(error.code).toBe('validation_error')
+      expect(error.message).toBe('The command "/output-style" is reserved by the app.')
+      expect(error.details).toEqual({ issues: [{ path: ['name'], message: error.message, code: 'custom' }] })
+    }
+  })
+
   it('accepts names that only start like a reserved one', () => {
-    for (const name of ['compact-x', 'compactor', 'news', 'helper', 'remember-me', 'remembered'])
+    for (const name of ['compact-x', 'compactor', 'news', 'helper', 'remember-me', 'remembered', 'output-styles', 'output', 'style'])
       expect(() => validateCommandDefinition({ name, description: 'Mine.', template: '{{input}}' }), name).not.toThrow()
   })
 })
@@ -289,5 +299,55 @@ describe('validateSkillDefinition (plugin API 1.4.0, ADR-045)', () => {
     expect(skillFailure(skill({ instructions: 'x' }))).toMatchObject({ code: 'validation_error', message: expect.stringContaining('instructions') })
     for (const value of [undefined, 'skill', [skill()]])
       expect(skillFailure(value)).toMatchObject({ code: 'validation_error', message: 'A skill definition must be an object.' })
+  })
+})
+
+describe('validateOutputStyleDefinition (plugin API 1.5.0, ADR-051)', () => {
+  const style = (extra: Record<string, unknown> = {}): OutputStyleDefinition =>
+    ({ name: 'terse', description: 'Short answers.', content: 'Answer in at most three sentences.', ...extra }) as OutputStyleDefinition
+  const styleFailure = (definition: unknown): HarnessError => thrown(() => validateOutputStyleDefinition(definition as OutputStyleDefinition))
+
+  it('accepts a style and returns a frozen copy (description trimmed, keepCodingInstructions filled in)', () => {
+    const input = style({ description: ' Short answers. ' })
+    const result = validateOutputStyleDefinition(input)
+    expect(result).toEqual({ name: 'terse', description: 'Short answers.', content: 'Answer in at most three sentences.', keepCodingInstructions: false })
+    expect(result).not.toBe(input)
+    expect(Object.isFrozen(result)).toBe(true)
+    expect(validateOutputStyleDefinition(style({ keepCodingInstructions: true })).keepCodingInstructions).toBe(true)
+    expect(() => validateOutputStyleDefinition(style({ description: 'd'.repeat(1024), content: 'x'.repeat(65_536) }))).not.toThrow()
+  })
+
+  it.each([...BUILTIN_OUTPUT_STYLE_NAMES])('refuses the builtin style name "%s" with validation_error naming the field', (name) => {
+    const error = styleFailure(style({ name }))
+    expect(error.code).toBe('validation_error')
+    expect(error.message).toBe(`The output style "${name}" is a builtin style (default, explanatory, learning); choose another name.`)
+    expect(error.details).toEqual({ issues: [{ path: ['name'], message: error.message, code: 'custom' }] })
+  })
+
+  it('accepts names that only start like a builtin one', () => {
+    for (const name of ['default-2', 'learning-mode', 'explanatory-short', 'teach'])
+      expect(validateOutputStyleDefinition(style({ name })).name, name).toBe(name)
+  })
+
+  it.each([
+    ['name', { name: 'Terse' }],
+    ['name', { name: `a${'b'.repeat(64)}` }],
+    ['name', { name: undefined }],
+    ['description', { description: '' }],
+    ['description', { description: 'x'.repeat(1025) }],
+    ['content', { content: '' }],
+    ['content', { content: 'x'.repeat(65_537) }],
+    ['keepCodingInstructions', { keepCodingInstructions: 'yes' }],
+  ])('refuses an invalid %s with validation_error naming the field', (path, extra) => {
+    const error = styleFailure(style(extra))
+    expect(error.code).toBe('validation_error')
+    expect(error.message).toMatch(new RegExp(`^Output style .+: ${path}: `))
+    expect(error.details).toMatchObject({ issues: [expect.objectContaining({ path: [path] })] })
+  })
+
+  it('refuses unknown keys (a skill shape is not a style) and non-objects', () => {
+    expect(styleFailure(style({ label: 'Terse' }))).toMatchObject({ code: 'validation_error', message: expect.stringContaining('label') })
+    for (const value of [undefined, 'style', [style()]])
+      expect(styleFailure(value)).toMatchObject({ code: 'validation_error', message: 'An output style definition must be an object.' })
   })
 })

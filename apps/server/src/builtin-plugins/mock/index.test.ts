@@ -69,12 +69,12 @@ describe('mock plugin', () => {
 })
 
 describe('mock provider definition', () => {
-  it('has no credentials, no icon, echo as small model and the nineteen models as listing and seeds', async () => {
+  it('has no credentials, no icon, echo as small model and the twenty models as listing and seeds', async () => {
     expect(mockProvider).toMatchObject({ id: 'mock', name: 'Mock (dev only)', credentials: [], smallModelId: 'echo' })
     expect(mockProvider.icon).toBeUndefined()
     const listed = await mockProvider.listModels?.({ credentials: {}, fetch: globalThis.fetch })
-    expect(listed?.map(model => model.id)).toEqual(['echo', 'reasoning', 'tool-approval', 'error', 'image', 'image-chat', 'image-tool', 'transcribe', 'speech', 'workspace', 'checkpoint', 'shell', 'compact', 'plan', 'todo', 'subagent', 'steer', 'agents', 'background'])
-    expect(listed).toHaveLength(19)
+    expect(listed?.map(model => model.id)).toEqual(['echo', 'reasoning', 'tool-approval', 'error', 'image', 'image-chat', 'image-tool', 'transcribe', 'speech', 'workspace', 'checkpoint', 'shell', 'compact', 'plan', 'todo', 'subagent', 'steer', 'agents', 'background', 'hooks'])
+    expect(listed).toHaveLength(20)
     expect(mockProvider.seedModels).toEqual(listed)
     expect(modelInfoListSchema.parse(mockModels())).toEqual(mockModels())
     const byId = new Map(mockModels().map(model => [model.id, model]))
@@ -128,8 +128,9 @@ describe('mock provider definition', () => {
       })
       expect(mockProvider.createLanguageModel(id, { credentials: {}, fetch: globalThis.fetch })).toMatchObject({ provider: 'mock', modelId: id })
     }
-    // Visible chat models (the picker, the provider's `modelCount`): everything except the three media models.
-    expect(mockModels().filter(model => model.kind === undefined || model.kind === 'chat')).toHaveLength(16)
+    // Visible chat models (the picker, the provider's `modelCount`): everything except the three media models (17 since
+    // Phase 11).
+    expect(mockModels().filter(model => model.kind === undefined || model.kind === 'chat')).toHaveLength(17)
   })
 
   it('lists the two customization mocks (Phase 10) as explicit chat models with tools only', () => {
@@ -148,7 +149,23 @@ describe('mock provider definition', () => {
       expect(mockProvider.createLanguageModel(id, { credentials: {}, fetch: globalThis.fetch })).toMatchObject({ provider: 'mock', modelId: id })
     }
     // The visible models (`GET /api/models`): the chat models plus the image model; transcribe and speech are hidden.
-    expect(mockModels().filter(model => model.kind !== 'transcription' && model.kind !== 'speech')).toHaveLength(17)
+    expect(mockModels().filter(model => model.kind !== 'transcription' && model.kind !== 'speech')).toHaveLength(18)
+  })
+
+  it('lists mock:hooks (Phase 11) as an explicit chat model with tools only, the last one', () => {
+    const hooks = mockModels().at(-1)
+    expect(modelInfoSchema.parse(hooks)).toEqual({
+      id: 'hooks',
+      name: 'Mock Hooks',
+      kind: 'chat',
+      contextWindow: 32_000,
+      maxOutputTokens: 4096,
+      capabilities: { tools: true, vision: false, pdf: false, reasoning: false, structuredOutput: false, imageOutput: false },
+      cost: { input: 1, output: 2 },
+    })
+    expect(mockProvider.createLanguageModel('hooks', { credentials: {}, fetch: globalThis.fetch })).toMatchObject({ provider: 'mock', modelId: 'hooks' })
+    // Counts of Phase 11: listing 20, `GET /api/models` 18, `modelCount` 17.
+    expect(mockModels()).toHaveLength(20)
   })
 
   it('passes the registry validation of provider definitions', () => {

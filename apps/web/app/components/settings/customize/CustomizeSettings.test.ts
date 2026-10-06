@@ -163,12 +163,43 @@ describe('customizeSettings', () => {
       // /compact and the seven client commands (Phase 11 adds /output-style).
       ['commands', '8', 'inactive'],
       ['skills', '0', 'inactive'],
-      // Phase 11 (ADR-051): the output styles tab.
+      // Phase 11 (ADR-051): the output styles tab; (ADR-048) the hooks tab, without a count until W11.8.
       ['output-styles', '0', 'inactive'],
+      ['hooks', undefined, 'inactive'],
     ])
     expect(tabs[0]!.textContent?.replace(/\s+/g, ' ').trim()).toBe('Agents, 4')
     expect(byTestId(testIds.customizeProjectSelect)?.dataset.value).toBe('')
     expect(byTestId(testIds.customizeProjectSelect)?.textContent).toContain('No project')
+  })
+
+  it('renders HooksPanel on ?tab=hooks; New and Import… open the hook editor and the hook import (Phase 11)', async () => {
+    mocks.route!.query = { tab: 'hooks' }
+    const host = await mountIn(CustomizeSettings)
+    expect(byTestId(testIds.customizeTab, document.body)).not.toBeNull()
+    expect(allByTestId(testIds.customizeTab).find(tab => tab.dataset.value === 'hooks')?.dataset.state).toBe('active')
+    expect(byTestId(testIds.hooksPanel)).not.toBeNull()
+    expect(allByTestId(testIds.hooksSection).map(section => section.dataset.source)).toEqual(['personal'])
+    const body = host.findComponent(CustomizeSettings).vm as unknown as { create: () => void, import: () => void }
+    body.create()
+    await settle()
+    expect(byTestId(testIds.hookEditor)?.dataset.mode).toBe('new')
+    expect(byTestId(testIds.customizationEditor)).toBeNull()
+    body.import()
+    await settle()
+    expect(byTestId(testIds.hookImportDialog)).not.toBeNull()
+
+    allByTestId(testIds.customizeTab)[0]!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }))
+    await settle()
+    expect(mocks.router.replace).toHaveBeenLastCalledWith({ query: { tab: 'agents' } })
+  })
+
+  it('opens the project trust dialog for the review action of a project row (Phase 11)', async () => {
+    mocks.route!.query = { project: projectId(1) }
+    const host = await mountIn(CustomizeSettings)
+    expect(byTestId(testIds.projectTrustDialog)).toBeNull()
+    host.findComponent({ name: 'CustomizationSection' }).vm.$emit('action', 'review', customizationEntry())
+    await settle()
+    expect(byTestId(testIds.projectTrustDialog)?.textContent).toContain('Review website')
   })
 
   it('switches tabs through ?tab and lists the built-in commands without a menu', async () => {

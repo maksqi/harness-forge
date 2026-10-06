@@ -34,3 +34,25 @@ export async function uniqueViolation(write: PromiseLike<unknown>): Promise<stri
     throw new Error(`Expected a unique violation, got: ${errorChain(failure).map(entry => entry.code ?? entry.message.slice(0, 80)).join(' <- ')}`)
   return message.slice(message.indexOf('UNIQUE constraint failed'))
 }
+
+/**
+ * Resolves with the `UNIQUE constraint failed: <table>.<columns>` message of a write that a PRIMARY KEY refused (driver
+ * code `SQLITE_CONSTRAINT_PRIMARYKEY` in the cause chain; Phase 11, `project_trust`); throws when the write succeeded
+ * or failed for another reason (a unique index violation included).
+ */
+export async function primaryKeyViolation(write: PromiseLike<unknown>): Promise<string> {
+  let failure: unknown
+  try {
+    await write
+  }
+  catch (error) {
+    failure = error
+  }
+  if (failure === undefined)
+    throw new Error('Expected a primary key violation, but the write succeeded.')
+  const chain = errorChain(failure)
+  if (!chain.some(entry => entry.code === 'SQLITE_CONSTRAINT_PRIMARYKEY'))
+    throw new Error(`Expected a primary key violation, got: ${chain.map(entry => entry.code ?? entry.message.slice(0, 80)).join(' <- ')}`)
+  const message = chain.map(entry => entry.message).find(text => text.includes('UNIQUE constraint failed')) ?? ''
+  return message.slice(message.indexOf('UNIQUE constraint failed'))
+}

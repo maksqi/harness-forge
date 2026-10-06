@@ -13,6 +13,11 @@
 // inside `startDeps` right after `checkpoints.start()` (`BOOT_STEPS`); `stopDeps` stops the background tasks inside
 // `runs.stopAll()` (queues, then background tasks, then runs) before it drops the customization catalog caches.
 //
+// Phase 11 (C36, frozen after Gate P11-0b): no new boot hook (hook snapshots, the project config reader, project trust
+// and the project MCP runtimes are lazy; `<dataDir>/hooks` is created on the first hook run); `stopDeps` kills the
+// running hook process groups right after the runs and then stops the project MCP runtimes (`SHUTDOWN_STEPS`), all
+// inside the shutdown timeout.
+//
 // Bind safety: a non-loopback `HF_HOST` needs `HF_PASSWORD`, a password stored in the data directory, or
 // `HF_INSECURE=1`; otherwise the process exits with code 1 before any plugin starts or any port is opened. An invalid
 // `HF_TRUST_PROXY` (`1`, `true`, a hop count, an unknown token) fails the boot the same way, with the format explained;

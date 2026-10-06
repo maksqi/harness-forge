@@ -11,6 +11,8 @@
 // parallel by the SDK) and `stepDelayMs` (an abortable wait before the step streams anything). Phase 10 (the
 // customization mocks, PROVIDERS.md 8 "Customization mocks (Phase 10)", FROZEN after Gate P10-0b): `mock:agents`
 // (./agents.ts: custom agents, skills, commands) and `mock:background` (./background.ts: background sub-agents).
+// Phase 11 (PROVIDERS.md 8 "Hook mocks (Phase 11)", FROZEN after Gate P11-0b): `mock:hooks` (./hooks.ts: hooks, project
+// MCP servers, output styles, command extras).
 import type {
   LanguageModelV4,
   LanguageModelV4CallOptions,
@@ -31,6 +33,7 @@ import { mockBackgroundPlan } from './background.ts'
 import { mockCheckpointPlan } from './checkpoint.ts'
 import { abortableDelay, abortError, countWords, MOCK_EMPTY_MESSAGE, MOCK_PROVIDER_ID, MOCK_TOOL_DENIED, MOCK_TOOLS_DISABLED, unknownModelError, wordChunks } from './common.ts'
 import { mockCompactPlan } from './compact.ts'
+import { mockHooksPlan } from './hooks.ts'
 import { mockAspectRatioOption, mockImagePng, mockImageSize } from './media.ts'
 import { mockPlanModePlan } from './plan-mode.ts'
 import { mockShellPlan } from './shell.ts'
@@ -44,8 +47,8 @@ export { abortableDelay, countWords, MOCK_EMPTY_MESSAGE, MOCK_PROVIDER_ID, MOCK_
 export const MOCK_TOOL_NAME = 'mock_approval_tool'
 /**
  * The language model ids of the mock provider (`createLanguageModel`): the four v1 models, the two Phase 6 ones,
- * `workspace` (Phase 7), `checkpoint` and `shell` (Phase 8), the five agent mocks of Phase 9 and the two customization
- * mocks of Phase 10.
+ * `workspace` (Phase 7), `checkpoint` and `shell` (Phase 8), the five agent mocks of Phase 9, the two customization
+ * mocks of Phase 10 and `hooks` (Phase 11).
  */
 export const MOCK_MODEL_IDS = [
   'echo',
@@ -64,6 +67,7 @@ export const MOCK_MODEL_IDS = [
   'steer',
   'agents',
   'background',
+  'hooks',
 ] as const
 export type MockModelId = (typeof MOCK_MODEL_IDS)[number]
 
@@ -304,6 +308,8 @@ export function mockPlan(modelId: MockModelId, options: LanguageModelV4CallOptio
       return mockAgentsPlan(options)
     case 'background':
       return mockBackgroundPlan(options)
+    case 'hooks':
+      return mockHooksPlan(options)
     default:
       return echoPlan(options.prompt)
   }

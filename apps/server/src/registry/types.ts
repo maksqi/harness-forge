@@ -11,6 +11,13 @@
 // `ctx.agents.register` / `ctx.skills.register`) and the contributions `agents` / `skills`. C30 lands them empty
 // (`registry/{agents,skills}.ts`: nothing registered, `register` answers `not_implemented`); W10.7 implements the
 // registration and its validation. The customization catalog reads them (`source: 'plugin'`, ADR-044).
+//
+// Phase 11 (plugin API 1.5.0, ADR-048 / ADR-051; C36): the kinds `style` and `hookCommands`, the registries `styles`
+// (output styles of plugins: manifest `contributes.outputStyles`, `ctx.outputStyles.register`) and `hookCommands` (the
+// command hooks of a plugin's `contributes.hooks`, one registration per plugin with the plugin folder) and the
+// contributions `outputStyles` / `commandHooks`. C36 lands them empty (`registry/{styles,hook-commands}.ts`: nothing
+// registered, `register` answers `not_implemented`); W11.7 implements the registration and its validation. The
+// customization catalog reads `styles` (W11.6), the hook service `hookCommands` (W11.1).
 import type {
   AgentDefinition,
   CommandDefinition,
@@ -18,13 +25,15 @@ import type {
   HookHandler,
   HookMap,
   HookName,
+  HooksConfig,
   McpServerDecl,
   ModelInfo,
+  OutputStyleDefinition,
   ProviderDefinition,
   SkillDefinition,
   ToolDefinition,
 } from '@harness-forge/plugin-sdk'
-import type { PluginContributions } from '@harness-forge/shared'
+import type { HookDiagnostic, HookSpec, PluginContributions } from '@harness-forge/shared'
 
 export interface RegisteredProvider {
   readonly pluginId: string
@@ -84,11 +93,42 @@ export interface RegisteredSkill {
   readonly definition: SkillDefinition
 }
 
-export type RegistryKind = 'provider' | 'models' | 'tool' | 'command' | 'hook' | 'mcpServer' | 'agent' | 'skill'
+/** An output style contributed by a plugin (manifest `contributes.outputStyles` or `ctx.outputStyles.register`; 1.5.0). */
+export interface RegisteredStyle {
+  readonly pluginId: string
+  readonly definition: OutputStyleDefinition
+}
+
+/** What a plugin's command hooks are registered with (the loader, from the manifest `contributes.hooks`; 1.5.0). */
+export interface HookCommandsRegistration {
+  /**
+   * The plugin's folder (canonical): `HARNESS_PLUGIN_ROOT` / `CLAUDE_PLUGIN_ROOT` of its hooks (their working folder
+   * stays the chat's project root, else `<dataDir>/hooks`).
+   */
+  readonly root: string
+  /** The Claude Code `hooks` object as declared (at most `LIMITS.pluginHooksMax` handlers). */
+  readonly hooks: HooksConfig
+}
+
+/** The command hooks of one plugin (manifest `contributes.hooks`; plugin API 1.5.0, ADR-048). */
+export interface RegisteredHookCommands {
+  readonly pluginId: string
+  /** The plugin's folder (`HookCommandsRegistration.root`). */
+  readonly root: string
+  /**
+   * The valid handlers (`readHooksConfig(hooks, { source: 'plugin' })`), in declaration order; a handler with an `error`
+   * diagnostic is not listed and never runs.
+   */
+  readonly hooks: readonly HookSpec[]
+  /** What `readHooksConfig` reported (shown by `GET /hooks`). */
+  readonly diagnostics: readonly HookDiagnostic[]
+}
+
+export type RegistryKind = 'provider' | 'models' | 'tool' | 'command' | 'hook' | 'mcpServer' | 'agent' | 'skill' | 'style' | 'hookCommands'
 
 /**
  * A registration was added or removed. `key`: provider id, provider id (models), tool / command / hook name, MCP id,
- * agent or skill name (Phase 10).
+ * agent or skill name (Phase 10), output style name (`style`, Phase 11), plugin id (`hookCommands`, Phase 11).
  */
 export interface RegistryChange {
   kind: RegistryKind
@@ -189,6 +229,45 @@ export interface SkillRegistry {
   readonly onChange: (listener: (change: RegistryChange) => void) => Disposable
 }
 
+/**
+ * Output styles of plugins (Phase 11, plugin API 1.5.0, ADR-051). Names follow `AGENT_NAME_PATTERN`; the builtin names
+ * (`default`, `explanatory`, `learning`) are reserved. Sorted by name.
+ */
+export interface StyleRegistry {
+  /**
+   * Validates the definition (`declarativeOutputStyleSchema`: name pattern and reserved names, description, `content` ≤
+   * 64 KiB) and adds it; a name another plugin registered throws `conflict` (W11.7; the C36 stub throws
+   * `not_implemented`).
+   */
+  readonly register: (pluginId: string, definition: OutputStyleDefinition) => Disposable
+  readonly get: (name: string) => RegisteredStyle | undefined
+  /** Sorted by name. */
+  readonly list: () => RegisteredStyle[]
+  /** The plugin that registered `name`, or undefined. */
+  readonly owner: (name: string) => string | undefined
+  /** Changes of styles only (`RegistryChange.kind === 'style'`); listeners run synchronously. */
+  readonly onChange: (listener: (change: RegistryChange) => void) => Disposable
+}
+
+/**
+ * Command hooks of plugins (Phase 11, plugin API 1.5.0, ADR-048): one registration per plugin. A plugin with command
+ * hooks requires trust; its hooks run only while it is active (the hook service checks the plugin state per snapshot).
+ */
+export interface HookCommandRegistry {
+  /**
+   * Reads `registration.hooks` with `readHooksConfig(…, { source: 'plugin' })` (at most `LIMITS.pluginHooksMax`
+   * handlers) and adds them; a second registration of the same plugin throws `conflict` (W11.7; the C36 stub throws
+   * `not_implemented`).
+   */
+  readonly register: (pluginId: string, registration: HookCommandsRegistration) => Disposable
+  /** The registration of a plugin, or undefined. */
+  readonly get: (pluginId: string) => RegisteredHookCommands | undefined
+  /** Registry order (builtins first in load order, then user plugins by id). */
+  readonly list: () => RegisteredHookCommands[]
+  /** Changes of command hooks only (`RegistryChange.kind === 'hookCommands'`, key = the plugin id). */
+  readonly onChange: (listener: (change: RegistryChange) => void) => Disposable
+}
+
 export interface Registry {
   readonly providers: ProviderRegistry
   readonly models: ModelRegistry
@@ -200,8 +279,15 @@ export interface Registry {
   readonly agents: AgentRegistry
   /** Skills of plugins (Phase 10, plugin API 1.4.0). */
   readonly skills: SkillRegistry
+  /** Output styles of plugins (Phase 11, plugin API 1.5.0). */
+  readonly styles: StyleRegistry
+  /** Command hooks of plugins (Phase 11, plugin API 1.5.0). */
+  readonly hookCommands: HookCommandRegistry
   /** Change notifications (catalog refresh, MCP manager, `plugin.changed`); listeners run synchronously. */
   readonly onChange: (listener: (change: RegistryChange) => void) => Disposable
-  /** Current contributions of a plugin (`PluginSummary.contributions`; Phase 10: `agents`, `skills`). */
+  /**
+   * Current contributions of a plugin (`PluginSummary.contributions`; Phase 10: `agents`, `skills`; Phase 11:
+   * `commandHooks` = the count of its registered command hook handlers, `outputStyles` = its style names, sorted).
+   */
   readonly contributions: (pluginId: string) => PluginContributions
 }

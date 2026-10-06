@@ -28,7 +28,12 @@
 // {source}". Its agent body is SkillToolBody, with the generic blocks behind "Raw input and output". The body of an
 // approved `exit_plan_mode` starts with PlanFileChip (the output's `planPath` / `planError`; Show changes in project
 // chats).
-import type { TodoItem } from '@harness-forge/shared'
+// Phase 11 (ADR-048; C39 wires it, W11.12 owns it; frozen from Gate P11-0b): `hooks` = the call's hook records
+// (`toolHooksOf(parts).get(toolCallId)`): ToolHookBadge in the status cell (a PreToolUse `denied` reads "Blocked by
+// hook" instead of "Denied"), the notes (HookNote, variant tool) at the top of the body, and the reason of an `asked`
+// record as the approval card's `hookReason`; the HOOK_ACTIVITY injection (the rows are `v-memo`ed) shows "Running
+// hook…" (`data-slot="running-hook"`) while the hooks of this call run.
+import type { HookData, TodoItem } from '@harness-forge/shared'
 import type { ToolPartLike } from '../chat-format'
 import type { WorkspaceRowSummary } from './tools/workspace-tools'
 import type { AllowRules } from '~/components/workspace/allowlist/allow-rule'
@@ -72,7 +77,7 @@ import PlanBody from '../agent/PlanBody.vue'
 import PlanFileChip from '../agent/PlanFileChip.vue'
 import SkillToolBody from '../agent/SkillToolBody.vue'
 import TodoList from '../agent/TodoList.vue'
-import { TRANSCRIPT_SCROLL } from '../chat-context'
+import { HOOK_ACTIVITY, TRANSCRIPT_SCROLL } from '../chat-context'
 import {
   CORE_AGENT_PLUGIN_ID,
   formatToolValue,
@@ -83,9 +88,11 @@ import {
   splitMcpToolName,
   toolNameOf,
 } from '../chat-format'
+import HookNote from '../hooks/HookNote.vue'
 import { TOOL_APPROVAL_CONTEXT } from './tool-approval-context'
 import { toolRowArgument } from './tool-row'
 import ToolApprovalCard from './ToolApprovalCard.vue'
+import ToolHookBadge from './tools/ToolHookBadge.vue'
 import ToolRowSummary from './tools/ToolRowSummary.vue'
 import ToolRuleBadge from './tools/ToolRuleBadge.vue'
 import {
@@ -106,8 +113,14 @@ const props = withDefaults(defineProps<{
    * the user sends a new message), so no card is offered.
    */
   superseded?: boolean
+  /**
+   * + Phase 11 (C39 declares it, W11.12 uses it): the hook records of this call (`toolHooksOf`), in part order; default
+   * none.
+   */
+  hooks?: readonly HookData[]
 }>(), {
   superseded: false,
+  hooks: () => [],
 })
 
 const emit = defineEmits<{
@@ -123,6 +136,8 @@ const plugins = usePluginsStore()
 const open = ref(false)
 const scroll = inject(TRANSCRIPT_SCROLL, null)
 const approvalContext = inject(TOOL_APPROVAL_CONTEXT, null)
+/** + Phase 11: the hooks running in the chat's stream (absent on share pages). */
+const hookActivity = inject(HOOK_ACTIVITY, null)
 watch(open, (isOpen) => {
   if (isOpen)
     scroll?.holdPosition()
@@ -206,6 +221,10 @@ const status = computed<RowStatus>(() => {
 })
 
 const awaitingDecision = computed(() => props.part.state === 'approval-requested' && !props.superseded)
+/** + Phase 11: the hooks of this call run right now ("Running hook…"). */
+const runningHook = computed(() => !!props.part.toolCallId && hookActivity?.value?.toolCallId === props.part.toolCallId)
+/** + Phase 11: the reason of a PreToolUse hook that asked for the card (null = no hook asked). */
+const hookReason = computed(() => props.hooks.find(data => data.event === 'PreToolUse' && data.outcome === 'asked')?.reason ?? null)
 const supersededDenial = computed(() => status.value === 'denied'
   && (isSupersededDenial(props.part) || props.part.state === 'approval-requested'))
 const statusLabel = computed(() => ({
@@ -387,6 +406,8 @@ function onDecide(decision: { approved: boolean, alwaysAllow: boolean, acceptEdi
           </Badge>
           <span class="ml-auto flex shrink-0 items-center gap-1.5 pl-2 text-xs text-muted-foreground">
             <span v-if="skillRow?.source" data-slot="skill-row-source" class="max-w-[16ch] truncate">{{ skillRow.source }}</span>
+            <span v-if="runningHook" data-slot="running-hook" class="hf-shimmer-text">Running hook…</span>
+            <ToolHookBadge v-if="hooks.length > 0" :hooks="hooks" />
             <ToolRuleBadge v-if="allowedBy.length > 0" :prefixes="allowedBy" />
             <ToolRowSummary v-if="summary" :summary="summary" class="mr-0.5" />
             <Spinner v-if="status === 'running'" class="size-3" />
@@ -432,6 +453,9 @@ function onDecide(decision: { approved: boolean, alwaysAllow: boolean, acceptEdi
         </CollapsibleTrigger>
       </div>
       <AiToolContent :data-testid="testIds.toolRowOutput" class="min-w-0 pt-1 pl-6">
+        <div v-if="hooks.length > 0" data-slot="tool-hook-notes" class="mb-2 flex min-w-0 flex-col gap-1">
+          <HookNote v-for="data in hooks" :key="data.id" :data="data" variant="tool" />
+        </div>
         <AgentToolBody v-if="agentView">
           <TodoList v-if="agentView.kind === 'todo'" :todos="agentView.todos" />
           <SkillToolBody v-else-if="agentView.kind === 'skill'" :input="part.input" :output="hasOutput ? part.output : undefined" />
@@ -473,6 +497,7 @@ function onDecide(decision: { approved: boolean, alwaysAllow: boolean, acceptEdi
       :tool-name="name"
       :source="tool?.pluginId ?? null"
       :workspace="workspaceAccess"
+      :hook-reason="hookReason"
       @decide="onDecide"
     />
   </div>

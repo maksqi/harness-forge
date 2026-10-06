@@ -11,6 +11,7 @@ import { createModelCatalog } from './catalog/index.ts'
 import { createChatRunner } from './chat/index.ts'
 import { envBootWarnings } from './env.ts'
 import { createMcpManager } from './mcp/index.ts'
+import { createProjectMcpManager } from './mcp/project.ts'
 import { createToolService } from './mcp/tools.ts'
 import { createPluginDrafts } from './plugins/drafts/index.ts'
 import { createPluginHost } from './plugins/host.ts'
@@ -29,10 +30,13 @@ import { createCustomizationService } from './services/customizations/index.ts'
 import { createDataService } from './services/data/index.ts'
 import { createEventBus } from './services/events/index.ts'
 import { createFilesService } from './services/files/index.ts'
+import { createHookService } from './services/hooks/index.ts'
 import { createImageService } from './services/images/index.ts'
 import { createKeyService } from './services/keys/index.ts'
 import { createMaintenanceService } from './services/maintenance/index.ts'
+import { createProjectConfigService } from './services/project-config/index.ts'
 import { createProjectFileService } from './services/project-files/index.ts'
+import { createProjectTrustService } from './services/project-trust/index.ts'
 import { createProjectService } from './services/projects/index.ts'
 import { createCredentialService } from './services/secrets/credentials.ts'
 import { createSecretStore } from './services/secrets/index.ts'
@@ -79,6 +83,12 @@ export const SERVICE_FACTORIES: ServiceFactories = {
   projectFiles: createProjectFileService,
   // Phase 10 (P10-0b): the catalog of agents, commands and skills and the personal definitions (C30 stub, W10.1).
   customizations: createCustomizationService,
+  // Phase 11 (P11-0b): the project config reader (C36 stub, W11.3), project trust (C36 stub, W11.3), command hooks
+  // (C36 stub, W11.1) and the project MCP manager (C36 stub, W11.4). All lazy: no boot step.
+  projectConfig: createProjectConfigService,
+  projectTrust: createProjectTrustService,
+  hooks: createHookService,
+  projectMcp: createProjectMcpManager,
 }
 
 /** Instantiation order (dependencies first; construction-time access to later services still works lazily). */
@@ -141,7 +151,9 @@ export type BootStep = typeof BOOT_STEPS[number]
  * plugin) -> staging recovery -> plugin host (builtins, then user plugins) -> model catalog warm-up -> MCP manager -> the
  * data service last (Phase 8: the automatic file sweep timer, ADR-039). A broken plugin never fails the boot. The
  * environment warnings (`envBootWarnings`) are logged first. The customization catalog has no boot step (built lazily,
- * Phase 10). Frozen order (Phase 10): `BOOT_STEPS`.
+ * Phase 10); neither have the Phase 11 services (hook snapshots, the project config reader, project trust and the
+ * project MCP runtimes are lazy; `<dataDir>/hooks` is created on the first hook run). Frozen order (Phase 10, confirmed
+ * in Phase 11): `BOOT_STEPS`.
  */
 export async function startDeps(deps: AppDeps): Promise<void> {
   for (const warning of envBootWarnings(deps.env))
@@ -162,24 +174,30 @@ export async function startDeps(deps: AppDeps): Promise<void> {
 }
 
 /** The steps of `stopDeps`, in order (each named by its service). */
-export const SHUTDOWN_STEPS = ['data', 'runs', 'customizations', 'projectFiles', 'checkpoints', 'plugins', 'mcp', 'catalog', 'events'] as const
+export const SHUTDOWN_STEPS = ['data', 'runs', 'hooks', 'projectMcp', 'customizations', 'projectConfig', 'projectFiles', 'checkpoints', 'plugins', 'mcp', 'catalog', 'events'] as const
 export type ShutdownStep = typeof SHUTDOWN_STEPS[number]
 
 /**
  * Shutdown (ARCHITECTURE.md 5): stop the automatic file sweep first (Phase 8: its timer, and a sweep in flight is
  * aborted) -> the runs (`runs.stopAll()`; Phase 9: every chat's steer queue cleared first, so no queued message starts
  * a new turn; Phase 10: then every background task aborted, awaited at most 5 s, its row saved; then every run aborted
- * and persisted as `aborted`, its sub-agents through the run's signal) -> drop the customization catalog caches (Phase
- * 10, `customizations.stop()`) -> drop the mention file index (Phase 9, `projectFiles.stop()`) -> stop the checkpoint
- * store (Phase 8: the prune timer, after the runs so no journal write is cut off) -> dispose plugins -> close MCP clients
- * -> stop catalog timers -> close SSE streams. Every step runs even when an earlier one fails (failures are logged).
- * The caller closes the HTTP server before and the database after. Frozen order (Phase 10): `SHUTDOWN_STEPS`.
+ * and persisted as `aborted`, its sub-agents through the run's signal) -> kill the running hook processes (Phase 11,
+ * `hooks.stop()`: the hook process groups first) -> stop the project MCP runtimes (Phase 11, `projectMcp.stop()`: the
+ * stdio process groups) -> drop the customization catalog caches (Phase 10, `customizations.stop()`) -> drop the
+ * project config caches (Phase 11, `projectConfig.stop()`; project trust keeps no state to stop) -> drop the mention
+ * file index (Phase 9, `projectFiles.stop()`) -> stop the checkpoint store (Phase 8: the prune timer, after the runs so
+ * no journal write is cut off) -> dispose plugins -> close MCP clients -> stop catalog timers -> close SSE streams. Every
+ * step runs even when an earlier one fails (failures are logged). The caller closes the HTTP server before and the
+ * database after. Frozen order (Phase 11): `SHUTDOWN_STEPS`.
  */
 export async function stopDeps(deps: AppDeps): Promise<void> {
   const steps: Array<[ShutdownStep, () => Promise<void>]> = [
     ['data', () => deps.data.stop()],
     ['runs', () => deps.runs.stopAll()],
+    ['hooks', () => deps.hooks.stop()],
+    ['projectMcp', () => deps.projectMcp.stop()],
     ['customizations', async () => deps.customizations.stop()],
+    ['projectConfig', async () => deps.projectConfig.stop()],
     ['projectFiles', async () => deps.projectFiles.stop()],
     ['checkpoints', () => deps.checkpoints.stop()],
     ['plugins', () => deps.plugins.stop()],

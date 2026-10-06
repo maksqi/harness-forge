@@ -25,6 +25,11 @@
 // background agents) is never edited (↑ edits the last message the user wrote) and never offers a rewind. A background
 // agent's writes are journaled under the reply that launched it, so a delivered result on the shown path whose steps
 // hold a done `write_file` / `edit_file` counts as an edit of that reply.
+// Phase 11 (ADR-048; C39 widens the prop, W11.12 owns the rows; frozen from Gate P11-0b): `activity` widens to
+// 'compacting' | 'hooks' | null ('hooks': command hooks of a message-level event run, "Running hooks…"; the per-tool
+// line comes through the HOOK_ACTIVITY injection because the rows are `v-memo`ed); a hook carrier
+// (`isHookCarrierMessage`, the turn the server started after a Stop hook blocked) is never edited and never offers a
+// rewind, like a background agent carrier.
 import type { HarnessUIMessage, MessageBranch } from '@harness-forge/shared'
 import type { ChatStatus, FileUIPart } from 'ai'
 import type { ToolApprovalDecision } from '~/composables/useChatSession'
@@ -39,6 +44,7 @@ import { TRANSCRIPT_SCROLL } from './chat-context'
 import { isTaskResultMessage, TASK_TOOL_NAME, taskResultsOf, toolNameOf } from './chat-format'
 import ChatMessage from './ChatMessage.vue'
 import { compactionLayout } from './compaction/compaction'
+import { isHookCarrierMessage } from './hooks/hook-notes'
 import ErrorPart from './parts/ErrorPart.vue'
 import SubmittedPlaceholder from './SubmittedPlaceholder.vue'
 import TranscriptScrollButton from './TranscriptScrollButton.vue'
@@ -58,9 +64,10 @@ const props = withDefaults(defineProps<{
   projectId?: string | null
   /**
    * + Phase 9 (ADR-040): the session's transient activity (`session.activity`): 'compacting' while a summary is written
-   * (the submitted placeholder and the streaming last row say "Compacting conversation…"); default null.
+   * (the submitted placeholder and the streaming last row say "Compacting conversation…"); + Phase 11: 'hooks' while
+   * command hooks run ("Running hooks…"); default null.
    */
-  activity?: 'compacting' | null
+  activity?: 'compacting' | 'hooks' | null
 }>(), {
   loading: false,
   branches: () => ({}),
@@ -98,7 +105,7 @@ function isStreaming(index: number): boolean {
 }
 
 /** + Phase 9: the activity of a row: only the streaming last reply shows it. */
-function activityFor(index: number): 'compacting' | null {
+function activityFor(index: number): 'compacting' | 'hooks' | null {
   return isStreaming(index) ? props.activity : null
 }
 
@@ -249,7 +256,7 @@ const rewindable = computed<ReadonlySet<string>>(() => {
   for (let index = messages.length - 1; index >= 0; index--) {
     const message = messages[index]!
     if (message.role === 'user') {
-      if (edited && !isTaskResultMessage(message))
+      if (edited && !isTaskResultMessage(message) && !isHookCarrierMessage(message))
         ids.add(message.id)
       continue
     }
@@ -414,7 +421,7 @@ function startEdit(messageId: string): void {
 
 /** Opens the editor on the last user message; false when there is none. */
 function editLastUserMessage(): boolean {
-  const last = [...props.messages].reverse().find(message => message.role === 'user' && !isTaskResultMessage(message))
+  const last = [...props.messages].reverse().find(message => message.role === 'user' && !isTaskResultMessage(message) && !isHookCarrierMessage(message))
   const target = last ? messageRefs.get(last.id) : undefined
   target?.startEdit()
   return !!target

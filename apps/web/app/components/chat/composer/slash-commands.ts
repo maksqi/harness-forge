@@ -7,13 +7,19 @@
 // namespace (project commands) or the plugin name (plugin commands) on the right (`slashItemDetail`) and is named
 // "/{name}, {description}, arguments {hint}" (`slashItemLabel`); `argumentHintAt` is the ghost hint of
 // SlashArgumentHint; `/remember [text]` resolves to the `remember` action (the composer opens RememberDialog).
+// Phase 11 (ADR-051, ADR-052; C39 declares, W11.10 implements; signatures frozen from Gate P11-0b): a last group
+// Skills (`skill`: user-invocable skills, `CommandSummary.kind === 'skill'`, `SlashItem.skill`), `SlashItem.pending` (a
+// project command whose `!` lines wait for approval), the actions `{ type: 'open', menu: 'style' }` and
+// `{ type: 'set-style', style }` of `/output-style` (with `ClientCommandContext.styles`), and command and skill names
+// of up to 64 characters in the hint, query and command patterns.
 import type { ClientCommand, CommandSummary, ReasoningEffort, ToolMode } from '@harness-forge/shared'
+import type { OutputStyleOption } from './output-style'
 import { CLIENT_COMMANDS, isClientCommand } from '@harness-forge/shared'
 import { EFFORT_LABELS } from './effort'
 import { EDITS_NEEDS_PROJECT, isProjectOnlyMode, PLAN_NEEDS_PROJECT, TOOL_MODE_OPTIONS } from './permission'
 
-/** The groups of the slash menu, in display order (docs/UI.md 7.8, Phase 10). */
-export type SlashGroup = 'app' | 'project' | 'personal' | 'plugin'
+/** The groups of the slash menu, in display order (docs/UI.md 7.8, Phase 10; + Phase 11: `skill`, last). */
+export type SlashGroup = 'app' | 'project' | 'personal' | 'plugin' | 'skill'
 
 /** The groups in display order with their headings (`data-group` = `value`). */
 export const SLASH_GROUPS: readonly { value: SlashGroup, label: string }[] = [
@@ -21,6 +27,7 @@ export const SLASH_GROUPS: readonly { value: SlashGroup, label: string }[] = [
   { value: 'project', label: 'Project' },
   { value: 'personal', label: 'Personal' },
   { value: 'plugin', label: 'Plugins' },
+  { value: 'skill', label: 'Skills' },
 ]
 
 /** One row of the slash menu (docs/UI.md 10.4; Phase 10: 10.7, 11.7). */
@@ -36,6 +43,10 @@ export interface SlashItem {
   argumentHint?: string
   /** + Phase 10: the subfolder of a project command (a display label only). */
   namespace?: string
+  /** + Phase 11 (ADR-052): a user-invocable skill (`CommandSummary.kind === 'skill'`; group `skill`). */
+  skill?: boolean
+  /** + Phase 11 (ADR-049): a project command whose `!` lines wait for approval ("Needs approval", `data-trust`). */
+  pending?: boolean
 }
 
 export const CLIENT_COMMAND_DESCRIPTIONS: Readonly<Record<ClientCommand, string>> = {
@@ -56,8 +67,13 @@ export function clientSlashItems(): SlashItem[] {
   return CLIENT_COMMANDS.map(name => ({ name, description: CLIENT_COMMAND_DESCRIPTIONS[name], kind: 'client' as const, group: 'app' as const }))
 }
 
-/** The menu group of a server command: harness -> App, project -> Project, user -> Personal, plugin -> Plugins. */
-export function slashGroupOf(command: Pick<CommandSummary, 'source'>): SlashGroup {
+/**
+ * The menu group of a server command: harness -> App, project -> Project, user -> Personal, plugin -> Plugins; + Phase
+ * 11: a skill (`kind: 'skill'`) of any source -> Skills.
+ */
+export function slashGroupOf(command: Pick<CommandSummary, 'source' | 'kind'>): SlashGroup {
+  if (command.kind === 'skill')
+    return 'skill'
   switch (command.source) {
     case 'harness':
       return 'app'
@@ -91,10 +107,11 @@ export function serverSlashItems(
       group: slashGroupOf(command),
       ...(command.argumentHint === undefined ? {} : { argumentHint: command.argumentHint }),
       ...(command.namespace === undefined ? {} : { namespace: command.namespace }),
+      ...(command.kind === 'skill' ? { skill: true } : {}),
     }))
 }
 
-const HINT_PATTERN = /^\/([a-z][\da-z-]{0,31})[ \t]+$/i
+const HINT_PATTERN = /^\/([a-z][\da-z-]{0,63})[ \t]+$/i
 
 /**
  * The argument hint to show after the typed command (SlashArgumentHint, docs/UI.md 7.28): the text is exactly `/name`
@@ -135,7 +152,7 @@ export function filterSlashItems(items: readonly SlashItem[], query: string): Sl
   return SLASH_GROUPS.flatMap(group => matches.filter(item => item.group === group.value))
 }
 
-const QUERY_PATTERN = /^[\w-]{0,32}$/
+const QUERY_PATTERN = /^[\w-]{0,64}$/
 
 /**
  * The command name being typed, or null when the slash menu should stay closed: the text starts with `/`, the caret
@@ -159,7 +176,7 @@ export interface ParsedSlashCommand {
   args: string
 }
 
-const COMMAND_PATTERN = /^\/([a-z][\da-z-]{0,31})(?:\s([\s\S]*))?$/i
+const COMMAND_PATTERN = /^\/([a-z][\da-z-]{0,63})(?:\s([\s\S]*))?$/i
 
 /** `/name args` -> `{ name, args }`; null when the text is not a slash command. */
 export function parseSlashCommand(text: string): ParsedSlashCommand | null {
@@ -181,13 +198,16 @@ export function parseClientCommand(text: string): { name: ClientCommand, args: s
 export type ClientCommandAction
   = | { type: 'new' }
     | { type: 'help' }
-    | { type: 'open', menu: 'model' | 'effort' | 'mode' }
+    /** + Phase 11: `style` = the output style menu (`/output-style` without an argument). */
+    | { type: 'open', menu: 'model' | 'effort' | 'mode' | 'style' }
     | { type: 'set-model', modelRef: string }
     | { type: 'set-effort', effort: ReasoningEffort }
     | { type: 'set-mode', mode: ToolMode }
     | { type: 'error', message: string }
     /** + Phase 10 (ADR-047): opens RememberDialog with the text after `/remember` (trimmed). */
     | { type: 'remember', text: string }
+    /** + Phase 11 (ADR-051): sets the chat's output style (`/output-style <name>`; null = Automatic, `/output-style auto`). */
+    | { type: 'set-style', style: string | null }
 
 export interface ClientCommandContext {
   /** Resolves a typed model (ref, id or name) to a model ref, or null when unknown. */
@@ -198,6 +218,11 @@ export interface ClientCommandContext {
   toolsAvailable: boolean
   /** The chat belongs to a project (Phase 7): only then can `/mode edits` select Accept edits. */
   projectChat: boolean
+  /**
+   * + Phase 11 (ADR-051): the output styles the menu offers (`styleOptions`), for `/output-style <name>`; absent = the
+   * built-ins only.
+   */
+  styles?: readonly OutputStyleOption[]
 }
 
 function listOf(values: readonly string[]): string {

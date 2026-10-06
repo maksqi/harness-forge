@@ -24,7 +24,12 @@
 // to it; a completed run without a pending approval whose chat has no queued message to start calls
 // `background.onChatIdle(chatId)`; `stopAll` clears the queues, then stops the background tasks, then the runs. The chat's
 // `stop` never stops a background task.
-import type { QueueChangedData, RunOrigin } from '@harness-forge/shared'
+// Phase 11 (C37 seams, ADR-048; W11.2 implements the hook turn): every run gets its origin in `prepareRun`
+// (`PrepareRunOptions.origin`, the prompt hooks); `onRunReleased(…, followUp)` receives what a released run asks for
+// (`RunReleaseFollowUp`: a blocking `Stop` hook) and the priority is: a queued item, then the hook turn
+// (`startHookTurn`: `start` with `origin: 'hook'` and `prepareRun(…, { serverMessage: true })` from a carrier user
+// message holding the record; C37 stub: starts nothing), then `background.onChatIdle`.
+import type { ChatRequestBody, HookData, QueueChangedData, RunOrigin } from '@harness-forge/shared'
 import type { EventBus } from '../services/events/types.ts'
 import type { AppDeps } from '../types.ts'
 import type { BackgroundTasks, BackgroundTasksFactory } from './background/types.ts'
@@ -32,7 +37,7 @@ import type { RunEnding } from './history.ts'
 import type { PrepareRunOptions } from './prepare.ts'
 import type { ChatQueue, QueueEntry } from './queue.ts'
 import type { Run } from './runs.ts'
-import type { ChatRunner, ChatRunOptions } from './types.ts'
+import type { ChatRunner, ChatRunOptions, RunReleaseFollowUp } from './types.ts'
 import { isHarnessError } from '@harness-forge/shared'
 import { assertRunsAllowed } from '../services/maintenance/index.ts'
 import { createBackgroundTasks } from './background/index.ts'
@@ -125,6 +130,38 @@ export async function startQueuedTurn(input: QueuedTurnInput): Promise<void> {
   }
 }
 
+/** The run that ended, for its follow-up turn (Phase 11: the hook turn keeps its model, effort and mode). */
+interface ReleasedRun {
+  body: ChatRequestBody
+  options: ChatRunOptions
+}
+
+/** What `startHookTurn` needs (the runner's internals; replaceable in tests). */
+export interface HookTurnInput {
+  chatId: string
+  /** The `Stop` record of the run that ended (outcome `continued`): the carrier message holds it. */
+  data: HookData
+  /** The request of the run that ended: the follow-up keeps its model, effort and mode. */
+  previous: Pick<ChatRequestBody, 'modelRef' | 'reasoningEffort' | 'toolMode'>
+  /** The logger and request id of the run that ended. */
+  options: ChatRunOptions
+  events: Pick<EventBus, 'emit'>
+  /** The runner's start (origin `hook`, `prepareRun(…, { serverMessage: true })`). */
+  start: QueuedTurnInput['start']
+}
+
+/**
+ * Starts the follow-up turn of a blocking `Stop` hook (Phase 11, ADR-048; W11.2): a carrier user message holding only
+ * the `data-hook` record, `start(body, …, 'hook', { serverMessage: true })` (the chat is acquired synchronously, so
+ * nothing comes between the run end and this turn); a lost start (409 `run-active`) drops it. True when a turn start
+ * was initiated (the background delivery then waits for that turn's end).
+ * C37 stub (P11-0b): starts nothing, answers false.
+ */
+export function startHookTurn(input: HookTurnInput): boolean {
+  void input
+  return false
+}
+
 export function createChatRunnerWith(deps: AppDeps, options: ChatRunnerOptions = {}): ChatRunnerInternal {
   const now = options.now ?? Date.now
   const registry = createRunRegistry(now)
@@ -152,11 +189,12 @@ export function createChatRunnerWith(deps: AppDeps, options: ChatRunnerOptions =
 
   /**
    * A run of `chatId` left the registry (Phase 9, `RunContext.onReleased`): completed without a pending approval → the
-   * oldest queued item becomes the next turn (Phase 10: none queued → `background.onChatIdle`); awaiting an approval →
-   * the items wait; aborted / failed → every item is removed (`stopped` / `failed`; the background results wait for the
-   * next run). At shutdown nothing starts (the queues were emptied first anyway).
+   * oldest queued item becomes the next turn, else (Phase 11) the hook turn of a `followUp` (`startHookTurn`), else
+   * (Phase 10) `background.onChatIdle`; awaiting an approval → the items wait; aborted / failed → every item is removed
+   * (`stopped` / `failed`; the background results wait for the next run). At shutdown nothing starts (the queues were
+   * emptied first anyway).
    */
-  function onRunReleased(chatId: string, ending: RunEnding, awaitingApproval: boolean): void {
+  function onRunReleased(chatId: string, ending: RunEnding, awaitingApproval: boolean, followUp?: RunReleaseFollowUp, released?: ReleasedRun): void {
     if (ending === 'aborted' || lifecycle.signal.aborted) {
       queue.clear(chatId, 'stopped')
       return
@@ -168,11 +206,16 @@ export function createChatRunnerWith(deps: AppDeps, options: ChatRunnerOptions =
     if (awaitingApproval)
       return
     const entry = queue.takeNext(chatId)
-    if (entry === null) {
-      chatIdle(chatId)
+    if (entry !== null) {
+      void startQueuedTurn({ chatId, entry, queue, events: deps.events, start: startRun })
       return
     }
-    void startQueuedTurn({ chatId, entry, queue, events: deps.events, start: startRun })
+    if (followUp?.kind === 'hook' && released !== undefined) {
+      const { modelRef, reasoningEffort, toolMode } = released.body
+      if (startHookTurn({ chatId, data: followUp.data, previous: { modelRef, reasoningEffort, toolMode }, options: released.options, events: deps.events, start: startRun }))
+        return
+    }
+    chatIdle(chatId)
   }
 
   /** Releases a run that did not settle after a stop; its late end callback stores nothing. */
@@ -232,7 +275,7 @@ export function createChatRunnerWith(deps: AppDeps, options: ChatRunnerOptions =
     const run = registry.acquire(body.chatId, body.modelRef)
     let launched = false
     try {
-      const prepared = await prepareRun(deps, run, body, logger, prepareOptions)
+      const prepared = await prepareRun(deps, run, body, logger, { ...prepareOptions, origin })
       if (run.signal.aborted)
         throw stoppedBeforeStart(body.chatId)
       await commitHistory(deps, body.chatId, prepared.writes)
@@ -251,7 +294,7 @@ export function createChatRunnerWith(deps: AppDeps, options: ChatRunnerOptions =
         lifecycle: lifecycle.signal,
         ...(options.imageKeepAliveMs === undefined ? {} : { imageKeepAliveMs: options.imageKeepAliveMs }),
         queue,
-        onReleased: (ending, awaitingApproval) => onRunReleased(body.chatId, ending, awaitingApproval),
+        onReleased: (ending, awaitingApproval, followUp) => onRunReleased(body.chatId, ending, awaitingApproval, followUp, { body, options: runOptions }),
         origin,
         background,
       })

@@ -35,14 +35,23 @@
 // the chats store knows the chat, so the draft on `/` sends none); closing it gives focus back to the textarea
 // (desktop). The keydown chain stays mention menu -> slash menu -> mode cycle; Esc stops only the running response
 // (background agents have their own Stop, docs/UI.md 7.29).
+// Phase 11 (ADR-048, ADR-051; C39 wires it, W11.10 implements; frozen from Gate P11-0b): `outputStyle` = the chat's own
+// output style (null = Automatic) with `update:outputStyle`; OutputStyleMenu sits after EffortMenu (hidden for image
+// models; options from the catalog's style entries through `styleOptions`, Automatic from the project's style and the
+// global setting through `automaticStyle`); `/output-style` opens it (`{ type: 'open', menu: 'style' }`) or sets the
+// style (`set-style`). ComposerRefusal shows above the text the refusal the host passes to the exposed `showRefusal`
+// (a hook blocked the submit, or it runs unapproved shell lines); it clears on the next send and with its × (W11.10 adds
+// a text change), its Review… opens the project trust dialog through CHAT_VIEW_ACTIONS; `restoreInput` puts a refused
+// submit back (the text and the files).
 import type { ClientCommand, ImageOptions, MessageUsage, ProjectFileEntry, QueueItem, ReasoningEffort, ToolMode } from '@harness-forge/shared'
 import type { ChatStatus } from 'ai'
 import type { DictationRange } from './dictation'
+import type { ComposerRefusalData } from './output-style'
 import type { SlashItem } from './slash-commands'
 import type { ChatComposerExposed, ComposerSubmitInput } from './types'
 import { isClientCommand, LIMITS } from '@harness-forge/shared'
 import { useMediaQuery } from '@vueuse/core'
-import { computed, nextTick, onMounted, ref, useId, useTemplateRef, watch } from 'vue'
+import { computed, inject, nextTick, onMounted, ref, useId, useTemplateRef, watch } from 'vue'
 import { toast } from 'vue-sonner'
 import {
   PromptInput as AiPromptInput,
@@ -70,10 +79,12 @@ import { useProvidersStore } from '~/stores/providers'
 import { useSettingsStore } from '~/stores/settings'
 import { useUiStore } from '~/stores/ui'
 import { testIds } from '~/utils/testids'
+import { CHAT_VIEW_ACTIONS } from '../chat-context'
 import { queueItemFiles, restoredDraft } from '../queue/queued-messages'
 import { capabilityWarnings, COMPOSER_ACCEPT } from './attachments'
 import ComposerAddMenu from './ComposerAddMenu.vue'
 import ComposerAttachments from './ComposerAttachments.vue'
+import ComposerRefusal from './ComposerRefusal.vue'
 import ContextRing from './ContextRing.vue'
 import { DICTATION_SHORTCUT, dictationErrorToast, insertDictation } from './dictation'
 import DropOverlay from './DropOverlay.vue'
@@ -86,6 +97,8 @@ import { useModeCycle } from './mode-cycle'
 import { isPickerModel, resolveModelQuery } from './model-picker'
 import ModelPicker from './ModelPicker.vue'
 import { navigateTo } from './nuxt-imports'
+import { automaticStyle, styleOptions } from './output-style'
+import OutputStyleMenu from './OutputStyleMenu.vue'
 import { offeredToolModes } from './permission'
 import PermissionMenu from './PermissionMenu.vue'
 import RecordingIndicator from './RecordingIndicator.vue'
@@ -124,6 +137,11 @@ const props = withDefaults(defineProps<{
    * PermissionMenu. null = none.
    */
   projectId?: string | null
+  /**
+   * + Phase 11 (C39 declares it, W11.10 uses it): the chat's own output style (`session.outputStyle`); null = Automatic
+   * (the project's style, else the global default).
+   */
+  outputStyle?: string | null
 }>(), {
   usage: null,
   chatCostUsd: null,
@@ -131,6 +149,7 @@ const props = withDefaults(defineProps<{
   placeholder: 'Reply…',
   previousImages: 0,
   projectId: null,
+  outputStyle: null,
 })
 
 const emit = defineEmits<{
@@ -141,6 +160,8 @@ const emit = defineEmits<{
   'stop': []
   /** ↑ in an empty composer (the documented contract name, docs/UI.md 10.4). */
   'edit-last': []
+  /** + Phase 11: the chat's output style chosen in OutputStyleMenu or with `/output-style` (null = Automatic). */
+  'update:outputStyle': [value: string | null]
 }>()
 
 const models = useModelsStore()
@@ -188,6 +209,8 @@ const attachmentItems = attachments.items
 
 const pickerOpen = ref(false)
 const effortOpen = ref(false)
+/** + Phase 11: the output style menu. */
+const styleOpen = ref(false)
 const permissionOpen = ref(false)
 const imageOptionsOpen = ref(false)
 const pendingSubmit = ref(false)
@@ -212,6 +235,36 @@ const effectivePlaceholder = computed(() => {
 
 function onImageOptionsChange(value: ImageOptions) {
   imageOptions.set({ n: value.n, aspectRatio: value.aspectRatio, editPrevious: value.editPrevious })
+}
+
+// ---------- output style (Phase 11, ADR-051; W11.10) ----------
+
+/** The styles of the menu: the built-ins, then the catalog's active styles of the chat's scope. */
+const outputStyles = computed(() => styleOptions(customizations.entriesOf(props.projectId, 'style')))
+/** What Automatic resolves to: the project's style, else the global setting. */
+const automaticOutputStyle = computed(() => {
+  const projectStyle = props.projectId ? projects.byId(props.projectId)?.outputStyle ?? null : null
+  return automaticStyle(projectStyle, settings.resolved.outputStyle, outputStyles.value)
+})
+
+function onOutputStyleChange(value: string | null) {
+  if (value !== props.outputStyle)
+    emit('update:outputStyle', value)
+}
+
+// ---------- refusal (Phase 11, ADR-048; W11.10) ----------
+
+/** The refusal of the last submit (ComposerRefusal), shown until the next send or its × (P11-0b). */
+const refusal = ref<ComposerRefusalData | null>(null)
+const chatView = inject(CHAT_VIEW_ACTIONS, null)
+
+function showRefusal(value: ComposerRefusalData | null) {
+  refusal.value = value
+}
+
+/** Review… of an `untrusted` refusal: the project trust dialog of the chat's project. */
+function onRefusalReview() {
+  chatView?.openProjectTrust()
 }
 
 // ---------- dictation (ADR-029) ----------
@@ -428,7 +481,7 @@ function onModelPicked(modelRef: string | null) {
     emit('update:modelRef', modelRef)
 }
 
-function openMenu(menu: 'model' | 'effort' | 'mode') {
+function openMenu(menu: 'model' | 'effort' | 'mode' | 'style') {
   // The menus sit in the tools the recording indicator replaces.
   if (voiceIndicator.value)
     return
@@ -436,6 +489,8 @@ function openMenu(menu: 'model' | 'effort' | 'mode') {
     pickerOpen.value = true
   else if (menu === 'effort')
     effortOpen.value = true
+  else if (menu === 'style')
+    styleOpen.value = true
   else
     permissionOpen.value = true
 }
@@ -462,6 +517,7 @@ function runClientCommand(name: ClientCommand, args: string) {
     efforts: current.efforts.value,
     toolsAvailable: current.toolsAvailable.value,
     projectChat: projectChat.value,
+    styles: outputStyles.value,
   })
   if (action.type === 'error') {
     toast.error(action.message)
@@ -491,6 +547,9 @@ function runClientCommand(name: ClientCommand, args: string) {
     case 'remember':
       rememberText.value = action.text
       rememberOpen.value = true
+      break
+    case 'set-style':
+      onOutputStyleChange(action.style)
       break
   }
 }
@@ -590,6 +649,7 @@ async function submit() {
     const input: ComposerSubmitInput = { text: text.value.trim(), files: attachments.fileRefs.value }
     if (props.modelRef)
       models.touchRecent(props.modelRef)
+    refusal.value = null
     emit('submit', input)
     clearText()
     attachments.clear()
@@ -768,6 +828,12 @@ onMounted(() => {
   focusTextarea()
 })
 
+/** + Phase 11: a refused submit back into the composer: its text replaces the draft, its files come back as chips. */
+function restoreInput(input: ComposerSubmitInput) {
+  setTextAndCaret(input.text, input.text.length)
+  attachments.addRefs(input.files)
+}
+
 /** Queued messages back into the composer (after a Stop, or Edit of a queued message): texts and files. */
 function restoreQueued(items: readonly QueueItem[]) {
   if (items.length === 0)
@@ -783,6 +849,8 @@ const exposed: ChatComposerExposed = {
   setText: (value: string) => setTextAndCaret(value, value.length),
   openModelPicker: () => openMenu('model'),
   restoreQueued,
+  showRefusal,
+  restoreInput,
 }
 defineExpose(exposed)
 
@@ -855,6 +923,8 @@ const TEXTAREA_CLASS = [
         />
       </AiPromptInputHeader>
 
+      <ComposerRefusal :refusal="refusal" @dismiss="showRefusal(null)" @review="onRefusalReview" />
+
       <!-- The textarea's own box: SlashArgumentHint lies exactly over it. -->
       <div class="relative flex w-full min-w-0" data-slot="composer-text">
         <InputGroupTextarea
@@ -912,6 +982,15 @@ const TEXTAREA_CLASS = [
               :model-ref="modelRef"
               :return-focus-to="focusTarget"
               @update:model-value="value => emit('update:reasoningEffort', value)"
+            />
+            <OutputStyleMenu
+              v-if="!isImageModel"
+              v-model:open="styleOpen"
+              :model-value="outputStyle"
+              :options="outputStyles"
+              :automatic="automaticOutputStyle"
+              :return-focus-to="focusTarget"
+              @update:model-value="onOutputStyleChange"
             />
             <ImageOptionsMenu
               v-model:open="imageOptionsOpen"

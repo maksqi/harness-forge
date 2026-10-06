@@ -2,6 +2,7 @@
 //   import type { ComposerSubmitInput } from '~/components/chat/composer/types'
 import type { FileRef, QueueItem } from '@harness-forge/shared'
 import type { ChatStatus } from 'ai'
+import type { ComposerRefusalData } from './output-style'
 
 /** `useChat` status the composer renders (Send in `ready` / `error`, Stop in `submitted` / `streaming`). */
 export type ComposerStatus = ChatStatus
@@ -26,4 +27,15 @@ export interface ChatComposerExposed {
    * between them, their files come back as done chips, and a toast says "Queued messages moved back to the composer."
    */
   restoreQueued: (items: readonly QueueItem[]) => void
+  /**
+   * + Phase 11 (ADR-048; C39 declares, W11.10 implements; frozen from Gate P11-0b): shows the refusal of a submit above
+   * the text (ComposerRefusal: a hook blocked it, or it runs unapproved shell lines); null clears it. It also clears when
+   * the text changes, on the next send and with its ×; Esc never dismisses it.
+   */
+  showRefusal: (refusal: ComposerRefusalData | null) => void
+  /**
+   * + Phase 11: puts a refused submit back into the composer: the text replaces the draft and the files come back as
+   * done chips (the composer cleared itself on submit).
+   */
+  restoreInput: (input: ComposerSubmitInput) => void
 }

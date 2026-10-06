@@ -38,7 +38,7 @@ function pluginAgent(overrides: Partial<CustomizationEntry> = {}): Customization
   return customizationEntry({ source: 'plugin', pluginId: 'agent-pack', path: undefined, ...overrides })
 }
 
-function mountList(props: { kind: 'agent' | 'skill', entries: readonly CustomizationEntry[], missing?: readonly string[] }) {
+function mountList(props: { kind: 'agent' | 'skill' | 'style', entries: readonly CustomizationEntry[], missing?: readonly string[] }) {
   const Host = defineComponent({
     setup: () => () => h(TooltipProvider, { delayDuration: 0 }, {
       default: () => h(PluginCustomizationList, { pluginId: 'agent-pack', missing: [], ...props }),
@@ -148,5 +148,14 @@ describe('pluginCustomizationList', () => {
     mountList({ kind: 'skill', entries: [], missing: ['release-notes'] })
     link = document.body.querySelector<HTMLAnchorElement>('[data-slot="plugin-customizations-open"]')!
     expect(link.getAttribute('href')).toBe('/settings/customize?tab=skills')
+    wrapper!.unmount()
+    wrapper = null
+    document.body.replaceChildren()
+
+    // Phase 11 (ADR-051): a plugin's output styles open the Output styles tab.
+    mountList({ kind: 'style', entries: [], missing: ['terse'] })
+    expect(document.body.querySelector<HTMLElement>(`[data-testid="${testIds.pluginCustomizations}"]`)?.dataset.kind).toBe('style')
+    link = document.body.querySelector<HTMLAnchorElement>('[data-slot="plugin-customizations-open"]')!
+    expect(link.getAttribute('href')).toBe('/settings/customize?tab=output-styles')
   })
 })

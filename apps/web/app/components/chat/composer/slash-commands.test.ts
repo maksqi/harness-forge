@@ -195,6 +195,8 @@ describe('groups, argument hints and /remember (Phase 10)', () => {
       { value: 'project', label: 'Project' },
       { value: 'personal', label: 'Personal' },
       { value: 'plugin', label: 'Plugins' },
+      // Phase 11 (ADR-052): user-invocable skills, last.
+      { value: 'skill', label: 'Skills' },
     ])
     // The server answers by name; the menu regroups.
     const server = serverSlashItems([
@@ -294,5 +296,27 @@ describe('resolveClientCommand', () => {
     expect(resolveClientCommand('mode', 'yolo', { ...context, projectChat: true })).toEqual({ type: 'error', message: 'Unknown mode "yolo". Use ask, edits, plan, auto or off.' })
     expect(resolveClientCommand('effort', 'high', { ...context, efforts: [] }).type).toBe('error')
     expect(resolveClientCommand('mode', '', { ...context, toolsAvailable: false }).type).toBe('error')
+  })
+})
+
+describe('skills and long names (Phase 11, P11-0b types)', () => {
+  it('puts user-invocable skills of any source into the Skills group, last', () => {
+    const skills = serverSlashItems([
+      { name: 'deploy', kind: 'skill', description: 'Deploy the app', source: 'project', argumentHint: '<env>' },
+      { name: 'review', description: 'Review a file', source: 'user' },
+    ])
+    expect(skills.map(item => [item.name, item.group, item.skill])).toEqual([['deploy', 'skill', true], ['review', 'personal', undefined]])
+    expect(slashGroupOf({ source: 'plugin', kind: 'skill' })).toBe('skill')
+    expect(filterSlashItems(skills, '').map(item => item.name)).toEqual(['review', 'deploy'])
+  })
+
+  it('accepts names of up to 64 characters in the query, the hint and the command patterns', () => {
+    const long = `a${'b'.repeat(63)}`
+    expect(slashQueryAt(`/${long}`, long.length + 1)).toBe(long)
+    expect(slashQueryAt(`/${long}x`, long.length + 2)).toBeNull()
+    expect(parseSlashCommand(`/${long} prod`)).toEqual({ name: long, args: 'prod' })
+    expect(parseSlashCommand(`/${long}x`)).toBeNull()
+    const longItems = serverSlashItems([{ name: long, kind: 'skill', description: 'A long skill', source: 'user', argumentHint: '<env>' }])
+    expect(argumentHintAt(`/${long} `, longItems)).toBe('<env>')
   })
 })

@@ -37,6 +37,17 @@
 //   `mcp__server__*` prefixes): it only ever narrows, never adds a tool or changes a policy; `core-agent`'s
 //   `exit_plan_mode` is exempt (`applyToolMode` keeps it in plan mode, or not callable for an approved plan's
 //   continuation); an empty list leaves no other tool; null or absent = no restriction.
+// Phase 11 (C37, ADR-048 / ADR-050; COMPLETE and FROZEN after P11-0b):
+// - command hooks (`ToolWrapContext.hooks`, the run's `RunHooks` or a child's `ChildHooks`, `hooks.ts`): the input a
+//   `PreToolUse` hook rewrote (`hooks.updatedInput(toolCallId)`) replaces the model's input in step 3, before
+//   `tool.before`, and goes through the same schema re-validation (too large or invalid → a `ToolFailure`: fail closed);
+//   the tool part keeps the model's input. `PostToolUse` runs after `tool.after` for a successful call only (its model
+//   text is queued for the next step, `continue: false` stops the run), before the output cap; a streaming tool runs
+//   it once, on the final value;
+// - project MCP servers (ADR-050): `assembleTools({ extraTools, shadowedMcpServers })` drops the registry tools of the
+//   global MCP servers a project server shadows and adds the project server tools (`ProjectMcpManager.toolsFor`) to the
+//   candidates before the mode filter, so they pass the same preferences, mode, restriction and approval as registry
+//   tools (preferences apply by name; a registry tool keeps a name an extra tool would take).
 import type { ToolCallContext, ToolDefinition, ToolResultOutput, ToolWorkspace } from '@harness-forge/plugin-sdk'
 import type { AgentToolName, HarnessUIMessage, McpServer, ToolMode } from '@harness-forge/shared'
 import type { JSONValue, Tool, ToolExecutionOptions, ToolSet } from 'ai'
@@ -47,6 +58,7 @@ import type { RegisteredTool, Registry } from '../registry/types.ts'
 import type { WorkspaceRunScopeInit } from '../workspace/run-scope.ts'
 import type { AgentRunScope } from './agent-scope.ts'
 import type { ApprovalTool } from './approval.ts'
+import type { ToolHooks } from './hooks.ts'
 import type { ModeTool, ToolModeResult } from './modes.ts'
 import { Buffer } from 'node:buffer'
 import { LIMITS, matchToolAllowlist } from '@harness-forge/shared'
@@ -157,6 +169,11 @@ export interface ToolWrapContext {
   callIdPrefix?: string
   /** Warnings of the journal step (default: none). */
   logger?: Logger
+  /**
+   * The command hooks of the run (Phase 11, `hooks.ts`): the `PreToolUse` rewrite (`updatedInput`) and `PostToolUse`
+   * (see the module comment). Null or absent = no hooks.
+   */
+  hooks?: Pick<ToolHooks, 'updatedInput' | 'postToolUse'> | null
 }
 
 /** The builtin plugin of the workspace tools (`builtin-plugins/core-workspace`). */
@@ -241,12 +258,43 @@ function callIdOf(context: ToolWrapContext, options: Pick<ToolExecutionOptions<u
   return `${context.callIdPrefix ?? ''}${options.toolCallId}`
 }
 
-/** Steps 1 and 3 before the plugin's code runs: the owner is active, `tool.before`, the input re-validated. */
+/** The serialized size of a hook's rewritten input in bytes, or null when it is not JSON-serializable. */
+function rewrittenInputBytes(input: unknown): number | null {
+  try {
+    const json = JSON.stringify(input)
+    return json === undefined ? null : Buffer.byteLength(json, 'utf8')
+  }
+  catch {
+    return null
+  }
+}
+
+/**
+ * The input a `PreToolUse` hook rewrote for the call (Phase 11), or the model's input: a rewrite that is not
+ * JSON-serializable or larger than `LIMITS.hookUpdatedInputBytes` fails the call (fail closed).
+ */
+function hookInput(context: ToolWrapContext, toolCallId: string, input: unknown): { input: unknown, rewritten: boolean } {
+  const rewrite = context.hooks?.updatedInput(toolCallId) ?? null
+  if (rewrite === null)
+    return { input, rewritten: false }
+  const bytes = rewrittenInputBytes(rewrite.input)
+  if (bytes === null)
+    throw new ToolFailure('The input changed by a hook is not valid JSON.')
+  if (bytes > LIMITS.hookUpdatedInputBytes)
+    throw new ToolFailure(`The input changed by a hook is larger than ${LIMITS.hookUpdatedInputBytes / 1024} KB.`)
+  return { input: rewrite.input, rewritten: true }
+}
+
+/**
+ * Steps 1 and 3 before the plugin's code runs: the owner is active, the input a `PreToolUse` hook rewrote (Phase 11),
+ * `tool.before`, the input re-validated.
+ */
 async function prepareInput(registered: WrappedTool, context: ToolWrapContext, base: CallBase, input: unknown): Promise<unknown> {
   const { pluginId, definition } = registered
   if (!context.plugins.isActive(pluginId))
     throw new ToolFailure(`Tool unavailable: the plugin "${pluginId}" is not active.`)
-  const before = { input }
+  const hooked = hookInput(context, base.toolCallId, input)
+  const before = { input: hooked.input }
   try {
     await context.registry.hooks.run('tool.before', base, before)
   }
@@ -257,9 +305,19 @@ async function prepareInput(registered: WrappedTool, context: ToolWrapContext, b
   if (schema.validate === undefined)
     return before.input
   const result = await schema.validate(before.input)
-  if (!result.success)
-    throw new ToolFailure(`The tool input is invalid: ${failureMessage(result.error)}`)
+  if (!result.success) {
+    const prefix = hooked.rewritten ? 'The input changed by a hook is invalid' : 'The tool input is invalid'
+    throw new ToolFailure(`${prefix}: ${failureMessage(result.error)}`)
+  }
   return result.value
+}
+
+/** `PostToolUse` of a successful call (Phase 11; never rejects). */
+async function postToolUse(context: ToolWrapContext, base: CallBase, input: unknown, output: unknown, signal: AbortSignal): Promise<void> {
+  const hooks = context.hooks ?? null
+  if (hooks === null)
+    return
+  await hooks.postToolUse({ toolName: base.tool, toolCallId: base.toolCallId, input, output }, signal)
 }
 
 /** The `ToolCallContext` of one call, with the run scope and the agent scope bound to it (server-internal). */
@@ -328,6 +386,7 @@ async function runToolCall(registered: WrappedTool, context: ToolWrapContext, in
 
   const after = { output }
   await context.registry.hooks.run('tool.after', { ...base, input: finalInput }, after)
+  await postToolUse(context, base, finalInput, after.output, signal)
   return capToolOutput(after.output)
 }
 
@@ -471,6 +530,7 @@ async function* streamToolCall(registered: WrappedTool, context: ToolWrapContext
       throw settledError(settled.error, signal)
     const after = { output: settled.last }
     await context.registry.hooks.run('tool.after', { ...base, input: finalInput }, after)
+    await postToolUse(context, base, finalInput, after.output, signal)
     yield capToolOutput(after.output)
   }
   finally {
@@ -554,6 +614,23 @@ export interface ToolAssemblyInput {
    * get `skill`).
    */
   skillsAvailable?: boolean
+  /**
+   * The command hooks of the run (Phase 11, `hooks.ts`): passed to every wrapped tool (`ToolWrapContext.hooks`). Null or
+   * absent = none.
+   */
+  hooks?: Pick<ToolHooks, 'updatedInput' | 'postToolUse'> | null
+  /**
+   * Tools of the run that are not in the registry (Phase 11, ADR-050: the project MCP server tools of
+   * `ProjectMcpManager.toolsFor`): added to the candidates before the mode filter (the same preferences, workspace,
+   * owner and connection checks as registry tools; a name the registry already offers is kept from the registry).
+   * Absent = none.
+   */
+  extraTools?: readonly RegisteredTool[]
+  /**
+   * Global MCP server ids a project server replaces in this run (Phase 11, `ProjectMcpTools.shadowed`): their registry
+   * tools are not offered. Absent = none.
+   */
+  shadowedMcpServers?: ReadonlySet<string>
 }
 
 export interface AssembledTools {
@@ -653,6 +730,27 @@ export function toAiTool(registered: RegisteredTool, context: ToolWrapContext): 
   return tool(base as Tool<unknown, unknown>) as Tool
 }
 
+/**
+ * The registry tools without those of the `shadowed` global MCP servers, followed by the `extra` tools (Phase 11:
+ * the project MCP server tools) whose names the remaining registry tools do not take. Without extras or shadowed
+ * servers: `registered` as it is.
+ */
+export function withExtraTools(registered: readonly RegisteredTool[], extra: readonly RegisteredTool[], shadowed: ReadonlySet<string> | null): RegisteredTool[] {
+  if (extra.length === 0 && (shadowed === null || shadowed.size === 0))
+    return [...registered]
+  const kept = shadowed === null || shadowed.size === 0
+    ? [...registered]
+    : registered.filter(entry => entry.mcpServerId === null || !shadowed.has(entry.mcpServerId))
+  const names = new Set(kept.map(entry => entry.definition.name))
+  for (const entry of extra) {
+    if (names.has(entry.definition.name))
+      continue
+    names.add(entry.definition.name)
+    kept.push(entry)
+  }
+  return kept
+}
+
 /** The tools of a run (see the header comment for the filters). */
 export async function assembleTools(input: ToolAssemblyInput): Promise<AssembledTools> {
   const prefs = await readPrefs(input)
@@ -664,12 +762,13 @@ export async function assembleTools(input: ToolAssemblyInput): Promise<Assembled
 
   let registered: RegisteredTool[]
   try {
-    registered = input.registry.tools.list()
+    registered = withExtraTools(input.registry.tools.list(), input.extraTools ?? [], input.shadowedMcpServers ?? null)
   }
   catch (error) {
     input.logger.warn('cannot list the registered tools', { err: error })
     return empty
   }
+  const extraServers = new Set((input.extraTools ?? []).flatMap(entry => entry.mcpServerId === null ? [] : [entry.mcpServerId]))
   const candidates = registered.filter((entry) => {
     const pref = prefs.get(entry.definition.name)
     if (pref?.enabled === false || pref?.override === 'deny')
@@ -679,10 +778,11 @@ export async function assembleTools(input: ToolAssemblyInput): Promise<Assembled
     return input.plugins.isActive(entry.pluginId)
   })
   let usable = candidates
-  if (candidates.some(entry => entry.mcpServerId !== null)) {
+  // The global MCP manager knows the connection state of registry MCP tools; project server tools come connected.
+  if (candidates.some(entry => entry.mcpServerId !== null && !extraServers.has(entry.mcpServerId))) {
     const connected = await connectedMcpServers(input)
     if (connected !== null)
-      usable = candidates.filter(entry => entry.mcpServerId === null || connected.has(entry.mcpServerId))
+      usable = candidates.filter(entry => entry.mcpServerId === null || extraServers.has(entry.mcpServerId) || connected.has(entry.mcpServerId))
   }
   const moded = restrictTools(
     applyToolMode(usable, { toolMode: input.toolMode, continuation: input.continuation ?? null }),
@@ -705,6 +805,7 @@ export async function assembleTools(input: ToolAssemblyInput): Promise<Assembled
     agent: input.agent ?? null,
     ...(input.callIdPrefix === undefined ? {} : { callIdPrefix: input.callIdPrefix }),
     logger: input.logger,
+    hooks: input.hooks ?? null,
   }
   const tools: ToolSet = {}
   const byName = new Map<string, ApprovalTool>()

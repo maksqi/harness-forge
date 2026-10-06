@@ -1,10 +1,12 @@
 import type { Mock } from 'vitest'
+import { createServerEvent } from '@harness-forge/shared'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { h, nextTick } from 'vue'
 import { SidebarProvider } from '@/components/ui/sidebar'
 import { TooltipProvider } from '@/components/ui/tooltip'
+import { useProjectTrustStore } from '~/stores/project-trust'
 import { useProjectsStore } from '~/stores/projects'
 import { useUiStore } from '~/stores/ui'
 import { testIds } from '~/utils/testids'
@@ -209,6 +211,20 @@ describe('chatHeader', () => {
     const order = [...wrapper.get(`[data-testid="${testIds.chatHeader}"]`).element.querySelectorAll('[data-testid]')].map(node => node.getAttribute('data-testid'))
     expect(order.indexOf(testIds.chatProjectChip)).toBeLessThan(order.indexOf(testIds.changesToggle))
     expect(order.indexOf(testIds.changesToggle)).toBeLessThan(order.indexOf(testIds.chatMenuTrigger))
+  })
+})
+
+describe('chatHeader: project trust chip (Phase 11, P11-0b mount)', () => {
+  it('shows the trust chip right after the project chip while the project has items to review', async () => {
+    const wrapper = mountHeader({ title: 'Chat', projectId: projectId(1) })
+    expect(wrapper.find(`[data-testid="${testIds.projectTrustChip}"]`).exists()).toBe(false)
+    useProjectTrustStore().applyEvent(createServerEvent('project-trust.changed', { projectId: projectId(1), pending: 2 }, 1))
+    await nextTick()
+    expect(wrapper.get(`[data-testid="${testIds.projectTrustChip}"]`).attributes('data-count')).toBe('2')
+    const order = [...wrapper.get(`[data-testid="${testIds.chatHeader}"]`).element.querySelectorAll('[data-testid]')].map(node => node.getAttribute('data-testid'))
+    expect(order.indexOf(testIds.chatProjectChip)).toBeLessThan(order.indexOf(testIds.projectTrustChip))
+    expect(order.indexOf(testIds.projectTrustChip)).toBeLessThan(order.indexOf(testIds.chatMenuTrigger))
+    expect(mountHeader({ title: 'Chat', projectId: null }).find(`[data-testid="${testIds.projectTrustChip}"]`).exists()).toBe(false)
   })
 })
 

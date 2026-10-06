@@ -27,10 +27,10 @@ describe('gET /api/commands', () => {
     expect(response.headers.get('cache-control')).toBe('no-store')
     const body = listResponseSchema(commandSummarySchema).parse(await response.json())
     expect(body.items.map(item => item.name)).toEqual([...BUILTIN_COMMANDS.map(command => command.name), 'compact'].sort())
-    expect(body.items[0]).toEqual({ name: body.items[0]!.name, description: expect.any(String), source: 'plugin', pluginId: 'core-commands' })
+    expect(body.items[0]).toEqual({ name: body.items[0]!.name, kind: 'command', description: expect.any(String), source: 'plugin', pluginId: 'core-commands' })
     // Phase 9 (ADR-040): `/compact [focus]` is run by the server; the agent tools' plugin owns it.
     expect(body.items.filter(item => item.name === 'compact')).toEqual([
-      { name: 'compact', description: 'Summarize the conversation to free up context', source: 'harness', pluginId: 'core-agent' },
+      { name: 'compact', kind: 'command', description: 'Summarize the conversation to free up context', source: 'harness', pluginId: 'core-agent' },
     ])
   })
 
@@ -38,7 +38,7 @@ describe('gET /api/commands', () => {
     const registration = t.deps.registry.commands.register('mock', { name: 'aaa-first', description: 'First', template: 'x {{input}}' })
     try {
       const { items } = await (await t.request('/api/commands')).json() as { items: { name: string, pluginId: string }[] }
-      expect(items[0]).toEqual({ name: 'aaa-first', description: 'First', source: 'plugin', pluginId: 'mock' })
+      expect(items[0]).toEqual({ name: 'aaa-first', kind: 'command', description: 'First', source: 'plugin', pluginId: 'mock' })
     }
     finally {
       registration.dispose()
@@ -111,10 +111,10 @@ describe('gET /api/commands?projectId: command files and personal commands (W10.
   it('lists the project\'s effective commands with their fields over the personal and plugin commands, sorted by name', async () => {
     const items = await list(`?projectId=${projectA}`)
     expect(items.map(item => item.name)).toEqual([...items.map(item => item.name)].sort())
-    expect(items.find(item => item.name === 'review')).toEqual({ name: 'review', description: 'The review command.', source: 'project', argumentHint: '<files>', modelRef: 'mock:agents' })
+    expect(items.find(item => item.name === 'review')).toEqual({ name: 'review', kind: 'command', description: 'The review command.', source: 'project', argumentHint: '<files>', modelRef: 'mock:agents' })
     expect(items.filter(item => item.name === 'review')).toHaveLength(1)
-    expect(items.find(item => item.name === 'deploy')).toEqual({ name: 'deploy', description: 'The deploy command.', source: 'project', namespace: 'ops' })
-    expect(items.find(item => item.name === 'standup')).toEqual({ name: 'standup', description: 'My standup notes.', source: 'user' })
+    expect(items.find(item => item.name === 'deploy')).toEqual({ name: 'deploy', kind: 'command', description: 'The deploy command.', source: 'project', namespace: 'ops' })
+    expect(items.find(item => item.name === 'standup')).toEqual({ name: 'standup', kind: 'command', description: 'My standup notes.', source: 'user' })
     expect(items.find(item => item.name === 'compact')).toMatchObject({ source: 'harness', pluginId: 'core-agent' })
     expect(items.find(item => item.name === 'summarize')).toMatchObject({ source: 'plugin', pluginId: 'core-commands' })
     // Invalid and turned-off definitions are not usable commands.

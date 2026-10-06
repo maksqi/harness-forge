@@ -57,6 +57,13 @@
       "when": 1791132881933,
       "tag": "0007_customizations",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1791252218750,
+      "tag": "0008_hooks_trust",
+      "breakpoints": true
     }
   ]
 }

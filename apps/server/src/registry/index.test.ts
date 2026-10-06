@@ -361,3 +361,35 @@ describe('contributions, change notifications and owner removal', () => {
     expect(seen).toEqual(['first'])
   })
 })
+
+describe('phase 11 registries (P11-0b: output styles and command hooks, empty until W11.7)', () => {
+  it('styles and hookCommands list nothing, refuse registrations with not_implemented and are subscribable', () => {
+    const { registry } = harness()
+    const styleChanges: RegistryChange[] = []
+    const hookChanges: RegistryChange[] = []
+    const all: RegistryChange[] = []
+    const styleSubscription = registry.styles.onChange(change => styleChanges.push(change))
+    const hookSubscription = registry.hookCommands.onChange(change => hookChanges.push(change))
+    registry.onChange(change => all.push(change))
+
+    expect(registry.styles.list()).toEqual([])
+    expect(registry.styles.get('terse')).toBeUndefined()
+    expect(registry.styles.owner('terse')).toBeUndefined()
+    expect(() => registry.styles.register('acme', { name: 'terse', description: 'Short answers.', content: 'Be brief.' })).toThrow(expect.objectContaining({ code: 'not_implemented' }))
+    expect(registry.hookCommands.list()).toEqual([])
+    expect(registry.hookCommands.get('acme')).toBeUndefined()
+    expect(() => registry.hookCommands.register('acme', { root: '/srv/plugins/acme', hooks: { Stop: [{ hooks: [{ type: 'command', command: 'sh stop.sh' }] }] } }))
+      .toThrow(expect.objectContaining({ code: 'not_implemented' }))
+
+    // The kind-filtered listeners see only their own kind.
+    registry.tools.register('acme', tool('acme_tool'))
+    expect(all.map(change => change.kind)).toEqual(['tool'])
+    expect(styleChanges).toEqual([])
+    expect(hookChanges).toEqual([])
+    styleSubscription.dispose()
+    hookSubscription.dispose()
+
+    expect(registry.contributions('acme')).toMatchObject({ commandHooks: 0, outputStyles: [] })
+    expect(registry.removeOwner('acme')).toBe(1)
+  })
+})

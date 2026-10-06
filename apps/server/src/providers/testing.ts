@@ -176,6 +176,9 @@ export function createFakeRegistry(): FakeRegistry {
     // Phase 10 (plugin API 1.4.0): no plugin agents or skills in this fake (registrations are accepted and ignored).
     agents: { register: () => disposable(() => {}), get: () => undefined, list: () => [], owner: () => undefined, onChange: () => disposable(() => {}) },
     skills: { register: () => disposable(() => {}), get: () => undefined, list: () => [], owner: () => undefined, onChange: () => disposable(() => {}) },
+    // Phase 11 (plugin API 1.5.0): no plugin output styles or command hooks in this fake (registrations are ignored).
+    styles: { register: () => disposable(() => {}), get: () => undefined, list: () => [], owner: () => undefined, onChange: () => disposable(() => {}) },
+    hookCommands: { register: () => disposable(() => {}), get: () => undefined, list: () => [], onChange: () => disposable(() => {}) },
     onChange: (listener) => {
       listeners.add(listener)
       return disposable(() => listeners.delete(listener))

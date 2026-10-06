@@ -11,8 +11,9 @@ import { defineComponent, h, shallowRef } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { NuxtLinkStub } from '~/components/plugins/list/testing'
 import { useCustomizationsStore } from '~/stores/customizations'
+import { useHooksStore } from '~/stores/hooks'
 import { testIds } from '~/utils/testids'
-import { customizationEntry, customizationList, pluginDetail } from '~/utils/testing/fixtures'
+import { customizationEntry, customizationList, hookEntry, hookList, pluginDetail, styleEntry } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import PluginContributions from './PluginContributions.vue'
 
@@ -166,5 +167,29 @@ describe('pluginContributions: agents and skills (Phase 10)', () => {
     const wrapper = mountContributions({ ...none, agents: ['reviewer'] })
     await flushPromises()
     expect(wrapper.get('[data-slot="plugin-customization-shadowed"]').attributes('aria-description')).toBe('Not used: your personal agent wins.')
+  })
+})
+
+describe('pluginContributions: hooks and output styles (Phase 11, P11-0b mounts)', () => {
+  it('lists the code hooks and the command hooks of the global hook listing in PluginHookList', async () => {
+    api.customizations.list.mockResolvedValue(customizationList({ project: null, items: [] }))
+    const command = hookEntry({ key: 'plugin:agent-pack:0', source: 'plugin', id: undefined, pluginId: 'agent-pack', event: 'PreToolUse', matcher: 'Bash', command: 'sh hooks/guard.sh' })
+    const other = hookEntry({ key: 'plugin:db-tools:0', source: 'plugin', id: undefined, pluginId: 'db-tools' })
+    useHooksStore().lists = { '': hookList({ items: [hookEntry(), command, other], project: undefined }) }
+    const wrapper = mountContributions({ ...none, hooks: ['prompt.submit'], commandHooks: 1 })
+    await flushPromises()
+    const list = wrapper.get(`[data-testid="${testIds.pluginHooks}"]`)
+    expect(list.attributes('data-count')).toBe('2')
+    expect(list.findAll(`[data-testid="${testIds.pluginHook}"]`).map(row => row.attributes('data-kind'))).toEqual(['command', 'code'])
+  })
+
+  it('lists the contributed output styles in a style section', async () => {
+    useCustomizationsStore().catalogs = { '': customizationList({ project: null, items: [styleEntry({ source: 'plugin', pluginId: 'agent-pack', path: undefined })] }) }
+    api.customizations.list.mockResolvedValue(useCustomizationsStore().catalogs['']!)
+    const wrapper = mountContributions({ ...none, outputStyles: ['terse', 'brief'] })
+    await flushPromises()
+    const rows = wrapper.get(`[data-testid="${testIds.pluginCustomizations}"][data-kind="style"]`).findAll(`[data-testid="${testIds.pluginCustomization}"]`)
+    expect(rows.map(row => row.attributes('data-name'))).toEqual(['brief', 'terse'])
+    expect(wrapper.find(`[data-testid="${testIds.pluginHooks}"]`).exists()).toBe(false)
   })
 })

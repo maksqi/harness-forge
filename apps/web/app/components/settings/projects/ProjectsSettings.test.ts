@@ -6,7 +6,7 @@
 import type { VueWrapper } from '@vue/test-utils'
 import type { ComputedRef } from 'vue'
 import type { MockApi } from '~/utils/testing/mock-api'
-import { HarnessError } from '@harness-forge/shared'
+import { createServerEvent, HarnessError } from '@harness-forge/shared'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, disposePinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -14,6 +14,7 @@ import { defineComponent, h, nextTick, reactive } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import ProjectsPage from '~/pages/settings/projects.vue'
 import { useChatsStore } from '~/stores/chats'
+import { useProjectTrustStore } from '~/stores/project-trust'
 import { useShellRulesStore } from '~/stores/shell-rules'
 import { testIds } from '~/utils/testids'
 import { chatId, chatSummary, projectId, projectSummary, shellRule, shellRuleId } from '~/utils/testing/fixtures'
@@ -245,6 +246,9 @@ describe('projectsSettings', () => {
       testIds.projectInstructions,
       testIds.projectAllowlist,
       testIds.projectCustomizations,
+      // Phase 11 (docs/UI.md 9.10): the project trust review and the project MCP servers.
+      testIds.projectTrust,
+      testIds.projectMcp,
       testIds.projectDelete,
     ])
     // 40px touch targets on coarse pointers.
@@ -333,6 +337,28 @@ describe('projectsSettings', () => {
     await flushPromises()
     expect(mocks.toast.error).toHaveBeenCalledWith(expect.any(String), { description: 'Project not found.' })
     expect(row(projectId(1)).textContent).toContain('website')
+  })
+
+  it('opens the project trust review of the row (Phase 11)', async () => {
+    await mountSettings()
+    await chooseFromMenu(projectId(1), testIds.projectTrust)
+    expect(byTestId(testIds.projectTrustDialog)?.textContent).toContain('Review website')
+  })
+
+  it('opens the project MCP servers of the row (Phase 11)', async () => {
+    await mountSettings()
+    await chooseFromMenu(projectId(1), testIds.projectMcp)
+    expect(byTestId(testIds.projectMcpDialog)?.textContent).toContain('MCP servers in website')
+  })
+
+  it('shows the "{n} to review" badge of a project with pending items (Phase 11)', async () => {
+    await mountSettings()
+    expect(byTestId(testIds.projectTrustPending, row(projectId(1)))).toBeNull()
+    useProjectTrustStore().applyEvent(createServerEvent('project-trust.changed', { projectId: projectId(1), pending: 3 }, 1))
+    await nextTick()
+    const badge = byTestId(testIds.projectTrustPending, row(projectId(1)))!
+    expect(badge.dataset.count).toBe('3')
+    expect(badge.textContent?.trim()).toBe('3 to review')
   })
 
   it('opens the instructions dialog of the row', async () => {

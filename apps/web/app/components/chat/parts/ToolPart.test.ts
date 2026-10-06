@@ -2,13 +2,14 @@ import type { ToolPartLike } from '../chat-format'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { h } from 'vue'
+import { h, ref } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { usePluginsStore } from '~/stores/plugins'
 import { testIds } from '~/utils/testids'
-import { planApprovalPart, pluginSummary, shellOutput, skillOutput, skillPart, taskPart, todoItem, todoWritePart, toolSummary } from '~/utils/testing/fixtures'
+import { hookData, hookRecordId, planApprovalPart, pluginSummary, shellOutput, skillOutput, skillPart, taskPart, todoItem, todoWritePart, toolSummary } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import PlanApprovalCard from '../agent/PlanApprovalCard.vue'
+import { HOOK_ACTIVITY } from '../chat-context'
 import { TOOL_BODY_PREVIEW_CHARS } from '../chat-format'
 import { TOOL_APPROVAL_CONTEXT } from './tool-approval-context'
 import ToolApprovalCard from './ToolApprovalCard.vue'
@@ -813,5 +814,39 @@ describe('toolPart: skills and plan files (Phase 10)', () => {
     const v15 = mountPart(planPart({ approved: true, mode: 'ask' }), false)
     await row(v15).get('button').trigger('click')
     expect(v15.find(`[data-testid="${testIds.planFile}"]`).exists()).toBe(false)
+  })
+})
+
+describe('toolPart: hooks (Phase 11, P11-0b seams)', () => {
+  it('shows the badge of the call\'s PreToolUse record and its notes in the body', async () => {
+    const denied = part({ state: 'output-denied', approval: { id: 'appr_1', approved: false } } as Partial<ToolPartLike> & Pick<ToolPartLike, 'state'>)
+    const wrapper = mount({
+      render: () => h(TooltipProvider, null, { default: () => h(ToolPart, { part: denied, streaming: false, hooks: [hookData({ toolCallId: 'call_1' })] }) }),
+    }, { attachTo: document.body })
+    expect(row(wrapper).get(`[data-testid="${testIds.toolRowHook}"]`).attributes('data-value')).toBe('denied')
+    await row(wrapper).get('button').trigger('click')
+    await flushPromises()
+    expect(wrapper.get(`[data-testid="${testIds.toolRowOutput}"]`).get(`[data-testid="${testIds.hookNote}"]`).attributes('data-variant')).toBe('tool')
+  })
+
+  it('passes the reason of an asking hook to the approval card', () => {
+    const asked = hookData({ id: hookRecordId(2), toolCallId: 'call_1', outcome: 'asked', reason: 'Touches production.' })
+    const wrapper = mount({
+      render: () => h(TooltipProvider, null, { default: () => h(ToolPart, { part: part({ state: 'approval-requested', approval: { id: 'appr_1' } }), streaming: true, hooks: [asked] }) }),
+    }, { attachTo: document.body })
+    expect(wrapper.getComponent(ToolApprovalCard).props('hookReason')).toBe('Touches production.')
+    expect(wrapper.get(`[data-testid="${testIds.toolApprovalHook}"]`).text()).toContain('Touches production.')
+  })
+
+  it('shows "Running hook…" while the hooks of this call run (HOOK_ACTIVITY), and no badge without records', async () => {
+    const activity = ref<{ event: 'PreToolUse', toolCallId: string | null } | null>({ event: 'PreToolUse', toolCallId: 'call_1' })
+    const wrapper = mount({
+      render: () => h(TooltipProvider, null, { default: () => h(ToolPart, { part: part({ state: 'input-available' }), streaming: true }) }),
+    }, { attachTo: document.body, global: { provide: { [HOOK_ACTIVITY as symbol]: activity } } })
+    expect(row(wrapper).get('[data-slot="running-hook"]').text()).toBe('Running hook…')
+    expect(row(wrapper).find(`[data-testid="${testIds.toolRowHook}"]`).exists()).toBe(false)
+    activity.value = { event: 'PreToolUse', toolCallId: 'call_other' }
+    await flushPromises()
+    expect(row(wrapper).find('[data-slot="running-hook"]').exists()).toBe(false)
   })
 })

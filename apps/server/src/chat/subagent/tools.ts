@@ -23,12 +23,16 @@
 // `user-approval` mapped to a denial (`SUBAGENT_APPROVAL_DENIED_TEXT`); the hooks see the prefixed call id.
 // The child's scope is a shallow copy of the parent's with its own `shellCwd` object: a child's `cd` never moves the
 // parent's sticky folder (the journal, the rules and the message id stay the parent's).
+// Phase 11 (C37, ADR-048): a child with hooks (`ChildToolsInput.hooks`, `ChildHooks` of `../hooks.ts`) runs `PreToolUse`
+// in its approval function (an `ask` becomes the sub-agent denial above, never a card) and the `PreToolUse` rewrite and
+// `PostToolUse` in its tool wrapper, with the prefixed call ids; nothing of it is stored.
 import type { TaskType, ToolMode } from '@harness-forge/shared'
 import type { ToolApprovalStatus, ToolSet } from 'ai'
 import type { ResolvedModel } from '../../providers/types.ts'
 import type { OpenWorkspace } from '../../services/projects/types.ts'
 import type { WorkspaceRunScopeInit } from '../../workspace/run-scope.ts'
 import type { ApprovalTool } from '../approval.ts'
+import type { ToolHooks } from '../hooks.ts'
 import type { ChildSession } from './host.ts'
 import { GENERATE_IMAGE_TOOL_NAME, matchToolAllowlist } from '@harness-forge/shared'
 import { CORE_AGENT_PLUGIN_ID } from '../../builtin-plugins/core-agent/index.ts'
@@ -66,6 +70,11 @@ export interface ChildToolsInput {
    * (`matchToolAllowlist`). Null or absent = no restriction (the builtins, an agent without `tools`); `[]` = no tool.
    */
   readonly allowlist?: readonly string[] | null
+  /**
+   * Phase 11 (ADR-048): the child's hooks (`ChildSession.hooks.forChild(childCallIdPrefix(parentCallId))`); null or
+   * absent = none.
+   */
+  readonly hooks?: ToolHooks | null
 }
 
 export interface ChildTools {
@@ -141,6 +150,7 @@ export async function childTools(input: ChildToolsInput): Promise<ChildTools> {
     continuation: null,
     agent: null,
     callIdPrefix,
+    hooks: input.hooks ?? null,
   })
 
   const active = assembled.activeTools === undefined ? null : new Set(assembled.activeTools)
@@ -171,6 +181,7 @@ export async function childTools(input: ChildToolsInput): Promise<ChildTools> {
     logger,
     workspace: assembled.workspace,
     scope: assembled.scope,
+    hooks: input.hooks ?? null,
   })
   const toolApproval: ChildToolApproval = async options => denyUserApproval(await approval({
     ...options,

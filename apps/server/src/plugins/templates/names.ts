@@ -1,8 +1,8 @@
 // Contribution names of a scaffolded plugin (W3.4-T1). Tool names, command names and MCP server ids are global, so the
 // scaffold picks names nobody registered yet: tools and providers are namespaced by the plugin id, commands keep short
 // names (`/tldr`) with a numeric suffix when taken, MCP servers use the plugin id (so its length is limited to 32).
-// Reserved command names count as taken: the client-only commands (`/remember` since Phase 10) and the harness commands
-// (`/compact`, Phase 9).
+// Reserved command names count as taken: the client-only commands (`/remember` since Phase 10, `/output-style` since
+// Phase 11) and the harness commands (`/compact`, Phase 9).
 import type { PluginTemplateId } from '@harness-forge/shared'
 import {
   COMMAND_NAME_PATTERN,
@@ -61,7 +61,10 @@ function unavailable(what: string): HarnessError {
   })
 }
 
-/** A command name no plugin may register: a client-only command (`/new`, `/remember`, ...) or a harness command (`/compact`). */
+/**
+ * A command name no plugin may register: a client-only command (`/new`, `/remember`, `/output-style`, ...) or a harness
+ * command (`/compact`).
+ */
 export function isReservedCommandName(name: string): boolean {
   return isClientCommand(name) || isHarnessCommand(name)
 }

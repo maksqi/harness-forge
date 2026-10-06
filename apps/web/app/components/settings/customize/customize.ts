@@ -4,6 +4,11 @@
 // and their copy, the import notes, free names for Duplicate, and the copy per kind. Definition files are parsed and
 // formatted only by the shared `parseDefinition` / `formatDefinition`. No Vue, no stores.
 // Signatures frozen from Gate P10-0b (C33); W10.8 owns the copy and the details in P10-A.
+// Phase 11 (ADR-048, ADR-051, ADR-052; C39 declares, W11.8 implements; frozen from Gate P11-0b): the tabs are the four
+// kinds plus the hooks (`CustomizeTab`, `tabOf`, `?tab=agents|commands|skills|output-styles|hooks`; the styles tab's
+// value is its folder name, so `kindFolders` keeps matching); the draft gains the style's `keepCodingInstructions` and
+// the skill's `userInvocable` / `modelInvocable` (the skill reuses `argumentHint`); the row menu gains `review` (a
+// project command whose `!` lines wait for approval) and `set-default` (Use by default, a style).
 import type {
   CommandSummary,
   Customization,
@@ -18,6 +23,7 @@ import {
   AGENT_NAME_PATTERN,
   CLIENT_COMMANDS,
   COMMAND_NAME_PATTERN,
+  CUSTOMIZATION_KINDS,
   DEFINITION_LIMITS,
   formatDefinition,
   isBuiltinOutputStyle,
@@ -28,8 +34,11 @@ import {
 } from '@harness-forge/shared'
 import { CLIENT_COMMAND_DESCRIPTIONS } from '~/components/chat/composer/slash-commands'
 
-/** The actions of a row's menu (docs/UI.md 9.12). */
-export type CustomizationAction = 'edit' | 'view' | 'duplicate' | 'export' | 'toggle' | 'delete' | 'open-plugin'
+/**
+ * The actions of a row's menu (docs/UI.md 9.12); + Phase 11 (9.13): `review` (Review…, a project command whose `!` lines
+ * wait for approval) and `set-default` (Use by default, an output style).
+ */
+export type CustomizationAction = 'edit' | 'view' | 'duplicate' | 'export' | 'toggle' | 'delete' | 'open-plugin' | 'review' | 'set-default'
 
 /** The editor's structured fields; `formatDefinition` turns them into the content that is saved. */
 export interface CustomizationDraft {
@@ -40,10 +49,16 @@ export interface CustomizationDraft {
   tools: string[] | null
   /** A model ref, 'inherit' (agents) or null. */
   model: string | null
-  /** Commands. */
+  /** Commands; + Phase 11: user-invocable skills too. */
   argumentHint: string | null
   /** Instructions / prompt / skill content. */
   body: string
+  /** + Phase 11 (styles, ADR-051): `keep-coding-instructions`; absent = off. */
+  keepCodingInstructions?: boolean
+  /** + Phase 11 (skills, ADR-052): `user-invocable` ("Show in the slash menu"); absent = on. */
+  userInvocable?: boolean
+  /** + Phase 11 (skills, ADR-052): not `disable-model-invocation` (off = "Only when you run it"); absent = on. */
+  modelInvocable?: boolean
 }
 
 /** The `?tab=` value of each kind (Phase 11: output styles, ADR-051). */
@@ -54,7 +69,22 @@ export const CUSTOMIZE_TABS: Readonly<Record<CustomizationKind, 'agents' | 'comm
   style: 'output-styles',
 }
 
-/** The kind of a `?tab=` value: `agents` when it is missing or unknown. */
+/** + Phase 11: a tab of the Customize page: a definition kind, or the hooks (docs/UI.md 9.13). */
+export type CustomizeTab = CustomizationKind | 'hook'
+
+/** + Phase 11: the tabs in display order (Agents · Commands · Skills · Output styles · Hooks). */
+export const CUSTOMIZE_TAB_ORDER: readonly CustomizeTab[] = [...CUSTOMIZATION_KINDS, 'hook']
+
+/** + Phase 11: the `?tab=` value of each tab. */
+export const CUSTOMIZE_TAB_VALUES: Readonly<Record<CustomizeTab, string>> = { ...CUSTOMIZE_TABS, hook: 'hooks' }
+
+/** + Phase 11: the tab of a `?tab=` value: `agent` when it is missing or unknown. */
+export function tabOf(tab: unknown): CustomizeTab {
+  const value = Array.isArray(tab) ? tab[0] : tab
+  return CUSTOMIZE_TAB_ORDER.find(item => CUSTOMIZE_TAB_VALUES[item] === value) ?? 'agent'
+}
+
+/** The kind of a `?tab=` value: `agents` when it is missing or unknown (the hooks tab included). */
 export function kindOfTab(tab: unknown): CustomizationKind {
   const value = Array.isArray(tab) ? tab[0] : tab
   const found = (Object.keys(CUSTOMIZE_TABS) as CustomizationKind[]).find(kind => CUSTOMIZE_TABS[kind] === value)
@@ -273,11 +303,31 @@ export function draftFromDefinition(definition: ParsedDefinition): Customization
     }
     case 'skill': {
       const fields = definition.fields
-      return { kind: 'skill', name: fields.name, description: fields.description, tools: null, model: null, argumentHint: null, body: fields.content }
+      return {
+        kind: 'skill',
+        name: fields.name,
+        description: fields.description,
+        tools: null,
+        model: null,
+        argumentHint: fields.argumentHint ?? null,
+        body: fields.content,
+        // + Phase 11: present only when not the default (like the parsed fields).
+        ...(fields.userInvocable === undefined ? {} : { userInvocable: fields.userInvocable }),
+        ...(fields.modelInvocable === undefined ? {} : { modelInvocable: fields.modelInvocable }),
+      }
     }
     case 'style': {
       const fields = definition.fields
-      return { kind: 'style', name: fields.name, description: fields.description, tools: null, model: null, argumentHint: null, body: fields.content }
+      return {
+        kind: 'style',
+        name: fields.name,
+        description: fields.description,
+        tools: null,
+        model: null,
+        argumentHint: null,
+        body: fields.content,
+        keepCodingInstructions: fields.keepCodingInstructions,
+      }
     }
   }
 }
@@ -379,10 +429,23 @@ export function draftDefinition(draft: CustomizationDraft): ParsedDefinition {
           body: draft.body,
         },
       }
-    case 'skill':
-      return { kind: 'skill', fields: { name, description, content: draft.body } }
+    case 'skill': {
+      // + Phase 11: the skill keys only when they are not the default (like the parser's fields).
+      const hint = draft.argumentHint?.trim() ?? ''
+      return {
+        kind: 'skill',
+        fields: {
+          name,
+          description,
+          content: draft.body,
+          ...(draft.userInvocable === false ? { userInvocable: false } : {}),
+          ...(draft.modelInvocable === false ? { modelInvocable: false } : {}),
+          ...(hint === '' ? {} : { argumentHint: hint }),
+        },
+      }
+    }
     case 'style':
-      return { kind: 'style', fields: { name, label: name, description, keepCodingInstructions: false, content: draft.body } }
+      return { kind: 'style', fields: { name, label: name, description, keepCodingInstructions: draft.keepCodingInstructions ?? false, content: draft.body } }
   }
 }
 

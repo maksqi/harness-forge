@@ -12,9 +12,15 @@
 // content kept here) / Open plugin. Import… opens the hidden `.md` input (`customize-import-input`, at most 256 KB) and
 // the editor in import mode with the notes. No props, no emits; the exposes `create()` / `import()` (the page header's
 // New and Import…) and the root test id are frozen from Gate P10-0b (C33).
+// Phase 11 (ADR-048, ADR-051; C39 adds the tab, W11.8 implements it; frozen from Gate P11-0b): the tabs are Agents ·
+// Commands · Skills · Output styles · Hooks (`CUSTOMIZE_TAB_ORDER`, `tabOf`; `?tab=output-styles|hooks`); the Output
+// styles tab renders through the kind sections, the Hooks tab through HooksPanel (`projectId`, `projectName`), and the
+// exposed `create()` / `import()` follow the tab (on the Hooks tab they open the hook editor and the hook import). The
+// row action `review` (a project command whose `!` lines wait for approval) opens the project trust dialog of the
+// selected project (ProjectTrustDialog, mounted here); `set-default` (Use by default, a style) is W11.8's.
 import type { Customization, CustomizationEntry, CustomizationKind } from '@harness-forge/shared'
 import type { AcceptableValue } from 'reka-ui'
-import type { CustomizationAction, CustomizationDraft } from './customize'
+import type { CustomizationAction, CustomizationDraft, CustomizeTab } from './customize'
 import { CUSTOMIZATION_KINDS } from '@harness-forge/shared'
 import { FileUpIcon, PlusIcon, TriangleAlertIcon } from '@lucide/vue'
 import { computed, markRaw, nextTick, onMounted, ref, shallowRef, useId, useTemplateRef, watch } from 'vue'
@@ -26,6 +32,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/u
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import ConfirmDialog from '~/components/common/ConfirmDialog.vue'
+import ProjectTrustDialog from '~/components/projects/trust/ProjectTrustDialog.vue'
 import { useCustomizationsStore } from '~/stores/customizations'
 import { useModelsStore } from '~/stores/models'
 import { usePluginsStore } from '~/stores/plugins'
@@ -43,6 +50,8 @@ import CustomizationSection from './CustomizationSection.vue'
 import CustomizationViewer from './CustomizationViewer.vue'
 import {
   builtinCommandEntries,
+  CUSTOMIZE_TAB_ORDER,
+  CUSTOMIZE_TAB_VALUES,
   CUSTOMIZE_TABS,
   deleteCopy,
   draftFromEntry,
@@ -51,16 +60,17 @@ import {
   importDraft,
   importTooLarge,
   kindFolders,
-  kindOfTab,
   sectionsOf,
+  tabOf,
 } from './customize'
+import HooksPanel from './HooksPanel.vue'
 
 /** How long Undo stays offered after a delete. */
 const UNDO_MS = 5000
 /** The Built-in command rows reuse a command list this young. */
 const COMMANDS_MAX_AGE_MS = 15_000
 const NO_PROJECT = '__none__'
-const TAB_LABELS: Readonly<Record<CustomizationKind, string>> = { agent: 'Agents', command: 'Commands', skill: 'Skills', style: 'Output styles' }
+const TAB_LABELS: Readonly<Record<CustomizeTab, string>> = { agent: 'Agents', command: 'Commands', skill: 'Skills', style: 'Output styles', hook: 'Hooks' }
 
 const route = useRoute()
 const router = useRouter()
@@ -71,12 +81,16 @@ const providers = useProvidersStore()
 const models = useModelsStore()
 const root = useTemplateRef<HTMLElement>('root')
 const fileInput = useTemplateRef<HTMLInputElement>('fileInput')
+const hooksPanel = useTemplateRef<InstanceType<typeof HooksPanel>>('hooksPanel')
 const ids = { project: useId() }
 
 // ---------- scope and tab ----------
 
-const kind = computed(() => kindOfTab(route.query.tab))
-const tab = computed(() => CUSTOMIZE_TABS[kind.value])
+/** + Phase 11: the shown tab (a kind or the hooks). */
+const activeTab = computed<CustomizeTab>(() => tabOf(route.query.tab))
+/** The definition kind of the shown tab (`agent` on the Hooks tab, where no definition shows). */
+const kind = computed<CustomizationKind>(() => (activeTab.value === 'hook' ? 'agent' : activeTab.value))
+const tab = computed(() => CUSTOMIZE_TAB_VALUES[activeTab.value])
 const projectId = computed<string | null>(() => {
   const value = Array.isArray(route.query.project) ? route.query.project[0] : route.query.project
   return typeof value === 'string' && value !== '' ? value : null
@@ -131,10 +145,10 @@ function setQuery(patch: Record<string, string | undefined>): void {
 }
 
 function setTab(value: AcceptableValue): void {
-  const next = kindOfTab(value)
-  if (next === kind.value)
+  const next = tabOf(value)
+  if (next === activeTab.value)
     return
-  setQuery({ tab: CUSTOMIZE_TABS[next] })
+  setQuery({ tab: CUSTOMIZE_TAB_VALUES[next] })
 }
 
 function setProject(value: AcceptableValue): void {
@@ -255,6 +269,11 @@ function openEditor(of: CustomizationKind, mode: 'new' | 'edit' | 'import', opti
 }
 
 function create(): void {
+  // + Phase 11: the Hooks tab's New hook.
+  if (activeTab.value === 'hook') {
+    hooksPanel.value?.create()
+    return
+  }
   openEditor(kind.value, 'new')
 }
 
@@ -283,6 +302,11 @@ function onViewerCopy(draft: CustomizationDraft): void {
 let importOpener: HTMLElement | null = null
 
 function importFile(): void {
+  // + Phase 11: the Hooks tab's Import… is the hook import (JSON).
+  if (activeTab.value === 'hook') {
+    hooksPanel.value?.import()
+    return
+  }
   importOpener = document.activeElement instanceof HTMLElement ? document.activeElement : null
   const input = fileInput.value
   if (!input)
@@ -466,6 +490,11 @@ async function restore(kept: Customization): Promise<void> {
   }
 }
 
+// ---------- project trust (Phase 11, ADR-049) ----------
+
+/** The trust dialog of the selected project ("Review…" of a project command with pending `!` lines). */
+const trustOpen = ref(false)
+
 // ---------- dispatch ----------
 
 function onAction(action: CustomizationAction, entry: CustomizationEntry): void {
@@ -493,6 +522,10 @@ function onAction(action: CustomizationAction, entry: CustomizationEntry): void 
       if (entry.pluginId)
         router.push(`/plugins/${entry.pluginId}`).catch(() => {})
       break
+    case 'review':
+      if (projectId.value)
+        trustOpen.value = true
+      break
   }
 }
 
@@ -506,15 +539,15 @@ defineExpose<{ create: () => void, import: () => void }>({ create, import: impor
         <div class="-mx-4 min-w-0 overflow-x-auto px-4 sm:mx-0 sm:px-0">
           <TabsList aria-label="Kinds" class="w-max">
             <TabsTrigger
-              v-for="of in CUSTOMIZATION_KINDS"
+              v-for="of in CUSTOMIZE_TAB_ORDER"
               :key="of"
-              :value="CUSTOMIZE_TABS[of]"
+              :value="CUSTOMIZE_TAB_VALUES[of]"
               :data-testid="testIds.customizeTab"
-              :data-value="CUSTOMIZE_TABS[of]"
-              :data-count="list ? counts[of] : undefined"
+              :data-value="CUSTOMIZE_TAB_VALUES[of]"
+              :data-count="list && of !== 'hook' ? counts[of] : undefined"
               class="flex-none px-3 pointer-coarse:h-10"
             >
-              {{ TAB_LABELS[of] }}<template v-if="list">
+              {{ TAB_LABELS[of] }}<template v-if="list && of !== 'hook'">
                 <span class="sr-only">, </span>
                 <span class="text-xs text-muted-foreground tabular-nums">{{ counts[of] }}</span>
               </template>
@@ -604,6 +637,9 @@ defineExpose<{ create: () => void, import: () => void }>({ create, import: impor
           </CustomizationSection>
         </template>
       </TabsContent>
+      <TabsContent :value="CUSTOMIZE_TAB_VALUES.hook" class="flex flex-col">
+        <HooksPanel ref="hooksPanel" :project-id="projectId" :project-name="projectName" />
+      </TabsContent>
     </Tabs>
 
     <input
@@ -626,6 +662,7 @@ defineExpose<{ create: () => void, import: () => void }>({ create, import: impor
       :notes="editorNotes"
       @saved="onSaved"
     />
+    <ProjectTrustDialog v-model:open="trustOpen" :project-id="projectId" />
     <CustomizationViewer
       v-model:open="viewerOpen"
       :entry="viewerEntry"

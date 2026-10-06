@@ -1,6 +1,7 @@
 // Test harness of the MCP tests: a test app with the real plugin host (only the builtins asked for), the MCP manager
 // with short retry delays, a recording event bus, the echo MCP server fixture over stdio or an in-process Streamable
-// HTTP endpoint on 127.0.0.1 (no other network access), and polling helpers.
+// HTTP endpoint on 127.0.0.1 (no other network access), and polling helpers. Phase 11 (C38-T3): the dependency-free
+// stdio fixture `mcp-min.mjs` (and its grandchild `grandchild.mjs`) for the process-group checks and `.mcp.json` tests.
 import type { ToolCallContext } from '@harness-forge/plugin-sdk'
 import type { BuiltinPluginId } from '@harness-forge/shared'
 import type { IncomingHttpHeaders, Server } from 'node:http'
@@ -8,6 +9,7 @@ import type { AddressInfo } from 'node:net'
 import type { TestApp } from '../../testing/create-test-app.ts'
 import type { RecordingEventBus } from '../../testing/fakes.ts'
 import type { McpManagerOptions } from '../index.ts'
+import { readFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
@@ -27,6 +29,28 @@ export const ECHO_SERVER_PATH = fileURLToPath(new URL('./echo-server.mjs', impor
 /** A stdio transport input that runs the echo server with the current Node binary. */
 export function echoStdio(args: string[] = [], env?: Record<string, string>) {
   return { type: 'stdio' as const, command: process.execPath, args: [ECHO_SERVER_PATH, ...args], ...(env ? { env } : {}) }
+}
+
+/** Absolute path of the dependency-free stdio MCP server (Phase 11, `mcp-min.mjs`). */
+export const MCP_MIN_PATH = fileURLToPath(new URL('./mcp-min.mjs', import.meta.url))
+
+/** Absolute path of the grandchild fixture that `mcp-min.mjs --grandchild` starts. */
+export const GRANDCHILD_PATH = fileURLToPath(new URL('./grandchild.mjs', import.meta.url))
+
+/** A stdio transport input that runs `mcp-min.mjs` with the current Node binary (arguments: see the fixture). */
+export function mcpMinStdio(args: string[] = [], env?: Record<string, string>) {
+  return { type: 'stdio' as const, command: process.execPath, args: [MCP_MIN_PATH, ...args], ...(env ? { env } : {}) }
+}
+
+/** Polls a `--pid-file` of `mcp-min.mjs` until it holds a line: the server's pid and its grandchild's (if any). */
+export async function readMcpPids(path: string, timeoutMs = 10_000): Promise<{ pid: number, grandchild: number | null }> {
+  return waitFor(async () => {
+    const line = (await readFile(path, 'utf8').catch(() => '')).split('\n').find(entry => entry.trim() !== '')
+    if (line === undefined)
+      return null
+    const [pid, grandchild] = line.trim().split(/\s+/).map(word => Number.parseInt(word, 10))
+    return pid !== undefined && pid > 0 ? { pid, grandchild: grandchild !== undefined && grandchild > 0 ? grandchild : null } : null
+  }, timeoutMs)
 }
 
 export interface McpTestApp {

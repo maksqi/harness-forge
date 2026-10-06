@@ -6,6 +6,8 @@
 // `compaction-failed` (the summary could not be written) right before the first step of the run it trimmed.
 // Phase 10 (ADR-045): `command-model-unavailable` is decided in `prepare.ts` when the `model` of the turn's command file
 // cannot run (the chat's model answers instead); a continuation whose reply already shows it does not add it again.
+// Phase 11: `output-style-unavailable` (ADR-051, `output-style.ts`), `hook-continuation-limit` (ADR-048, the `Stop` gate
+// of `hooks.ts`, at the end of the reply) and `project-mcp-unavailable` (ADR-050, `modelStream`).
 import type { NoticeData } from '@harness-forge/shared'
 import { LIMITS } from '@harness-forge/shared'
 
@@ -57,6 +59,35 @@ export const NOTICES = {
     level: 'warning',
     code: 'workspace-unavailable',
     message: message.trim() === '' ? 'The project folder of this chat is not available, so no workspace tools were sent.' : message,
+  }),
+  /**
+   * Phase 11 (ADR-051): the effective output style (the chat's, the project's or the global one) is unknown or inactive,
+   * so the run used `default` (`output-style.ts`; once per chat and model, `alreadyNoticed`).
+   */
+  outputStyleUnavailable: (name: string): NoticeData => ({
+    level: 'warning',
+    code: 'output-style-unavailable',
+    message: `The output style "${name}" is not available, so the default style was used.`,
+  }),
+  /**
+   * Phase 11 (ADR-048): `Stop` hooks blocked `LIMITS.hookContinuationsMax` runs in a row, so no further follow-up turn
+   * starts (the `Stop` gate of `hooks.ts` adds it to the reply).
+   */
+  hookContinuationLimit: (): NoticeData => ({
+    level: 'info',
+    code: 'hook-continuation-limit',
+    message: `Stopped after ${LIMITS.hookContinuationsMax} hook continuations in a row.`,
+  }),
+  /**
+   * Phase 11 (ADR-050): approved project MCP servers that were not ready within `LIMITS.projectMcpConnectWaitMs` (or
+   * failed), so the run has no tools of them (`names`: as written in `.mcp.json`).
+   */
+  projectMcpUnavailable: (names: readonly string[]): NoticeData => ({
+    level: 'warning',
+    code: 'project-mcp-unavailable',
+    message: names.length === 1
+      ? `The project MCP server "${names[0]}" is not ready, so its tools were not sent.`
+      : `${names.length} project MCP servers are not ready (${names.map(name => `"${name}"`).join(', ')}), so their tools were not sent.`,
   }),
   /** Generated files that were not kept (not a raster image of `GENERATED_IMAGE_MIME_TYPES`, too large, unreadable). */
   generatedFileDropped: (count = 1): NoticeData => {

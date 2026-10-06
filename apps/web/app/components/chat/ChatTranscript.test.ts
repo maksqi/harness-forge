@@ -11,6 +11,7 @@ import {
   backgroundLaunchOutput,
   backgroundTaskId,
   compactionPart,
+  hookCarrier,
   messageBranch,
   taskInput,
   taskOutput,
@@ -681,5 +682,50 @@ describe('chatTranscript: Phase 9 seams', () => {
     state.value = { status: 'ready', activity: 'compacting' }
     await nextTick()
     expect(rows().map(row => row.props('activity'))).toEqual([null, null, null, null])
+  })
+})
+
+describe('chatTranscript: hooks (Phase 11, P11-0b seams)', () => {
+  it('passes the hooks activity to the streaming last reply and the submitted placeholder', async () => {
+    const state = ref<{ status: ChatStatus, messages: HarnessUIMessage[] }>({
+      status: 'submitted',
+      messages: [userMessage('msg_u000000000000001', 'Question')],
+    })
+    const wrapper = mount({
+      render: () => h(TooltipProvider, null, {
+        default: () => h(ChatTranscript, { messages: state.value.messages, status: state.value.status, showThinking: false, activity: 'hooks' }),
+      }),
+    }, { attachTo: document.body })
+    await nextTick()
+    expect(wrapper.get(`[data-testid="${testIds.submittedPlaceholder}"]`).text()).toBe('Running hooks…')
+    state.value = { status: 'streaming', messages: [...state.value.messages, assistantMessage('msg_a000000000000001', '', { parts: [] })] }
+    await nextTick()
+    expect(wrapper.findAllComponents(ChatMessage).map(row => row.props('activity'))).toEqual([null, 'hooks'])
+  })
+
+  it('renders a hook carrier as notes: never rewound, and ↑ edits the last message the user wrote', async () => {
+    const U1 = 'msg_user0000000000h1'
+    const C1 = 'msg_carr0000000000h1'
+    const write = { type: 'tool-write_file', toolCallId: 'call_w1', state: 'output-available', input: { path: 'a.txt', content: 'x' }, output: { path: 'a.txt', created: true, bytes: 1, diff: '' } } as unknown as HarnessUIMessage['parts'][number]
+    const transcript = ref<InstanceType<typeof ChatTranscript> | null>(null)
+    const wrapper = mount({
+      render: () => h(TooltipProvider, null, {
+        default: () => h(ChatTranscript, {
+          ref: transcript,
+          messages: [userMessage(U1, 'q1'), assistantMessage('msg_asst0000000000h1', '', { parts: [write] }), hookCarrier(C1), assistantMessage('msg_asst0000000000h2', 'Fixed.', { parts: [write] })],
+          status: 'ready',
+          showThinking: false,
+          projectId: 'prj_sample0000000001',
+        }),
+      }),
+    }, { attachTo: document.body })
+    await nextTick()
+    const carrier = wrapper.get(`[data-message-id="${C1}"]`)
+    expect(carrier.get(`[data-testid="${testIds.hookNote}"]`).attributes('data-variant')).toBe('turn')
+    expect(carrier.find(`[data-testid="${testIds.messageRewind}"]`).exists()).toBe(false)
+    expect(wrapper.get(`[data-message-id="${U1}"]`).find(`[data-testid="${testIds.messageRewind}"]`).exists()).toBe(true)
+    expect(transcript.value!.editLastUserMessage()).toBe(true)
+    await nextTick()
+    expect(wrapper.get(`[data-message-id="${U1}"]`).find(`[data-testid="${testIds.messageEditInput}"]`).exists()).toBe(true)
   })
 })

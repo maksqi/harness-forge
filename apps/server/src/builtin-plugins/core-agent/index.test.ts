@@ -3,7 +3,7 @@ import type { SkillOutput, TaskInput, TaskOutput } from '@harness-forge/shared'
 import type { AgentRunScope, RunSubagentOptions } from '../../chat/agent-scope.ts'
 import type { TestApp } from '../../testing/create-test-app.ts'
 import { PLUGIN_API_VERSION } from '@harness-forge/plugin-sdk'
-import { AGENT_TOOL_NAMES, AGENT_TOOL_SCHEMAS, BUILTIN_AGENT_TYPES, isReservedAgentName, LIMITS, listResponseSchema, pluginManifestBaseSchema, taskOutputSchema, toolSummarySchema } from '@harness-forge/shared'
+import { AGENT_TOOL_NAMES, AGENT_TOOL_SCHEMAS, BUILTIN_AGENT_TYPES, BUILTIN_OUTPUT_STYLE_NAMES, BUILTIN_OUTPUT_STYLES, declarativeOutputStyleSchema, isReservedAgentName, LIMITS, listResponseSchema, outputStyleBlock, parseDefinition, pluginManifestBaseSchema, taskOutputSchema, toolSummarySchema } from '@harness-forge/shared'
 import semver from 'semver'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { bindAgentScope } from '../../chat/agent-scope.ts'
@@ -11,7 +11,9 @@ import { validateToolDefinition } from '../../registry/validate.ts'
 import { createTestApp } from '../../testing/create-test-app.ts'
 import coreAgent, {
   BUILTIN_AGENT_DEFINITIONS,
+  BUILTIN_STYLE_DEFINITIONS,
   builtinAgentDefinition,
+  builtinStyleDefinition,
   CORE_AGENT_PLUGIN_ID,
   createAgentTools,
   createSkillTool,
@@ -83,6 +85,13 @@ describe('core-agent manifest', () => {
     expect(semver.satisfies('1.3.0', manifest.engines.harness)).toBe(false)
     expect(semver.satisfies('1.2.0', manifest.engines.harness)).toBe(false)
   })
+
+  it('phase 11 (C38): keeps ^1.4.0 under plugin API 1.5.0 (it uses no 1.5.0 member; the builtin styles are server-read)', () => {
+    expect(PLUGIN_API_VERSION).toBe('1.5.0')
+    expect(manifest.engines.harness).toBe('^1.4.0')
+    expect(semver.satisfies('1.4.0', manifest.engines.harness)).toBe(true)
+    expect(semver.satisfies('1.5.0', manifest.engines.harness)).toBe(true)
+  })
 })
 
 describe('the four agent tools', () => {
@@ -138,6 +147,13 @@ describe('the four agent tools', () => {
     expect(TASK_DESCRIPTION).toContain('arrives later as a message')
     expect(SKILL_DESCRIPTION).toContain('"Skills" block')
     expect(SKILL_DESCRIPTION).toContain('read_file')
+  })
+
+  it('skill (Phase 11): the description says only the listed (model-invocable) skills can be loaded', () => {
+    expect(SKILL_DESCRIPTION).toContain('Only the listed skills can be loaded')
+    expect(SKILL_DESCRIPTION).toContain('slash commands are not listed')
+    expect(SKILL_DESCRIPTION).toContain('never guess names that are not listed')
+    expect(SKILL_DESCRIPTION.length).toBeLessThanOrEqual(1024)
   })
 
   it('todo_write refuses duplicate ids and more than 50 items in its input schema', () => {
@@ -273,6 +289,46 @@ describe('builtin agent definitions', () => {
     expect(builtinAgentDefinition('general-purpose')?.name).toBe('general')
     for (const name of ['reviewer', 'Explore', '', 'constructor', '__proto__'])
       expect(builtinAgentDefinition(name), name).toBeNull()
+  })
+})
+
+describe('builtin output styles (Phase 11, ADR-051, C38-T4)', () => {
+  it('are default, explanatory and learning in menu order, adapted from the shared texts and frozen', () => {
+    expect(BUILTIN_STYLE_DEFINITIONS.map(style => style.name)).toEqual([...BUILTIN_OUTPUT_STYLE_NAMES])
+    expect(BUILTIN_STYLE_DEFINITIONS.map(style => style.name)).toEqual(['default', 'explanatory', 'learning'])
+    BUILTIN_OUTPUT_STYLES.forEach((shared, index) => {
+      const style = BUILTIN_STYLE_DEFINITIONS[index]!
+      expect(style).toEqual({ name: shared.name, label: shared.label, description: shared.description, keepCodingInstructions: shared.keepCodingInstructions, content: shared.content })
+      expect(Object.isFrozen(style)).toBe(true)
+    })
+    expect(Object.isFrozen(BUILTIN_STYLE_DEFINITIONS)).toBe(true)
+    expect(BUILTIN_STYLE_DEFINITIONS.map(style => [style.name, style.label])).toEqual([['default', 'Default'], ['explanatory', 'Explanatory'], ['learning', 'Learning']])
+  })
+
+  it('default adds no instruction block; the other two start with "Output style: <label>"', () => {
+    expect(builtinStyleDefinition('default')!.content).toBe('')
+    expect(outputStyleBlock(builtinStyleDefinition('default')!)).toBeNull()
+    for (const name of ['explanatory', 'learning']) {
+      const style = builtinStyleDefinition(name)!
+      expect(style.content.length, name).toBeGreaterThan(200)
+      expect(style.keepCodingInstructions, name).toBe(true)
+      expect(outputStyleBlock(style)!.split('\n')[0]).toBe(`Output style: ${style.label}`)
+      expect(style.description.length, name).toBeLessThanOrEqual(LIMITS.listedDescriptionMaxChars)
+    }
+  })
+
+  it('builtinStyleDefinition is exact (case-sensitive, no prototype keys), else null', () => {
+    expect(builtinStyleDefinition('learning')?.label).toBe('Learning')
+    for (const name of ['Learning', 'terse', '', 'constructor', '__proto__'])
+      expect(builtinStyleDefinition(name), name).toBeNull()
+  })
+
+  it('the builtin names are reserved: a plugin style or a style file with one is refused', () => {
+    for (const style of BUILTIN_STYLE_DEFINITIONS) {
+      expect(declarativeOutputStyleSchema.safeParse({ name: style.name, description: 'Mine.', content: 'Be brief.' }).success, style.name).toBe(false)
+      const parsed = parseDefinition('style', `---\nname: ${style.name}\ndescription: Mine.\n---\nBe brief.\n`, { fileName: `${style.name}.md` })
+      expect(parsed.diagnostics.map(diagnostic => diagnostic.code), style.name).toContain('reserved-name')
+    }
   })
 })
 
