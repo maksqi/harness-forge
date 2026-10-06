@@ -19,6 +19,8 @@ catalog:
 overrides:
   # TypeScript 7 breaks .vue files that import prop types (ADR-013). Never upgrade.
   typescript: ~6.0.3
+  # GHSA-68fv-2mgg-jv7q (2026-10-06): source-map-js < 1.2.2 (build tooling: vue compiler, magicast, tailwind).
+  source-map-js@<1.2.2: ^1.2.2
 
 # Dependency build scripts are blocked unless listed here (true = run, false = skip silently).
 allowBuilds:
@@ -33,7 +35,15 @@ strictDepBuilds: true
 # Ignored advisories (2026-10-03): both reach only the web build tooling (nuxt CLI / nitropack: listhen -> node-forge,
 # globby -> micromatch -> braces), never the server runtime or the generated SPA, and no patched release (braces 3.0.4,
 # node-forge 1.4.1) was published yet. Remove each entry once the fix is released.
+# Ignored advisories (2026-10-06): simple-git / @simple-git/argv-parser reach only @nuxt/devtools (nuxt -> @nuxt/devtools
+# 3.4.2 -> simple-git ^3.36.0), which is disabled in apps/web/nuxt.config.ts and never part of the server runtime or the
+# generated SPA; the fixes exist only in new majors (simple-git 4.0.1, argv-parser 2.0.1). Remove them once a stable
+# @nuxt/devtools depends on simple-git 4.
 auditConfig:
   ignoreGhsas:
     - GHSA-86w9-cpqp-85rv
     - GHSA-vfj7-8cjw-p6xm
+    - GHSA-v5rq-49vh-5v5c
+    - GHSA-858h-whjf-mvg5
+    - GHSA-g4wm-2vf7-vfgr
+    - GHSA-x6jw-m9v5-85vh
