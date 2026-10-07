@@ -13,6 +13,12 @@ There are four ways to add a server:
 | [A code plugin](#3-a-code-plugin) | servers that depend on settings or logic (`ctx.mcp.register`) | always (code plugin) |
 | A project's `.mcp.json` (v1.7) | servers a repository needs, only in that project's chats | each server is approved in the project's review dialog; `${VARIABLES}` are stored per project ([hooks and project MCP servers](hooks-and-project-mcp.md#7-mcpjson-mcp-servers-of-a-project)) |
 
+v1.8 adds two more sources: the MCP servers of a **Claude Code plugin** (its `.mcp.json` and the MCP servers of its
+`plugin.json`; a stdio server runs only once the plugin is trusted: [Claude Code plugins](claude-code-plugins.md)), and
+**Import from Claude Code**, which copies the
+servers of your `~/.claude.json` into the MCP servers panel once (stdio servers arrive turned off:
+[Import from Claude Code](claude-code-import.md)).
+
 Transports:
 
 | `type` | Connects to | Notes |

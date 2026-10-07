@@ -128,6 +128,19 @@ describe('marketplacesView: loading', () => {
     expect(byTestId(testIds.marketplaceAdd)!.getAttribute('aria-label')).toBe('Add marketplace…')
   })
 
+  it('makes the icon-only header buttons and the category select 40 px targets on phones and coarse pointers (W12.19)', async () => {
+    twoMarketplaces()
+    await render()
+    for (const id of [testIds.marketplaceAdd, testIds.marketplaceRefreshAll]) {
+      const classes = byTestId(id)!.className.split(/\s+/)
+      expect(classes, id).toEqual(expect.arrayContaining(['max-sm:size-10', 'pointer-coarse:h-10']))
+    }
+    // The SelectTrigger sets its height on `data-size`, so the larger height names that attribute too.
+    const category = byTestId(testIds.marketplaceCategory)!.className.split(/\s+/)
+    expect(category).toEqual(expect.arrayContaining(['max-sm:data-[size=default]:h-10', 'pointer-coarse:data-[size=default]:h-10']))
+    expect(category).not.toContain('max-sm:h-10')
+  })
+
   it('loads the details of All at most 4 at a time', async () => {
     const ids = [1, 2, 3, 4, 5, 6].map(marketplaceId)
     api.marketplaces.list.mockResolvedValue(marketplaceList({ items: ids.map((id, index) => marketplaceSummary({ id, name: `m${index}` })) }))

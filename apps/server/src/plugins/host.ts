@@ -691,14 +691,21 @@ export function createPluginHost(deps: AppDeps, options: PluginHostOptions = {})
     return join(deps.env.paths.plugins, id)
   }
 
-  /** The raw version a Claude Code plugin without one reads as: the 12-character commit or archive sha of its origin. */
+  /**
+   * The raw version a Claude Code plugin without one reads as, the same hint the installer read it with: the 12-character
+   * commit or archive sha of its origin, the npm version of a marketplace entry's package (`origin.npmVersion`), and
+   * for an npm install the version the row stores (the package version it was installed as). So the version stays the
+   * same across reloads and restarts (W12.18-T2); other sources have no hint (`0.0.0`).
+   */
   function versionHintOf(record: PluginRecord | null): string | undefined {
-    const origin = record?.origin ?? null
-    if (origin === null)
+    if (record === null)
       return undefined
-    if (origin.kind === 'github')
+    const origin = record.origin
+    if (origin?.kind === 'github')
       return origin.commit.slice(0, 12)
-    return origin.commit?.slice(0, 12) ?? origin.archiveSha256?.slice(0, 12)
+    if (origin?.kind === 'marketplace')
+      return origin.commit?.slice(0, 12) ?? origin.archiveSha256?.slice(0, 12) ?? origin.npmVersion
+    return record.source === 'npm' ? record.version : undefined
   }
 
   /**

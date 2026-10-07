@@ -22,8 +22,9 @@
 //                Phase 12: `format` and `origin`; a fresh Claude Code plugin with `defaultEnabled: false` is saved
 //                disabled unless the request sets `enable`), the host loads it; a load that ends in `error` restores the
 //                previous version (or forgets a fresh install).
-// `HF_OFFLINE=1` refuses the GitHub source and marketplace entries that need the network (409 `offline`); a relative
-// entry of a folder marketplace, npm and URL installs are unchanged. The staging directory is removed in every case;
+// `HF_OFFLINE=1` refuses the GitHub source and marketplace entries that need the network (409 `offline`, one message:
+// `offlineError` of `marketplaces/sources.ts`); a relative entry of a folder marketplace, npm and URL installs from the
+// install dialog, zip uploads and local folders are unchanged. The staging directory is removed in every case;
 // `recover()` cleans up after a crash (staging.ts). Logs carry the plugin id, the source, the version and the state.
 import type { PluginDetail, PluginFormat, PluginInspection, PluginSource } from '@harness-forge/shared'
 import type { SafeFetch } from '../../security/types.ts'
@@ -54,7 +55,7 @@ import { detectPluginLayout } from '../claude/detect.ts'
 import { isInside, pathPin } from '../loader.ts'
 import { resolveHostFolder } from '../marketplaces/fetch.ts'
 import { githubBases, shortSha } from '../marketplaces/github.ts'
-import { planEntryInstall } from '../marketplaces/sources.ts'
+import { offlineError, planEntryInstall } from '../marketplaces/sources.ts'
 import { createMarketplaceStore } from '../marketplaces/store.ts'
 import { EntryCollector, MANIFEST_NAME, verifyTree, writeEntries } from './archive.ts'
 import { claudeDefaultEnabled } from './claude.ts'
@@ -172,15 +173,6 @@ async function exists(path: string): Promise<boolean> {
 
 function conflict(message: string): HarnessError {
   return new HarnessError({ code: 'conflict', message, details: { reason: 'exists' } })
-}
-
-/** `409 conflict` (`offline`): `HF_OFFLINE=1` refuses sources that need the network (ADR-054). */
-function offlineError(what: string): HarnessError {
-  return new HarnessError({
-    code: 'conflict',
-    message: `This server is offline (HF_OFFLINE=1): ${what} cannot be downloaded. Folder marketplaces, npm and URL installs still work.`,
-    details: { reason: 'offline' },
-  })
 }
 
 /** The plugin of `id` failed to load after an install: the change was rolled back. */
@@ -432,7 +424,7 @@ export function createInstaller(deps: AppDeps, options: InstallerOptions = {}): 
 
   async function stageGithub(input: Extract<PluginInstallInput, { source: 'github' }>): Promise<StagedPlugin> {
     if (deps.env.offline)
-      throw offlineError(`the GitHub repository ${input.repo}`)
+      throw offlineError()
     const archive = await downloadGithubArchive(
       { repo: input.repo, ...(input.ref === undefined ? {} : { ref: input.ref }), ...(input.path === undefined ? {} : { path: input.path }) },
       { safeFetch, bases, limits, ...(options.repoArchiveBytes === undefined ? {} : { archiveBytes: options.repoArchiveBytes }), issuePath: ['repo'] },
@@ -498,7 +490,7 @@ export function createInstaller(deps: AppDeps, options: InstallerOptions = {}): 
     const plan = planEntryInstall(await marketplaces.get(input.marketplaceId), input.marketplaceId, input.plugin)
     const { marketplace, entry } = plan
     if (plan.needsNetwork && deps.env.offline)
-      throw offlineError(`the plugin "${entry.name}" of the marketplace "${marketplace.name}"`)
+      throw offlineError()
     const origin: Extract<StoredPluginOrigin, { kind: 'marketplace' }> = {
       kind: 'marketplace',
       marketplaceId: marketplace.id,
@@ -829,7 +821,8 @@ export function createInstaller(deps: AppDeps, options: InstallerOptions = {}): 
       const dir = await deps.plugins.directory(id)
       if (dir === null)
         throw new HarnessError({ code: 'not_found', message: `The files of the plugin "${id}" are missing.` })
-      return exportPluginDirectory(id, detail.version, dir, limits)
+      // Phase 12 (W12.18-T1): a Claude Code plugin is exported as its installed tree, exec bits kept.
+      return exportPluginDirectory(id, detail.version, dir, limits, { format: detail.format })
     },
   }
 }

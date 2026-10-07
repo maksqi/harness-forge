@@ -10,7 +10,7 @@ import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import process from 'node:process'
-import { claudeImportHomeSchema, claudeImportPlanSchema, createHookId, LIMITS, setDefinitionName } from '@harness-forge/shared'
+import { claudeImportHomeSchema, claudeImportPlanSchema, conflictDetailsSchema, createHookId, HarnessError, LIMITS, setDefinitionName } from '@harness-forge/shared'
 import { afterEach, describe, expect, it } from 'vitest'
 import { hooks } from '../../db/schema.ts'
 import { freshAuthRequiredError } from '../../http/middleware/fresh-auth.ts'
@@ -18,7 +18,7 @@ import { CLAUDE_HOME_CANARIES, fakeClaudeHomeFiles } from '../../testing/claude-
 import { createTestApp } from '../../testing/create-test-app.ts'
 import { NODE_DISK_FS } from './collect-disk.ts'
 import { cleanupImportFixtures, hasCanary, planItems, uploadOfHome, writeFakeHome, zipOfHome } from './fixtures.test-util.ts'
-import { claudeImportHome, createClaudeImportService } from './index.ts'
+import { claudeImportHome, createClaudeImportService, scanStoppedError } from './index.ts'
 
 const apps: TestApp[] = []
 const cleanups: Array<() => void> = []
@@ -163,6 +163,34 @@ describe('scan', () => {
     expect(t.logs.records.filter(record => record.level === 'info').map(record => record.msg)).toContain('claude import planned')
     // The root path only at debug.
     expect(t.logs.records.filter(record => record.level !== 'debug').some(record => JSON.stringify(record).includes(claudeHome))).toBe(false)
+  })
+
+  it('stop() during a scan: 409 conflict busy with the stopped message (W12.18-T3); nothing is kept', async () => {
+    const { claudeHome } = await writeFakeHome()
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let entered: () => void = () => {}
+    const reading = new Promise<void>((resolve) => {
+      entered = resolve
+    })
+    const realpath: typeof NODE_DISK_FS.realpath = async (path) => {
+      entered()
+      await gate
+      return NODE_DISK_FS.realpath(path)
+    }
+    const t = await app(claudeHome, { fs: { ...NODE_DISK_FS, realpath } })
+    const scan = t.deps.claudeImport.scan(FRESH).then(() => null, (error: unknown) => error)
+    await reading
+    await t.deps.claudeImport.stop()
+    release()
+    const error = await scan
+    expect(error).toBeInstanceOf(HarnessError)
+    expect(error).toMatchObject({ code: 'conflict', message: 'The scan of the Claude Code folder was stopped.', details: { reason: 'busy' } })
+    expect(conflictDetailsSchema.parse((error as HarnessError).details)).toEqual({ reason: 'busy' })
+    expect(scanStoppedError().toJSON()).toEqual({ error: { code: 'conflict', message: 'The scan of the Claude Code folder was stopped.', details: { reason: 'busy' } } })
+    expect(t.logs.records.map(record => record.msg)).not.toContain('claude import planned')
   })
 
   it('the same fake home as folder files and as a zip gives the same plan as the scan', async () => {

@@ -183,10 +183,10 @@ export const HOOK_COPY: Readonly<Record<string, string>> = {
 /** "Prompt hooks work only for {events}." (the seven events of ADR-057). */
 export const PROMPT_EVENTS_TEXT = `Prompt hooks work only for ${PROMPT_HOOK_EVENTS.slice(0, -1).join(', ')} and ${PROMPT_HOOK_EVENTS.at(-1)}.`
 
-/** "Runs with {model} (Settings → General → Hook model). It answers ok, or not ok with a reason." */
+/** "Runs with {model} (Settings → General → Agent → Hook model). It answers ok, or not ok with a reason." */
 export function promptModelLine(model: string, fromSetting: boolean): string {
   return fromSetting
-    ? `Runs with ${model} (Settings → General → Hook model). It answers ok, or not ok with a reason.`
+    ? `Runs with ${model} (Settings → General → Agent → Hook model). It answers ok, or not ok with a reason.`
     : `Runs with ${model}. It answers ok, or not ok with a reason.`
 }
 

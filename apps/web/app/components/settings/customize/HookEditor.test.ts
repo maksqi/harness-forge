@@ -20,6 +20,7 @@ import { useSettingsStore } from '~/stores/settings'
 import { testIds } from '~/utils/testids'
 import { authStatus, catalogModel, hookEntry, hookId, hookList, personalHook, projectDefinitionFile, projectDefinitionWriteResult, projectId, providerSummary, settings, toolSummary, trustSha } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
+import { SHEET_CLOSE_TOUCH_CLASS } from './customize'
 import HookEditor from './HookEditor.vue'
 
 const mocks = vi.hoisted(() => ({ api: null as unknown }))
@@ -325,7 +326,7 @@ describe('hookEditor: the Prompt type and the 13 events (W12.12-T1)', () => {
     expect(byTestId(testIds.hookCommand)).toBeNull()
     expect(field('hook-args')).toBeNull()
     expect(byTestId(testIds.hookWarning)?.textContent).toContain('A prompt hook asks a model about every matching event, using tokens each time. Its answer can block a call or make the agent continue, never allow one.')
-    expect(field('hook-model-line')?.textContent?.trim()).toBe('Runs with the provider\'s small model (Settings → General → Hook model). It answers ok, or not ok with a reason.')
+    expect(field('hook-model-line')?.textContent?.trim()).toBe('Runs with the provider\'s small model (Settings → General → Agent → Hook model). It answers ok, or not ok with a reason.')
     expect(byTestId<HTMLInputElement>(testIds.hookTimeout)?.placeholder).toBe('30')
     // PreToolUse offers Continue on block; Stop does not.
     expect(field('hook-continue-on-block')).not.toBeNull()
@@ -350,7 +351,7 @@ describe('hookEditor: the Prompt type and the 13 events (W12.12-T1)', () => {
   it('names the hook model of the settings and refuses a prompt hook on an event that takes none', async () => {
     useSettingsStore().settings = settings({ hookModelRef: 'anthropic:claude-haiku-5' })
     await mountEditor({ mode: 'new', draft: { event: 'Notification', matcher: '', command: '', timeout: null, enabled: true, type: 'prompt', prompt: 'Is it urgent?' } })
-    expect(field('hook-model-line')?.textContent?.trim()).toBe('Runs with Claude Haiku 5 (Settings → General → Hook model). It answers ok, or not ok with a reason.')
+    expect(field('hook-model-line')?.textContent?.trim()).toBe('Runs with Claude Haiku 5 (Settings → General → Agent → Hook model). It answers ok, or not ok with a reason.')
     expect(field('hook-event-error')?.textContent?.trim()).toBe('Prompt hooks work only for PreToolUse, PostToolUse, PostToolUseFailure, UserPromptSubmit, Stop, SubagentStop and PermissionRequest.')
     expect(byTestId(testIds.hookEvent)?.getAttribute('aria-invalid')).toBe('true')
     await save()
@@ -524,5 +525,20 @@ describe('hookEditor: project mode (W12.12-T1)', () => {
   it('offers no Where without a project', async () => {
     await mountEditor({ mode: 'new' })
     expect(field('hook-where')).toBeNull()
+  })
+})
+
+describe('hookEditor: touch targets (W12.19, docs/UI.md 14.5)', () => {
+  const classesOf = (element: Element | null) => (element?.getAttribute('class') ?? '').split(/\s+/)
+
+  it('gives the switches a 40 px hit area and the Event trigger and the × Close 40 px on a coarse pointer', async () => {
+    await mountEditor({ mode: 'new' })
+    expect(classesOf(byTestId(testIds.hookEditor))).toEqual(expect.arrayContaining(SHEET_CLOSE_TOUCH_CLASS.split(' ')))
+    expect(classesOf(byTestId(testIds.hookEvent))).toContain('pointer-coarse:data-[size=default]:h-10')
+    // A Switch's `::after` counts from inside its 1 px border (16.4 px): -12 px each way makes 40.4 px.
+    for (const element of [byTestId(testIds.hookEditorEnabled), field('hook-async')])
+      expect(classesOf(element)).toContain('pointer-coarse:after:-inset-y-3')
+    await chooseType('prompt')
+    expect(classesOf(field('hook-continue-on-block'))).toContain('pointer-coarse:after:-inset-y-3')
   })
 })

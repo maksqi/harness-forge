@@ -249,8 +249,9 @@ with their chat or project, and they are never part of a backup. Edits made befo
   MCP servers (`.mcp.json`) and command files with `` !`cmd` `` lines. **None of them runs before you approve it** in
   the project's review dialog (the chat header shows "{n} to review"; Settings → Projects shows the same count on the
   project's row, whose menu has **Review commands and hooks…** and **MCP servers…**); the approval is pinned to the
-  exact text (and the scripts it names), so any change needs a new approval. `HF_WORKSPACE_SHELL=0` also turns hooks and
-  `!` lines off (project MCP servers still start), and `HF_SAFE_MODE=1` starts no hook and no project MCP server (`!`
+  exact text (and the scripts it names), so any change needs a new approval (v1.8: also a change saved from
+  harness-forge's own editors). `HF_WORKSPACE_SHELL=0` also turns command hooks and `!` lines off (prompt hooks and
+  project MCP servers still run), and `HF_SAFE_MODE=1` starts no hook (command or prompt) and no project MCP server (`!`
   lines still run). A project can also have its own output style (Settings → Customize → Output styles, with the
   project selected; the row in Settings → Projects shows "Style: {name}"). See
   [hooks and project MCP servers](hooks-and-project-mcp.md).

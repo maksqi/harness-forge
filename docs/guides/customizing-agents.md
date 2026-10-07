@@ -22,16 +22,18 @@ for a project's command files only after you approve them), skills you run yours
 **output styles** (a fourth kind, [output styles](output-styles.md)) and **hooks** and project **`.mcp.json`** servers
 ([hooks and project MCP servers](hooks-and-project-mcp.md)).
 
-v1.8 (ADR-055, ADR-056, ADR-058) adds: Claude Code's newer header keys (agents `disallowedTools`, `maxTurns`, `color`,
-`skills`; commands and skills `when_to_use`, `arguments`, `disallowed-tools`, `context: fork`; skills `allowed-tools`
-and `model`; section 2), `$ARGUMENTS[0]` / `$0` and named arguments, Claude model names (`model: sonnet`) through
-Settings → General → Agent, editing a project's files from Settings → Customize (**Edit…** on a project row, section 4),
-copying your `~/.claude` folder with **Import from Claude Code** ([guide](claude-code-import.md)) and Claude Code
-plugins ([guide](claude-code-plugins.md)).
+v1.8 (ADR-053, ADR-055, ADR-056, ADR-058) adds: Claude Code's newer header keys (agents `disallowedTools`, `maxTurns`,
+`color`, `skills`; commands and skills `when_to_use`, `arguments`, `disallowed-tools`, `context: fork` + `agent`; skills
+`allowed-tools` and `model`; section 2), `$ARGUMENTS[0]` / `$0`, named arguments and the `${CLAUDE_…}` variables, Claude
+model names (`model: sonnet`) through Settings → General → Agent, editing a project's files from Settings → Customize
+(**Edit…**, **New file…**, **Delete…**, section 4), copying your `~/.claude` folder with **Import from Claude Code**
+([guide](claude-code-import.md)) and Claude Code plugins, whose agents, commands and skills are named
+`<plugin>:<name>` (section 3, [guide](claude-code-plugins.md)).
 
-Reference: [ARCHITECTURE.md 6.23 – 6.27](../ARCHITECTURE.md#623-customization-catalog-adr-044) (how it works) and
+Reference: [ARCHITECTURE.md 6.23 – 6.27](../ARCHITECTURE.md#623-customization-catalog-adr-044) (how it works; v1.8:
+6.36 project files, 6.38 the newer keys) and
 [10.11](../ARCHITECTURE.md#1011-agent-customization-security-phase-10-adr-044--adr-047) (security),
-[UI.md 7.28 – 7.30, 9.12](../UI.md#912-customize-settingscustomize-w108-phase-10) (the screens),
+[UI.md 7.28 – 7.30, 9.12](../UI.md#912-customize-settingscustomize-w108-phase-10) (the screens; v1.8: 7.34, 9.14),
 [PLUGINS.md](../PLUGINS.md#declarative-agents-plugin-api-140) (agents and skills in plugins), [API.md](../API.md) (the
 `customizations`, `memory` and `chatTasks` routes). The features of v1.5 (plan mode, sub-agents, the queue) are in
 [agent features](agent-features.md).
@@ -41,10 +43,10 @@ Reference: [ARCHITECTURE.md 6.23 – 6.27](../ARCHITECTURE.md#623-customization-
 | Source | Where | Edited in | Wins over |
 |---|---|---|---|
 | Built-in | the agents `explore` and `general`; the commands `/compact`, `/new`, `/model`, `/effort`, `/mode`, `/help`, `/remember` (v1.7: `/output-style`); the output styles Default, Explanatory, Learning (v1.7) | — (reserved names) | — |
-| Plugins | the agents, skills and commands an installed plugin contributes (`contributes.agents` / `contributes.skills` / `contributes.commands` of its manifest, or registered by its code) | the plugin | built-in |
+| Plugins | the agents, skills and commands an installed plugin contributes (`contributes.agents` / `contributes.skills` / `contributes.commands` of its manifest, or registered by its code; v1.8: the `agents/`, `commands/` and `skills/` of a Claude Code plugin, named `<plugin>:<name>`) | the plugin | built-in |
 | Personal | the harness-forge database (all your chats, every project) | Settings → Customize | plugins |
-| Project, `.claude/` | `.claude/agents/`, `.claude/commands/`, `.claude/skills/` in the project folder | your editor or the agent (with approval) | personal |
-| Project, `.harness/` | `.harness/agents/`, `.harness/commands/`, `.harness/skills/` in the project folder | your editor or the agent (with approval) | everything |
+| Project, `.claude/` | `.claude/agents/`, `.claude/commands/`, `.claude/skills/` in the project folder | your editor, the agent (with approval) or (v1.8) Settings → Customize | personal |
+| Project, `.harness/` | `.harness/agents/`, `.harness/commands/`, `.harness/skills/` in the project folder | your editor, the agent (with approval) or (v1.8) Settings → Customize | everything |
 
 A project's definitions apply only to the chats of that project. When two sources define the same name, the higher one
 wins and the other is listed as **shadowed** (Settings → Customize shows both, and why). `.harness/` exists so a
@@ -99,13 +101,14 @@ The body: the agent's instructions, the command's prompt or the skill's content.
   characters is cut.
 - **Size**: at most 64 KB per file, the header at most 8 KB. Text only: a larger or binary file is listed as
   **Invalid**.
-- **Lists**: `tools` and `allowed-tools` take a comma-separated string (`Read, Grep, Glob`), a space-separated one
-  (`Read Grep Glob`) or a YAML list. `mcp__github__*` matches every tool whose name starts with it, and
-  `mcp__github` every tool of that MCP server.
+- **Lists**: `tools` and `allowed-tools` (v1.8: also `disallowedTools` / `disallowed-tools`) take a comma-separated
+  string (`Read, Grep, Glob`), a space-separated one (`Read Grep Glob`) or a YAML list. `mcp__github__*` matches every
+  tool whose name starts with it, and `mcp__github` every tool of that MCP server.
 - Problems never break anything: a file that cannot be used is listed as **Invalid** with the reason ("Line 2: Add a
   description."), and warnings ("Unknown tool: foo; it matches nothing.") are shown next to the definition. A header
   that is not valid YAML but has plain `key: value` lines is read line by line: the definition still works, with a
-  warning.
+  warning. Keys harness-forge does not use are listed as info notes ("The key "memory" is ignored; harness-forge does
+  not support it.") and never break the file.
 
 ### Agents (`.harness/agents/<name>.md`)
 
@@ -127,11 +130,11 @@ You review code changes.
 |---|---|
 | `name`, `description` | required |
 | `tools` | optional: the only tools this agent may use (harness names such as `read_file`, or Claude Code names, section 6). It can only **narrow** what a sub-agent may use in the chat's current mode: a tool that can only ask there is never offered, and a tool that decides per call (file edits, the shell) runs only the calls that need no approval (in Accept edits: file edits, and the shell commands your shell rules allow; every other call is denied). It never gets the agent tools (`task`, `skill`, `todo_write`, …) or `generate_image`. Without `tools`, it gets everything a sub-agent may use in that mode |
-| `model` | optional: a model ref such as `openai:gpt-6` (used when that provider is connected; else the default below, with a warning), or `inherit` (the chat's model; the editor's **Same as the chat**). Without it: Settings → General → Agent → **Sub-agent model**, else the chat's model. v1.8: also a Claude model name (`sonnet`, `opus`, `haiku`, `fable`) or a full `claude-*` id, resolved through Settings → General → Agent → **Claude model names** |
-| `disallowedTools` (v1.8) | optional: tools removed before `tools` narrows the set (`Bash(rm *)` removes the whole `shell` tool) |
-| `maxTurns` (v1.8) | optional, 1–200: at most this many steps (the **Sub-agent max steps** setting still applies, the smaller wins) |
+| `model` | optional: a model ref such as `openai:gpt-6` (used when that provider is connected; else the default below, with a warning), or `inherit` (the chat's model; the editor's **Same as the chat**). Without it: Settings → General → Agent → **Sub-agent model**, else the chat's model. v1.8: also a Claude model name (`sonnet`, `opus`, `haiku`, `fable`) or a full `claude-*` id, resolved through Settings → General → Agent → **Claude model names** (section 6; a name you did not set runs the default sub-agent model) |
+| `disallowedTools` (v1.8) | optional: tools removed before `tools` narrows the set (`Bash(rm *)` removes the whole `shell` tool, with a warning) |
+| `maxTurns` (v1.8) | optional, 1–200 (larger values are lowered to 200): at most this many steps (the **Sub-agent max steps** setting still applies, the smaller wins) |
 | `color` (v1.8) | optional: `red`, `blue`, `green`, `yellow`, `purple`, `orange`, `pink` or `cyan`; marks the agent's blocks in the chat |
-| `skills` (v1.8) | optional, up to 5 skill names: their content is added to the agent's instructions when it starts (up to 32 KB) |
+| `skills` (v1.8) | optional, up to 5 skill names (a plugin skill by its `<plugin>:<name>` or a unique bare name): their content is added to the agent's instructions after its body, under "# Preloaded skills", when it starts (up to 32 KB in total); a skill that is missing or cannot be read is skipped |
 | body | the agent's instructions; it reads them after harness-forge's sub-agent preamble and before your custom instructions. A sub-agent does not see the conversation: the main agent writes it a prompt |
 
 The main agent sees the list of agent types (names and descriptions) and picks one when a task fits. You can also ask
@@ -155,13 +158,14 @@ Report the findings as a list with line numbers.
 |---|---|
 | `description` | shown in the slash menu |
 | `argument-hint` | shown after the command while you type its arguments (`/review <file> [focus]`); write it as is, brackets need no quotes |
-| `model` | optional: this turn runs on that model; the chat keeps its own model (which must still be usable: it is checked first). When the command's model is not available (no key, unknown, an image model), the chat's model answers and the reply starts with "The command's model … is not available, so the chat's model answered." |
+| `model` | optional: this turn runs on that model; the chat keeps its own model (which must still be usable: it is checked first). When the command's model is not available (no key, unknown, an image model), the chat's model answers and the reply starts with "The command's model … is not available, so the chat's model answered." v1.8: also a Claude model name (`model: sonnet`, section 6) |
 | `allowed-tools` | optional: the tools of this turn are limited to this list (also for the approvals and regenerations of the turn). It never approves anything: calls still ask as the permission mode says. List `task` or `skill` too when the turn should start sub-agents or load skills; in plan mode `exit_plan_mode` always stays |
 | body | the prompt (required) |
 | `$ARGUMENTS` | everything you typed after `/review ` |
 | `$1` … `$9` | single words of it; quotes group words (`/review "src/a b.ts" naming` → `$1` = `src/a b.ts`) |
-| `$ARGUMENTS[0]`, `$0`, `$name` (v1.8) | Claude Code's newer forms: a file that uses `$0` or `$ARGUMENTS[` or declares `arguments: [file, focus]` counts words **from 0** (`$0` = the first word, `$file` = the word named `file`); every other file keeps `$1` as the first word, so v1.6 – v1.7 commands expand as before; `\$` writes a literal `$` |
-| `when_to_use`, `disallowed-tools`, `context: fork` + `agent` (v1.8) | `when_to_use` is added to the description; `disallowed-tools` removes tools for the turn; `context: fork` runs the command (or skill) as a sub-agent of type `agent` (default `general`) and only its report comes back |
+| `$ARGUMENTS[0]`, `$0`, `$name` (v1.8) | Claude Code's newer forms. The **argument base**: a file that uses `$0` or `$ARGUMENTS[` anywhere, or declares `arguments: [file, focus]` (up to 9 names), counts words **from 0** (`$0` and `$ARGUMENTS[0]` = the first word, `$1` the second, `$file` = the word at the position of `file`); every other file keeps `$1` as the first word, so v1.6 – v1.7 commands expand as before. Mind a literal `$0` in an older command, such as an `awk '{print $0}'` example next to `$1`: it switches the whole file (spans included) to counting from 0, so its `$1` becomes the second word; outside spans write it as `\$0`. `\$` writes a literal `$`; a `$name` that is not declared stays as written |
+| `${CLAUDE_PROJECT_DIR}`, `${CLAUDE_SESSION_ID}`, `${CLAUDE_SKILL_DIR}` (v1.8) | the project folder (its absolute path, in a project chat whose folder is available), the chat's id, a skill's folder (see Skills below); any other `${…}` stays as written |
+| `when_to_use`, `disallowed-tools`, `context: fork` + `agent` (v1.8) | `when_to_use` is added to the description where the slash menu (and, for a skill, the agent) lists it (`<description> - <when_to_use>`, up to 1,024 characters); `disallowed-tools` removes tools from the turn (it only restricts, like `allowed-tools`); `context: fork` runs the command as a sub-agent of type `agent` (default `general`; `agent` without `context: fork` is ignored): your `/name` asks the main agent to hand the expanded prompt, unchanged, to that sub-agent with the `task` tool (kept in the turn's tools) and to answer with its report |
 | `{{input}}` | same as `$ARGUMENTS` (the syntax of plugin templates) |
 | no placeholder | your text is added after the body, separated by a blank line |
 | `` !`cmd` `` (v1.7) | runs `cmd` in the project folder before the model is called; its output replaces the span (section below) |
@@ -241,8 +245,9 @@ description: How this project writes release notes. Load it before writing or ed
 | `user-invocable` (v1.7) | optional, default `true`: the skill is also listed in the slash menu as `/name` |
 | `disable-model-invocation` (v1.7) | optional, default `false`: `true` keeps the skill away from the agent (not listed to it, not loadable with the `skill` tool); it runs only when you type `/name` |
 | `argument-hint` (v1.7) | optional: shown after `/name` while you type its arguments |
-| `allowed-tools`, `model`, `when_to_use`, `arguments`, `disallowed-tools`, `context: fork` + `agent` (v1.8) | as for commands; `${CLAUDE_SKILL_DIR}` in the body is the skill's folder |
-| body | the skill; the agent reads it when it loads the skill |
+| `allowed-tools`, `model`, `when_to_use`, `arguments`, `disallowed-tools`, `context: fork` + `agent` (v1.8) | as for commands: `allowed-tools`, `disallowed-tools` and `model` apply to the turn when you run `/name` (not when the agent loads the skill); with `context: fork`, `/name` delegates like a fork command, and when the **agent** loads the skill, the `skill` call itself runs one sub-agent of type `agent` with the skill as its prompt and returns only its report (a sub-agent stopped at its limit returns its partial report with a note; the call may take up to 10 minutes, like `task`) |
+| `${CLAUDE_SKILL_DIR}` (v1.8) | the skill's folder: for a project skill its folder in the project (`.harness/skills/release-notes`), for a plugin skill its absolute folder; in a personal skill it stays as written |
+| body | the skill; the agent reads it when it loads the skill (v1.8: with `$ARGUMENTS` empty, `\$` read as `$` and the `${…}` variables filled) |
 | other files in the folder | supporting files (up to 50 are listed, three folders deep; hidden, secret-looking and gitignored files, `node_modules`, links and the `SKILL.md` itself are left out). The agent gets the folder's path and reads them with `read_file`, without asking. They are listed only while the project folder is available |
 
 The agent sees the names and descriptions of the skills (up to 50) and loads one with the `skill` tool when a task
@@ -250,7 +255,10 @@ matches; the chat shows a row "Loaded skill release-notes". Since v1.7 you can a
 `/release-notes [what you want]` (the slash menu lists skills in its **Skills** group); your text is added to the
 skill's content like a command's arguments (`$ARGUMENTS` works too; a skill's `!` spans and `@path` stay text), and the
 badge on your message says it was a skill. Skill names may have up to 64 characters in the menu; when a command and a
-skill share a name, the command wins. A personal or plugin skill is one file: put everything it needs in its body.
+skill share a name, the command wins. A personal skill is one file: put everything it needs in its body. v1.8: a plugin
+skill can come with supporting files in its folder (Claude Code plugins); the agent reads one by calling the `skill`
+tool again with the file's path, and the chat shows that read with "The agent read this file of the skill.". A fork
+skill's row shows the report instead of the instructions ("The skill ran as a sub-agent. This is its report.").
 
 ## 3. Precedence, duplicates and reserved names
 
@@ -266,6 +274,11 @@ skill share a name, the command wins. A personal or plugin skill is one file: pu
 - **A command and a skill with the same name** (v1.7): the command wins in the slash menu; the skill can still be
   loaded by the agent.
 - **Turned off** personal definitions are listed as **Off** and shadow nothing.
+- **Plugin names** (v1.8): the agents, commands and skills of a Claude Code plugin carry the plugin's id,
+  `<plugin>:<name>` (`review-kit:review`; a command in a subfolder `review-kit:db:migrate`), so they never shadow a bare
+  name or get shadowed by one. The bare name (`/review`, an agent type `review`) reaches such an entry when exactly one
+  qualified name ends with it and nothing is named `review` itself; otherwise type the full name. Harness plugins keep
+  bare names; `<pluginId>:<name>` reaches their entries too.
 
 ## 4. Personal definitions: Settings → Customize
 
@@ -277,19 +290,31 @@ in Settings → Projects) lists everything by tab (**Agents**, **Commands**, **S
   hint) and a Markdown editor for the body; it saves the same file format as above. **Tools** is "All tools the chat
   allows" (commands: "No restriction") or **Only these tools**; an agent's **Model** has a **Same as the chat**
   checkbox (`model: inherit`). Ctrl+Enter (⌘Enter on macOS) saves. Tab in the body editor moves to the next field (it
-  does not indent).
+  does not indent). v1.8 adds the newer keys: agents get **Tools not allowed**, **Max turns**, **Color** and **Skills**
+  (up to 5); commands and skills get **When to use**, **Tools not allowed in this turn** and **Run in a sub-agent**
+  ("The command runs as a sub-agent and only its report comes back.") with its **Agent**; skills also get **Allowed
+  tools** and **Model**. Keys the form does not show (`arguments`, a Claude model name such as `model: sonnet` while no
+  model is chosen) are kept when you save.
 - **Edit**, **Duplicate**, **Export .md** (download the file), **Turn off / Turn on** and **Delete** (with Undo) are in
   each personal row's menu.
 - **Import…** reads a `.md` file (an agent, command or skill from a repository or from Claude Code; up to 64 KB) into
-  the editor, with notes about what was ignored; check it and save.
-- **Project and plugin definitions are read-only** here: **View** shows the file, **Copy to personal** makes an
-  editable copy, **Export .md** downloads it (and **Open plugin** opens a plugin's page). Edit project files in the
-  repository. v1.8: a project row's **Edit…** (and **Edit** in the viewer) opens the file itself in an editor: the raw
-  file is saved as you wrote it (keys harness-forge does not know stay), checked first, and refused with "{file} changed
-  on disk after you opened it." when the file changed meanwhile (**Load from disk** or **Overwrite**); **New file…** in
-  the project's section creates one in `.harness/` or `.claude/`, and **Delete…** removes one. Saving never approves a
-  command's `!` lines: they wait for the review ("Saved {path}. 1 item needs your approval." → **Review**). Folder problems (a symbolic link that was skipped, a folder over the limit) show as notes above the
-  project's list.
+  the editor, with notes about what was ignored ("Ignored: …"); check it and save.
+- **Plugin definitions are read-only** here: **View…** shows the file, **Copy to personal** makes an editable copy
+  (a `<plugin>:<name>` entry under its bare name), **Export .md** downloads it and **Open plugin** opens the plugin's
+  page. Project rows have **View…**, **Copy to personal** and **Export .md** too.
+- **Project files** (v1.8): a project row's **Edit…** (and **Edit** in the viewer) opens the file itself in an editor
+  ("Edit {file}"). The raw file is saved as you wrote it (keys harness-forge does not know stay); it is checked as you
+  type (errors block **Save file**, warnings do not), and Ctrl+Enter (⌘Enter on macOS) saves too. When the file changed
+  on disk after you opened it, the save stops with "{file} changed on disk after you opened it." and offers **Load from
+  disk** (drops your edits) or **Overwrite**; a file that is gone reads "This file no longer exists.". **New file…** in
+  the heading of the project's section creates one ("New {kind} in {project}": choose the **Folder**, `.harness` or
+  `.claude`, and the **Name**), and **Delete…** removes one ("Delete {path}?"; no Undo). Saving never approves anything
+  ("Saving never approves hooks or shell lines."): a command's `!` lines wait for the review ("Saved {path}. 1 item
+  needs your approval." with **Review**). These saves are your own edits, like those in your editor: they work while a
+  chat of the project runs and are not journaled (Rewind does not undo them). Project hooks and `.mcp.json` are edited
+  the same way from the **Hooks** tab and the project's MCP servers dialog
+  ([hooks and project MCP servers](hooks-and-project-mcp.md)).
+- Folder problems (a symbolic link that was skipped, a folder over the limit) show as notes above the project's list.
 - A plugin's agents and skills are also listed on its page in the **Plugins** tab (the filter **Agents and skills**
   finds such plugins), with **Open in Customize**.
 - Personal definitions are part of every backup (Settings → Data → Export); **Restore settings from the backup** brings
@@ -306,10 +331,14 @@ in Settings → Projects) lists everything by tab (**Agents**, **Commands**, **S
   `/output-style`), **Project**, **Personal**, **Plugins** and (v1.7) **Skills**. A project command whose shell lines
   are not approved yet shows **Needs approval**. After you pick one, a faded hint shows its arguments. Project commands
   appear only in that project's chats; a command file saved on disk shows up when you open the menu again (it can take
-  up to half a minute). The bubble's badge tells where the command came from and which model it asked for.
+  up to half a minute). The bubble's badge tells where the command came from and which model it asked for. v1.8: a
+  plugin's qualified command (`/review-kit:review`) shows its namespace muted, and typing any part of the name finds it
+  (`/migrate` finds `/review-kit:db:migrate`); the bare `/review` works when it is unique (section 3).
 - **Agents**: the main agent decides when to use one; mention it by name to ask for it. Each runs as a sub-agent block
-  with its name; it never asks you for approval (a call that would need it is skipped), like every sub-agent.
-- **Skills**: the main agent loads them; the "Loaded skill" row shows what it read.
+  with its name (v1.8: in its `color`); it never asks you for approval (a call that would need it is skipped), like
+  every sub-agent.
+- **Skills**: the main agent loads them; the "Loaded skill" row shows what it read (v1.8: a fork skill's report, or a
+  supporting file of a plugin skill).
 - **Changes to files** made by custom agents are journaled like the main agent's: **Rewind files to here** and the
   changes panel cover them.
 
@@ -322,15 +351,15 @@ unchanged; these are the differences:
 |---|---|---|
 | tool names `Read`, `Write`, `Edit`, `MultiEdit`, `Grep`, `Glob`, `LS`, `Bash`, `WebFetch` | mapped to `read_file`, `write_file`, `edit_file`, `edit_file`, `search_files`, `find_files`, `list_directory`, `shell`, `web_fetch`; `mcp__…` names kept | same tools, other names |
 | other tool names (`Task`, `TodoWrite`, `NotebookEdit`, …) | match nothing, with a warning ("Unknown tool: Task; it matches nothing.") | there is no such tool, and a sub-agent never gets the agent tools |
-| `Bash(git:*)`-style patterns | the tool (`shell`) is kept, the pattern is ignored with a warning; every shell call still asks unless your shell rules allow it | harness-forge has its own shell rules (Settings → Projects) |
-| a `tools` value that is neither text nor a list | **no tools** at all, with a warning | a broken list must not grant everything |
-| `allowed-tools` of a command | **narrows** the turn's tools; it does **not** pre-approve them | in Claude Code it pre-approves; a cloned repository must not be able to approve the shell for you |
-| `model: sonnet` / `opus` / `haiku` | v1.8: the model you chose for that name in Settings → General → Agent → **Claude model names** (a full `claude-*` id uses the Anthropic provider); a name you did not set: an agent uses the default sub-agent model, a command the chat's model (a note says so) | harness-forge works with any provider, so you pick what each name means |
+| `Bash(git:*)`-style patterns | the tool (`shell`) is kept, the pattern is ignored with a warning; every shell call still asks unless your shell rules allow it (v1.8: in `disallowedTools` / `disallowed-tools` the whole tool is removed) | harness-forge has its own shell rules (Settings → Projects) |
+| a `tools` value that is neither text nor a list | **no tools** at all, with a warning (v1.8: a broken `disallowedTools` / `disallowed-tools` removes nothing) | a broken list must not grant everything |
+| `allowed-tools` of a command (v1.8: or a skill) | **narrows** the turn's tools; it does **not** pre-approve them | in Claude Code it pre-approves; a cloned repository must not be able to approve the shell for you |
+| `model: sonnet` / `opus` / `haiku` / `fable` | v1.8: the model you chose for that name in Settings → General → Agent → **Claude model names** (`opusplan` reads as `opus`, a `[1m]` suffix is dropped; a full `claude-*` id runs on the Anthropic provider when that provider knows the model); a name you did not set: an agent uses the default sub-agent model, a command or skill (`/name`) the chat's model and the reply's notice says so. The file shows the note "Claude model names use the model aliases of the settings; without one, …" | harness-forge works with any provider, so you pick what each name means |
 | `model: inherit` | the chat's model | same meaning |
 | a header that is not valid YAML | read line by line when it has plain `key: value` lines (a warning; the definition stays usable), else **Invalid** | Claude Code is lenient with hand-written headers |
 | `` !`git status` `` spans in a command | v1.7: **run** in the project folder before the model call, for personal and trusted plugin commands, and for a project's command files only after you approve them (section 2); v1.6 left them as text | a repository must not run programs without your consent |
 | `@path` in a command (`@src/main.ts`) | v1.7: the project file is **inlined** (project chats only; secret-looking paths refused); v1.6 left it as text | the same guard as the agent's file tools |
-| other header keys | v1.8 uses `disallowedTools`, `maxTurns`, `color`, `skills`, `when_to_use`, `arguments`, `disallowed-tools`, `context: fork` + `agent` and skill `allowed-tools` / `model`; `permissionMode`, `hooks`, `mcpServers`, `memory`, `background`, `effort`, `isolation`, `initialPrompt`, `paths`, `shell` and `metadata` are ignored (listed as "Ignored" in the editor) | not supported; a file can never change the permission mode |
+| other header keys | v1.8 uses `disallowedTools`, `maxTurns`, `color`, `skills`, `when_to_use`, `arguments`, `disallowed-tools`, `context: fork` + `agent` and skill `allowed-tools` / `model`; `permissionMode`, `hooks`, `mcpServers`, `memory`, `background`, `effort`, `isolation`, `initialPrompt`, `paths`, `shell`, `metadata`, `license`, `compatibility` and any other key are ignored: an info note per key ("The key "permissionMode" is ignored; harness-forge does not support it."), gathered as "Ignored: …" in the import notes | not supported; a file can never change the permission mode |
 | YAML anchors and aliases (`&x`, `*x`) | the header is read line by line instead, aliases are not expanded (a warning) | protects against oversized headers |
 | `~/.claude/…` (your home folder) | not read by chats; v1.8: copied once into your personal definitions with **Import from Claude Code** ([guide](claude-code-import.md)) | your personal setup lives in harness-forge's database |
 | sub-agents that start sub-agents | not supported (depth 1) | the same rule as for the built-in sub-agents |
@@ -343,9 +372,10 @@ unchanged; these are the differences:
 Definition files come with repositories you clone, so harness-forge treats them like `AGENTS.md`: their **text** can
 steer the model (check what a repository ships), but they can **never give themselves rights**:
 
-- a `tools` or `allowed-tools` list only removes tools; it never adds one, never approves a call, never changes the
-  permission mode, never creates a tool override or a shell rule;
-- `model` works only with providers you connected;
+- a `tools` or `allowed-tools` list (v1.8: also `disallowedTools` / `disallowed-tools`) only removes tools; it never
+  adds one, never approves a call, never changes the permission mode, never creates a tool override or a shell rule;
+- `model` works only with providers you connected (v1.8: a Claude model name runs the model you chose for it in the
+  settings, a full `claude-*` id only on your Anthropic provider);
 - command bodies never run programs by themselves: since v1.7 a project command's `` !`cmd` `` spans run only after you
   approve that file (pinned by hash; any change needs a new approval), and `@path` reads only project files through the
   agent's path guard (no secret-looking paths, no `.git`, no links, nothing outside the project; it needs no
@@ -370,7 +400,8 @@ reply goes on (or ends), and the **background agent** keeps working. When it is 
 
 **Above the composer**, the **Background agents** list shows what runs ("2 background agents · Find flaky tests ·
 1m 12s") and finished agents whose report was not delivered yet ("1 background agent finished · report pending"); open
-it for each agent's live steps, a **Stop** per agent and **Stop all**.
+it for each agent's live steps, a **Stop** per agent and **Stop all**. An agent you stop there stays in the open list
+for 3 seconds with its final state, even when its report was taken at once (v1.8).
 
 - **Stop in the composer (or Esc) does not stop background agents** (as in Claude Code). Use their own Stop. Deleting
   the chat or its project, Delete all data, a key rotation and stopping the server stop them too. A stopped agent still
@@ -423,6 +454,8 @@ binary file is refused.
 | What | Limit |
 |---|---|
 | A definition file | 64 KB, header 8 KB, description 1,024 characters, argument hint 100 characters, 64 tool names |
+| Claude Code keys (v1.8) | `when_to_use` 1,024 characters, 9 named `arguments`, `maxTurns` 1–200, 5 preloaded `skills` (32 KB in total) |
+| A fork skill the agent loads (v1.8) | one sub-agent; the `skill` call may take up to 10 minutes (like `task`) |
 | Project folders | 200 definitions per folder, commands up to 3 subfolders deep (100 subfolders), skills with up to 50 listed supporting files |
 | Personal definitions | 200 per kind |
 | Listed to the model | 30 agent types and 50 skills, descriptions cut at 250 characters |
@@ -452,7 +485,13 @@ Changes on disk show up within 10 seconds (Settings → Customize reads the fold
 - **An `@path` was not inlined**: the path must hold a `.` or `/`, exist in the project, and not be secret-looking, a
   `.git` path or a link; punctuation glued to it is part of the path (write `@"README.md",`).
 - **The command ran on the chat's model**: the command's `model` is not available (no key for that provider, an unknown
-  model, or an image model); the reply's notice says so.
+  model, or an image model; v1.8: a Claude model name such as `sonnet` without a model chosen in Settings → General →
+  Agent → **Claude model names**); the reply's notice says so.
+- **`$1` is the wrong word** (v1.8): the file counts arguments from 0 because it uses `$0` or `$ARGUMENTS[` somewhere
+  (a literal `$0`, such as an `awk '{print $0}'` example, counts) or declares `arguments`; then `$0` is the first word
+  and `$1` the second. Write a literal `$0` as `\$0` outside spans, or count from 0.
+- **`/review` does not run the plugin's command** (v1.8): another entry is named `review`, or two plugins have a
+  `review`; type the full name (`/review-kit:review`).
 - **The custom agent did not get a tool from its list**: a sub-agent only gets tools that run without approval in the
   chat's mode. In Ask that means read-only tools; switch to Accept edits for file edits (it gets `shell` there too, but
   only the commands your shell rules allow run; the others are denied).

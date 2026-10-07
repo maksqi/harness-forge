@@ -3,7 +3,7 @@
 //
 // - `home()`: one `stat` of `env.claudeHome` (never a file read);
 // - `scan()` (fresh auth): `HF_CLAUDE_HOME=0` → 409 `disabled`; ./collect-disk.ts reads the allowlist (10 s deadline;
-//   aborted by `stop()`), then a plan is built and kept;
+//   aborted by `stop()`: 409 `busy`, nothing kept), then a plan is built and kept;
 // - `upload()`: ./collect-upload.ts (folder files or a zip, plus `~/.claude.json`), then a plan is built and kept;
 // - `apply()` (fresh auth): ./apply.ts against the kept plan (404 when it is unknown or expired; dropped once applied).
 //
@@ -60,6 +60,18 @@ export function scanDisabledError(): HarnessError {
     code: 'conflict',
     message: 'Scanning a Claude Code folder on the server is turned off (HF_CLAUDE_HOME=0). Upload the folder instead.',
     details: { reason: 'disabled' },
+  })
+}
+
+/**
+ * The 409 of a scan stopped by `stop()` (shutdown) while it read the folder: `details.reason: 'busy'` (W12.18-T3; the
+ * conflict details need a reason). Nothing is kept.
+ */
+export function scanStoppedError(): HarnessError {
+  return new HarnessError({
+    code: 'conflict',
+    message: 'The scan of the Claude Code folder was stopped.',
+    details: { reason: 'busy' },
   })
 }
 
@@ -187,9 +199,18 @@ export function createClaudeImportService(deps: AppDeps, options: ClaudeImportSe
           ...(options.scanTimeoutMs === undefined ? {} : { timeoutMs: options.scanTimeoutMs }),
           ...(options.fs === undefined ? {} : { fs: options.fs }),
         }
-        const collected = await collectDiskHome(collect)
+        let collected: CollectedHome
+        try {
+          collected = await collectDiskHome(collect)
+        }
+        catch (error) {
+          // The collector's own "stopped" error has no reason: a stopped scan always answers `scanStoppedError()`.
+          if (controller.signal.aborted)
+            throw scanStoppedError()
+          throw error
+        }
         if (controller.signal.aborted)
-          throw new HarnessError({ code: 'conflict', message: 'The scan of the Claude Code folder was stopped.' })
+          throw scanStoppedError()
         return await keep('scan', root, collected, started)
       }
       finally {

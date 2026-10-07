@@ -13,6 +13,7 @@
 // (`data-action="edit"`), the emit `edit` that CustomizeSettings answers with the project file editor; the list adds the
 // Claude Code keys (Tools not allowed, Max turns, Color, Skills, When to use, Runs in a sub-agent, a Claude model name).
 // Qualified plugin names are shown as they are; Export .md names the file after the bare name.
+// W12.19: on a coarse pointer the × Close is a 40 px target.
 import type { CustomizationEntry } from '@harness-forge/shared'
 import type { CustomizationDraft } from './customize'
 import { CopyPlusIcon, DownloadIcon, FileXIcon, PencilIcon } from '@lucide/vue'
@@ -29,7 +30,7 @@ import { usePluginsStore } from '~/stores/plugins'
 import { downloadText } from '~/utils/download'
 import { hasErrorCode, toHarnessError } from '~/utils/errors'
 import { testIds } from '~/utils/testids'
-import { AGENT_COLOR_LABELS, bareName, displayName as displayNameOf, draftFromEntry, isEditableProjectEntry, sourceLabel } from './customize'
+import { AGENT_COLOR_LABELS, bareName, displayName as displayNameOf, draftFromEntry, isEditableProjectEntry, SHEET_CLOSE_TOUCH_CLASS, sourceLabel } from './customize'
 
 const props = defineProps<{ open: boolean, entry: CustomizationEntry | null, projectId: string | null }>()
 
@@ -168,6 +169,7 @@ const editable = computed(() => !!props.entry && isEditableProjectEntry(props.en
       :data-kind="entry.kind"
       :data-source="entry.source"
       class="gap-0 data-[side=right]:w-full data-[side=right]:sm:max-w-2xl"
+      :class="SHEET_CLOSE_TOUCH_CLASS"
       @open-auto-focus="onOpenAutoFocus"
     >
       <SheetHeader class="border-b pr-14">

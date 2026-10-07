@@ -5,7 +5,7 @@ registers tools, providers, slash commands, MCP servers, hooks, (plugin API 1.4.
 (plugin API 1.5.0) output styles through `ctx`. Use a code plugin when a manifest is not enough: a tool the model can
 call, a provider for an unusual API, a command that computes its answer, a hook that changes prompts and tool calls, or
 agents, skills and styles built from code. (Command hooks, the shell commands of Claude Code's `hooks` format, are
-declared in `plugin.json` as `contributes.hooks`; plugin API 1.5.0 has no `ctx` API for them.)
+declared in `plugin.json` as `contributes.hooks`; the plugin API (1.6.0) has no `ctx` API for them.)
 
 > **Trust.** A code plugin runs **inside the server process with its full rights**. It can read every API key and
 > conversation, the data directory and `process.env`, make any network request and start programs. harness-forge
@@ -384,6 +384,13 @@ in a project chat the lines run in the project folder before the model is called
 `` !`cmd` `` lines is refused and `@path` stays text. A declarative manifest whose template holds such a line requires
 trust, like a code plugin. The prompt a `run` command returns is never scanned for them.
 
+Plugin API 1.6.0 adds optional `CommandDefinition` fields: `syntax: 'markdown'` makes the `template` a command-file body
+(up to 64 KiB, `$ARGUMENTS`, `$ARGUMENTS[N]` / `$N` and `$name` instead of `{{input}}`), `argumentHint`, `model` (a
+model ref or a Claude model name such as `sonnet`), `allowedTools` / `disallowedTools` (they only narrow the turn's
+tools), `arguments`, `whenToUse`, and `context: 'fork'` with `agent` (the command runs as a sub-agent). A 1.6.0 name may
+be qualified with your plugin id (`my-plugin:review`); a bare name is also callable as `/<pluginId>:<name>`. Declare
+`"engines": { "harness": "^1.6.0" }` when you use one ([PLUGINS.md "Commands"](../PLUGINS.md#commands)).
+
 ## Agents and skills (plugin API 1.4.0)
 
 `ctx.agents.register()` adds a **sub-agent type**: the main agent starts it with the `task` tool
@@ -420,6 +427,12 @@ export default {
   `.claude/agents/`, `.harness/skills/<name>/SKILL.md`, ...) with the same name wins over yours where it exists.
 - **No code needed** for fixed definitions: `contributes.agents` / `contributes.skills` in `plugin.json` take the same
   fields and run no code. Declare `"engines": { "harness": "^1.4.0" }` for either form.
+- **Plugin API 1.6.0** adds optional fields (code form; a manifest skill only gains `baseDir`): an agent's
+  `disallowedTools`, `maxTurns` (1-200), `color` and `skills` (at most 5 preloaded skills), and a Claude model name
+  (`sonnet`, `opus`, `haiku`, `fable`, a `claude-*` id) as its `model`; a skill's `baseDir` (a folder of supporting files
+  the `skill` tool reads with its `file` input), `argumentHint`, `userInvocable`, `modelInvocable`, `allowedTools`,
+  `disallowedTools`, `model`, `arguments`, `whenToUse` and `context: 'fork'` with `agent` (the skill runs as a
+  sub-agent). Declare `"engines": { "harness": "^1.6.0" }` when you use one; an older server refuses these fields.
 
 Reference: [PLUGINS.md "Agents and skills"](../PLUGINS.md#agents-and-skills).
 
@@ -509,8 +522,8 @@ Calls are billed to the user's key, so say in your description that the plugin m
 ## Lifecycle, debugging and trust
 
 - **States**: `active`, `disabled`, `untrusted` (the files changed since they were trusted), `incompatible`
-  (`engines.harness` does not match the plugin API `1.5.0`, so use `"^1.0.0"`, or `"^1.1.0"` / `"^1.2.0"` /
-  `"^1.3.0"` / `"^1.4.0"` / `"^1.5.0"` for the members of those versions),
+  (`engines.harness` does not match the plugin API `1.6.0`, so use `"^1.0.0"`, or `"^1.1.0"` / `"^1.2.0"` /
+  `"^1.3.0"` / `"^1.4.0"` / `"^1.5.0"` / `"^1.6.0"` for the members of those versions),
   `error` (invalid manifest, `setup` threw or timed out, build failed). The plugin card and the detail header show the
   state and the last error.
 - **Logs**: `ctx.logger.debug/info/warn/error(message, data)` shows up in the Logs tab (last 500 entries) and the

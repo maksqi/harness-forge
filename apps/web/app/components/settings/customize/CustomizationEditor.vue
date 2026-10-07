@@ -25,6 +25,8 @@
 // (like commands). The body help names `$ARGUMENTS[N]`, `$name` and `${CLAUDE_SKILL_DIR}`. Keys the form does not show
 // (`arguments`, a Claude model name such as `model: sonnet` while no model is chosen) are kept on save; every key is
 // written by the shared `formatDefinition` only when it is set.
+// W12.19: the Color and Agent lists open as poppers below their trigger (`position="popper"`; the item-aligned default
+// placed them off-screen inside the sheet); on a coarse pointer their triggers, the switches and the × Close are 40 px.
 import type { AgentColor, Customization, CustomizationKind, DefinitionDiagnostic, ToolSummary } from '@harness-forge/shared'
 import type { AcceptableValue } from 'reka-ui'
 import type { CustomizationDraft, DraftField } from './customize'
@@ -72,6 +74,7 @@ import {
   maxTurnsValue,
   nameError,
   nameMaxChars,
+  SHEET_CLOSE_TOUCH_CLASS,
   sizeLabel,
   skillsError,
   utf8Bytes,
@@ -521,6 +524,7 @@ function errorProps(field: DraftField, errorId: string, meta?: { isBlurred: bool
       :data-kind="kind"
       :data-mode="mode"
       class="gap-0 data-[side=right]:w-full data-[side=right]:sm:max-w-2xl"
+      :class="SHEET_CLOSE_TOUCH_CLASS"
       @open-auto-focus="onOpenAutoFocus"
     >
       <SheetHeader class="border-b pr-14">
@@ -771,14 +775,14 @@ function errorProps(field: DraftField, errorId: string, meta?: { isBlurred: bool
                       :data-testid="testIds.customizationColor"
                       :data-value="state.value"
                       :aria-describedby="ids.colorHelp"
-                      class="w-48 pointer-coarse:h-10"
+                      class="w-48 pointer-coarse:data-[size=default]:h-10"
                     >
                       <span class="inline-flex min-w-0 items-center gap-2">
                         <span v-if="state.value" aria-hidden="true" class="size-2 shrink-0 rounded-full" :style="colorDot(state.value)" />
                         {{ state.value ? AGENT_COLOR_LABELS[state.value] : 'None' }}
                       </span>
                     </SelectTrigger>
-                    <SelectContent>
+                    <SelectContent position="popper" align="start">
                       <SelectItem :value="NO_COLOR" data-value="">
                         None
                       </SelectItem>
@@ -831,7 +835,7 @@ function errorProps(field: DraftField, errorId: string, meta?: { isBlurred: bool
                     :model-value="state.value"
                     :aria-describedby="ids.forkHelp"
                     :data-testid="testIds.customizationFork"
-                    class="mt-0.5 pointer-coarse:after:-inset-y-[11px]"
+                    class="mt-0.5 pointer-coarse:after:-inset-y-3"
                     @update:model-value="value => field.handleChange(value === true)"
                   />
                 </div>
@@ -846,11 +850,11 @@ function errorProps(field: DraftField, errorId: string, meta?: { isBlurred: bool
                       :id="ids.forkAgent"
                       :data-testid="testIds.customizationForkAgent"
                       :data-value="state.value || DEFAULT_FORK_AGENT"
-                      class="w-full font-mono text-[13px] sm:w-64 pointer-coarse:h-10"
+                      class="w-full font-mono text-[13px] sm:w-64 pointer-coarse:data-[size=default]:h-10"
                     >
                       <span class="min-w-0 truncate">{{ state.value || DEFAULT_FORK_AGENT }}</span>
                     </SelectTrigger>
-                    <SelectContent>
+                    <SelectContent position="popper" align="start">
                       <SelectItem v-for="agent in forkAgentOptions" :key="agent" :value="agent" :data-value="agent" class="font-mono text-[13px]">
                         {{ agent }}
                       </SelectItem>
@@ -872,7 +876,7 @@ function errorProps(field: DraftField, errorId: string, meta?: { isBlurred: bool
                     :id="ids.userInvocable"
                     :model-value="state.value"
                     :data-testid="testIds.customizationUserInvocable"
-                    class="mt-0.5 pointer-coarse:after:-inset-y-[11px]"
+                    class="mt-0.5 pointer-coarse:after:-inset-y-3"
                     @update:model-value="value => field.handleChange(value === true)"
                   />
                 </div>
@@ -892,7 +896,7 @@ function errorProps(field: DraftField, errorId: string, meta?: { isBlurred: bool
                     :model-value="state.value"
                     :aria-describedby="ids.modelInvocationHelp"
                     :data-testid="testIds.customizationModelInvocation"
-                    class="mt-0.5 pointer-coarse:after:-inset-y-[11px]"
+                    class="mt-0.5 pointer-coarse:after:-inset-y-3"
                     @update:model-value="value => field.handleChange(value === true)"
                   />
                 </div>
@@ -914,7 +918,7 @@ function errorProps(field: DraftField, errorId: string, meta?: { isBlurred: bool
                   :model-value="state.value"
                   :aria-describedby="ids.keepCodingHelp"
                   :data-testid="testIds.customizationKeepCoding"
-                  class="mt-0.5 pointer-coarse:after:-inset-y-[11px]"
+                  class="mt-0.5 pointer-coarse:after:-inset-y-3"
                   @update:model-value="value => field.handleChange(value === true)"
                 />
               </div>

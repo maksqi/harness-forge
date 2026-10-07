@@ -15,6 +15,7 @@ import { useProjectsStore } from '~/stores/projects'
 import { testIds } from '~/utils/testids'
 import { projectDefinitionFile, projectDefinitionWriteResult, projectId, projectSummary, trustSha } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
+import { SHEET_CLOSE_TOUCH_CLASS } from './customize'
 import ProjectFileEditor from './ProjectFileEditor.vue'
 
 const mocks = vi.hoisted(() => ({
@@ -282,6 +283,25 @@ describe('projectFileEditor', () => {
       body: { path: '.claude/skills/pdf/SKILL.md', expectedSha256: null, content: '---\nname: pdf\ndescription: Fill PDF forms\n---\nUse the scripts.\n' },
     })
     expect(events.saved).toHaveBeenCalledWith({ path: '.claude/skills/pdf/SKILL.md', pending: 0 })
+  })
+
+  it('gives the × Close a 40 px target on a coarse pointer and opens the Folder list next to its trigger (W12.19)', async () => {
+    await mountEditor({ path: '.claude/skills/SKILL.md', kind: 'skill', name: null, create: true })
+    const editor = byTestId(testIds.projectFileEditor)!
+    // The frozen SheetContent's × Close is `size-8` at `top-4 right-4`: 40 px around the same center on a coarse pointer.
+    expect(editor.className.split(/\s+/)).toEqual(expect.arrayContaining(SHEET_CLOSE_TOUCH_CLASS.split(' ')))
+    expect(SHEET_CLOSE_TOUCH_CLASS.split(' ')).toEqual([
+      'pointer-coarse:**:data-[slot=sheet-close]:top-3',
+      'pointer-coarse:**:data-[slot=sheet-close]:right-3',
+      'pointer-coarse:**:data-[slot=sheet-close]:size-10',
+    ])
+    const close = editor.querySelector<HTMLElement>('[data-slot="sheet-close"]')!
+    expect(close.textContent).toContain('Close')
+    const folder = editor.querySelector<HTMLElement>('[data-slot="project-file-folder"]')!
+    expect(folder.className.split(/\s+/)).toContain('pointer-coarse:data-[size=default]:h-10')
+    folder.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await settle()
+    expect(document.body.querySelector('[data-slot="select-content"] [data-position]')?.getAttribute('data-position')).toBe('popper')
   })
 
   it('switches a new file to the existing one after a conflict and Load from disk', async () => {

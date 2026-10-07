@@ -132,9 +132,9 @@ Key properties:
   commit, never with git (6.34); a Claude Code home folder (uploaded from the browser or scanned on the server) is
   imported once into personal definitions, hooks, MCP servers, shell rules and instructions through a server-side plan
   (6.35); a project's definition files, hooks and `.mcp.json` are edited from the UI without ever approving what they
-  run (6.36); hooks gain prompt handlers answered by a small model, five more events, Claude Code's handler fields and a
-  `transcript_path` file (6.37); and definitions accept Claude Code's newer frontmatter, 0-based arguments and model
-  aliases (6.38). The security model is in 10.13.
+  run (6.36); hooks gain prompt handlers answered by a model (the hook model setting, else the run provider's small
+  model), five more events, Claude Code's handler fields and a `transcript_path` file (6.37); and definitions accept
+  Claude Code's newer frontmatter, 0-based arguments and model aliases (6.38). The security model is in 10.13.
 
 ## 2. Packages
 
@@ -154,14 +154,14 @@ boundary and `plugin-sdk` re-exports the plugin data shapes (API.md 3.2).
 | Path | Responsibility |
 |---|---|
 | `main.ts` | Process entry: dispatches the `rotate-key` CLI (Phase 7, 6.14) before anything boots; otherwise installs the signal handlers for graceful shutdown (before the boot starts, Phase 6 hotfix), then runs the boot sequence (section 5) with the key recovery and the `server.lock` hooks (Phase 7). |
-| `env.ts` | Loads `<repo root>/.env`, parses and validates `HF_*` environment variables (zod) into a frozen `Env` object; resolves `HF_DATA_DIR` and `HF_WEB_DIR`; bind-safety check; Phase 7: the syntax of `HF_WORKSPACE_ROOTS` (`Env.workspaceRoots`, `workspaceRootsDefault`) and `HF_WORKSPACE_SHELL` (`Env.workspaceShell`), `DataPaths.workspaces`; Phase 8: `DataPaths.checkpoints` and the test-only `Env.testFileSweepDelayMs` (`HF_TEST_FILE_SWEEP_DELAY_MS`, honored only with `HF_MOCK_PROVIDER=1`, else null; `envBootWarnings(env)` then returns the warning "the test-only automatic file sweep delay is ignored: it is honored only with HF_MOCK_PROVIDER=1", which `startDeps` logs first; the text names the variable in words because the log redactor masks `HF_` followed by 16 or more word characters). Phase 12: `HF_CLAUDE_HOME` (`Env.claudeHome`: unset = `os.homedir()/.claude`, `0` = the scan is off, else an absolute path, rejected at boot otherwise; the Docker image sets `0`) and the test-only `HF_TEST_REMOTE_URL` (`Env.testRemoteUrl`: honored only with `HF_MOCK_PROVIDER=1` and only as `http://127.0.0.1:<port>`, any other value fails the boot), `DataPaths.transcripts`. |
-| `deps.ts` | Composition root: `createDeps()` builds every service (eagerly, so a failing factory fails the boot), `startDeps()` / `stopDeps()` run the boot and shutdown steps (section 5; Phase 8: `checkpoints.start()` right after `projects.start()`, before the staging recovery and the plugins, and `data.start()` last; `data.stop()` first, `checkpoints.stop()` right after the runs stopped; Phase 10: `runs.boot()` right after `checkpoints.start()` (the boot sweep of `background_tasks`; `runs.start()` is `POST /chat`), and `runs.stopAll()` stops the queues, then the background tasks, then the runs; `customizations.stop()` right after the runs; the frozen orders are `BOOT_STEPS` and `SHUTDOWN_STEPS`). Phase 11 (frozen from P11-0b): the services `hooks`, `projectConfig`, `projectTrust` and `projectMcp` (`AppDeps`); no new boot step (hook snapshots, the project config reader and the project MCP runtimes are lazy); shutdown runs data → runs (queues → background tasks → runs) → **hooks** → **projectMcp** → customizations → **projectConfig** → projectFiles → checkpoints → plugins → mcp → catalog → events (`projectTrust` keeps no state to stop). Phase 12 (frozen from P12-0b): the services `marketplaces`, `claudeImport` and `projectDefinitions` (`AppDeps`); no new boot step (marketplaces are read from the database on use, import plans live in memory, project files are read on request); shutdown adds `claudeImport.stop()` (drops every plan) before the runs and `marketplaces.stop()` (aborts the fetches in flight) right before the plugins, and `hooks.stop()` also stops the prompt-hook calls, the detached `async` and `SessionEnd` hooks and the transcript writer (`projectDefinitions` keeps no state to stop). |
+| `env.ts` | Loads `<repo root>/.env`, parses and validates `HF_*` environment variables (zod) into a frozen `Env` object; resolves `HF_DATA_DIR` and `HF_WEB_DIR`; bind-safety check; Phase 7: the syntax of `HF_WORKSPACE_ROOTS` (`Env.workspaceRoots`, `workspaceRootsDefault`) and `HF_WORKSPACE_SHELL` (`Env.workspaceShell`), `DataPaths.workspaces`; Phase 8: `DataPaths.checkpoints` and the test-only `Env.testFileSweepDelayMs` (`HF_TEST_FILE_SWEEP_DELAY_MS`, honored only with `HF_MOCK_PROVIDER=1`, else null; `envBootWarnings(env)` then returns the warning "the test-only automatic file sweep delay is ignored: it is honored only with HF_MOCK_PROVIDER=1", which `startDeps` logs first; the text names the variable in words because the log redactor masks `HF_` followed by 16 or more word characters). Phase 12: `HF_CLAUDE_HOME` (`Env.claudeHome`: unset = `os.homedir()/.claude`, `0` = the scan is off (null), else an absolute path normalized with `resolve`; a relative path or a NUL fails the boot; the folder itself is never touched at boot; the Docker image and `start:e2e` set `0`) and the test-only `HF_TEST_REMOTE_URL` (`Env.testRemoteUrl`: any value other than `http://127.0.0.1:<port>` fails the boot, also without `HF_MOCK_PROVIDER=1`; a valid one is honored only with `HF_MOCK_PROVIDER=1`, else null and `envBootWarnings` returns `TEST_REMOTE_URL_IGNORED_WARNING`), `DataPaths.transcripts` (not created by `ensureDataDir`: the first hook that needs a transcript creates it). |
+| `deps.ts` | Composition root: `createDeps()` builds every service (eagerly, so a failing factory fails the boot), `startDeps()` / `stopDeps()` run the boot and shutdown steps (section 5; Phase 8: `checkpoints.start()` right after `projects.start()`, before the staging recovery and the plugins, and `data.start()` last; `data.stop()` first, `checkpoints.stop()` right after the runs stopped; Phase 10: `runs.boot()` right after `checkpoints.start()` (the boot sweep of `background_tasks`; `runs.start()` is `POST /chat`), and `runs.stopAll()` stops the queues, then the background tasks, then the runs; `customizations.stop()` right after the runs; the frozen orders are `BOOT_STEPS` and `SHUTDOWN_STEPS`). Phase 11 (frozen from P11-0b): the services `hooks`, `projectConfig`, `projectTrust` and `projectMcp` (`AppDeps`); no new boot step (hook snapshots, the project config reader and the project MCP runtimes are lazy); shutdown runs data → runs (queues → background tasks → runs) → **hooks** → **projectMcp** → customizations → **projectConfig** → projectFiles → checkpoints → plugins → mcp → catalog → events (`projectTrust` keeps no state to stop). Phase 12 (frozen from P12-0b): the services `marketplaces`, `claudeImport` and `projectDefinitions` (`AppDeps`); no new boot step (marketplaces are read from the database on use, import plans live in memory, project files are read on request); shutdown adds `claudeImport.stop()` (drops every plan and aborts a scan in flight) as the first step, before `data.stop()`, and `marketplaces.stop()` (aborts the fetches in flight) right before the plugins, and `hooks.stop()` also stops the prompt-hook calls, the detached `async` and `SessionEnd` hooks and the transcript writer (`projectDefinitions` keeps no state to stop); `SHUTDOWN_STEPS` = claudeImport, data, runs, hooks, projectMcp, customizations, projectConfig, projectFiles, checkpoints, marketplaces, plugins, mcp, catalog, events. `pluginSourceFetch(env)` builds the one plugin-source fetch (`createPluginSourceFetch`, with the test remote when `env.testRemoteUrl` is set) that the installer and the marketplace service share. |
 | `app.ts` | `createApp(deps)` app factory: mounts middleware and every route module under `/api`; used by `main.ts` and `createTestApp()`. |
 | `paths.ts`, `logger.ts` | Package-relative locations (server package root, migrations, bundled assets, the SPA build, installed package versions); JSON-lines logger with redaction. |
 | `http/middleware/` | Request id, structured access log (share tokens masked; it also runs the untrusted-proxy hint of `proxy-warning.ts`), secure headers + CSP, Origin check on non-GET, session auth, fresh auth (ADR-017), login rate limiter, body-size and content-type gate, the global error handler that renders `HarnessErrorEnvelope`; `request-info.ts` resolves the client address and scheme, trusting forwarded headers only from `HF_TRUST_PROXY` peers (section 10.6). |
-| `http/routes/` | One Hono module per API area (`health`, `auth`, `settings`, `events`, `providers`, `credentials`, `models`, `icons`, `chats`, `chat`, `files`, `tools`, `mcp`, `commands`, `plugins`, `plugin-install`, `plugin-drafts`, `plugin-files`, `data`, `audio`, `shares`; Phase 7: `projects`, `keys`; Phase 8: `changes` (7 chat-scoped routes: changes, diff, git, revert, undo, rewind preview and apply; 6.16, 6.17) and `shell-rules` (3; 6.13); Phase 9: `chat-queue` (module `chatQueue`, 3 routes under `/chat/:id/queue`; 6.20) and `project-files` (module `projectFiles`, 2 routes under `/projects/:id/files`; 6.21); Phase 10: `customizations` (6 routes; 6.23), `memory` (1 route, `POST /memory`; 6.27) and `chat-tasks` (module `chatTasks`, 2 routes under `/chat/:id/tasks`; 6.26), and `commands` gains `?projectId=`; Phase 11: `hooks` (5 routes: list, runs, create, update, remove; 6.28), `project-trust` (module `projectTrust`, 3 routes under `/projects/:id/trust`; 6.29) and `project-mcp` (module `projectMcp`, 3 routes under `/projects/:id/mcp`; 6.30); Phase 12: `marketplaces` (5 routes: list, add, get, refresh, remove; 6.34), `claude-import` (module `claudeImport`, 4 routes: home, scan, upload, apply; 6.35) and `project-definitions` (module `projectDefinitions`, 3 routes under `/projects/:id/definitions/file`; 6.36), and the `pluginInstall` inspect / install bodies gain the `github` and `marketplace` sources and `format`: 132 routes in 36 modules, 14 of them fresh); thin: validate (`http/validate.ts` maps zod issues to `validation_error`), call services, map DTOs. `shares.ts` also serves the public `/share/:token` routes; `audio.ts` (Phase 6) parses the multipart recording of `POST /audio/transcriptions` itself and answers `POST /audio/speech` with audio bytes (section 6.12). |
+| `http/routes/` | One Hono module per API area (`health`, `auth`, `settings`, `events`, `providers`, `credentials`, `models`, `icons`, `chats`, `chat`, `files`, `tools`, `mcp`, `commands`, `plugins`, `plugin-install`, `plugin-drafts`, `plugin-files`, `data`, `audio`, `shares`; Phase 7: `projects`, `keys`; Phase 8: `changes` (7 chat-scoped routes: changes, diff, git, revert, undo, rewind preview and apply; 6.16, 6.17) and `shell-rules` (3; 6.13); Phase 9: `chat-queue` (module `chatQueue`, 3 routes under `/chat/:id/queue`; 6.20) and `project-files` (module `projectFiles`, 2 routes under `/projects/:id/files`; 6.21); Phase 10: `customizations` (6 routes; 6.23), `memory` (1 route, `POST /memory`; 6.27) and `chat-tasks` (module `chatTasks`, 2 routes under `/chat/:id/tasks`; 6.26), and `commands` gains `?projectId=`; Phase 11: `hooks` (5 routes: list, runs, create, update, remove; 6.28), `project-trust` (module `projectTrust`, 3 routes under `/projects/:id/trust`; 6.29) and `project-mcp` (module `projectMcp`, 3 routes under `/projects/:id/mcp`; 6.30); Phase 12: `marketplaces` (5 routes: list, add, get, refresh, remove; 6.34), `claude-import` (module `claudeImport`, 4 routes: home, scan, upload, apply; 6.35) and `project-definitions` (module `projectDefinitions`, 3 routes under `/projects/:id/definitions/file`; 6.36), and the `pluginInstall` inspect / install bodies gain the `github` and `marketplace` sources and `format`: 132 routes in 36 modules, 14 of them fresh; `plugins-detail.ts` is a helper of the plugin routes, not a module: the Phase 12 fields of the plugin DTOs, `format`, `origin` without the entry overlay, `claude` and `editable: false` for a Claude Code plugin); thin: validate (`http/validate.ts` maps zod issues to `validation_error`), call services, map DTOs. `shares.ts` also serves the public `/share/:token` routes; `audio.ts` (Phase 6) parses the multipart recording of `POST /audio/transcriptions` itself and answers `POST /audio/speech` with audio bytes (section 6.12). |
 | `http/static.ts` | Production SPA serving from `HF_WEB_DIR` (default `apps/web/.output/public`) with `200.html` fallback for client routes. |
-| `security/` | `keyring.ts` (master key + HKDF subkeys; Phase 7: one frozen keyring whose key and `keyVersion` swap in place during a rotation, with the module-private controls `swapMasterKey`, `beginKeyChange`, `whenKeyStable`, 6.14), `password.ts` (scrypt), `session.ts` (HMAC session tokens + cookie), `headers.ts` (CSP/secure headers; Phase 6: `microphone=(self)` and the SPA's `media-src`, section 10.2), `ssrf.ts` (outbound URL guard), `redact.ts` (secret redactor for logs and errors; also masks share tokens), `proxy-trust.ts` (the `HF_TRUST_PROXY` matcher, section 10.6). Phase 8: `process-spawn.test.ts` fails when a non-test file other than `workspace/shell.ts`, `workspace/git.ts` and `mcp/stdio-transport.ts` imports `node:child_process`. Phase 11: the list stays at these three modules: command hooks and command `!` spans run through `workspace/shell.ts`, project stdio MCP servers through `mcp/stdio-transport.ts`. Phase 12: still three modules (no git, no download shell, prompt hooks call a model, not a process); `ssrf.ts` honors the test-only `HF_TEST_REMOTE_URL`: every plugin-source and marketplace fetch goes to `<base>/<host>/<path>`, and only that loopback base is allowed (6.34). |
+| `security/` | `keyring.ts` (master key + HKDF subkeys; Phase 7: one frozen keyring whose key and `keyVersion` swap in place during a rotation, with the module-private controls `swapMasterKey`, `beginKeyChange`, `whenKeyStable`, 6.14), `password.ts` (scrypt), `session.ts` (HMAC session tokens + cookie), `headers.ts` (CSP/secure headers; Phase 6: `microphone=(self)` and the SPA's `media-src`, section 10.2), `ssrf.ts` (outbound URL guard), `redact.ts` (secret redactor for logs and errors; also masks share tokens), `proxy-trust.ts` (the `HF_TRUST_PROXY` matcher, section 10.6). Phase 8: `process-spawn.test.ts` fails when a non-test file other than `workspace/shell.ts`, `workspace/git.ts` and `mcp/stdio-transport.ts` imports `node:child_process`. Phase 11: the list stays at these three modules: command hooks and command `!` spans run through `workspace/shell.ts`, project stdio MCP servers through `mcp/stdio-transport.ts`. Phase 12: still three modules (no git, no download shell, prompt hooks call a model, not a process); `ssrf.ts` gains `createPluginSourceFetch` (the https-only `SafeFetch` of plugin sources and marketplaces) and honors the test-only `HF_TEST_REMOTE_URL`: every plugin-source and marketplace fetch goes to `<base>/<host>/<path>`, and only that loopback base is allowed (6.34). |
 | `db/` | Drizzle schema (`schema.ts`), libsql client, `migrate()` at boot, pragmas (WAL, foreign keys, busy timeout), transaction helper. |
 | `services/settings/` | Typed global settings (defaults, validation, cache) over the `settings` table. |
 | `services/secrets/` | Encrypted secret store (AES-256-GCM) over the `secrets` table: `get/set/delete/list(scope)`, masked hints, env fallback lookup. Phase 11 (ADR-050, frozen `types.ts` edit): the scope `project:<projectId>` holds the project MCP variables (names `mcp.var.<NAME>`; 6.30); it is deleted with its project, and a key rotation re-encrypts it with every other row. |
@@ -173,46 +173,46 @@ boundary and `plugin-sdk` re-exports the plugin data shapes (API.md 3.2).
 | `services/shell-rules/` | `ShellRuleService` (Phase 8, ADR-038, 6.13): rule CRUD over `shell_rules` (validation through the shared `parseShellRule`, 200 rules per scope, duplicates 409 `exists`; creates serialized in-process because the table has no unique index) and `forRun(projectId)`, the global plus project rules a run matches against (one query; `forRun(null)` runs none). |
 | `services/project-files/` | The project files service (Phase 9, ADR-042, section 6.21; `types.ts` frozen, `AppDeps.projectFiles`): the per-project in-memory file index for `@` mentions (built with `workspace/walk.ts`, secret-looking paths left out, single-flight, 30 s TTL, at most 8 projects, dropped on `workspace.changed`, `project.changed` and `run.finished` of a chat of the project), `search(projectId, q, limit)` ranked by the shared `rankPaths`, and `attach(projectId, path)` (path guard, `.git` / secret refusal, 5 MiB cap, then `files.upload`). |
 | `services/projects/` | `ProjectService` (Phase 7, ADR-031, section 6.13): `roots.ts` (the allowed roots, checked first in `startDeps` by `start()`, and the folder checks), `index.ts` (project CRUD, the folder browser, `openWorkspace()`, `chatCount`, `project.changed`), `project-file.ts` (`AGENTS.md` / `CLAUDE.md` with its `@file.md` lines). Phase 10: project deletion is refused (409 `run-active`) while a background task of one of its chats runs. Phase 11: `ProjectSummary.outputStyle` (the column `projects.output_style`, set through the project update; 6.31); deleting a project cascades its approvals (`project_trust`), deletes its secret scope `project:<projectId>` and stops its MCP runtimes (6.30). |
-| `services/customizations/` | The customization catalog (Phase 10, ADR-044 / ADR-045, sections 6.23 – 6.25; `types.ts` frozen from P10-0b, `AppDeps.customizations`): `discover.ts` (the guarded scan of a project's `.harness/` and `.claude/` folders: frontmatter only), the user store over the `customizations` table (`cus_` ids, raw markdown), `catalog.ts` (the merge of built-in, plugin, user and project entries with the shared `resolvePrecedence`, diagnostics, the per-project cache with a 10 s TTL and single-flight builds, the invalidation subscriptions), `load(entry)` (re-reads and re-validates one body for a run), `memory.ts` (`/remember`, 6.27); `customization.changed` events. Phase 11 (ADR-051, ADR-052): the fourth kind `style` (folders `.harness/output-styles` and `.claude/output-styles`, 8 project folders; the builtin styles; plugin styles from `registry.styles`), `styles()` / `style(name)`, and the skill keys `user-invocable` / `disable-model-invocation` (6.31, 6.32). Phase 12 (ADR-053, ADR-055, ADR-058): the new frontmatter keys (6.38), the qualified names of Claude Code plugin entries and their bare alias (6.33), `importDefinitions(items)` (one batch through the write queue: create, overwrite or rename, `!` commands turned off unless enabled, one `customization.changed`; 6.35) and `CustomizationRestoreResult.turnedOff`. |
-| `services/hooks/` | The hook service (Phase 11, ADR-048, section 6.28; `types.ts` frozen from P11-0b, `AppDeps.hooks`): `HookService { snapshot(scope), list, create, update, remove, runs, invalidate, stop }`; the merge of the personal rows (table `hooks`, `hok_` ids), the approved project items of `projectConfig.snapshot` and the plugin hooks (`registry.hookCommands`, code events through `registry.hooks`), the matcher, the runner (stdin payload, caps, parallel handlers, the server-wide semaphore of 16 processes, timeouts, process-group kills), the kill switches, the combination of outcomes (the shared `util/hooks.ts`), the in-memory run log (200 entries, `GET /hooks/runs`) and `hooks.changed` events. Phase 12 (ADR-057, 6.37): `prompt-hooks.ts` (the prompt-hook runner inside the snapshot), `exec-form.ts` (`args`), `transcripts.ts` (`transcript_path` files), `session-end.ts` (the detached `SessionEnd` runs of a chat delete), personal rows with `type`, `prompt`, `model` and `options`, `importPersonal(items)` (one `hooks.changed`) and the hooks of untrusted plugins listed as `pending` rows. |
-| `services/project-config/` | The project config reader (Phase 11, ADR-049, section 6.29; `types.ts` frozen, `AppDeps.projectConfig`): `snapshot(projectId, { signal, refresh })` reads the `hooks` key of `.harness/settings{,.local}.json` and `.claude/settings{,.local}.json` and the project's `.mcp.json` through the workspace path guard (no links, regular files, ≤ 256 KiB before `JSON.parse`), parses them with the shared helpers, hashes the script files each item names, and caches the result per project for 10 s (at most 50 projects; dropped on a `workspace.changed` that touches a config, `.claude/` / `.harness/` or referenced file, `project.changed` and `run.finished` of the project, then rebuilt after 1 s); `verify(projectId, item)` (verify-before-run, opens nothing); a rebuild whose hashes changed emits `project-trust.changed` (and `hooks.changed` when hook items changed); it never opens the workspace (0 folder opens per run). |
+| `services/customizations/` | The customization catalog (Phase 10, ADR-044 / ADR-045, sections 6.23 – 6.25; `types.ts` frozen from P10-0b, `AppDeps.customizations`): `discover.ts` (the guarded scan of a project's `.harness/` and `.claude/` folders: frontmatter only), the user store over the `customizations` table (`cus_` ids, raw markdown), `catalog.ts` (the merge of built-in, plugin, user and project entries with the shared `resolvePrecedence`, diagnostics, the per-project cache with a 10 s TTL and single-flight builds, the invalidation subscriptions), `load(entry)` (re-reads and re-validates one body for a run), `memory.ts` (`/remember`, 6.27); `customization.changed` events. Phase 11 (ADR-051, ADR-052): the fourth kind `style` (folders `.harness/output-styles` and `.claude/output-styles`, 8 project folders; the builtin styles; plugin styles from `registry.styles`), `styles()` / `style(name)`, and the skill keys `user-invocable` / `disable-model-invocation` (6.31, 6.32). Phase 12 (ADR-053, ADR-055, ADR-058): the new frontmatter keys in the entries (6.38) and the plugin API 1.6.0 fields of plugin entries (`plugins.ts`); `qualified.ts` (the snapshot getters and the slash resolution take a qualified name exactly and a bare name as its alias when exactly one active entry ends in `:<bare>` and nothing has the bare name; a harness plugin's `<pluginId>:<name>` reaches its bare entry; 6.33); `import.ts` (`importDefinitions(items)`: one batch through the write queue; create, overwrite keeping `enabled` or rename; `!` commands turned off unless enabled; one `customization.changed {}` when anything changed; 6.35) and `CustomizationRestoreResult.turnedOff`. |
+| `services/hooks/` | The hook service (Phase 11, ADR-048, section 6.28; `types.ts` frozen from P11-0b, `AppDeps.hooks`): `HookService { snapshot(scope), list, create, update, remove, runs, invalidate, stop }`; the merge of the personal rows (table `hooks`, `hok_` ids), the approved project items of `projectConfig.snapshot` and the plugin hooks (`registry.hookCommands`, code events through `registry.hooks`), the matcher, the runner (stdin payload, caps, parallel handlers, the server-wide semaphore of 16 processes, timeouts, process-group kills), the kill switches, the combination of outcomes (the shared `util/hooks.ts`), the in-memory run log (200 entries, `GET /hooks/runs`) and `hooks.changed` events. Phase 12 (ADR-057, 6.37): `prompt-hooks.ts` (the prompt-hook runner inside the snapshot), `exec-form.ts` (`args`), `transcripts.ts` (`transcript_path` files), `session-end.ts` (the detached `SessionEnd` runs of a chat delete), personal rows with `type`, `prompt`, `model` and `options`, `importPersonal(items)` (one `hooks.changed`), the prompt-hook limiter of 8 calls next to the semaphore of 16 processes, and the `contributes.hooks` of untrusted harness plugins listed as `pending` rows (plugin prompt rows keyed `plugin:<id>:prompt:<n>`). |
+| `services/project-config/` | The project config reader (Phase 11, ADR-049, section 6.29; `types.ts` frozen, `AppDeps.projectConfig`): `snapshot(projectId, { signal, refresh })` reads the `hooks` key of `.harness/settings{,.local}.json` and `.claude/settings{,.local}.json` and the project's `.mcp.json` through the workspace path guard (no links, regular files, ≤ 256 KiB before `JSON.parse`), parses them with the shared helpers, hashes the script files each item names, and caches the result per project for 10 s (at most 50 projects; dropped on a `workspace.changed` that touches a config, `.claude/` / `.harness/` or referenced file, `project.changed` and `run.finished` of the project, then rebuilt after 1 s); `verify(projectId, item)` (verify-before-run, opens nothing); a rebuild whose hashes changed emits `project-trust.changed` (and `hooks.changed` when hook items changed); it never opens the workspace (0 folder opens per run). Phase 12 (ADR-056, ADR-057): `hook-items.ts` (prompt handlers read with `{ prompts: true }` and merged at their declaration place, so the command items keep their v1.7 order; the v2 hash item; the script files of exec-form `args` as referenced files; `projectPromptSpec`); a file saved from the UI (`workspace.changed` with `source: 'user'`, or the first `invalidate(projectId)` before any read) announces the new pending count once (`project-trust.changed`, plus `hooks.changed` when hook items changed or no earlier build existed). |
 | `services/project-trust/` | Project trust (Phase 11, ADR-049, section 6.29; `types.ts` frozen, `AppDeps.projectTrust`): the `project_trust` table (one row per project and approved sha256), `approved(projectId)` (memoized), `list` (hooks, MCP servers and project commands with `!` spans, with their hashes and states), `approve` (a batch, fresh auth, 409 `stale`), `revoke` (idempotent, answers the list, also removes orphaned hashes), `pending(projectId)` and `project-trust.changed` events; approve and revoke also emit `hooks.changed`; the trust service only emits, and the project MCP manager reacts by stopping the runtimes whose hash was revoked or replaced. Phase 12: prompt hooks and hooks with the new handler fields are trust items too (layout v2 only when such fields exist, so every v1.7 approval keeps its hash; 6.37). |
-| `services/claude-import/` | The home-folder import (Phase 12, ADR-055, section 6.35; `types.ts` frozen from P12-0b, `AppDeps.claudeImport`): `collect-disk.ts` (the scan of `HF_CLAUDE_HOME`: the allowlist only, links followed to regular files outside the data directory, caps, a 10 s deadline), `collect-upload.ts` (the multipart folder files or one zip through `openZip` + `EntryCollector`), `baseline.ts` (the current personal rows, hooks, MCP servers, shell rules, tool overrides and settings), `plans.ts` (the in-memory plans: `cip_` ids, 10 minutes, at most 4, dropped on apply, expiry, key rotation and shutdown) and `apply.ts` (one pass through `customizations.importDefinitions`, `hooks.importPersonal`, the MCP servers, the shell rules, the tool overrides and the settings); the planner is the shared `planClaudeImport`. |
-| `services/project-definitions/` | Project definition files (Phase 12, ADR-056, section 6.36; `types.ts` frozen, `AppDeps.projectDefinitions`): `paths.ts` (the editable paths: the definition folders of `.claude/` and `.harness/`, the four settings files, `.mcp.json`; `resolveWorkspacePath` with `allowMissing` must give the same relative path), `settings-file.ts` (splices the `hooks` or `mcpServers` key and keeps every other key and its order) and `index.ts` (read, write, remove through `writeWithoutRecording` under the file lock, with the `expectedSha256` check; `workspace.changed { source: 'user' }`; the answer's `trust.pending`). |
+| `services/claude-import/` | The home-folder import (Phase 12, ADR-055, section 6.35; `types.ts` frozen from P12-0b, `AppDeps.claudeImport`): `index.ts` (`home`, `scan`, `upload`, `apply`, `stop`), `collected.ts` (`HomeCollector`: the allowlist, the caps, strict UTF-8, `.claude.json` reduced at once to its MCP server maps), `collect-disk.ts` (the scan of `HF_CLAUDE_HOME`: the allowlist only, links followed to regular files outside the data directory, caps, a 10 s deadline, then the files read so far and a `timeout` warning), `collect-upload.ts` (the multipart folder files or one zip through `openZip` + `EntryCollector`), `baseline.ts` (the current personal rows, hooks, MCP servers, shell rules, tool overrides and settings), `plans.ts` (the in-memory plans: `cip_` ids, 10 minutes, at most 4, dropped on apply, expiry, key rotation and shutdown) and `apply.ts` (one pass through `customizations.importDefinitions`, `hooks.importPersonal`, the MCP servers, the shell rules, the tool overrides and the settings); the planner is the shared `planClaudeImport`. |
+| `services/project-definitions/` | Project definition files (Phase 12, ADR-056, section 6.36; `types.ts` frozen, `AppDeps.projectDefinitions`): `paths.ts` (the editable paths: the definition folders of `.claude/` and `.harness/`, the four settings files, `.mcp.json`; `resolveWorkspacePath` with `allowMissing` must give the same relative path), `settings-file.ts` (splices the `hooks` or `mcpServers` key, keeps every other key and its order, writes `JSON.stringify(…, null, 2)` + a newline), `diagnostics.ts` (parser diagnostics in the API shape, prefixed by event and position or by server name) and `index.ts` (read, write, remove through `writeWithoutRecording` under the file lock, with the `expectedSha256` check; `workspace.changed { source: 'user' }`; the answer's `trust.pending`). |
 | `workspace/` | The agent workspace (Phase 7, section 6.13): `paths.ts` (`resolveWorkspacePath` and the safe read / write helpers; frozen), `sensitive.ts` (secret-looking and hidden paths), `walk.ts` (the folder walker; `.gitignore` through `ignore`), `pattern-worker.ts` (globs through `picomatch` and regular expressions, matched in a killable Worker), `diff.ts` (diffs through `diff`), `trim.ts` (output caps), `text.ts`, `shell.ts` (the only shell runner: process groups, capped output; Phase 8: the working folder reported on fd 3 with `reportCwd`, `parseCwdReport`, `killProcessGroup` exported) and `shell-env.ts` (the environment allowlist; Phase 8: empty and relative `PATH` entries dropped, `CDPATH`, `ENV` and `BASH_ENV` never passed). Phase 8 (6.13, 6.16, 6.17): `run-scope.ts` (`bindRunScope` / `runScopeOf`: the server-only run scope bound to a tool call context), `file-lock.ts` (`withFileLock`: one promise chain per resolved path), `journal.ts` (`journaledWrite`: snapshot, write, journal row), `remove.ts` (the guarded unlink of a restore), `shell-cwd.ts` (`initialShellCwd(history)`, `checkShellFolder`, `clampEndCwd`, `cdTargetsInside`, the folder notes) and `git.ts` (the hardened git runner; the only git spawn). Phase 11 (frozen from P11-0b): `runShellCommand` gains `input` (written to the process's stdin, a closed pipe swallowed; before Phase 11 stdin was `ignore`) and `env` (extra variables on top of `shellEnvironment`; an attempt to override an allowlisted or fixed key is refused); it stays the only shell-string spawn and also runs command hooks (6.28) and command `!` spans (6.32). |
 | `services/shares/` | Share links (ADR-025, section 6.10): HMAC tokens, the allowlist sanitizer, snapshots, owner CRUD, the public view and file access, expiry, rate limits. |
 | `services/files/` | Content-addressed upload store (`data/files/<aa>/<sha256>`), MIME/size validation, `files` rows, read streams; for bulk data `importFile` (deduplicated by sha256, keeps the preferred id when it is free) and `purge` (every row and blob); Phase 7: `sweep()` for the cleanup (`sweep.ts`), in-memory pins of fresh ids (`pins.ts`) and a shared / exclusive gate (`gate.ts`; 6.15); `saveGenerated` (Phase 6, rules in `generated.ts`) stores a generated raster image (PNG, JPEG, WebP or GIF whose magic bytes match its type, at most 20 MiB; a row with the same content and type is reused, and concurrent saves of the same bytes are serialized, section 6.11). Phase 8: `FileSweepInput.signal` (the automatic sweep aborts between batches); the store gate (`gate.ts`) is reused by the checkpoint store (6.16). |
 | `services/images/` | `ImageService` (Phase 6, ADR-028, section 6.11): `generate()` runs `generateImage` with the provider's `imageParams`, writes the one usage row of a generation (`purpose: 'image'`), records the provider outcome and stores every image through `files.saveGenerated`; `generation.ts` holds the pure helpers (the checked `imageParams` result, token usage, estimated cost, revised prompt). Used by image turns and by `ctx.images` (the `generate_image` tool). |
 | `services/audio/` | `AudioService` (Phase 6, ADR-029, section 6.12): `transcribe()` (type allowlist + magic-byte sniffing in `sniff.ts`, `transcribe()` of the AI SDK) and `speak()` (`generateSpeech()`); a usage row (`transcription` / `speech`) and the provider outcome only for a call that answers; one info log line per call; stores nothing. |
 | `services/events/` | In-process event bus + SSE fan-out for `/api/events` (section 6.7); Phase 7: `disconnectAll()` (flushes queued events, then closes every stream; after a key rotation and a password change). |
-| `registry/` | Typed registries for providers, models, tools, MCP server declarations, commands and hooks; every registration returns a `Disposable` and is tagged with its owner plugin id. Phase 10 (plugin API 1.4.0): the kinds `agent` and `skill` (`registry.agents`, `registry.skills`; name pattern, reserved names, 64 KiB bodies, tool names and model refs checked at registration, a duplicate name across plugins is a `conflict`), and the contributions `agents` / `skills` of a plugin summary. Phase 11 (plugin API 1.5.0, frozen `types.ts` edit): `registry.styles` (plugin output styles, `contributes.outputStyles` and `ctx.outputStyles.register`) and `registry.hookCommands` (the command hooks of `contributes.hooks`, only while their plugin is active and trusted), the new code hook events of `HookMap` (`prompt.submit`, `session.start`, `run.stop`, `subagent.stop`, `compact.before`, `notification`; `tool.after` may set `context`), and the contributions `commandHooks` (a count; `hooks` keeps listing the code hook names) / `outputStyles` (names). Phase 12 (plugin API 1.6.0, frozen `types.ts` edit): qualified names (`<pluginId>:<name>`, accepted only when the first segment is the owner's id; 6.33), markdown command syntax (`syntax: 'markdown'`), skill `baseDir`, prompt handlers and the five new events in `contributes.hooks`, `HookCommandsRegistration.env` (`CLAUDE_PLUGIN_DATA`, `CLAUDE_PLUGIN_OPTION_<KEY>`), and `McpServerRegistry.register(…, { claudeName })` (the `mcp__plugin_<name>_<server>` alias hooks and tool lists can use). |
-| `plugins/host.ts` | Plugin host: discovery, load order, lifecycle state machine, enable/disable/reload, boot sentinel, safe mode. Phase 12: dispatches by `plugins.format` through `formats.ts` (`readPluginDirectoryFor(format, dir, opts)`): a Claude Code plugin's trust requirement and hash come from its reader (the whole-tree hash), its contributions from the Claude registration, a hand-placed folder's format is detected, saving its settings reloads it, and it is never editable (6.33). |
-| `plugins/claude/` | Claude Code plugins (Phase 12, ADR-053, section 6.33): `detect.ts` (layout and root prefix), `reader.ts` (`readClaudePluginDirectory` → `PluginDirectoryRead` + `ClaudePluginRead`), `layout.ts` (component path rules: replace / add / merge, `./` paths inside the root), `files.ts` (definition files through `readDefinitionFile` with the plugin root), `tree-hash.ts` (`hf-claude-plugin/v1`), `variables.ts`, `user-config.ts`, `mcp.ts`, `hooks.ts`, `register.ts` (`registerClaudeContributions(ctx, read, runtime)`), `skill-files.ts` (the `skill` tool's `file` reads) and `info.ts` (the inspection's `claude` block); `plugin.json` and `marketplace.json` are parsed only by the shared `util/claude-plugins.ts`. |
-| `plugins/marketplaces/` | Marketplaces (Phase 12, ADR-054, section 6.34; `types.ts` frozen, `AppDeps.marketplaces`): `MarketplaceService { list, add, get, refresh, remove, stop }` over the `marketplaces` table (`store.ts`), `github.ts` (ref → commit, `marketplace.json` of that commit), `catalog.ts` (the validated, normalized catalog), `sources.ts` (an entry → a staged source or an unsupported reason), `updates.ts` (update availability) and `testing.ts`; `marketplace.changed` events. |
+| `registry/` | Typed registries for providers, models, tools, MCP server declarations, commands and hooks; every registration returns a `Disposable` and is tagged with its owner plugin id. Phase 10 (plugin API 1.4.0): the kinds `agent` and `skill` (`registry.agents`, `registry.skills`; name pattern, reserved names, 64 KiB bodies, tool names and model refs checked at registration, a duplicate name across plugins is a `conflict`), and the contributions `agents` / `skills` of a plugin summary. Phase 11 (plugin API 1.5.0, frozen `types.ts` edit): `registry.styles` (plugin output styles, `contributes.outputStyles` and `ctx.outputStyles.register`) and `registry.hookCommands` (the command hooks of `contributes.hooks`, only while their plugin is active and trusted), the new code hook events of `HookMap` (`prompt.submit`, `session.start`, `run.stop`, `subagent.stop`, `compact.before`, `notification`; `tool.after` may set `context`), and the contributions `commandHooks` (a count; `hooks` keeps listing the code hook names) / `outputStyles` (names). Phase 12 (plugin API 1.6.0, frozen `types.ts` edit): qualified names (`<pluginId>:<name>`, accepted only when the first segment is the owner's id; 6.33), markdown command syntax (`syntax: 'markdown'`), skill `baseDir`, prompt handlers and the five new events in `contributes.hooks`, `HookCommandsRegistration.env` (`CLAUDE_PLUGIN_DATA`, `CLAUDE_PLUGIN_OPTION_<KEY>`; the registered exec-form `args` keep `${user_config.KEY}` as written, filled at spawn) and `.prompts`, and `McpServerRegistry.register(…, { claudeName })` (the `mcp__plugin_<name>_<server>` alias hooks and tool lists can use). |
+| `plugins/host.ts` | Plugin host: discovery, load order, lifecycle state machine, enable/disable/reload, boot sentinel, safe mode. Phase 12: dispatches by `plugins.format` through `formats.ts` (`readPluginDirectoryFor(format, dir, opts)`; `inspectDirectoryFor` answers `inspectDirectory` for both formats; `detectFolderFormat` for a hand-placed folder): a Claude Code plugin's trust requirement and hash come from its reader (the whole-tree hash), its contributions from the Claude registration, a hand-placed folder's format is detected, saving its settings reloads it, and it is never editable (6.33). |
+| `plugins/claude/` | Claude Code plugins (Phase 12, ADR-053, section 6.33): `detect.ts` (layout and root prefix), `reader.ts` (`readClaudePluginDirectory` → `PluginDirectoryRead` + `ClaudePluginRead`), `layout.ts` (component path rules: replace / add / merge, `./` paths inside the root), `files.ts` (definition files through `readDefinitionFile` with the plugin root), `tree-hash.ts` (`hf-claude-plugin/v1`), `variables.ts`, `user-config.ts`, `mcp.ts`, `hooks.ts`, `register.ts` (`registerClaudeContributions(ctx, read, runtime)`), `skill-files.ts` (the `skill` tool's `file` reads), `info.ts` (the inspection's `claude` block) and `types.ts` (frozen from P12-0b); `plugin.json` and `marketplace.json` are parsed only by the shared `util/claude-plugins.ts`. |
+| `plugins/marketplaces/` | Marketplaces (Phase 12, ADR-054, section 6.34; `types.ts` frozen, `AppDeps.marketplaces`): `MarketplaceService { list, add, get, refresh, remove, stop }` (`index.ts`) over the `marketplaces` table (`store.ts`), `fetch.ts` (the GitHub / URL / folder source readers), `github.ts` (ref → commit, a file of a commit, the GitHub error mapping; shared with the installer), `catalog.ts` (the validated, normalized catalog), `sources.ts` (an entry → a staged source or an unsupported reason), `updates.ts` (update availability) and `testing.ts` (`createSourcesTestApp`); `marketplace.changed` events. |
 | `plugins/loader.ts` | Reads + validates `plugin.json`, checks id/dir/engines/trust, imports the entry module (cache-busted URL). |
 | `plugins/context.ts` | Builds the per-plugin `PluginContext` (`ctx`): scoped logger, settings, secrets, storage, registries, hooks, `ai`, `fetch`, `signal`, and `images` (plugin API 1.1.0: `images.generate` through `ImageService`). |
 | `plugins/guard.ts` | `guard(pluginId, fn, timeoutMs)`: timeouts, error capture into `plugin_error`, per-plugin log ring buffer, hook failure counters. |
 | `plugins/declarative.ts` | Adapter that turns declarative `contributes.providers` into `ProviderDefinition`s (OpenAI-chat, OpenAI-responses, Anthropic, Google formats). |
 | `plugins/compile.ts` | esbuild compile of `.ts` entries into one ESM file in `data/cache/plugins/<id>/` (SDK aliased to a shim), returns diagnostics. |
 | `plugins/watch.ts` | `fs.watch` for linked folders or `HF_PLUGIN_WATCH=1`, 300 ms debounce, triggers reloads. |
-| `plugins/state.ts` | Persistence of plugin rows (`plugins`, `plugin_settings`, `plugin_kv`), trust hashes, `loading_since`. |
-| `plugins/install/` | Inspect + install from zip / npm / URL / folder into `plugins/.staging/<uuid>`, validation, review check (what was inspected is what gets installed), atomic swap, crash recovery of staging, export. `zip.ts` also provides `openZip()`, the lazy reader of data imports with the same guards (section 6.9). Phase 12 (ADR-054, 6.34): `github.ts` (GitHub and marketplace staging: the commit's zip from codeload, the top folder and the archive comment checked), entry modes in the zip and tar readers (`ArchiveEntry.executable`, kept as 0755 for the claude format only), `select(path)` (only one subtree of an archive is extracted and counted), the detection-aware root prefix (a harness `plugin.json` or a Claude Code layout at the root or in one top folder), the review keys of the new sources and `format?`. |
+| `plugins/state.ts` | Persistence of plugin rows (`plugins`, `plugin_settings`, `plugin_kv`), trust hashes, `loading_since`; Phase 12: `format` and the stored `origin` (`StoredPluginOrigin`). |
+| `plugins/install/` | Inspect + install from zip / npm / URL / folder into `plugins/.staging/<uuid>`, validation, review check (what was inspected is what gets installed), atomic swap, crash recovery of staging, export. `zip.ts` also provides `openZip()`, the lazy reader of data imports with the same guards (section 6.9). Phase 12 (ADR-054, 6.34): `github.ts` (GitHub and marketplace staging: the commit's zip from codeload, the top folder and the archive comment checked, the rate-limit fallback), `layout.ts` (`layoutOf`: the format and the root prefix through `detectPluginLayout`, or the requested `format`), `claude.ts` (`claudeDefaultEnabled`: `defaultEnabled` of the manifest and the entry overlay), entry modes in the zip and tar readers (`ArchiveEntry.executable`, kept as 0755 for the claude format only), `select(path)` (only one subtree of an archive is extracted and counted), the detection-aware root prefix (a harness `plugin.json` or a Claude Code layout at the root or in one top folder), the review keys of the new sources and `format?`. |
 | `plugins/drafts/` | Declarative plugins created and edited in the browser (provider wizard): draft validation, SVG icon sanitizing, credentials saved as provider credentials, temporary-provider draft test. |
 | `plugins/scaffold/` | Code plugins created from a template (`POST /plugins/scaffold`) and the traversal-safe files API: tree, read, atomic write, delete, build + reload, trust re-pinning of `created` plugins. |
 | `plugins/templates/` | Template sources (tool, provider, MCP bridge, command pack): a JSDoc-typed `index.mjs` or a TypeScript `index.ts`, the vendored API types `harness-forge.d.ts` and a README. |
 | `catalog/` | Model catalog: live listings with 24 h cache (`model_cache`), models.dev snapshot + weekly refresh, seeds, plugin models, custom ids, prefs, `classify()` (model kinds incl. `image`, `transcription`, `speech`; `imageOutput`), cost lookup (section 9). |
 | `providers/` | Model resolution: `modelRef` -> provider -> credentials (stored or env) -> `LanguageModel` (`resolveModel`), and since Phase 6 image, transcription and speech models (`resolveImageModel`, `resolveTranscriptionModel`, `resolveSpeechModel`); provider test; provider status; error mapping to `HarnessError`; the LobeHub icon service (`/api/icons/lobe`). |
-| `chat/` | Chat pipeline: runs registry (one active run per chat, stop, resume buffer), history assembly, approvals, slash commands, tool assembly, context trimming, titles, usage/cost, persistence; Phase 6: image turns (`images.ts`), generated-file storage for every run (`generated-files.ts`), the history carry-forward of generated images (`files.ts`), the run notices incl. `generated-file-dropped` (`notices.ts`); Phase 7: the project of a new chat, `openWorkspace` + the `workspace-unavailable` notice, the workspace tool filter and `ToolCallContext.workspace`, the `edits` approval mode, the instruction order with the workspace block and the project file, `projectMaxSteps` (6.13). Phase 8: `scope.ts` (`createRunScope`: chat, assistant message id, journal, shell rules, sticky folder, built once per run) bound to every tool call context and to policy contexts (`AssembledTools.scope`), `shell` / `untracked` journal rows after each settled workspace call (`settledCallRecord` in `tools.ts`), `effectiveOverride` in `approval.ts` (a stored `allow` override on an `execute` tool is ignored), and the workspace block says that `cd` persists (6.2, 6.13, 6.16). Phase 9 (ADR-040 … ADR-043, sections 6.18 – 6.22): `steps.ts` (`createPrepareStep`: the one step-boundary composer: context guard → steer → sub-agent finalize nudge), `model-history.ts` (`buildModelHistory`: compaction → steer split → task output reduction → command expansions → summary merge), `markers.ts` (the instruction markers of the summarizer and of sub-agents), `agent-scope.ts` (`agentScopeOf(c)`: the private side channel of `core-agent`, a WeakMap bound to the tool call context like the run scope), `compaction/` (`history.ts`, `guard.ts`, `stream.ts`, `summarize.ts`, `prompt.ts`), `queue.ts` (the in-memory steer queue), `steer.ts` (`createSteerStep`, `stepInjector`), `modes.ts` (the plan-mode tool set and `activeTools`), `subagent/` (`index.ts` `createSubagentRunner`, `tools.ts` the child tool set and its approval, `history.ts`), plus `RunSession.inject` / `addExtraCost` / `writeTransient` and `RunContext.onReleased` in `pipeline.ts`, the `/compact` branch of `commands.ts`, the streaming tool wrapper of `tools.ts`, `case 'plan'` and the `exit_plan_mode` rule of `approval.ts`. Phase 10 (ADR-045 … ADR-047, sections 6.23 – 6.27): `PreparedRun.catalog` (one catalog per run), `requestModelRef` (a command's model never becomes the chat's model) and `turnRestriction` (a command's `allowed-tools`); `commands.ts` resolves file commands (`resolveCommand(…, { catalog })`, `isServerCommandFor`) and `prepare.ts` resolves the request's model first, then the command's `model` override (`resolveTurnModel`); `tools.ts` applies `allowedTools` after the mode and drops `skill` without skills; `params.ts` adds the agent-types and skills blocks; `subagent/` runs custom agent types (`host.ts`: the structural `ChildSession` shared with detached children); `background/` (the per-chat manager of background tasks: launch, caps, persistence in `background_tasks`, `task.changed`, the result inbox, idle delivery, guards, the boot sweep; 6.26); `steer.ts` also takes finished background results; `model-history.ts` gains the `splitTaskResults` stage; `skills.ts` (`loadSkill`) and `plan-file.ts` (`savePlan`), both reached through `agent-scope.ts`. Phase 11 (ADR-048 … ADR-052, sections 6.28 – 6.32; the seams complete and frozen from P11-0b): `hooks.ts` (`RunHooks`, the per-run hook runtime over a `HookSnapshot`: `record(data)` injects a `data-hook` part, queued contexts for the next step, the answered / replayed PreToolUse decisions of a continuation, the record of a plugin's `tool.after` `context`, `forChild(prefix)` for sub-agents and `detachedHooks` for background children, and the `hookGate` transform that holds `finish` for the `Stop` hooks), `hooks-prompt.ts` (`SessionStart` and `UserPromptSubmit` at submit; `UserPromptSubmit` also at enqueue), `prepare.ts` (`TurnWorkspace`: the project folder opened at most once per turn, shared by the command expansion and `openRunWorkspace`), `output-style.ts` (`resolveRunOutputStyle` → `PreparedRun.outputStyle` → `RunParamsInput.outputStyle`; `agentBlocks(…, { codingHints })`), `inline/` (the `!` span runner and the `@path` reader behind `CommandContext.expansion`); `approval.ts` runs `PreToolUse` after the unknown-tool and `exit_plan_mode` rules (skipped for answered tool call ids and replayed from the stored part); `tools.ts` applies a hook's `updatedInput` in `prepareInput` (before `tool.before`, re-validated), runs `PostToolUse` after `tool.after`, and `assembleTools({ extraTools, shadowedMcpServers })` adds the project MCP tools; the step composer runs context guard → **hooks** → steer → finalize; `model-history.ts` gains the `splitHooks` stage after `splitTaskResults`; `RunContext.origin` gains `hook`, `onReleased(ending, awaitingApproval, followUp)` and `startHookTurn` start a hook continuation, and `carrierParts` accepts `data-hook` carriers; `pipeline.ts` fires `Notification` when a run is released waiting for an approval; `modelStream` asks `projectMcp.toolsFor` for project chats (tools on, a tool-capable model). Phase 12 (ADR-053, ADR-057, ADR-058, sections 6.33 – 6.38; the seams complete and frozen from P12-0b): `hooks.ts` gains `ToolHooks.permissionRequest`, `ToolHooks.postToolUseFailure`, `settle(callId, { harnessAsked })`, `RunHooks.postCompact` and `ChildHooks.subagentStart`; `approval.ts` runs the `PermissionRequest` step after the combination and settles the PreToolUse record; `tools.ts` runs `PostToolUseFailure` in the catch paths of `runToolCall` and `streamToolCall`; `subagent/host.ts` runs `SubagentStart` before the child's step 0 and applies `maxTurns`, `disallowedTools` and the skills preload; `compaction/{guard,stream}.ts` run `PostCompact` after the marker; `model-aliases.ts` (`resolveClaudeModel`); `commands.ts` and `skills.ts` resolve qualified names and the bare alias, run markdown plugin commands through the command-file path and serve the `skill` tool's `file` and fork skills; `inline/shell.ts` gives a plugin's `!` spans `CLAUDE_PLUGIN_ROOT` / `CLAUDE_PLUGIN_DATA`; `DELETE /chats/:id` starts the detached `SessionEnd` hooks. |
+| `chat/` | Chat pipeline: runs registry (one active run per chat, stop, resume buffer), history assembly, approvals, slash commands, tool assembly, context trimming, titles, usage/cost, persistence; Phase 6: image turns (`images.ts`), generated-file storage for every run (`generated-files.ts`), the history carry-forward of generated images (`files.ts`), the run notices incl. `generated-file-dropped` (`notices.ts`); Phase 7: the project of a new chat, `openWorkspace` + the `workspace-unavailable` notice, the workspace tool filter and `ToolCallContext.workspace`, the `edits` approval mode, the instruction order with the workspace block and the project file, `projectMaxSteps` (6.13). Phase 8: `scope.ts` (`createRunScope`: chat, assistant message id, journal, shell rules, sticky folder, built once per run) bound to every tool call context and to policy contexts (`AssembledTools.scope`), `shell` / `untracked` journal rows after each settled workspace call (`settledCallRecord` in `tools.ts`), `effectiveOverride` in `approval.ts` (a stored `allow` override on an `execute` tool is ignored), and the workspace block says that `cd` persists (6.2, 6.13, 6.16). Phase 9 (ADR-040 … ADR-043, sections 6.18 – 6.22): `steps.ts` (`createPrepareStep`: the one step-boundary composer: context guard → steer → sub-agent finalize nudge), `model-history.ts` (`buildModelHistory`: compaction → steer split → task output reduction → command expansions → summary merge), `markers.ts` (the instruction markers of the summarizer and of sub-agents), `agent-scope.ts` (`agentScopeOf(c)`: the private side channel of `core-agent`, a WeakMap bound to the tool call context like the run scope), `compaction/` (`history.ts`, `guard.ts`, `stream.ts`, `summarize.ts`, `prompt.ts`), `queue.ts` (the in-memory steer queue), `steer.ts` (`createSteerStep`, `stepInjector`), `modes.ts` (the plan-mode tool set and `activeTools`), `subagent/` (`index.ts` `createSubagentRunner`, `tools.ts` the child tool set and its approval, `history.ts`), plus `RunSession.inject` / `addExtraCost` / `writeTransient` and `RunContext.onReleased` in `pipeline.ts`, the `/compact` branch of `commands.ts`, the streaming tool wrapper of `tools.ts`, `case 'plan'` and the `exit_plan_mode` rule of `approval.ts`. Phase 10 (ADR-045 … ADR-047, sections 6.23 – 6.27): `PreparedRun.catalog` (one catalog per run), `requestModelRef` (a command's model never becomes the chat's model) and `turnRestriction` (a command's `allowed-tools`); `commands.ts` resolves file commands (`resolveCommand(…, { catalog })`, `isServerCommandFor`) and `prepare.ts` resolves the request's model first, then the command's `model` override (`resolveTurnModel`); `tools.ts` applies `allowedTools` after the mode and drops `skill` without skills; `params.ts` adds the agent-types and skills blocks; `subagent/` runs custom agent types (`host.ts`: the structural `ChildSession` shared with detached children); `background/` (the per-chat manager of background tasks: launch, caps, persistence in `background_tasks`, `task.changed`, the result inbox, idle delivery, guards, the boot sweep; 6.26); `steer.ts` also takes finished background results; `model-history.ts` gains the `splitTaskResults` stage; `skills.ts` (`loadSkill`) and `plan-file.ts` (`savePlan`), both reached through `agent-scope.ts`. Phase 11 (ADR-048 … ADR-052, sections 6.28 – 6.32; the seams complete and frozen from P11-0b): `hooks.ts` (`RunHooks`, the per-run hook runtime over a `HookSnapshot`: `record(data)` injects a `data-hook` part, queued contexts for the next step, the answered / replayed PreToolUse decisions of a continuation, the record of a plugin's `tool.after` `context`, `forChild(prefix)` for sub-agents and `detachedHooks` for background children, and the `hookGate` transform that holds `finish` for the `Stop` hooks), `hooks-prompt.ts` (`SessionStart` and `UserPromptSubmit` at submit; `UserPromptSubmit` also at enqueue), `prepare.ts` (`TurnWorkspace`: the project folder opened at most once per turn, shared by the command expansion and `openRunWorkspace`), `output-style.ts` (`resolveRunOutputStyle` → `PreparedRun.outputStyle` → `RunParamsInput.outputStyle`; `agentBlocks(…, { codingHints })`), `inline/` (the `!` span runner and the `@path` reader behind `CommandContext.expansion`); `approval.ts` runs `PreToolUse` after the unknown-tool and `exit_plan_mode` rules (skipped for answered tool call ids and replayed from the stored part); `tools.ts` applies a hook's `updatedInput` in `prepareInput` (before `tool.before`, re-validated), runs `PostToolUse` after `tool.after`, and `assembleTools({ extraTools, shadowedMcpServers })` adds the project MCP tools; the step composer runs context guard → **hooks** → steer → finalize; `model-history.ts` gains the `splitHooks` stage after `splitTaskResults`; `RunContext.origin` gains `hook`, `onReleased(ending, awaitingApproval, followUp)` and `startHookTurn` start a hook continuation, and `carrierParts` accepts `data-hook` carriers; `pipeline.ts` fires `Notification` when a run is released waiting for an approval; `modelStream` asks `projectMcp.toolsFor` for project chats (tools on, a tool-capable model). Phase 12 (ADR-053, ADR-057, ADR-058, sections 6.33 – 6.38; the seams complete and frozen from P12-0b): `hooks.ts` gains `ToolHooks.permissionRequest`, `ToolHooks.postToolUseFailure`, `settle(callId, { harnessAsked })`, `RunHooks.postCompact` and `ChildHooks.subagentStart`; `approval.ts` runs the `PermissionRequest` step after the combination and settles the PreToolUse record; `tools.ts` runs `PostToolUseFailure` in the catch paths of `runToolCall` and `streamToolCall`; `subagent/index.ts` (behind the `subagent/host.ts` seams `ChildAgentSpec`, `childMaxSteps`, `childFirstMessage`; `childSpec`) runs `SubagentStart` before the child's step 0 and applies `maxTurns`, `disallowedTools` and the skills preload; `compaction/{guard,stream}.ts` run `PostCompact` after the marker; `model-aliases.ts` (`resolveClaudeModel`); `skills-call.ts` (the scope of one `skill` call: the chat id and the run's `runSubagent` for a fork skill, bound to `LoadSkillOptions` through a module-private `WeakMap`); `commands.ts` and `skills.ts` resolve qualified names and the bare alias, run markdown plugin commands through the command-file path and serve the `skill` tool's `file` and fork skills; `inline/shell.ts` gives a plugin's `!` spans `CLAUDE_PLUGIN_ROOT`, `HARNESS_PLUGIN_ROOT` and `CLAUDE_PLUGIN_DATA` (never a `CLAUDE_PLUGIN_OPTION_*`); `DELETE /chats/:id` starts the detached `SessionEnd` hooks. |
 | `mcp/` | MCP manager: one client per enabled server (`@ai-sdk/mcp`), status, reconnect with backoff, tool naming `mcp__<serverId>__<tool>`, hint -> policy mapping, close on disable; `{{settings.*}}` templating of plugin-declared servers; its own stdio transport (minimal environment, stderr lines in the owning plugin's log); the user-configured servers of the MCP panel (`mcp_servers`). Phase 8: `tools.ts` (`ToolService.update`) refuses `override: 'allow'` for tools with workspace access `execute` (400 on `['override']`, "Shell commands can't be always allowed. Add a shell rule instead."), and `GET /tools` shows `policy: null` for a tool whose policy is a function (the shell's `shellPolicy`). Phase 11 (ADR-050, section 6.30): `project*.ts` (the `ProjectMcpManager` of `.mcp.json` servers, interface in the frozen `mcp/types.ts`: lazy runtimes per project and server id, the variables, `toolsFor`, shadowing, idle and revoke stops, `project-mcp.changed`); the stdio transport gains `processGroup` (the child starts detached and is killed with its whole process group on close), used for **every** stdio server, global and project. |
 | `builtin-plugins/index.ts` | Static list of builtin plugin modules, loaded first and trusted. |
 | `builtin-plugins/core-providers/` | The 13 builtin providers (see PROVIDERS.md): definitions, seeds, reasoning mapping, error mapping; Phase 6 (version 1.1.0, `engines ^1.1.0`): the image, transcription and speech factories of OpenAI, xAI, Google, Mistral and Groq, `imageParams`, `transcriptionOptions` and the media seeds (`lib/media.ts`; PROVIDERS.md 13). |
 | `builtin-plugins/core-tools/` | Builtin tools (version 1.2.0 since Phase 7, `engines ^1.2.0`): `current_time` (policy `safe`), `web_fetch` (policy `ask`, SSRF guard; setting "Allow localhost in web_fetch") and `generate_image` (Phase 6, `generate-image.ts`, policy `ask`, the `imageModelRef` setting; Phase 7: its output names the model with `modelName`; section 6.11). |
 | `builtin-plugins/core-workspace/` | Phase 7 (ADR-032, version 1.0.0, `engines ^1.2.0`, permission `process`): the workspace tools `read_file`, `list_directory`, `find_files`, `search_files`, `write_file`, `edit_file` (one module each) and `shell` (`shell-tool.ts`; not on Windows, removed by `HF_WORKSPACE_SHELL=0`); `policies.ts` (the policy functions of the file tools), `common.ts` (guard timeouts, the model text helper); every tool declares its workspace access (section 6.13). Phase 8: `write_file` and `edit_file` write through `journaledWrite` (snapshot first; parallel edits of one file serialize), and `shell` gets the sticky working folder, the `shellPolicy` of the shell rules and the output fields `endCwd`, `cwdNote`, `allowedBy`. |
-| `builtin-plugins/core-agent/` | Phase 9 (ADR-041, ADR-043; version 1.0.0, `engines ^1.3.0`): the agent tools `todo_write` (`todo-write.ts`, policy `safe`), `exit_plan_mode` (`exit-plan-mode.ts`, policy `always`) and `task` (`task.ts`, policy `safe`, an async-generator `execute`); `common.ts` (the model texts). They reach server internals (the run's tool mode, the sub-agent runner) only through `chat/agent-scope.ts`; server code recognizes them by `pluginId === 'core-agent'` (sections 6.19, 6.22). Phase 10 (`engines ^1.4.0`): `task` takes any catalog agent type and `background`, the fourth tool `skill` (`skill.ts`, policy `safe`, offered only when the catalog has skills, never in a sub-agent; 6.25), `exit_plan_mode` saves the approved plan through `savePlan` when `planFiles` is on (6.27), and the module declares the built-in agent definitions (`explore`, `general`). Phase 11: `skill` refuses a skill with `disable-model-invocation` (it is not listed to the model either; 6.32), and the built-in output styles `default`, `explanatory` and `learning` (texts from the shared `BUILTIN_OUTPUT_STYLES`) are listed by the catalog as `builtin` entries, like the built-in agent types (6.31). Phase 12 (6.33, 6.38): `skill` gains the input `file?` (a supporting file of a plugin or project skill, read inside its folder) and runs a `context: fork` skill as a sub-agent of its `agent` type; `task.type` and `skill.name` accept qualified plugin names. |
+| `builtin-plugins/core-agent/` | Phase 9 (ADR-041, ADR-043; version 1.0.0, `engines ^1.3.0`): the agent tools `todo_write` (`todo-write.ts`, policy `safe`), `exit_plan_mode` (`exit-plan-mode.ts`, policy `always`) and `task` (`task.ts`, policy `safe`, an async-generator `execute`); `common.ts` (the model texts). They reach server internals (the run's tool mode, the sub-agent runner) only through `chat/agent-scope.ts`; server code recognizes them by `pluginId === 'core-agent'` (sections 6.19, 6.22). Phase 10 (`engines ^1.4.0`): `task` takes any catalog agent type and `background`, the fourth tool `skill` (`skill.ts`, policy `safe`, offered only when the catalog has skills, never in a sub-agent; 6.25), `exit_plan_mode` saves the approved plan through `savePlan` when `planFiles` is on (6.27), and the module declares the built-in agent definitions (`explore`, `general`). Phase 11: `skill` refuses a skill with `disable-model-invocation` (it is not listed to the model either; 6.32), and the built-in output styles `default`, `explanatory` and `learning` (texts from the shared `BUILTIN_OUTPUT_STYLES`) are listed by the catalog as `builtin` entries, like the built-in agent types (6.31). Phase 12 (6.33, 6.38): `skill` gains the input `file?` (a supporting file of a plugin or project skill, read inside its folder) and runs a `context: fork` skill as a sub-agent of its `agent` type (so its timeout is the `task` tool's 600 s, `SKILL_TOOL_TIMEOUT_MS = TASK_TIMEOUT_MS`); `file` is ≤ 512 characters; `task.type` and `skill.name` accept qualified plugin names. |
 | `builtin-plugins/core-commands/` | Builtin server-side slash commands (prompt templates such as `/explain`, `/review`, `/commit`; list in PLUGINS.md). |
 | `builtin-plugins/core-mcp/` | Owns the user-configured MCP servers (`mcp_servers` table): they are declared as its contributions, so disabling `core-mcp` closes them. Its settings (reconnect automatically, connect timeout) apply to every MCP server. |
 | `builtin-plugins/mock/` | Dev-only `mock` provider (`HF_MOCK_PROVIDER=1`): `mock:echo`, `mock:reasoning`, `mock:tool-approval`, `mock:error` on `MockLanguageModelV4`, the Phase 6 media models `mock:image`, `mock:image-chat`, `mock:image-tool`, `mock:transcribe`, `mock:speech` (a PNG encoder and a silent WAV), plus the tool `mock_approval_tool`; Phase 7: `mock:workspace`, which walks through the workspace tools; Phase 8: `mock:checkpoint` (an edit per turn plus shell steps for rewind and the sticky folder) and `mock:shell` (runs the user text as one shell command); Phase 9: `mock:compact`, `mock:plan`, `mock:todo`, `mock:subagent` and `mock:steer` (scripts for compaction, plan mode, todos, sub-agents and the steer queue; `MockPlan` gains parallel `toolCalls` and `stepDelayMs`); Phase 10: `mock:agents` (custom agent types, the agent-types and skills blocks, `skill` calls, command expansions) and `mock:background` (background tasks: idle and in-run delivery); Phase 11: `mock:hooks` (scripted tool calls, hook context and continuation reports, output style and MCP tool reports); Phase 12: `mock:prompt-hook` (answers prompt hooks from `[[ph:…]]` markers) (behavior in PROVIDERS.md section 8). |
-| `testing/` | In-process test harness: `createTestApp()` (real composition over an in-memory database) and fakes (Phase 6: `fake-media.ts` with fake image and audio services; the fake media resolvers live in `providers/testing.ts`, and `chat/testing.ts` has `createMediaTestApp()`; Phase 7: `fake-keyring.ts`, a deterministic, rotatable keyring; Phase 8: `fake-checkpoints.ts` (an in-memory `CheckpointBlobStore`, a test row writer and journal-row helpers) and `fake-shell-rules.ts`; Phase 10: `fake-customizations.ts` and `createTestApp({ customizations, backgroundTasks })`; Phase 11: `fake-hooks.ts`, `createTestApp({ hooks, projectTrust, projectMcp })`, `hook-scripts.ts` (POSIX `sh` hook scripts written into a temp project: `deny`, `ask`, `allow`, `rewrite`, `context`, `exit2`, `error`, `sleep`, `record`, `env`, `stop-once`, `prompt-block`) and the MCP fixtures in `mcp/__fixtures__/` (the echo server with `pid` / `env` tools, a dependency-free stdio server and a grandchild fixture for the process-group checks); Phase 12: `fake-remote.ts` (a loopback server for `api.github.com`, `raw.githubusercontent.com`, `codeload.github.com` and archive hosts under host prefixes, every request logged; used with `HF_TEST_REMOTE_URL` or `createFakeSafeFetch`), `claude-fixtures.ts` (builders of Claude Code plugins, a marketplace and a fake home in `realpath(mkdtemp())` folders; nothing is committed), `createTestApp({ marketplaces, claudeImport, projectDefinitions })` and `githubZipOf` in `plugins/install/testing.ts`). |
+| `testing/` | In-process test harness: `createTestApp()` (real composition over an in-memory database) and fakes (Phase 6: `fake-media.ts` with fake image and audio services; the fake media resolvers live in `providers/testing.ts`, and `chat/testing.ts` has `createMediaTestApp()`; Phase 7: `fake-keyring.ts`, a deterministic, rotatable keyring; Phase 8: `fake-checkpoints.ts` (an in-memory `CheckpointBlobStore`, a test row writer and journal-row helpers) and `fake-shell-rules.ts`; Phase 10: `fake-customizations.ts` and `createTestApp({ customizations, backgroundTasks })`; Phase 11: `fake-hooks.ts`, `createTestApp({ hooks, projectTrust, projectMcp })`, `hook-scripts.ts` (POSIX `sh` hook scripts written into a temp project: `deny`, `ask`, `allow`, `rewrite`, `context`, `exit2`, `error`, `sleep`, `record`, `env`, `stop-once`, `prompt-block`) and the MCP fixtures in `mcp/__fixtures__/` (the echo server with `pid` / `env` tools, a dependency-free stdio server and a grandchild fixture for the process-group checks); Phase 12: `fake-remote.ts` (a loopback server for `api.github.com`, `raw.githubusercontent.com`, `codeload.github.com` and archive hosts under host prefixes, every request logged; used with `HF_TEST_REMOTE_URL` or `createFakeSafeFetch`), `claude-fixtures.ts` (builders of Claude Code plugins, a marketplace and a fake home in `realpath(mkdtemp())` folders; nothing is committed), `createTestApp({ marketplaces, claudeImport, projectDefinitions })` (`'fake'` = `fake-marketplaces.ts`, `fake-claude-import.ts`, `fake-project-definitions.ts`; `HF_CLAUDE_HOME` defaults to `<dataDir>/claude-home`, never created, so no test reads the real `~/.claude`), the hook scripts `permission-allow`, `permission-deny`, `print-args` and `agent-context`, and `githubZipOf` in `plugins/install/testing.ts`; `createSourcesTestApp` in `plugins/marketplaces/testing.ts`). |
 | `live/` | Opt-in live provider suite (`*.live.test.ts`, `pnpm test:live`, ADR-027): real provider calls with the keys in the environment; the image and voice checks only with `HF_LIVE_MEDIA=1`; excluded from `pnpm test` (PROVIDERS.md section 12). |
 | `assets/catalog/models-dev.json` (package root) | Bundled models.dev snapshot (updated by `pnpm catalog:update`); read at runtime, so it ships next to `dist/` (section 11). |
 | `drizzle/` (package root) | Generated SQL migrations, applied by `migrate()` at boot; ship next to `dist/`. |
@@ -232,7 +232,7 @@ Dependency direction (no cycles): `http/routes` -> `services`, `chat`, `catalog`
 | `pages/index.vue` | Empty state: greeting + composer; first send navigates to `/chat/:id`. |
 | `pages/chat/[id].vue` | Chat transcript + composer for one chat (Phase 8: wrapped in `ChatWorkspace`, which adds the changes pane or sheet). |
 | `pages/plugins.vue`, `pages/plugins/{index,new,[id]}.vue` | Parent route (hosts the single `InstallDialog`); plugin list (`?filter=`), new plugin (provider wizard / code template), plugin detail tabs. Phase 12: `pages/plugins/marketplaces.vue` (the Marketplaces page, `MarketplacesView`; `new` and `marketplaces` are reserved plugin ids). |
-| `pages/settings/{providers,models,media,projects,customize,general,appearance,data,about}.vue` | Settings pages (`/settings` redirects to providers); `media` = image model and voice (Phase 6); `projects` = the project list and the Add project dialog (Phase 7); `customize` = the agents, commands and skills by source with the editor, the viewer, import and export (Phase 10, UI.md 9.12); `data` = backup, import, storage cleanup (Phase 7), shared links, the encryption key (Phase 7), delete-all. |
+| `pages/settings/{providers,models,media,projects,customize,general,appearance,data,about}.vue` | Settings pages (`/settings` redirects to providers); `media` = image model and voice (Phase 6); `projects` = the project list and the Add project dialog (Phase 7); `customize` = the agents, commands and skills by source with the editor, the viewer, import and export (Phase 10, UI.md 9.12); `data` = backup, import, storage cleanup (Phase 7), shared links, the encryption key (Phase 7), delete-all; Phase 12: `customize` also mounts the Claude Code import (`ClaudeImportDialog`, opened by its button or `?import=claude`), and `general` → Agent gains the Hook model and the Claude model names (`modelAliases`). |
 | `pages/share/[token].vue` | Public read-only share page (`share` layout): a store-free transcript of a share snapshot. |
 | `pages/login.vue` | Password login. |
 | `components/ui/` | shadcn-vue primitives (generated, frozen, no prefix). |
@@ -245,11 +245,11 @@ Dependency direction (no cycles): `http/routes` -> `services`, `chat`, `catalog`
 | `components/chat/{agent,compaction,steer,queue}/`, `components/settings/agent/` | Phase 9 (UI.md 7.24 – 7.27, 9.11): `PlanApprovalCard`, `PlanBody`, `TodoList`, `TodoStrip`, `TaskBlock`, `TaskBody`, `TaskStepRow` and `todos.ts` (the todo state over the shared `latestTodos`); `CompactionDivider` and `compaction.ts` (the dimming layout over the shared `compactionMarkers`); `SteerNote`; `QueuedMessages`; `AgentSettingsSection`; in `composer/`: `MentionMenu` and `mode-cycle.ts` (Shift+Tab). |
 | `components/settings/customize/`, `components/chat/background/`, `components/common/MarkdownEditor.vue` | Phase 10 (UI.md 7.28 – 7.30, 9.12): `CustomizeSettings`, `CustomizationSection`, `CustomizationRow`, `CustomizationEditor`, `CustomizationViewer`, `ToolMultiSelect`, `customize.ts`; `BackgroundAgents`, `BackgroundAgentRow`, `background-agents.ts`; in `chat/agent/`: `TaskResultNote`, `SkillToolBody`, `PlanFileChip`; in `composer/`: `SlashArgumentHint`, `RememberDialog`, `remember.ts`; `plugins/detail/PluginCustomizationList`; `utils/download.ts`. Definitions are parsed and formatted in the browser only with the shared `parseDefinition` / `formatDefinition` (import and export need no route). |
 | `components/settings/customize/` (Phase 11), `components/projects/{trust,mcp}/`, `components/chat/hooks/` | Phase 11 (UI.md 7.31 – 7.33, 9.13): the Customize tabs Output styles and Hooks (`HooksPanel`, `HookSection`, `HookRow`, `HookEditor`, `HookImportDialog`, `StyleScopeBar`, pure `hooks.ts`: event copy, the matcher preview over the shared matcher, the Claude JSON import over the shared reader); `trust/` (`ProjectTrustDialog`, `ProjectTrustItem`, `ProjectTrustChip`, pure `project-trust.ts`) and `mcp/` (`ProjectMcpDialog`, `ProjectMcpServerRow`); `chat/hooks/HookNote` with the pure `hook-notes.ts` (`toolHooksOf`, `isHookCarrierMessage`, the outcome texts), `chat/parts/tools/ToolHookBadge`, `chat/composer/OutputStyleMenu` and `ComposerRefusal` with the pure `output-style.ts` (`styleOptions`, `automaticStyle`, `refusalOf`), `plugins/detail/PluginHookList`. Hook configurations are parsed in the browser only with the shared `util/hooks.ts` (the import needs no route). |
-| `components/plugins/marketplaces/`, `components/settings/claude-import/`, `components/settings/customize/ProjectFileEditor.vue` | Phase 12 (UI.md 7.34, 8.13, 9.14): `MarketplacesView`, `MarketplaceSuggestion`, `MarketplaceStrip`, `MarketplaceAddDialog`, `MarketplaceEntryRow`, `MarketplaceInstallDialog` and the pure `marketplaces.ts`; `plugins/install/InstallReview` (the preview, trust and install steps shared by the install dialog and the marketplace dialog, so the fresh-auth flow exists once) and the GitHub tab; `plugins/detail/PluginUpdateBanner`; the import wizard (`ClaudeImportDialog`, `ClaudeImportSource`, `ClaudeImportPreview`, `ClaudeImportGroup`, `ClaudeImportItem`, `ClaudeImportResult`, pure `claude-import.ts`: the allowlist filter of a picked folder over the shared `isClaudeHomeImportPath`, selections and result lines; the browser never opens a zip and never sees a file's content or an env value of the plan); `ProjectFileEditor` (the raw editor of a project's definition files and `.mcp.json`), the hook editor's Prompt type and project mode, the agent colors in `TaskBlock` and the mixed select-all of the trust dialog. |
+| `components/plugins/marketplaces/`, `components/settings/claude-import/`, `components/settings/customize/ProjectFileEditor.vue` | Phase 12 (UI.md 7.34, 8.13, 9.14): `MarketplacesView`, `MarketplaceSuggestion`, `MarketplaceStrip`, `MarketplaceAddDialog`, `MarketplaceEntryRow`, `MarketplaceInstallDialog` and the pure `marketplaces.ts`; `plugins/install/InstallReview` (the preview, trust and install steps shared by the install dialog and the marketplace dialog, so the fresh-auth flow exists once) and the GitHub tab; `plugins/detail/PluginUpdateBanner`; the import wizard (`ClaudeImportDialog`, `ClaudeImportSource`, `ClaudeImportPreview`, `ClaudeImportGroup`, `ClaudeImportItem`, `ClaudeImportResult`, pure `claude-import.ts`: `pickClaudeFiles`, the allowlist filter of a picked folder over the shared `classifyClaudeHomePath` and the caps, selections and result lines; the browser never opens a zip and never sees a file's content or an env value of the plan); `ProjectFileEditor` (the raw editor of a project's definition files and `.mcp.json`), the hook editor's Prompt type and project mode, `plugins/install/TrustConsent` (Enter in its password field emits `confirm`: the install review then logs in and installs, as a click on Install does; the plugin trust dialog's form still submits Trust), `plugins/detail/PluginClaudeInfo` and `plugins/list/PluginFormatBadge`, `settings/agent/AgentSettingsSection` (Hook model, Claude model names), the agent colors (`AGENT_COLOR_TOKENS` of `chat/agent/agent-tools.ts`) in `TaskBlock` and the Customize rows, qualified names in the slash menu, the hook notes and still-asks state of `chat/hooks/`, the 3 s linger of a stopped row in `chat/background/BackgroundAgents` (`BACKGROUND_STOPPED_LINGER_MS`) and the mixed select-all of the trust dialog. |
 | `components/plugins/*` | `list`, `detail`, `forms`, `install`, `wizard`, `code`, `mcp` component groups. |
 | `components/share/` | `ShareDialog`, `SharesSettingsSection`, `SharedChatView`, `ShareToolRow`; the share page renders generated images as a gallery (Phase 6). |
 | `components/settings/`, `components/settings/{data,media,images,voice}/`, `components/providers/`, `components/common/` | Settings forms (incl. the Data and Media pages; Phase 7: `data/EncryptionKeySection`, `RotateKeyDialog`, `StorageCleanupSection` and `data/data-context.ts`, which lets the sections reload the summary and Shared links after a cleanup or a rotation; `voice/voice-settings.ts`: the dictation languages, speeds, voice field rules and the Test voice text), `ProviderIcon`, shared pieces (`Markdown.vue`, empty states). |
-| `composables/` | `useChatSession` (detached `useChat` registry), `useComposer*`, `useShortcuts`, `useGlobalShortcuts`, helpers; Phase 6: `useImageOptions`, `useVoiceInput` (dictation), `useSpeechPlayer` (the one read-aloud player), `useFreshAuth` (every password prompt; it replaced the three `fresh-auth.ts` helpers of `plugins/code`, `plugins/detail` and `share`, and the duplicate helpers of the data, install and MCP forms); Phase 8: `useChangesPanel` (the panel's open state, view and width in `localStorage`), `useChatSession` gains `cwd` and the shell rules of an approval; Phase 9: `useProjectFiles` (mention search and attach), `useFileMentions` (the `@` menu state), and `useChatSession` gains `submit` (send or queue), `queue`, `cancelQueued`, `stop()` returning the dropped queue items, `todos`, `activity` and the plan decision of an approval; Phase 11: `useChatSession` gains `outputStyle` (the chat's own choice, never pinned), `hookActivity`, the `activity` value `hooks`, follows `run.started` with origin `hook` like `task`, and sends `outputStyle` with a new chat's first request; Phase 12: `useClaudeImport` (the home status, the scan, the upload of a picked folder or a zip, the apply by plan id; no store). |
+| `composables/` | `useChatSession` (detached `useChat` registry), `useComposer*`, `useShortcuts`, `useGlobalShortcuts`, helpers; Phase 6: `useImageOptions`, `useVoiceInput` (dictation), `useSpeechPlayer` (the one read-aloud player), `useFreshAuth` (every password prompt; it replaced the three `fresh-auth.ts` helpers of `plugins/code`, `plugins/detail` and `share`, and the duplicate helpers of the data, install and MCP forms); Phase 8: `useChangesPanel` (the panel's open state, view and width in `localStorage`), `useChatSession` gains `cwd` and the shell rules of an approval; Phase 9: `useProjectFiles` (mention search and attach), `useFileMentions` (the `@` menu state), and `useChatSession` gains `submit` (send or queue), `queue`, `cancelQueued`, `stop()` returning the dropped queue items, `todos`, `activity` and the plan decision of an approval; Phase 11: `useChatSession` gains `outputStyle` (the chat's own choice, never pinned), `hookActivity`, the `activity` value `hooks`, follows `run.started` with origin `hook` like `task`, and sends `outputStyle` with a new chat's first request; Phase 12: `useClaudeImport` (the home status, the scan, the upload of a picked folder or a zip, the apply by plan id; no store), `useChatSession().hookActivity` gains `label` (the `statusMessage` of `data-activity`), and `useServerEvents` routes `marketplace.changed` and `plugin.changed` to the marketplaces store (a reconnect refreshes what it loaded). |
 | `stores/` | Pinia stores `auth`, `chats` (Phase 7: the project filter), `providers`, `models`, `plugins`, `projects` (Phase 7), `settings`, `ui`, `workspace` and `shell-rules` (Phase 8: the changes panel data and the shell rules), `chat-queue` (Phase 9: the queued messages per chat, kept in sync by `queue.changed`), `customizations` and `background-tasks` (Phase 10: the catalogs and command lists per project scope, refreshed by `customization.changed` / `plugin.changed`; the background tasks per chat, kept in sync by `task.changed`), `hooks`, `project-trust` and `project-mcp` (Phase 11: the hook lists per project scope, refreshed by `hooks.changed`; each project's trust list and pending count, refreshed by `project-trust.changed`; each project's `.mcp.json` servers and variables, refreshed by `project-mcp.changed`; pending counts are fetched lazily, `ProjectSummary` carries none), `marketplaces` (Phase 12: the marketplace list, the loaded catalogs and the plugin updates, refreshed by `marketplace.changed` and `plugin.changed`) (each `use<Name>Store`), implemented over the typed client and refreshed by `/api/events`. |
 | `utils/` | Pure helpers (date grouping, formatting, `data-testid` constants, `speech-text.ts`: what read-aloud speaks; Phase 7: `line-diff.ts` for approval previews, `ansi.ts` for terminal output), test helpers (`utils/testing/`, incl. `fake-media.ts`). |
 
@@ -277,7 +277,7 @@ sequenceDiagram
   Main->>Deps: createDeps(): keyring (at keyVersion) and every service
   Main->>Main: bind check again: a password stored in the database also allows a non-loopback bind (else exit 1)
   Main->>Deps: startDeps()
-  Deps->>Deps: log envBootWarnings (Phase 8: an ignored HF_TEST_FILE_SWEEP_DELAY_MS)
+  Deps->>Deps: log envBootWarnings (Phase 8: an ignored HF_TEST_FILE_SWEEP_DELAY_MS; Phase 12: an ignored HF_TEST_REMOTE_URL)
   Deps->>Deps: projects.start(): realpath and check HF_WORKSPACE_ROOTS, create the default root (0700) (Phase 7)
   Deps->>Deps: checkpoints.start(): create checkpoints/ (0700), one prune (age, budget, orphan blobs, temp files); with background on, then every 6 h and 60 s after a chat.deleted burst (Phase 8)
   Deps->>Deps: runs.boot(): background_tasks rows still running -> aborted ("The server restarted before the task finished."); undelivered rows -> the in-memory inboxes (delivered at each chat's next run; no turn is started at boot) (Phase 10)
@@ -285,7 +285,7 @@ sequenceDiagram
   Deps->>Host: start(): builtins (static imports, trusted), then unless HF_SAFE_MODE=1 data/plugins/* + linked folders, sorted by id, each guarded
   Host-->>Deps: registry populated (providers, models, tools, MCP decls, commands, hooks)
   Deps->>Cat: start(): models.dev snapshot (bundled or data/cache refresh), model_cache
-  Cat-)Cat: background: refresh stale listings (>24 h) and weekly models.dev (unless HF_OFFLINE=1)
+  Cat-)Cat: background: refresh stale listings (>24 h); weekly models.dev unless HF_OFFLINE=1
   Deps->>MCP: start(): connect declared MCP servers in the background (never blocks boot)
   Deps->>Deps: data.start(): the automatic file sweep timer, first check 24 h after boot (Phase 8, ADR-039)
   Main->>HTTP: createApp(deps): /api/*, plus the SPA with 200.html fallback when the web build exists
@@ -294,7 +294,9 @@ sequenceDiagram
 
 Notes:
 
-- Boot fails (exit code 1, clear log line) on: invalid env (Phase 7: also an invalid `HF_WORKSPACE_ROOTS` syntax),
+- Boot fails (exit code 1, clear log line) on: invalid env (Phase 7: also an invalid `HF_WORKSPACE_ROOTS` syntax;
+  Phase 12: an `HF_CLAUDE_HOME` that is neither `0` nor an absolute path, and an `HF_TEST_REMOTE_URL` that is not
+  `http://127.0.0.1:<port>`, also without `HF_MOCK_PROVIDER=1`),
   non-loopback bind without a password (env or stored) or `HF_INSECURE=1`, unreadable/invalid master key (or a
   group/world readable `secret.key`), failed migration, a `secret.key.next` when neither it nor `secret.key` matches the
   stored key check (6.14), a workspace root that is missing, not a folder, not accessible, a filesystem root, the data
@@ -314,6 +316,14 @@ Notes:
 - `HF_TRUST_PROXY` is parsed with the other variables: a boolean-like word, a hop count, a `/0` range, an unknown token
   or a list that names no proxy fails the boot like any invalid variable (`EnvError` on stderr with the format
   explained, exit code 1); when it is set, the boot log lists the trusted ranges (section 10.6).
+- Phase 12: `HF_CLAUDE_HOME` is only parsed at boot (unset = `<home>/.claude`, `0` = the scan is off, else an absolute
+  path; the folder is never read at boot, `GET /claude-import/home` answers `available` / `missing` / `unreadable` /
+  `disabled` when asked); the Docker image and `start:e2e` set `0`, so the e2e server never reads the machine's
+  `~/.claude`. The test-only `HF_TEST_REMOTE_URL` is honored only with `HF_MOCK_PROVIDER=1`: then `main.ts` logs the
+  warning `plugin sources and marketplaces are fetched from the loopback test remote (test-only)` before `startDeps`,
+  and every GitHub API / raw / codeload request, marketplace and archive URL and the npm registry go to the loopback
+  base (6.34); a valid value without the mock flag is ignored with the boot warning
+  `TEST_REMOTE_URL_IGNORED_WARNING`.
 - The first boot of v1.1 on a v1 data directory applies migration `0001`, which backfills a linear message tree for
   every existing chat (section 8, Migrations). The first boot of v1.2 on a v1.1 data directory applies `0002`, which
   records the active path of every chat as its remembered versions (`messages.selected_child_id`), and `0003`, which
@@ -344,9 +354,9 @@ Notes:
   index, `plugins.format` / `origin`, `hooks.type` / `prompt` / `model` / `options`; section 8): every plugin row reads
   `format = 'harness'` and every personal hook `type = 'command'`, no marketplace exists, the two new settings take their
   defaults (`hookModelRef` null, `modelAliases` all null), and **every v1.7 approval still matches** (a trust item
-  without the new hook fields keeps its v1 hash bytes, 6.37); project files with v1.8-only keys (a prompt hook, a
-  `SessionEnd` hook, an agent with `disallowedTools`) are now parsed and show as pending until approved, so nothing new
-  runs before a review.
+  without the new hook fields keeps its v1 hash bytes, 6.37); project hooks with v1.8-only keys (a prompt hook, a
+  `SessionEnd` hook, `args` / `async` / `if`) are now parsed and show as pending until approved, so nothing new runs
+  before a review (new definition keys such as an agent's `disallowedTools` only restrict, 6.38).
 - A failed boot prune of the checkpoint store is logged (`checkpoint prune failed`) and never fails the boot; the store
   folder itself must be creatable (a failing `mkdir` fails the boot like any other step).
 - Phase 10: the boot sweep of background tasks is `runs.boot()` (`ChatRunner.boot()` → `BackgroundTasks.start()`; not
@@ -387,7 +397,8 @@ Notes:
   groups), stop catalog timers, close SSE
   streams (the order of `SHUTDOWN_STEPS` in `deps.ts`: data, runs (queues → background tasks → runs), hooks, projectMcp,
   customizations, projectConfig, projectFiles, checkpoints, plugins, mcp, catalog, events; Phase 12 adds claudeImport
-  (drop every import plan, so no secret of a scan outlives the process) before the runs and marketplaces (abort the
+  (drop every import plan, so no secret of a scan outlives the process, and abort a scan in flight) as the first step,
+  before data, and marketplaces (abort the
   catalog and archive fetches in flight) right before the plugins), close the DB, then remove
   `server.lock` while it still
   names this process (Phase 7; a lock a newer server took over stays). A process-exit handler SIGKILLs
@@ -1132,10 +1143,12 @@ links or usage rows (the per-message `metadata.usage` survives, so `ChatDetail.t
   context and reasons, and share snapshots drop them (the allowlist, 6.10). Delete-all keeps personal hooks, approvals
   and variables (configuration, like projects); `projects.output_style` is not exported (projects never are).
 - **Phase 12** (ADR-053 … ADR-058): marketplaces (`marketplaces`), Claude Code plugins (like every plugin), hook
-  transcripts (`<dataDir>/transcripts/`) and import plans (memory) are **never** exported or imported; personal prompt
-  hooks are personal hooks, so never either; the settings `hookModelRef` and `modelAliases` are public settings
-  (restored with `restoreSettings`); the import result gains `customizations.turnedOff` (the number of restored personal
-  commands turned off because of their `!` spans: `CustomizationRestoreResult.turnedOff` → `restore.ts` →
+  transcripts (`<dataDir>/transcripts/`) and import plans (memory) are **never** exported or imported, nor are personal
+  hooks (prompt hooks and the new `type`, `prompt`, `model` and `options` columns included, as in Phase 11); the
+  settings `hookModelRef` and `modelAliases` are public settings (exported in `settings.json`, restored with
+  `restoreSettings`); the import result's `customizations` (present when the personal definitions were restored) always
+  carries `turnedOff` (the number of restored personal commands the backup had turned on that came back turned off
+  because of their `!` spans: `CustomizationRestoreResult.turnedOff` → `restore.ts` →
   `DataImportResult.customizations.turnedOff`, shown by the Data page). Delete-all keeps marketplaces and Claude Code
   plugins (configuration) and removes the transcripts with their chats (`chat.deleted`); a delete-all never runs
   `SessionEnd` hooks (6.37).
@@ -2915,7 +2928,8 @@ background call resolves its type the same way before anything is launched.
   true`) but stays static: it never depends on the catalog. Depth stays 1: children never get `task`.
 
 **Skills** (`chat/skills.ts`, `core-agent/skill.ts`): the fourth `core-agent` tool `skill { name }` (policy `safe`, no
-workspace access, 60 s) is offered only when the run's catalog has at least one active skill (`assembleTools({
+workspace access, 60 s; Phase 12: 600 s, the `task` tool's, because a fork skill runs a sub-agent, 6.38) is offered only
+when the run's catalog has at least one active skill (`assembleTools({
 skillsAvailable })`) and never to a sub-agent. The instructions then carry a skills block (the last agent block): the
 header line `Skills (when a request matches one, load it with the skill tool before you start; it gives you its
 instructions):`, then one `- name: description` line per active skill (by name; at most 50, `skillsListedMax`;
@@ -3579,8 +3593,9 @@ substituted inside a span (`/x ; touch pwned` stays an argument).
   that is never stored); `prepareRun` then runs `SessionStart` / `UserPromptSubmit` (6.28; they see the typed text and
   the command's name, never the expansion) and only after they passed `withCommandExpansion` runs the spans and reads
   (`finish()`), checking a project command file's trust hash again right before the spans. A hook block therefore runs
-  nothing and stores nothing. An image turn runs no prompt hook: its command is expanded while the request is planned
-  (`planHistory`). `@path` references (the mention grammar: a `.` or `/` is required, and punctuation glued to an
+  nothing and stores nothing. An image turn runs no `SessionStart` / `UserPromptSubmit` hook: its command is expanded
+  while the request is planned (`planHistory`). `@path` references (the mention grammar: a `.` or `/` is required, and
+  punctuation glued to an
   unquoted path is part of it, so `@README.md,` is not inlined; project chats only, else they stay text; at most 10) go
   through `resolveWorkspacePath` (no link on the path), the secret-looking-path and `.git` refusals and
   `openWorkspaceFile` (a regular file; at most 32 KiB, a longer file is cut; a NUL byte in the first 8 KiB makes it
@@ -3624,32 +3639,38 @@ both are looked for at the archive root or inside one top folder. Inspect and in
 
 | Component | Default location | `plugin.json` field | Rule |
 |---|---|---|---|
-| commands | `commands/**/*.md` (subfolders = name segments) | `commands`: paths, or an object map `{ name: { source \| content, description, argumentHint, model, allowedTools } }` | paths **replace** the scan; the object form adds inline commands |
-| agents | `agents/*.md` (subfolders = segments) | `agents`: `.md` paths | **replaces** the scan |
+| commands | `commands/**/*.md` (subfolders = name segments) | `commands`: paths, or an object map `{ name: { source \| content, description, argumentHint, model, allowedTools } }` | paths and the object form's inline commands **replace** the scan, unless a marketplace entry added them (`appendToDefault`) |
+| agents | `agents/**/*.md` (subfolders = segments) | `agents`: `.md` paths | **replaces** the scan (unless `appendToDefault`) |
 | skills | `skills/<name>/SKILL.md` with its files; a root `SKILL.md` when there is no `skills/` | `skills`: paths (`"."` = the root) | **adds** to the scan |
-| output styles | `output-styles/*.md` | `outputStyles` | **replaces** the scan |
+| output styles | `output-styles/*.md` | `outputStyles` (files or folders) | **replaces** the scan (unless `appendToDefault`) |
 | hooks | `hooks/hooks.json` (the `{ "hooks": … }` wrapper) | `hooks`: a file path, an inline event map, or an array of both | **merged** per event |
 | MCP servers | `.mcp.json` (with or without the `mcpServers` wrapper) | `mcpServers`: a `.json` path, an inline map, or an array | **merged**; a later name wins |
 
-Every path must start with `./`, stay inside the plugin root (realpath) and exist; files are read through the
-definition reader (`files.ts` → `readDefinitionFile` of `services/customizations/discover.ts` with the plugin root: no
-links, regular files, 64 KiB per definition, caps before parsing) and parsed by the shared `parseDefinition`,
-`readSettingsHooks` / `readHooksConfig` (with prompt handlers on, 6.37) and `parseMcpJson`. Problems are diagnostics on
-the plugin (`ClaudePluginInfo.diagnostics`, ≤ 200), never a failed load, except an unusable `plugin.json`, a path
-outside the root, a link or a special file (the plugin is `error`). At most 100 components per kind (20 output styles);
-more than 50 hook handlers are trimmed with a diagnostic (the registry refuses more than 50). **Never run, never
-loaded**: `.lsp.json` / `lspServers`, `bin/`, `themes/`, `monitors/`, `workflows/`, the plugin's own `settings.json`,
-`channels`, `dependencies`, `headersHelper`, `.mcpb` / `.dxt` bundles, `ws` servers and OAuth-only remote servers:
-each is an info diagnostic and listed under "Ignored" in the review (UI.md 8.13). `defaultEnabled: false` installs the
-plugin disabled.
+Every path must start with `./` (stored without it; `.` is the root) and stay inside the plugin root; a path without
+`./` or one that does not exist is a warning and is skipped; files are read through the definition reader (`files.ts` →
+`readDefinitionFile` of `services/customizations/discover.ts` with the plugin root: no links, regular files, 64 KiB per
+definition, caps before parsing) and parsed by the shared `parseDefinition`, `readSettingsHooks` / `readHooksConfig`
+(with prompt handlers on, 6.37) and `parseMcpJson`. Problems are diagnostics on the plugin
+(`ClaudePluginInfo.diagnostics`, ≤ 200), never a failed load, except an unusable `plugin.json`, a path outside the root,
+a `strict: false` entry next to a `plugin.json` that declares components, a link or a special file, the tree caps, a
+file that changed while it was hashed, or an id that does not match its folder (the plugin is `error`, diagnostic
+`plugin-error`). At most 100 components per kind (20 output styles); more than 50 hook handlers are trimmed with a
+diagnostic (the registry refuses more than 50). **Never run, never loaded**: `.lsp.json` / `lspServers`, `bin/`,
+`themes/`, `monitors/`, `workflows/`, the plugin's own `settings.json`, `channels`, `dependencies`, `experimental`,
+`types`, a plugin `CLAUDE.md` and the hook handler types `http` / `mcp_tool` / `agent`: each is an info diagnostic and
+listed under "Ignored" in the review (UI.md 8.13); `.mcpb` / `.dxt` bundles, URL MCP sources and `ws` servers are
+skipped with a warning; `headersHelper` and OAuth settings are dropped with an info (the server connects without them).
+`defaultEnabled: false` installs the plugin disabled.
 
 **Id and version**: the id is `claudePluginId(name)`: the name from `plugin.json`, else the marketplace entry, else the
 folder or repository name; lowercased, `[^a-z0-9-]` → `-`, repeats collapsed, ends trimmed; longer than 40 → the
-first 31 characters + `-` + 8 hex of sha256(name); a reserved id (`core-*`, `mock*`, a builtin provider id, `new`,
+first 31 characters + `-` + 8 hex of sha256(name); a reserved id (`core-*`, `mock`, a builtin provider id, `new`,
 `marketplaces`) gets the prefix `cc-`; an empty slug → `plugin-<8 hex>`. An id held by another origin or format is 409
 `exists` (no automatic suffix: the namespace must stay predictable). The raw version string is kept (`plugin.json`,
-else the entry, else the 12-character commit or archive sha, else `0.0.0`); the DTO manifest uses it when it is valid
-semver, else `0.0.0+<sanitized>`. The DTO manifest is **synthesized**: id, name (`displayName ?? name`, ≤ 64),
+else the entry, else the 12-character commit or archive sha, else the npm version: `origin.npmVersion` of a
+marketplace npm entry, or the version the row stores for an npm install; else `0.0.0`); the host reads every load with
+the same hint (`versionHintOf`), so the version stays the same across reloads and restarts; the DTO manifest uses it
+when it is valid semver, else `0.0.0+<sanitized>`. The DTO manifest is **synthesized**: id, name (`displayName ?? name`, ≤ 64),
 version, `engines.harness: '^1.6.0'`, description (≤ 280), `author.name`, an http(s) homepage and the `settings`
 built from `userConfig`; it has no `contributes` (the contributions come from the Claude registration).
 
@@ -3674,12 +3695,20 @@ registering plugin's id.
 | Variable | Shell-form hook | Exec-form hook (`args`) | stdio MCP | http MCP | Markdown bodies | `!` spans |
 |---|---|---|---|---|---|---|
 | `${CLAUDE_PLUGIN_ROOT}` (the plugin folder) | env | literal at load | literal at load | literal | absolute path | env |
-| `${CLAUDE_PLUGIN_DATA}` (`<dataDir>/plugins/.data/<id>/`, kept across updates) | env | literal | literal | literal | absolute path | env |
+| `${CLAUDE_PLUGIN_DATA}` (`<dataDir>/plugins/.data/<id>/`, kept across updates) | env | literal at load | literal at load | literal | absolute path | env |
 | `${CLAUDE_PROJECT_DIR}` | env | at spawn (the working folder) | the server is skipped (plugin servers are global) | same | at expansion when a project is open, else literal | env |
 | `${CLAUDE_SKILL_DIR}` (plugin skills) | — | — | — | — | the absolute skill folder | — |
-| `${user_config.KEY}` | refused: the handler is skipped with a diagnostic | substituted, then quoted | in `args` / `env` → `{{settings.KEY}}`; in `command` → the server is skipped | → `{{settings.KEY}}` | non-sensitive values only; a sensitive one → `''` with a warning | never |
-| any other `${VAR}` | — | literal | `{{settings.env_VAR}}` (a secret setting the user fills), never the server environment | same | literal | — |
+| `${user_config.KEY}` | refused: the handler is skipped with a diagnostic | at spawn (the runner) | in `args` / `env` → `{{settings.KEY}}`; in `command` → the server is skipped | → `{{settings.KEY}}` | non-sensitive values only; a sensitive one → `''` with a warning | never |
+| any other `${VAR}` | — | literal | in `args` / `env` → `{{settings.env_VAR}}` (a secret setting the user fills; a text setting with the default of a `${VAR:-default}`); in `command` → the server is skipped; never the server environment | same (URL, headers) | literal | — |
 | env `CLAUDE_PLUGIN_OPTION_<KEY>` | every value | every value | — | — | — | — |
+
+Exec-form hooks keep every `${user_config.KEY}` (an escaped `\${…}` too) as written in the registry, `GET /hooks`,
+`/hooks/runs`, `data-hook` labels and the debug log (plugin folders appear as absolute paths, since only
+`${CLAUDE_PLUGIN_ROOT}` / `${CLAUDE_PLUGIN_DATA}` are filled at load). The hook runner fills the options only when the
+hook process starts, from `CLAUDE_PLUGIN_OPTION_<KEY>` of the registration's `env` (never `process.env`); a missing
+option reaches the hook as the literal placeholder; a value with a NUL, or one that makes the command longer than 4,096
+characters, means the hook does not start (`HOOK_START_ERROR`). Markdown bodies: a sensitive option → `''` (warning
+`secret-in-body`), an undeclared one stays as written (info `unknown-option`).
 
 **`userConfig` → settings** (`userConfigToSettings`): `string` → string; `sensitive` → `format: 'secret'` (a default is
 dropped with a warning); `options` → `enum`, with `multiple` → an array of the enum; `number` → number with
@@ -3689,33 +3718,39 @@ options. The values are ordinary plugin settings (secret ones in the `secrets` t
 the plugin's Configuration tab; saving them reloads the plugin so every substitution is redone.
 
 **Trust** (ADR-053, amends ADR-017 / ADR-052): a Claude Code plugin needs a trust pin when it has any `command` hook
-handler (whatever its event, so a later host cannot activate an unreviewed handler), any stdio MCP server or any
-command body with `` !`cmd` `` spans (`planCommandExpansion`); pure markdown, http MCP servers and prompt-only hooks need
-none (the rule of declarative harness plugins). The pin is a **whole-tree hash** (`tree-hash.ts`): sha256 of
-`hf-claude-plugin/v1\0`, then for every regular file in UTF-8 byte order of its POSIX path `F\0<path>\0<755|644>\0<size>\0`
-+ sha256(content), then `O\0` + `canonicalJson(overlay)` when a marketplace entry overlay exists (6.34). A link or a
-special file makes the plugin `error`; a linked folder skips `.git` and `node_modules`, ignores links and stays pinned
-by path (`pathPin`). The hash is cached per (path, size, mtime, inode); caps 2,000 entries and 100 MB. **Any** changed
-file (a script a hook runs, a skill's reference file, an exec bit) makes the plugin `untrusted` until the user trusts it
-again (fresh auth, 8.4 of UI.md). **Exec bits** are kept for this format only: the owner exec bit from zip external
-attributes, the tar header mode or `lstat` of a copied folder becomes mode 0755 (else 0644) and is part of the hash;
-harness plugins stay 0644. An exec bit alone runs nothing: hooks and MCP servers start only while the plugin is
-trusted and active.
+handler (whatever its event, so a later host cannot activate an unreviewed handler), any stdio MCP server or any command
+body with `` !`cmd` `` spans (`planCommandExpansion`); pure markdown, http MCP servers and prompt-only hooks need none
+(the rule of declarative harness plugins). The pin is a **whole-tree hash** (`tree-hash.ts`): sha256 of
+`hf-claude-plugin/v1\0`, then for every regular file in UTF-8 byte order of its POSIX path
+`F\0<path>\0<755|644>\0<size>\0` + sha256(content), then `O\0` + `canonicalJson(overlay)` when a marketplace entry
+overlay exists (6.34). A link or a special file makes the plugin `error`; a linked folder skips `.git` and
+`node_modules`, ignores links and stays pinned by path (`pathPin`). File digests are cached per (path, size, mtime,
+ctime, inode, device; at most 20,000 files); caps 2,000 entries and 100 MB. The hash is computed again on every load,
+reload (a settings save too), trust and hot reload, not before each spawn. **Any** changed file (a script a hook runs, a
+skill's reference file, an exec bit) makes the plugin `untrusted` from that point until the user trusts it again (fresh
+auth, 8.4 of UI.md); until then an edited script can still run (accepted: project items are re-hashed right before every
+spawn, 6.29). **Exec bits** are kept for this format only: the owner exec bit from zip external attributes, the tar
+header mode or `lstat` of a copied folder becomes mode 0755 (else 0644) and is part of the hash; harness plugins stay
+0644. An exec bit alone runs nothing: hooks and MCP servers start only while the plugin is trusted and active.
 
 **Registration** (`register.ts`, `registerClaudeContributions(ctx, read, runtime)`, through the same `ctx` registries as
 a harness plugin, plugin API 1.6.0):
 
-- **Commands**: `CommandDefinition { syntax: 'markdown', argumentHint, model, allowedTools }`; `resolveCommand` runs them
+- **Commands**: `CommandDefinition { syntax: 'markdown', argumentHint, model, allowedTools, disallowedTools, arguments,
+  whenToUse, context, agent }`; `resolveCommand` runs them
   through the command-file path (`expandArguments` with the plugin variables, `!` spans as a **trusted plugin source**
-  with `CLAUDE_PLUGIN_ROOT` / `CLAUDE_PLUGIN_DATA` in their environment, `@path`, the per-turn `model`, `allowed-tools`
+  with `CLAUDE_PLUGIN_ROOT`, `HARNESS_PLUGIN_ROOT` and `CLAUDE_PLUGIN_DATA` in their environment (no
+  `CLAUDE_PLUGIN_OPTION_*`), `@path`, the per-turn `model`, `allowed-tools`
   that only narrow; a trusted plugin's `allowed-tools` never pre-approve a call).
 - **Agents**: sub-agent types with qualified names; `model: sonnet` and the other aliases resolve through
   `resolveClaudeModel` (6.38); plugin agents ignore `permissionMode`, `hooks`, `mcpServers` and `initialPrompt` (info
-  diagnostics), like Claude Code.
-- **Skills**: `SkillDefinition.baseDir` (relative to the plugin); the `skill` tool's `file` input reads a supporting
-  file (below).
+  diagnostics), like Claude Code; `disallowedTools`, `maxTurns`, `color` and `skills` are kept (6.38).
+- **Skills**: `SkillDefinition.baseDir` (relative to the plugin) plus `allowedTools`, `disallowedTools`, `model`,
+  `arguments`, `whenToUse`, `context` and `agent` (6.38); `${CLAUDE_SKILL_DIR}` becomes the absolute skill folder at
+  load; the `skill` tool's `file` input reads a supporting file (below).
 - **Output styles**: `OutputStyleDefinition` with qualified names (`force-for-plugin` is ignored).
-- **Hooks**: `registerHookCommands({ root, hooks, env })` with `env` = `CLAUDE_PLUGIN_DATA` and the
+- **Hooks**: `registerHookCommands({ root, hooks, env })` (the exec-form `command` / `args` with the plugin folders
+  filled and `${user_config.KEY}` kept, see "Variables") with `env` = `CLAUDE_PLUGIN_DATA` and the
   `CLAUDE_PLUGIN_OPTION_<KEY>` values (`HARNESS_PLUGIN_ROOT` / `CLAUDE_PLUGIN_ROOT` as before); prompt handlers register
   too (6.37); unknown events and unsupported handler types stay diagnostics (also in `GET /hooks`).
 - **MCP servers**: `McpServerDecl`s with `{{settings.*}}` placeholders and `cwd` = the plugin folder, registered with
@@ -3731,14 +3766,26 @@ hidden, not secret-looking, not binary, at most 64 KiB, cut beyond with `truncat
 **Host** (`plugins/host.ts`): `runsCode` comes from the reader's `requiresTrust`; `editable` is false (no Source tab, no
 file routes: Claude Code plugins are not edited in the plugin editor in v1.8); `contributionsOf` reports the Claude
 contributions; `startRuntime` dispatches by format; a folder placed by hand is detected; `updateSettings` reloads a
-Claude Code plugin. Safe mode loads none (like every user plugin). Export zips the stored files as they are (a
-`strict: false` entry's overlay is not part of the files and is lost; 6.34).
+Claude Code plugin. Safe mode loads none (like every user plugin).
+
+**Export** (`GET /plugins/:id/export`, `install/export.ts`): a Claude Code plugin is zipped as its installed tree below
+`<id>/` (`<id>-<version>.zip`): the same paths and bytes in the UTF-8 byte order of their paths, each file's owner exec
+bit kept in the Unix external attributes (0755, else 0644), no root `plugin.json` needed, and the skip rules and caps of
+every export (`node_modules`, `.git`, `.env*`, `.npmrc` and links left out; 2,000 entries, 100 MB); a folder without
+files is a 400 ("The plugin folder has no files, so it cannot be exported."). Inspecting the zip gives the installed
+whole-tree hash, except for a plugin installed from a marketplace entry: its entry overlay is part of the hash but not a
+file, so the export hashes differently.
 
 **Inspection** (`claudePluginInfoSchema`, in `PluginInspection.claude` and `PluginDetail.claude`): `name`,
 `displayName?`, `version` (raw) | null, `namespace`, `components { commands, agents, skills, outputStyles, hooks,
-mcpServers }`, `executables[{ kind: hook | mcp | span, label, command }]` (≤ 200; exactly what the trust consent
-lists), `hosts`, `userConfig[{ key, title, sensitive, required }]`, `unsupported[{ component, reason }]` and
-`diagnostics`.
+mcpServers }`, `executables[{ kind: hook | mcp | span, label, command }]` (≤ 200; exactly what the trust consent lists:
+every command hook handler of any event as written, unknown events and a refused shell-form `${user_config.*}` handler
+included, every stdio server declared, a skipped one too, and every `!` span: a conservative consent), `hosts`,
+`userConfig[{ key, title, sensitive, required }]`, `unsupported[{ component, reason }]` and `diagnostics`. Besides the
+shared parsers' codes (`CLAUDE_PLUGIN_DIAGNOSTIC_CODES`, the definition, hook and `.mcp.json` codes), the reader reports
+`plugin-error` (first: why the plugin is `error`), `missing-manifest` (info: a `.claude-plugin/` folder without
+`plugin.json`), `read-failed`, `renamed` (info: a slugified name), `duplicate-name`, `invalid-command`,
+`invalid-server`, `invalid-variable`, `secret-in-body` and `unknown-option`.
 
 ### 6.34 Marketplaces and HTTPS archive sources (ADR-054)
 
@@ -3757,12 +3804,17 @@ It is added from one of three sources (`MarketplaceSource`):
 and ref validated before a URL is built):
 
 1. `GET https://api.github.com/repos/{owner}/{repo}/commits/{ref | HEAD}` with `Accept: application/vnd.github.sha`
-   gives the commit sha (40 hex).
+   gives the commit sha (40 hex); a full 40-hex sha needs no request. The API and raw requests follow at most 3
+   redirects (a renamed repository), each re-checked.
 2. `https://raw.githubusercontent.com/{owner}/{repo}/{sha}/.claude-plugin/marketplace.json` (≤ 1 MiB) gives the catalog.
 3. An install downloads `https://codeload.github.com/{owner}/{repo}/zip/{sha}` **without redirects**; the top folder
    must be `<repo>-<sha>/` and the zip comment must equal the sha. When the API is rate-limited (60 unauthenticated
-   requests per hour; no token in v1.8), the fallback downloads `codeload …/zip/refs/heads/{ref}` and reads the sha
-   from the zip comment; a 429 is reported as `rate_limited` with `retryAfterMs`.
+   requests per hour; no token in v1.8), an install falls back to `codeload …/zip/refs/heads/{ref}` (`zip/HEAD` for
+   the default branch), reads the sha from the zip comment (top folder `<repo>-<ref>/` with `/` → `-`, or
+   `<repo>-<sha>/`) and adds a note to the inspection; adding or refreshing a marketplace has no fallback. GitHub's 404
+   and 422 (an unknown ref) become `not_found` (404); an exhausted limit (any 429, or a 403 with
+   `x-ratelimit-remaining: 0`) is `rate_limited` (429) with `retryAfterMs` when `retry-after` / `x-ratelimit-reset`
+   gives the reset; any other status is `provider_error` (502).
 
 **Entries** (`parseMarketplaceJson` classifies each `source`; `sources.ts` turns an entry into a staged source or an
 unsupported reason):
@@ -3771,10 +3823,10 @@ unsupported reason):
 |---|---|
 | a relative path (`./plugins/x`, or a bare name under `metadata.pluginRoot`) | the subtree of the marketplace's **stored commit** (GitHub) or folder (`path`); only that subtree is extracted and counted (`select(path)`) |
 | `github { repo, ref?, sha? }` | as is (ref → commit as above; a given sha wins) |
-| `url` / `git-subdir` whose host is `github.com` | as `github` (+ `path`) |
-| `archive { url, sha256? }` | an HTTPS archive; the sha256 is checked when given, else trust on first use (the review shows the sha256) |
+| `url` / `git` / `git-subdir` on `github.com` | as `github` (`git-subdir` keeps its `path`) |
+| `archive { url, sha256? }` | an HTTPS `.zip` / `.tgz` (≤ 20 MB, 60 s, 3 redirects; an `http:` archive is unsupported); the sha256 is checked when given, else trust on first use (the review shows the sha256) |
 | `npm { package, version? }` | the existing npm pipeline (the default registry; a custom `registry` is unsupported) |
-| `url` / `git` / `git-subdir` on another host, `command` | **unsupported** ("Unsupported source (git)") |
+| `url` / `git` / `git-subdir` on another host, `command` | **unsupported** (the parser's reason, e.g. "Only GitHub repositories, archives, npm packages and relative paths can be installed; other git hosts are not supported."); installing one is 400 `validation_error` "This plugin cannot be installed: …" on `['plugin']` |
 
 `strict` (default true) merges the entry's component lists into the plugin's own `plugin.json` (which wins metadata);
 `strict: false` makes the entry the whole manifest (a `plugin.json` that also declares components → `conflicting-
@@ -3794,16 +3846,19 @@ the DTO drops `overlay`); `plugins.source` gains `github` and `marketplace`.
 | Route (module `marketplaces`) | Answer |
 |---|---|
 | `GET /marketplaces` | `MarketplaceList { items, suggestions, updates }` from the stored rows (no network) |
-| `POST /marketplaces` `{ source }` | 201 `MarketplaceDetail`; fetched at once, **no row on failure**; 409 `conflict` reason `exists` (the name is added, or 50 marketplaces exist) or `offline` (a `github` / `url` source with `HF_OFFLINE=1`), 404 (no repository, ref or catalog), 413 (over 1 MiB), 429 `rate_limited` (`retryAfterMs`), 502 (the host failed), 400 (an invalid catalog, or a reserved name from outside `anthropics/*`) |
+| `POST /marketplaces` `{ source }` | 201 `MarketplaceDetail`; fetched at once, **no row on failure**; 409 `conflict` reason `exists` (the name is added, or 50 marketplaces exist) or `offline` (a `github` / `url` source with `HF_OFFLINE=1`), 404 (no repository, ref, folder or catalog), 413 (over 1 MiB), 429 `rate_limited` (`retryAfterMs`), 502 (the host failed), 400 (an invalid catalog, or a reserved name from outside `anthropics/*`) |
 | `GET /marketplaces/:id` | `MarketplaceDetail` (the entries with `supported`, the reason, the installed plugin and its update, the diagnostics) |
-| `POST /marketplaces/:id/refresh` | the detail after fetching again (a moved ref gives a new commit); the last error is stored on failure |
-| `DELETE /marketplaces/:id` | 204; the installed plugins are **kept** (their origin keeps the marketplace's name) |
+| `POST /marketplaces/:id/refresh` | the detail after fetching again (a moved ref gives a new commit; a folder is read again); a failure (incl. 409 `offline`, or a `marketplace.json` now carrying another name: 400 "remove it and add it again") keeps the stored catalog, stores `lastError` and emits `marketplace.changed`; plugins whose update state changed get `plugin.changed` |
+| `DELETE /marketplaces/:id` | 204; the installed plugins are **kept** (their origin keeps the marketplace's name; a marketplace added again under that name finds them) |
 
 Plugin installs from these sources use the existing routes: `POST /plugins/inspect` and `POST /plugins/install` accept
 `{ source: 'github', repo, ref?, path? }` and `{ source: 'marketplace', marketplaceId, plugin }` (and `format?` on every
 source). The installer stages the archive (`plugins/install/github.ts`; repository zips ≤ 50 MB compressed; the caps of
 100 MB and 2,000 entries count the selected subtree only; links and devices refused; exclusive writes; `verifyTree`),
-detects the format, inspects it (`sourceRef` = `owner/repo@<sha12>[/path]`, the tree sha256) and answers the review;
+detects the format, inspects it (the inspection's `sourceRef` is the resolved source: `owner/repo@<sha12>[/path]`, a
+marketplace folder, an archive URL or `name@version`; the stored `plugins.source_ref` of a marketplace install is
+`<plugin>@<marketplace>`; the inspection `sha256` is the whole-tree hash, equal to `trust.hash` after install; a fresh
+plugin with `defaultEnabled: false` adds the warning "This plugin installs turned off.") and answers the review;
 install re-stages and requires the reviewed sha256 (else 409 `stale`) and, when the plugin needs trust, **fresh auth**
 (ADR-017). The GitHub zip bytes are not pinned (they are not byte-stable); the commit and the tree are.
 
@@ -3829,23 +3884,30 @@ sequenceDiagram
 ```
 
 **Updates**: there is no automatic refresh or update. After a refresh, "update available" means the entry's `version`
-differs from the installed `origin.version`, or (without versions) the marketplace or entry commit differs
-(`updates.ts`); `GET /marketplaces` lists them as `updates`, and `plugin.changed` / `marketplace.changed` refresh the
-badges. An update is a normal inspect → install from the same origin: the review runs again, `trust: true` re-pins,
-fresh auth applies when trust is required, and an unchanged tree hash reads "up to date". A different origin or format
-for the same id is 409 `exists`.
+differs from the installed `origin.version`; without an entry version, a relative entry compares the marketplace's
+stored commit, a GitHub entry its pinned `sha`, an archive entry its pinned `sha256` and an npm entry its exact version
+with the origin (a GitHub entry with only a ref, or a folder marketplace, never reports one) (`updates.ts`); `GET
+/marketplaces` lists them as `updates`, and `plugin.changed` / `marketplace.changed` refresh the badges. An update is a
+normal inspect → install from the same origin: the review runs again, `trust: true` re-pins, fresh auth applies when
+trust is required, and an unchanged tree hash reads "up to date". A different source, format or origin for the same id
+is 409 `exists` (origins compare the marketplace name + entry, or the GitHub repository + folder).
 
 **Offline and tests**: with `HF_OFFLINE=1`, adding or refreshing a `github` or `url` marketplace and installing from a
-`github` or `marketplace` source answer 409 `conflict` reason `offline` (a folder marketplace still works; npm and URL
-installs are unchanged). Tests never reach
+`github` source or a marketplace entry that needs the network (all but a relative entry of a folder marketplace, so a
+marketplace's npm or archive entries too) answer 409 `conflict` reason `offline` with one text for every refusal
+(`OFFLINE_MESSAGE`, `marketplaces/sources.ts`: "Adding, refreshing and installing from marketplaces and GitHub need the
+network (HF_OFFLINE=1). npm and URL installs from the install dialog, zip uploads and local folders work offline."; a
+folder marketplace still works; direct npm and URL installs are unchanged). Tests never reach
 the real hosts: unit tests inject `safeFetch` (`createFakeSafeFetch`, the `InstallerOptions` / `MarketplaceServiceOptions`
 overrides `{ safeFetch, githubApi, githubRaw, githubCodeload }`); gate probes run the loopback fake
 (`testing/fake-remote.ts`) with the test-only `HF_TEST_REMOTE_URL` (honored only with `HF_MOCK_PROVIDER=1`), which
-reroutes every plugin-source and marketplace fetch to `<base>/<host>/<path>` and allows loopback for that base only.
+reroutes every plugin-source and marketplace fetch (GitHub API, raw, codeload, marketplace and archive URLs) to
+`<base>/<host>/<path>` and allows loopback for that base only; the installer's npm registry becomes
+`<base>/registry.npmjs.org` too. Route tests use `createSourcesTestApp` (`plugins/marketplaces/testing.ts`).
 
-`marketplace.changed { id, marketplace: MarketplaceSummary | null }` (null = removed) follows add, refresh and remove.
-Marketplaces are configuration of the server: never in backups, kept by delete-all (6.9). Logs carry the marketplace
-id, name, repository and a 12-character sha only (12).
+`marketplace.changed { id, marketplace: MarketplaceSummary | null }` (null = removed) follows add, refresh (a failed one
+too) and remove. Marketplaces are configuration of the server: never in backups, kept by delete-all (6.9). Logs carry
+the marketplace id, name, repository and a 12-character sha only (12).
 
 ### 6.35 Import from a Claude Code home folder (ADR-055)
 
@@ -3863,9 +3925,9 @@ never opened):
 | `commands/**/*.md` (≤ 3 levels; a nested command is named `<folder>-<name>`) | personal commands |
 | `skills/<name>/SKILL.md` | personal skills (one file; supporting files are not copied) |
 | `output-styles/*.md` | personal output styles |
-| `settings.json` (≤ 256 KiB) | `hooks` → personal hooks; `permissions.allow` `Bash(…)` → global shell rules; whole-tool `permissions.deny` → tool overrides `deny`; `outputStyle` → the setting; `env` → names only (values resolve MCP variables, below); `model` → info |
+| `settings.json` (≤ 256 KiB) | `hooks` → personal hooks; `permissions.allow` `Bash(…)` → global shell rules; whole-tool `permissions.deny` → tool overrides `deny`; `outputStyle` → the setting; `env` → names only (values resolve MCP variables, below); `model` and the command-running settings → `unsupported` items |
 | `CLAUDE.md` (≤ 1 MiB) | the global instructions setting (append, replace or skip) |
-| `.claude.json` (inside the folder, or `~/.claude.json` next to a folder named `.claude`; ≤ 16 MiB) | only `mcpServers` and `projects[*].mcpServers` (`extractClaudeJsonMcpServers` drops every other key, `oauthAccount`, `primaryApiKey`, histories, before anything else reads the object) → global MCP servers |
+| `.claude.json` (`~/.claude.json` next to a folder named `.claude` first, else inside the folder; in an upload the part `claudeJson` or the zip root; ≤ 16 MiB) | only `mcpServers` and `projects[*].mcpServers` (`extractClaudeJsonMcpServers` drops every other key, `oauthAccount`, `primaryApiKey`, histories, before anything else reads the object) → global MCP servers |
 
 Never read: `.credentials.json`, `projects/`, `history.jsonl`, `todos/`, `shell-snapshots/`, `statsig/`, `plugins/`,
 `settings.local.json` (a denylist would miss `.credentials.json`, so the rule is the allowlist). Caps
@@ -3874,18 +3936,25 @@ Never read: `.credentials.json`, `projects/`, `history.jsonl`, `todos/`, `shell-
 **Intakes**:
 
 - **Upload** (`POST /claude-import/upload`, multipart, ≤ 32 MiB, **no side effects**): either the files of a folder the
-  browser picked (`files[]` named by their relative path; the browser keeps only allowlisted paths with
-  `isClaudeHomeImportPath` and never reads anything else) plus an optional `.claude.json`, or one zip of the folder
+  browser picked (parts `files`, each named by its relative path; the browser keeps only allowlisted paths with
+  `isClaudeHomeImportPath` and never reads anything else) plus an optional `claudeJson` part, or one zip (part `file`)
   (the server reads it with `openZip` + `EntryCollector`: the zip guards of 6.9, only allowlisted entries inflated, one
-  shared top folder stripped). The browser never opens a zip.
+  shared top folder stripped unless it is `agents`, `commands`, `skills` or `output-styles`; at most 20,000 entries). A
+  `claudeJson` part alone is accepted; unknown fields, a text where a file belongs, a repeated `file` / `claudeJson`
+  part and more than 10,000 `files` parts are 400. The browser never opens a zip.
 - **Scan** (`POST /claude-import/scan`, **fresh auth**): reads `HF_CLAUDE_HOME` (unset = `~/.claude` of the server user;
   `0` = off, 409 `conflict` reason `disabled`; the Docker image sets `0`, so a container scans only a folder mounted
-  read-only and named with `HF_CLAUDE_HOME=/claude`), always fresh (never cached). The root is resolved once with
-  `realpath`; folders are listed with `opendir` (≤ 2,000 entries each, 3 levels); files are opened with `O_NONBLOCK`
-  and must be regular (`fstat`); **symbolic links are followed** (dotfile managers link these files) when the target
-  is a regular file outside `HF_DATA_DIR` (the item says "linked"); a 10 s deadline. `.claude.json` is read inside the
-  folder, or next to it when the folder is named `.claude` (`~/.claude.json`). `GET /claude-import/home` answers `{ available, reason?:
-  disabled | missing | unreadable, path }` without reading any file.
+  read-only and named with `HF_CLAUDE_HOME`: the one-mount form `-v ~/.claude:/claude:ro -e HF_CLAUDE_HOME=/claude`
+  imports everything except the MCP servers of `~/.claude.json`, which is read only next to a root named `.claude`; the
+  two-mount form `-v ~/.claude:/home/node/.claude:ro -v ~/.claude.json:/home/node/.claude.json:ro -e
+  HF_CLAUDE_HOME=/home/node/.claude` reads both; the files must be readable by uid 1000; section 11), always fresh
+  (never cached). The root is resolved once with `realpath`; folders are listed with `opendir` (≤ 2,000 entries each, 3
+  levels); files are opened with `O_NONBLOCK` and must be regular (`fstat`); **symbolic links are followed** (dotfile
+  managers link these files) when the target is a regular file outside `HF_DATA_DIR` (the item says "linked"); a 10 s
+  deadline (past it the plan holds the files read so far and a `timeout` warning). A missing or unreadable folder is
+  404; a scan stopped by the shutdown is 409 `conflict` (`reason: 'busy'`) and keeps no plan. `.claude.json` is read next to the folder
+  when it is named `.claude` (`~/.claude.json`), else (or when it is missing there) inside the folder. `GET
+  /claude-import/home` answers `{ available, reason?: disabled | missing | unreadable, path }` without reading any file.
 
 **The plan** (`ClaudeImportPlan`, `cip_` id, held in memory for 10 minutes, at most 4 plans; dropped on apply, expiry,
 key rotation and shutdown): items `{ key, kind, name, source: { file, project? }, status, actions, defaultAction,
@@ -3897,38 +3966,43 @@ tool overrides, instructions and styles):
 
 | Kind | Identity | Statuses and actions |
 |---|---|---|
-| agent, command, skill, style | (kind, name); a missing `name:` is inserted from the file name (`setDefinitionName`) | `new`; `unchanged` (same content); `update` (default **skip**; overwrite keeps the row's `enabled`; rename to `<name>-2` …); `conflict` with a built-in or reserved name (rename only) |
-| hook | the canonical handler (`canonicalJson({ event, matcher, handler })`) | `new` or `unchanged`; unknown events and unsupported types → `invalid` / `unsupported` |
+| agent, command, skill, style | (kind, name); a missing `name:` is inserted from the file name (`setDefinitionName`) | `new`; `unchanged` (same content); `update` (default **skip**; overwrite keeps the row's `enabled`; rename to `<name>-2` …); `conflict` (skip or rename) with a built-in or reserved name or a name an earlier file of this import uses; parser errors → `invalid` |
+| hook | `claudeImportHookIdentity` (`canonicalJson({ event, matcher, handler })`; prompt handlers too; the personal rows' handler fields live in `hooks.options`) | `new` or `unchanged` (also a repeat within the file); unknown events and unsupported handler types → `unsupported`; invalid handlers → `invalid` |
 | mcp-server | `mcpServerIdFromName` + a transport fingerprint (command, args, url, env / header **names**) | `new`; `unchanged`; `conflict` (skip, overwrite or rename); a per-project server → a **disabled** global server with the warning `project-server` |
 | shell-rule | the canonical prefix of `shellRuleFromPermission` (`Bash(p:*)`, `Bash(p *)` → `p`; `Bash(p)` → `p` with the warning `prefix-broader`) | `new` / `unchanged`; bare `Bash`, `Bash(*)`, inner wildcards and prefixes `parseShellRule` refuses (command runners, interpreters, `cd`) → `unsupported` |
 | tool-deny | a whole-tool `deny` rule (`WebFetch`, `Write` → `web_fetch`, `write_file`, `toolNamesFromPermission`) | `new` / `unchanged`; it only restricts |
-| instructions | `CLAUDE.md` | `new` (append by default; replace; skip); already contained → `unchanged`; over 20,000 characters together → `invalid`; `@imports` stay text (warning `imports-kept`) |
+| instructions | `CLAUDE.md` | `new` when the instructions are empty, else `update` (append by default; replace; skip; when appending would pass 20,000 characters only replace or skip, default skip, warning `append-too-long`); already contained → `unchanged`; a `CLAUDE.md` over 20,000 characters → `invalid`; `@imports` stay text (warning `imports-kept`) |
 | setting | `outputStyle` (slugged; the style must exist or be imported in the same batch) | `new` / `unchanged` |
-| permission, env, plugin, marketplace | `ask` rules, non-Bash rules, `defaultMode`, `additionalDirectories`; `env` names; `enabledPlugins`; `extraKnownMarketplaces`; `apiKeyHelper`, `statusLine`, `awsAuthRefresh` | `unsupported`, listed with the reason, never applied (plugins and marketplaces: Plugins → Marketplaces) |
+| permission, env, plugin, marketplace | `ask` rules, non-Bash rules, `defaultMode`, `additionalDirectories`; `env` names; `enabledPlugins`; `extraKnownMarketplaces`; `model`, `apiKeyHelper`, `statusLine`, `awsAuthRefresh`, `awsCredentialExport`, `otelHeadersHelper` | `unsupported`, listed with the reason, never applied (plugins and marketplaces: Plugins → Marketplaces) |
 
 **Apply** (`POST /claude-import/apply`, **fresh auth**; `{ planId, items: [{ key, action, renameTo?, enable? }],
-instructions?: append | replace, variables?: { <itemKey>: { NAME: value } } }`; an expired plan → 404): one pass in the
-catalog's write queue: `customizations.importDefinitions` (create, overwrite or rename; a command with `!` spans arrives
-**turned off** unless the item says `enable`), `hooks.importPersonal` (command hooks arrive **turned off** unless
-`enable`; prompt hooks arrive on), the global MCP servers (`core-mcp`; a stdio server arrives turned off unless
-`enable`; a per-project server always off), the global shell rules, the tool overrides and the settings (`instructions`,
-`outputStyle`). `${VAR}` / `${VAR:-default}` of an imported MCP server resolve from the body's `variables`, then the
-imported `settings.json` `env`, then the default — **never `process.env`**, also for a server scan; an unresolved
-reference fails that item (`needs-variables`). The answer `ClaudeImportApplyResult { results: [{ key, outcome:
-created | updated | unchanged | skipped | failed, id?, message? }], counts, warnings }`; exactly **one**
-`customization.changed` and **one** `hooks.changed` follow (plus the usual MCP and settings events). The plan is
-dropped.
+instructions?: append | replace, variables?: { <itemKey>: { NAME: value } } }`; an expired plan → 404; a key, action or
+rename the plan does not offer, or `variables` for an item that is not an MCP server → 400 and the plan is kept): the
+kept files are planned again against a fresh baseline and every picked item is re-checked (an item whose status changed
+fails with "The item changed since the folder was read. Read the folder again."), then one pass:
+`customizations.importDefinitions` (one batch in the catalog's write queue; create, overwrite or rename; a command with
+`!` spans arrives **turned off** unless the item says `enable`), `hooks.importPersonal` (command hooks arrive **turned
+off** unless `enable`; prompt hooks arrive on), the global MCP servers (`core-mcp`; a stdio server arrives turned off
+unless `enable`; a per-project server always off; an overwrite keeps a remote server's `enabled`), the global shell
+rules (an existing prefix → `unchanged`), the tool overrides and the settings (`instructions`, `outputStyle`). `${VAR}`
+/ `${VAR:-default}` of an imported MCP server resolve from the body's `variables`, then the imported `settings.json`
+`env`, then the default — **never `process.env`**, also for a server scan; an unresolved reference fails that item
+(`needs-variables`). The answer `ClaudeImportApplyResult { results: [{ key, outcome: created | updated | unchanged |
+skipped | failed, id?, message? }], counts, warnings }`; exactly **one** `customization.changed` and **one**
+`hooks.changed` follow, even when nothing of that kind changed (plus the usual MCP and settings events); `warnings`
+stays empty (what arrived turned off is known from the plan and the `enable` sent). The plan is dropped.
 
 | Route (module `claudeImport`) | Answer |
 |---|---|
 | `GET /claude-import/home` | `ClaudeImportHome { available, reason?, path }` (`path` null when disabled) |
-| `POST /claude-import/scan` | **fresh**; `ClaudeImportPlan`; 409 `disabled` with `HF_CLAUDE_HOME=0` |
-| `POST /claude-import/upload` (multipart) | `ClaudeImportPlan`; no side effects; 413 above 32 MiB |
-| `POST /claude-import/apply` | **fresh**; `ClaudeImportApplyResult`; 404 for an expired or unknown plan |
+| `POST /claude-import/scan` | **fresh**; `ClaudeImportPlan`; 409 `disabled` with `HF_CLAUDE_HOME=0`; 404 for a missing or unreadable folder; 409 `busy` when the shutdown stops it |
+| `POST /claude-import/upload` (multipart) | `ClaudeImportPlan`; no side effects; 413 above 32 MiB; 400 for unknown fields, repeated `file` / `claudeJson` parts, more than 10,000 files or a zip the guards refuse (more than 20,000 entries) |
+| `POST /claude-import/apply` | **fresh**; `ClaudeImportApplyResult`; 404 for an expired or unknown plan; 400 for a key or action the plan does not offer |
 
-**Logging**: `info` gets the source (`upload` / `scan`), counts and the duration; the root path only at `debug`; never
-a file's content, a hook command, a prompt, an env or header value (canary tests with fake `oauthAccount`,
-`primaryApiKey` and MCP token values).
+**Logging**: `info` lines `claude import planned` (`source` `upload` / `scan`, `files`, `items`, `skipped`,
+`durationMs`) and `claude import applied` (the outcome counts, `durationMs`); the root path only at `debug` (`claude
+import scan`); never a file's content, a hook command, a prompt, an env or header value (canary tests with fake
+`oauthAccount`, `primaryApiKey` and MCP token values).
 
 ### 6.36 Editing project definition files (ADR-056)
 
@@ -3939,29 +4013,38 @@ user approves it in the trust dialog (6.29).
 | Editable | Paths | Write body |
 |---|---|---|
 | definitions (raw markdown; create, update, delete; an empty skill folder is removed) | `.claude/` and `.harness/` `agents/*.md`, `commands/**/*.md`, `skills/<name>/SKILL.md`, `output-styles/*.md` | `{ path, expectedSha256, content }` |
-| hooks (the `hooks` key only; create, update) | `.claude/settings.json`, `.claude/settings.local.json`, `.harness/settings.json`, `.harness/settings.local.json` | `{ path, expectedSha256, hooks }` (`hooks: null` removes the key) |
-| MCP servers (the `mcpServers` key; create, update) | `.mcp.json` | `{ path: '.mcp.json', expectedSha256, mcpServers }` (`mcpServers: null` removes the key) |
+| hooks (the `hooks` key only; create, update) | `.claude/settings.json`, `.claude/settings.local.json`, `.harness/settings.json`, `.harness/settings.local.json` | `{ path, expectedSha256, hooks }` (`hooks: null` removes the key; a missing file is created as `{}`) |
+| MCP servers (the `mcpServers` key; create, update) | `.mcp.json` | `{ path: '.mcp.json', expectedSha256, mcpServers }` (`mcpServers: null` removes the key; a missing file is created as `{}`) |
 
 | Route (module `projectDefinitions`) | Answer |
 |---|---|
-| `GET /projects/:id/definitions/file?path` | `ProjectDefinitionFile { path, kind: agent \| command \| skill \| style \| settings \| mcp, exists, content \| null, sha256 \| null, diagnostics }` |
-| `PUT /projects/:id/definitions/file` | `{ path, sha256, created, diagnostics, trust: { pending } }`; 400 with diagnostics; 409 `conflict` reason `stale` |
-| `DELETE /projects/:id/definitions/file?path&expectedSha256` | 204; markdown definitions only; 409 `stale` |
+| `GET /projects/:id/definitions/file?path` | `ProjectDefinitionFile { path, kind: agent \| command \| skill \| style \| settings \| mcp, exists, content \| null, sha256 \| null, diagnostics }`; a file over its cap (64 KiB for a definition, 256 KiB for a settings file or `.mcp.json`) or a binary one → `content: null` with its sha256 and an `error` diagnostic; a byte order mark stays in `content`; 404 for an unknown project or an unavailable folder |
+| `PUT /projects/:id/definitions/file` | `{ path, sha256, created, diagnostics, trust: { pending } }`; 400 with diagnostics; 409 `conflict` reason `stale` ("The file changed on disk. Load it again or overwrite it."); 404 for an unknown project or an unavailable folder |
+| `DELETE /projects/:id/definitions/file?path&expectedSha256` | 204; markdown definitions only; 404 for a missing file; 409 `stale` |
 
 - **Validation**: markdown through `parseDefinition(kind, text, { fileName | folderName })` (raw text is stored, so keys
   the harness does not know survive byte for byte), settings through `readHooksConfig` (unknown events and unsupported
   handler types stay warnings), `.mcp.json` through `parseMcpJson`; any `error` diagnostic → 400 `validation_error`
   with `details.diagnostics`. A settings file is at most 256 KiB: only its `hooks` (or `.mcp.json`'s `mcpServers`) key
-  is replaced, every other key and the key order are kept (`settings-file.ts`); a settings file is never deleted.
+  is replaced; the value of every other key and the key order are kept, and the file is written as
+  `JSON.stringify(object, null, 2)` + a newline (`settings-file.ts`): the formatting of the other keys may change, their
+  trust hashes do not (they are canonical); a byte order mark is kept on read and dropped by the splice. A file on disk
+  that is not valid JSON, not a JSON object or larger than 256 KiB is a 400 and is never replaced; the whole new file is
+  checked again before the write; a settings file is never deleted. Hook diagnostics are prefixed
+  `<Event> (group g, hook h): `, server diagnostics `Server "<name>": `.
 - **Paths** (`paths.ts`): only the paths above; `resolveWorkspacePath(…, { allowMissing: true })` must give the same
-  relative path (no link anywhere on the path), checked again inside the lock; `.git` and secret-looking names are
-  refused; nothing is ever written outside `.claude/`, `.harness/` and `.mcp.json`.
+  relative path (no link anywhere on the path), checked again inside the lock; a `.git` segment (any case) and a
+  secret-looking segment anywhere in the path are refused; nothing is ever written outside `.claude/`, `.harness/` and
+  `.mcp.json`.
 - **Write path**: `writeWithoutRecording` (`services/checkpoints/disk.ts`: the per-file lock, the atomic write), with
   `expectedSha256` compared **under the lock** (null = the file must not exist) → 409 `stale` on a mismatch. The write
   is **not journaled** (`workspace_changes.chat_id` is NOT NULL and a UI edit belongs to no chat; a later rewind sees it
-  as an outside change and reports the conflict). It emits `workspace.changed { projectId, chatId: null, source:
-  'user', paths }`, which drops the catalog and project config caches as an agent edit does, so `customization.changed`,
-  `hooks.changed` and `project-trust.changed` follow.
+  as an outside change and reports the conflict). It emits `workspace.changed { projectId, chatId: null, batchId: null,
+  source: 'user', paths }` and calls `projectConfig.invalidate(projectId)`: the catalog and the hook service drop their
+  caches as for an agent edit, and the project config reader announces the new pending count **once per save**
+  (`project-trust.changed`, also before its first read of the project), plus `hooks.changed` when the hook items
+  changed or there was no earlier read. Logs: `info` `project definition saved` (`projectId`, `kind`, `created`,
+  `bytes`, `pending`) / `project definition deleted` (`projectId`, `kind`); the path only at `debug`.
 - **No fresh auth and no idle rule**: nothing written here can run before a fresh-auth approval, and the agent's own
   `write_file` can write the same files (with an approval card, since they are hidden paths), so a save is allowed while
   a chat of the project runs; the file lock and the sha check serialize it with the agent's writes. The answer's
@@ -3984,13 +4067,13 @@ info diagnostics everywhere (a later Claude Code event never invalidates a file)
 | Event | Where it fires | What a hook can do | Stored |
 |---|---|---|---|
 | `PostToolUseFailure` | `tools.ts`, the catch paths of `runToolCall` and `streamToolCall` (a thrown or failed call; **not** on abort); payload `tool_name`, `tool_input`, `tool_use_id`, `error` (≤ 16 KiB) | context, exit 2 or a block → feedback at the next step (the turn goes on) | a record on the tool row when there is something to show |
-| `PermissionRequest` | `approval.ts`, after the combination of 6.2 / 6.28, when the result is `user-approval` and the call is unanswered; **main agent only** (sub-agents never ask) | `hookSpecificOutput.decision { behavior: allow \| deny, updatedInput?, message? }`: `allow` passes the same gate as a PreToolUse `allow` (never in plan mode, never for `execute` tools or `always` policies), `deny` → "Blocked by hook: <message>"; exit 2 is not a decision | a record (`allowed` / `denied`) linked by `toolCallId` |
-| `SubagentStart` | `subagent/host.ts` before the child's step 0 (foreground and background children) | `additionalContext` → the child's first user message | never persisted (run log only) |
+| `PermissionRequest` | `approval.ts`, after the combination of 6.2 / 6.28, when the result is `user-approval` and the call is unanswered; **main agent only** (sub-agents never ask) | `hookSpecificOutput.decision { behavior: allow \| deny, updatedInput?, message?, interrupt? }`: `allow` passes the same gate as a PreToolUse `allow` (never in plan mode, never for `execute` tools or `always` policies), `deny` → "Blocked by hook: <message>" (a deny with `interrupt: true` stops the run); exit 2 is not a decision | a record (`allowed` / `denied`; a prompt "no" is `context`) linked by `toolCallId`; the tool row's badge shows it before a PreToolUse record |
+| `SubagentStart` | `subagent/index.ts` (the runner; the seam is `subagent/host.ts`) before the child's step 0 (foreground and background children) | `additionalContext` → the child's first user message | never persisted (run log only) |
 | `PostCompact` | `compaction/guard.ts` and `compaction/stream.ts`, after the marker | observe only | its record right after the compaction marker |
 | `SessionEnd` | **only** `DELETE /chats/:id` (`reason: 'other'`), detached and tracked, within a 1.5 s budget raised by explicit hook timeouts up to 60 s; never on delete-all, project delete or shutdown | observe only | nothing (the chat is gone) |
 
-`SubagentStop` gains agent matching and the payload fields `agent_id` / `agent_type` (also on `SubagentStart` and on
-every hook that runs inside a child).
+`SubagentStop` gains agent matching (a `SubagentStop` without an agent ignores the matcher, as in v1.7) and the payload
+fields `agent_id` / `agent_type` (also on `SubagentStart` and on every hook that runs inside a child).
 
 **Prompt hooks** (`type: 'prompt'`): `{ type: 'prompt', prompt, model?, timeout? (default 30 s, ≤ 600), continueOnBlock?
 }`, accepted for `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `UserPromptSubmit`, `Stop`, `SubagentStop` and
@@ -3999,19 +4082,26 @@ runs **inside the snapshot**, so the existing seams apply its effects:
 
 1. **Prompt**: `expandHookPrompt` replaces `$ARGUMENTS` with the hook input JSON (the 6.28 payload, ≤ 256 KiB) and
    appends it when the prompt has no `$ARGUMENTS`; `\$` gives a literal `$`; a prompt is at most 16,384 characters.
-2. **Model**: the handler's `model` (a model ref, or a Claude alias through `modelAliases`, 6.38), else the setting
-   `hookModelRef`, else the run provider's `smallModelId`, else the run model (the `title.ts` pattern); an unusable
-   model is a non-blocking error (`invalid-model` when it cannot be parsed).
+2. **Model**: the candidates are the handler's `model` (a model ref, or a Claude model name through
+   `resolveClaudeModel` and the setting `modelAliases`, 6.38), the setting `hookModelRef`, the run provider's
+   `smallModelId` and the run model (`promptHookModelCandidates`); the **first that resolves** is used (`resolveFirst`),
+   so a handler `model` that names a missing provider or an unmapped Claude name falls back to the next one (a `model`
+   that is neither is an `invalid-model` diagnostic when the hook is read). Only when no candidate resolves is it a
+   non-blocking error ("No model is available for the prompt hook."). With the mock provider the small model is
+   `mock:echo`, whose answer is not a verdict (the invalid-answer path below) unless `hookModelRef` is
+   `mock:prompt-hook`.
 3. **Call**: `generateText` with reasoning off, `maxRetries: 0`, 512 output tokens, the hook's timeout and the run's
    signal; at most **8** prompt-hook calls at once on the server (`hookModelCallsMax`); a usage row with purpose `hook`
    (in the chat's totals).
-4. **Answer**: `readPromptHookAnswer` strips code fences and reads the first JSON object `{ ok, reason?, impossible? }`;
-   anything else is a non-blocking error ("The model's answer could not be read."); answers are never logged.
+4. **Answer**: `readPromptHookAnswer` strips code fences and reads the first JSON object `{ ok, reason, impossible? }`
+   (`reason` is required when `ok` is false; `impossible` counts only on a "no"); anything else is a non-blocking error
+   with a fixed text that never quotes the answer (a timeout or a failing provider likewise); answers are never logged.
 5. **Effect** (`promptHookOutcome(event, answer, { continueOnBlock })`): `ok: true` decides **nothing** (it is never an
    allow). On `ok: false`: `PreToolUse` → deny and end the turn (`continueOnBlock`: deny only, the reason becomes the
    tool's error); `PostToolUse` → end the turn (`continueOnBlock`: a block, the reason is fed back); `PostToolUseFailure`
    → feedback; `UserPromptSubmit` → 409 `hook-blocked`; `Stop` / `SubagentStop` → the agent continues with the reason,
-   unless `impossible: true` (the stop is allowed and the reason recorded); `PermissionRequest` → recorded, no effect.
+   unless `impossible: true` (the stop is allowed; the record is outcome `context` with the reason); `PermissionRequest`
+   → no effect, stored as outcome `context` with the reason.
 
 `hooksEnabled: false` and `HF_SAFE_MODE` turn prompt hooks off; `HF_WORKSPACE_SHELL=0` does not (they run no shell).
 Project prompt hooks need approval like command hooks; a plugin with only prompt hooks needs no trust pin.
@@ -4019,20 +4109,31 @@ Project prompt hooks need approval like command hooks; a plugin with only prompt
 **Handler fields** (from every source; `args` and `async` for command hooks, `if` and `statusMessage` for both types):
 `args` (exec form, ≤ 64 arguments: `execFormCommand` substitutes the
 `${CLAUDE_*}` placeholders as plain text and single-quotes each word, then the string runs through `runShellCommand`,
-still the only shell-string spawn, so an argument can never inject a command); `async` (detached and tracked, its
-timeout enforced, its output has no effect); `if` (a bare tool name or a `Bash(p:*)` / `Bash(p *)` / `Bash(p)` rule
-through the shared `parseClaudePermissionRule` and the shell command parser; anything else is `invalid-if` and the
-handler **never runs**); `statusMessage` (the label of the transient activity while it runs); `asyncRewake` and `once`
+still the only shell-string spawn, so an argument can never inject a command; the placeholders are
+`CLAUDE_PROJECT_DIR` / `HARNESS_PROJECT_DIR` (the working folder at spawn), the plugin root and `CLAUDE_PLUGIN_DATA`;
+unknown names stay as written; a Claude Code plugin's `${user_config.KEY}` is filled only at spawn, 6.33 "Variables");
+`async` (detached from the run and tracked; it holds one of the 16 process slots while it runs, at most until its
+timeout; only the service's `stop()` kills it early; its outcome reaches only the run log); `if` (tool events only, an
+`ignored-field` info elsewhere; a tool name or a `Bash(p:*)` / `Bash(p *)` / `Bash(p)` rule through the shared
+`parseClaudePermissionRule` and the shell command parser; a `Bash(…)` rule matches when any segment of the command
+starts with the prefix, and a command the parser cannot split counts as a match, so a guarding hook still runs;
+anything else is `invalid-if` and the handler **never runs**); `statusMessage` (≤ 200 characters; the first matching
+handler's becomes the `label` of the transient `data-activity` while the hooks run); `asyncRewake` and `once`
 (info; `asyncRewake` runs as `async`); `shell: 'powershell'` (invalid); `type: 'http' | 'mcp_tool' | 'agent'`
 (`unsupported-type` warning). None of them invalidates a source.
 
 **Trust hash v2** (`trustHashInput`, `util/trust.ts`): a hook item **without** the new fields keeps the v1 layout `['hook',
 1, …]`, so **every v1.7 approval keeps its hash** (golden tests); an item with prompt fields or `args` / `async` / `if`
-hashes as `['hook', 2, event, matcher, command | null, timeout, extra, refs]`.
+hashes as `['hook', 2, event, matcher, command | null, timeout, extra, refs]` (`extra`: `{ args?, async?, if? }`, or
+`{ type: 'prompt', prompt, model, continueOnBlock, if? }` with `command: null`; `statusMessage` is never hashed). The
+script files named in exec-form `args` are referenced files too (`hook-items.ts`), so editing them makes the item
+pending.
 
-**Personal hooks**: the `hooks` rows gain `type` (default `command`), `prompt`, `model` and `options` (`{ continueOnBlock?,
-args?, async?, if?, statusMessage? }`; a prompt row stores `command = ''`); `POST /hooks` and `PATCH /hooks/:id` take
-the `type`-discriminated body (fresh auth as before); `importPersonal(items)` serves the Claude Code import (one
+**Personal hooks**: the `hooks` rows gain `type` (default `command`), `prompt`, `model` and `options` (`{
+continueOnBlock?, args?, async?, if?, statusMessage? }`; a prompt row stores `command = ''`); `POST /hooks` and `PATCH
+/hooks/:id` take the `type`-discriminated body (fresh auth as before; a prompt hook on an event without prompt handlers,
+or an `if` rule on an event without a tool, is a 400); `importPersonal(items)` serves the Claude Code import (command
+hooks turned off unless the item enables them; options trimmed, `continueOnBlock` / `async` stored only when true; one
 `hooks.changed`). `GET /hooks` also lists the `contributes.hooks` of harness plugins waiting for trust as `state:
 'pending'` plugin rows (the web labels them "Plugin not trusted"); an untrusted Claude Code plugin's hooks show only on
 its plugin page (`claude.executables`).
@@ -4045,13 +4146,13 @@ entries gain `kind?: 'command' | 'prompt'` and `model?`.
 **Transcripts** (`services/hooks/transcripts.ts`): the payload gains `transcript_path` =
 `<dataDir>/transcripts/<chatId>.jsonl` (folder 0700, file 0600), written **lazily**, only when a matching command or
 prompt hook will run, inside `snapshot.run` before the payload is built, and rebuilt from the active path when the leaf
-changed (a temporary file + rename). Lines are a Claude Code-compatible subset: `{ type: 'user' | 'assistant', uuid
-(the message id), parentUuid, sessionId (the chat id), timestamp, cwd, isSidechain: false, userType: 'external', version:
-'harness-forge/<version>', message: { role, content } }` with text and `tool_use` / `tool_result` blocks (Claude tool
-names, results ≤ 16 KiB); reasoning, files and `data-hook` parts are left out. Caps: 8 MiB per file (the oldest
-messages dropped first), 64 KiB per part. A transcript is removed on `chat.deleted` (delete-all emits it per chat),
-with an orphan sweep on first use; it is never in a backup; any failure leaves the field out of the payload. Hooks must
-not rely on it after a `SessionEnd`.
+(or its update time, or the hook's working folder) changed (a temporary file + rename). Lines are a Claude
+Code-compatible subset: `{ type: 'user' | 'assistant', uuid (the message id), parentUuid, sessionId (the chat id),
+timestamp, cwd, isSidechain: false, userType: 'external', version: 'harness-forge/<version>', message: { role, content }
+}` with text and `tool_use` / `tool_result` blocks (Claude tool names, results ≤ 16 KiB); reasoning, files and
+`data-hook` parts are left out. Caps: 8 MiB per file (the oldest messages dropped first), 64 KiB per part. A transcript
+is removed on `chat.deleted` (delete-all emits it per chat), with an orphan sweep on first use; it is never in a backup;
+any failure leaves the field out of the payload. Hooks must not rely on it after a `SessionEnd`.
 
 ### 6.38 Frontmatter compatibility, argument base and model aliases (ADR-058)
 
@@ -4063,32 +4164,47 @@ key in the parsed fields **only when it is set**, so every existing definition p
 |---|---|---|
 | agents | `disallowedTools` | removed from the child's tools **before** `tools` narrows them (a specifier such as `Bash(rm *)` removes the whole tool) |
 | | `maxTurns` (1 – 200) | the child's steps = min(`subagentMaxSteps`, `maxTurns`) |
-| | `color` (`red`, `blue`, `green`, `yellow`, `purple`, `orange`, `pink`, `cyan`) | display only (the task block, UI.md 7.34) |
-| | `skills` (≤ 5 names) | their content is added to the child's instructions (≤ 32 KiB, loaded through `customizations.load`) |
-| | `model: sonnet \| opus \| haiku \| fable \| claude-…` | the parser keeps `model: null` + `modelAlias`; resolved at run time (below) |
-| commands, skills | `when_to_use` | appended to the description in the listings the model reads |
+| | `color` (`red`, `blue`, `green`, `yellow`, `purple`, `orange`, `pink`, `cyan`) | display only (the task block and the Customize rows, read from the catalog entry; UI.md 7.34) |
+| | `skills` (≤ 5 names) | preloaded into the child's instructions after the agent's body: `# Preloaded skills`, the line "Your agent definition preloads these skills. Follow their instructions where they apply to your task.", then one `## Skill: <name>` section per skill (≤ 32 KiB in all, later skills dropped; each looked up in the run's catalog like the `skill` tool and loaded through `customizations.load`); a missing, off or unreadable skill is skipped, a bare and a qualified name of the same skill load once; bodies expand with no arguments and no variables (`${CLAUDE_SKILL_DIR}` stays literal) |
+| | `model: sonnet \| opus \| haiku \| fable \| claude-…` | the parser keeps `model: null` + `modelAlias` (a `model-alias` info; commands and skills too; `opusplan` and `[1m]` are accepted); resolved at run time (below) |
+| commands, skills | `when_to_use` | appended as `<description> - <when_to_use>` in the agent-types and skills blocks the model reads and in `GET /commands` |
 | | `arguments` (≤ 9 names) | named arguments (`$name`) and the 0-based argument base |
-| | `disallowed-tools` | narrows the turn's tools like `allowed-tools` |
+| | `disallowed-tools` | removes those tools from the turn (restrict-only; read from the run catalog's entry of the invoked name, not frozen in `metadata.command`; a fork keeps `task`) |
 | | `context: fork` + `agent` | the skill (or command) runs as a sub-agent of type `agent` (default `general`) |
 | skills | `allowed-tools`, `model` | applied on `/name` like a command's (restrict-only; a model that cannot run gives `command-model-unavailable`) |
 
 Read but **ignored** (an `ignored-key` info diagnostic): `permissionMode`, `mcpServers`, `hooks`, `memory`,
-`background`, `effort`, `isolation`, `initialPrompt`, `paths`, `shell`, `metadata`.
+`background`, `effort`, `isolation`, `initialPrompt`, `paths`, `shell`, `metadata`, `license`, `compatibility`
+(`CLAUDE_UNSUPPORTED_DEFINITION_KEYS`), and any other key the kind does not read (at most 20 reported one by one, the
+rest counted).
 
 **Arguments** (`expandArguments(body, input, { names, base, vars })`): `$ARGUMENTS`, `$ARGUMENTS[N]`, `$N`, `$name`
 (declared `arguments`), `\$` (a literal `$`) and `${CLAUDE_SKILL_DIR}`, `${CLAUDE_PROJECT_DIR}`, `${CLAUDE_SESSION_ID}`
 (plus the plugin variables of 6.33; an unknown one stays literal, e.g. a personal skill has no folder). Claude Code now
 indexes positional arguments from 0 while Phase 10 made `$1` the first word, so `argumentBase` is **0** when the body
 uses `$0` or `$ARGUMENTS[` or the definition declares `arguments`, and **1** otherwise: every v1.6 – v1.7 template
-expands as before.
+expands as before, except a legacy template with a literal `$0` (an awk snippet) next to `$1`: it switches to 0-based,
+so its `$1` becomes the second word (write `\$0` to keep it 1-based); and `\$` gives `$` in every body.
+`renderCommandExpansion(…, options)` computes one base for the whole body and applies `${NAME}` variables and `\$` in
+text parts without placeholders too. `${CLAUDE_SKILL_DIR}` is a project skill's project-relative folder and a plugin
+skill's absolute folder; `${CLAUDE_SESSION_ID}` is the chat id. A skill body the model loads with the `skill` tool has
+`$ARGUMENTS` empty and `\$` → `$`.
 
 **Model aliases** (setting `modelAliases { sonnet, opus, haiku, fable }`, each a model ref or null; Settings → General →
-Agent): `resolveClaudeModel` (`chat/model-aliases.ts`, also for plugin agents) lowercases the alias, drops `[1m]` and
+Agent): `resolveClaudeModel` (`chat/model-aliases.ts`; used by agents, plugin agents included, commands, skills and
+prompt hooks) lowercases the alias, drops `[1m]` and
 reads `opusplan` as `opus`; it uses the setting first, then, for a full `claude-*` id, `anthropic:<id>` when that model
-resolves, then the existing fallback with its notice or warning.
+resolves, else null and the caller's fallback: a command or skill runs the chat's model with the
+`command-model-unavailable` notice; an agent logs the warning "the agent's Claude model name has no model; the default
+model runs the sub-agent" and the child runs on the default child model; a prompt hook tries its next model candidate
+(6.37).
 
 **Fork skills**: when the agent loads a `context: fork` skill with the `skill` tool, the tool runs a child of the
-skill's `agent` type with the skill's content (and arguments) as its prompt and returns the child's report; a user
+skill's `agent` type (default `general`) through the run's `runSubagent` under the `skill` call's id, with the skill's
+expanded content (no arguments: `$ARGUMENTS` is empty, `\$` gives `$`; ≤ 20,000 characters) as its prompt, and returns
+the child's report as `content`; a failed or stopped child is a tool error, and a child at its limit returns its partial
+report followed by `FORK_LIMIT_NOTE` ("(The sub-agent stopped at its limit; this report may be incomplete.)"). So the
+`skill` tool's timeout is the `task` tool's 600 s (`SKILL_TOOL_TIMEOUT_MS = TASK_TIMEOUT_MS`). A user
 `/name` of one expands with a delegation directive that asks the main agent to call `task` (a user turn never starts a
 child by itself).
 
@@ -4431,13 +4547,13 @@ are kept).
 | `delivered_message_id` | text | NULL; the message that holds its `data-task-result` (a reply, or a carrier user message); no FK |
 | | | indexes (`chat_id`, `created_at`) and (`delivered_at`, `status`) |
 
-**`hooks`** — the user's personal command hooks (Phase 11, ADR-048, 6.28). Configuration: kept by delete-all, **never**
-in backups or exports; at most 100 rows.
+**`hooks`** — the user's personal hooks (Phase 11, ADR-048, 6.28; command hooks, Phase 12 also prompt hooks).
+Configuration: kept by delete-all, **never** in backups or exports; at most 100 rows.
 
 | Column | Type | Constraints |
 |---|---|---|
 | `id` | text | PK; `hok_` + 16 chars |
-| `event` | text | NOT NULL; one of the eight hook events |
+| `event` | text | NOT NULL; one of the hook events (eight in Phase 11, 13 since Phase 12) |
 | `matcher` | text | NULL = every tool; <= 200 chars of the safe matcher subset (compiled on every write) |
 | `command` | text | NOT NULL; the shell command (1 – 4,096 chars); `''` for a prompt hook (Phase 12) |
 | `timeout` | integer | NULL = 60 s (30 s for a prompt hook); seconds, 1 – 600 |
@@ -4446,8 +4562,8 @@ in backups or exports; at most 100 rows.
 | `updated_at` | timestamp | NOT NULL |
 | `type` | text | NOT NULL DEFAULT `command`; `command` \| `prompt` (Phase 12, ADR-057; added by `0009`) |
 | `prompt` | text | NULL; the prompt of a prompt hook (≤ 16,384 chars) |
-| `model` | text | NULL; a model ref or a Claude alias of a prompt hook (null = the hook model) |
-| `options` | json | NULL; `{ continueOnBlock?, args?, async?, if?, statusMessage? }` (Phase 12) |
+| `model` | text | NULL; a model ref or a Claude alias of a prompt hook (null = the `hookModelRef` setting, then the fallbacks of 6.37) |
+| `options` | json `PersonalHookOptions` | NULL = none; `{ continueOnBlock?, args?, async?, if?, statusMessage? }` (Phase 12; trimmed, `continueOnBlock` / `async` stored only when true) |
 
 **`project_trust`** — the approved executable items of each project (Phase 11, ADR-049, 6.29). Never in backups or
 exports; kept by delete-all; deleted with their project.
@@ -4636,10 +4752,10 @@ prepare), the hook run log (memory, the last 200 runs), the project config snaps
 project MCP runtimes and their processes (memory), a hook record between the hook run and its injection into the reply
 (memory, tracked until stored), and the project settings files, `.mcp.json` and the scripts hooks run (read from the
 project folders; only their hashes are stored, in `project_trust`). Phase 12: the import plans (memory, 10 minutes,
-at most 4, with their payloads), the whole-tree hashes of Claude Code plugins (memory, cached per path, size, mtime and
-inode; the pin itself is `plugins.trusted_hash`), the transcripts (`transcripts/`, rebuilt from the messages), the
-in-flight prompt-hook calls and detached `async` / `SessionEnd` hooks (memory, tracked), and the Claude Code home
-folder (read on request, never copied as a whole).
+at most 4, with their payloads), the file digests behind the whole-tree hashes of Claude Code plugins (memory, cached per
+path, size, mtime, ctime, inode and device, at most 20,000 files; the pin itself is `plugins.trusted_hash`), the
+transcripts (`transcripts/`, rebuilt from the messages), the in-flight prompt-hook calls and detached `async` /
+`SessionEnd` hooks (memory, tracked), and the Claude Code home folder (read on request, never copied as a whole).
 
 ## 9. Model catalog
 
@@ -5064,12 +5180,12 @@ the browser or the log, and saving a file never approves it.
 
 | Threat | Mitigation | Accepted risk |
 |---|---|---|
-| Remote code from a marketplace or GitHub | a Claude Code plugin that runs anything (a command hook, a stdio MCP server, a `!` span) needs a trust pin over its **whole file tree** (paths, modes, sizes, contents, the entry overlay), shown in a review that lists every command, with fresh auth; no automatic add, refresh or update; an update is a new review | the user trusts a plugin without reading what it runs |
+| Remote code from a marketplace or GitHub | a Claude Code plugin that runs anything (a command hook, a stdio MCP server, a `!` span) needs a trust pin over its **whole file tree** (paths, modes, sizes, contents, the entry overlay), shown in a review that lists every command, with fresh auth; no automatic add, refresh or update; an update is a new review | the user trusts a plugin without reading what it runs; an edited script of a trusted plugin runs until the next load / reload / trust (the tree hash is checked then; project items are re-hashed before every spawn) |
 | Supply-chain drift on a moving ref | a ref resolves to a commit sha, the archive of that commit is downloaded, relative entries come from the **stored** commit, and the review shows `owner/repo@<sha12>`; install compares the reviewed tree sha256 (409 `stale`) | an archive entry without `sha256` is trusted on first use (its sha256 is shown) |
 | Archive attacks (traversal, links, bombs, a repository too large) | the installer's guards (`checkEntryPath`, `EntryCollector`, exclusive writes, `verifyTree`), links and devices refused, caps (20 MB / 50 MB for a repository zip compressed, 100 MB and 2,000 entries for the selected subtree), the codeload top folder and archive comment checked, no redirects on codeload | a plugin with a large `node_modules` is refused (clear message) |
 | SSRF through marketplace, entry or archive URLs | every fetch through `safeFetch` (https only, no private / loopback / link-local address, DNS pinned, each redirect re-checked); GitHub hosts are constants; owner, repo and ref validated before a URL is built; `HF_TEST_REMOTE_URL` honored only with `HF_MOCK_PROVIDER=1` and only as a loopback base | npm entries use the existing npm pipeline |
 | Impersonating the official catalog | the names `claude-plugins-official`, `claude-code-plugins`, `claude-community` and `anthropic-*` only from `anthropics/*` repositories; the official suggestion sends nothing before a click | a look-alike name (`claude-plugin-official`) is shown as it is |
-| Plugin variables leaking secrets | substitutions only through `substitutePluginVariables`, never `process.env`; sensitive `userConfig` values never in markdown bodies, refused in shell-form hooks, passed to MCP servers as `{{settings.*}}`; other `${VAR}` become secret settings the user fills | a trusted plugin's hook sees its own `CLAUDE_PLUGIN_OPTION_<KEY>` values (like Claude Code) |
+| Plugin variables leaking secrets | substitutions only through `substitutePluginVariables` (exec-form hook options: the hook runner at spawn), never `process.env`; sensitive `userConfig` values never in markdown bodies; `${user_config.*}` refused in shell-form hooks and kept as written in exec-form `args` (registry, `GET /hooks`, `/hooks/runs`, `data-hook` labels, logs); MCP servers get `{{settings.*}}`; other `${VAR}` become secret settings the user fills (a text setting when a default is given) | a trusted plugin's hook sees its own `CLAUDE_PLUGIN_OPTION_<KEY>` values (like Claude Code); text a trusted hook writes itself (`systemMessage`, `reason`, `context`) is not redacted |
 | Executables in a plugin that look inert | exec bits only for the claude format, part of the hash; `bin/`, `.lsp.json`, `monitors/`, `themes/`, `workflows/`, `headersHelper` never run (diagnostics) | — |
 | Reading secrets from `~/.claude` / `~/.claude.json` | an **allowlist** of paths (never `.credentials.json`, `projects/`, histories, `plugins/`, `settings.local.json`); `.claude.json` reduced to its MCP maps before anything reads it; the scan needs fresh auth and is off in Docker by default (`HF_CLAUDE_HOME=0`); the browser filters a picked folder with the same allowlist and never opens a zip | a link in the home folder that points at another regular file is followed (dotfile managers; outside the data directory only) |
 | Secrets in the import plan | env and header values and file contents stay in the server-side plan (10 minutes, dropped on apply, expiry, key rotation and shutdown); the DTO, errors and logs carry names and summaries; `${VAR}` resolves from the imported `env` or values typed in the preview, never `process.env` (canary tests) | a value the user types is stored like any MCP secret |
@@ -5083,8 +5199,9 @@ the browser or the log, and saving a file never approves it.
 | v1.7 approvals orphaned or silently widened | trust items without the new fields keep their v1 bytes (golden tests); items with them hash as v2, so a changed handler is pending again | — |
 
 - **Logging rules** (12): never at `info` — imported file contents, hook commands, prompts and prompt-hook answers,
-  `userConfig` values, tokens, env and header values, marketplace JSON or transcript lines; marketplace lines carry
-  only the id, name, repository and a 12-character sha; import lines the source, counts and the duration.
+  `userConfig` values (an exec-form hook's `args` keep `${user_config.KEY}` as written, also in the debug log), tokens,
+  env and header values, marketplace JSON or transcript lines; marketplace lines carry only the id, name, source type,
+  repository and a 12-character sha; import lines the source, counts and the duration.
 - **Fresh auth**: installing or updating a plugin that requires trust (any source), trusting one, the home-folder scan
   and the import apply; adding, refreshing or removing a marketplace and saving a project file need none (they run
   nothing).
@@ -5160,12 +5277,13 @@ flowchart LR
   this repository"): `chown` the folder to uid 1000, or set `safe.directory` for that path in the git configuration of
   the `node` user yourself (10.9). The "This chat" view and rewind work without git.
 - Claude Code in Docker (Phase 12): the image sets `HF_CLAUDE_HOME=0`, so the import's server scan answers `disabled`
-  and only browser uploads work; to scan, mount a Claude Code folder read-only and point the variable at it (`-v
-  ~/.claude:/claude:ro -e HF_CLAUDE_HOME=/claude`; the files must be readable by uid 1000). The scan reads
-  `.claude.json` inside the folder or next to a folder named `.claude`, so for the MCP servers of `~/.claude.json`
-  either upload that file in the browser or mount both as `/home/node/.claude` and `/home/node/.claude.json` with
-  `HF_CLAUDE_HOME=/home/node/.claude`. Hook scripts of Claude Code plugins run as uid 1000 with the image's tools: POSIX `sh` works, `python3`
-  and `jq` are not installed.
+  and only browser uploads work; to scan, mount a Claude Code folder read-only and point the variable at it (the files
+  must be readable by uid 1000). The scan reads a `.claude.json` only next to a root whose name is `.claude`, else
+  inside the root, so the one-mount form `-v ~/.claude:/claude:ro -e HF_CLAUDE_HOME=/claude` imports everything except
+  the MCP servers of `~/.claude.json` (it never reads that file); for them use the two-mount form `-v
+  ~/.claude:/home/node/.claude:ro -v ~/.claude.json:/home/node/.claude.json:ro -e HF_CLAUDE_HOME=/home/node/.claude`
+  (both readable by uid 1000), or upload `.claude.json` in the browser. Hook scripts of Claude Code plugins run as uid
+  1000 with the image's tools: POSIX `sh` works, `python3` and `jq` are not installed.
 
 ## 12. Observability
 
@@ -5342,24 +5460,40 @@ flowchart LR
   `info`; never an imported file's content, a hook command, a prompt or a prompt-hook answer, a `userConfig` value, a
   token, an env or header value, marketplace JSON or a transcript line (at `debug` only where the existing rules allow,
   redacted).
-  - Marketplaces and sources (component `marketplaces`, the installer): `info` `marketplace added` / `marketplace
-    refreshed` / `marketplace removed` (id, name, repository, a 12-character sha, entry count, duration); `warn`
-    `marketplace refresh failed` (id, code); the install line of a `github` or `marketplace` source carries the
-    repository and the sha prefix; a rate-limited GitHub answer logs `github rate limit` (`retryAfterMs`).
-  - Claude Code plugins (the plugin log): diagnostics go to the plugin's log ring (never file contents); `info` once per
-    load with the component counts and whether trust is required.
-  - Import (component `claude-import`): `info` `claude import planned` (source `upload` / `scan`, item counts by status,
-    skipped, duration) and `claude import applied` (counts by outcome, turned-off count); the root path only at `debug`;
-    a canary test proves no secret of the fake home reaches the log.
-  - Project files (component `project-definitions`): `info` `project file saved` / `project file removed` (project id,
-    kind, created, pending count); the path only at `debug`.
-  - Prompt hooks (component `hooks`): the `hook ran` line of 6.28 with `type: prompt`, the model ref and the token
-    counts; the prompt and the answer never. Transcripts: `debug` lines only (written, rebuilt, removed, swept).
+  - Marketplaces and sources (the marketplace service and the installer): `info` `marketplace added` / `marketplace
+    refreshed` / `marketplace removed` (`marketplaceId`, `name`, `type`, and for GitHub `repo` and a 12-character
+    `sha`); `warn` `marketplace refresh failed` (the same fields + `code`) and `cannot emit marketplace.changed`; the
+    installer's `plugin installed` line carries `pluginId`, `source`, `format`, `version` and `state`. A rate-limited
+    GitHub answer is the error `rate_limited` (`retryAfterMs`), not a log line.
+  - Claude Code plugins (the plugin log): a registration that is skipped (a name another plugin took, a refused
+    definition, an MCP server whose URL needs a setting that is not set) is a `warn` entry of the plugin's log ring; the
+    reader's diagnostics are in `ClaudePluginInfo.diagnostics` of the inspection and the detail (never file contents);
+    saving a Claude Code plugin's settings logs `Settings saved: reloading.`
+  - Import: `info` `claude import planned` (`source` `upload` / `scan`, `files`, `items`, `skipped`, `durationMs`) and
+    `claude import applied` (`created`, `updated`, `unchanged`, `skipped`, `failed`, `durationMs`); `warn` `claude
+    import: the definitions could not be imported` / `… the hooks could not be imported` / `… the settings could not be
+    saved` (`code`); the root path only at `debug` (`claude import scan`); a canary test proves no secret of the fake
+    home reaches the log. A restore logs `customizations restored` with `turnedOff` too.
+  - Project files (component `project-definitions`): `info` `project definition saved` (`projectId`, `kind`, `created`,
+    `bytes`, `pending`) / `project definition deleted` (`projectId`, `kind`); the path only at `debug`
+    (`project definition saved: path`, `project definition deleted: path`).
+  - Prompt hooks (component `hooks`): the `hook ran` line of 6.28 with `kind: 'prompt'` (event, source, label hash,
+    duration, outcome; no model and no tokens at `info`); `debug` `hooks: prompt hook answered` (`event`, `modelRef`,
+    `promptChars`, `answerChars`, `valid`) and `hooks: a prompt hook model is not usable` (`modelRef`); `warn` `hooks:
+    the usage of a prompt hook could not be stored`; the prompt and the answer never. `SessionEnd`: `info` `hooks: the
+    SessionEnd hooks were stopped at the end of their time` (`chatId`), `warn` `hooks: the SessionEnd hooks failed`.
+    Transcripts: `warn` `hooks: the transcript folder could not be created; hooks get no transcript_path`, else `debug`
+    lines only (a failed write, the orphan sweep).
+  - Sub-agents and skills: `warn` `the agent's Claude model name has no model; the default model runs the sub-agent`
+    (`agentType`; the alias only at `debug`); `debug` `agent skills preloaded` (`agentType`, `preloaded`, `skipped`,
+    `cut`), `skill file read` (`name`, `source`, `bytes`, `truncated`) and `fork skill finished` (`name`, `agent`,
+    `status`).
   - **Limits at a glance** (`LIMITS`, Phase 12 group): marketplaces 50, `marketplace.json` 1 MiB and 1,000 entries, a
     repository zip 50 MB compressed, 100 components per kind (20 output styles), qualified names 128 characters,
     skill file reads 64 KiB (50 files listed); import 1,000 items, 32 MiB in total, `.claude.json` 16 MiB, `CLAUDE.md`
     1 MiB, plans 10 minutes and 4 at once; prompt hooks 30 s by default, prompts 16,384 characters, 8 calls at once,
-    512 output tokens; transcripts 8 MiB; `SessionEnd` 1.5 s; agent skills preload 5 skills, 32 KiB.
+    512 output tokens; transcripts 8 MiB; `SessionEnd` 1.5 s; agent skills preload 5 skills, 32 KiB; the `skill` tool
+    600 s (a fork skill runs a sub-agent).
 - **Proxy trust** (texts in section 10.6): the boot log line `trusting reverse proxies (HF_TRUST_PROXY)` lists the
   canonical entries and the trusted ranges; one warning per untrusted peer address that sends a forwarded header the
   server would honor from a trusted proxy (header names only, at most 256 addresses); failed-login warnings carry the

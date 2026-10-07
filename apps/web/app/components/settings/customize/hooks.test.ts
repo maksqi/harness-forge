@@ -227,7 +227,7 @@ describe('phase 12 hook helpers (W12.12)', () => {
   })
 
   it('reads the copy of the model line, a saved project file and a stale file', () => {
-    expect(promptModelLine('Claude Haiku 4.5', true)).toBe('Runs with Claude Haiku 4.5 (Settings → General → Hook model). It answers ok, or not ok with a reason.')
+    expect(promptModelLine('Claude Haiku 4.5', true)).toBe('Runs with Claude Haiku 4.5 (Settings → General → Agent → Hook model). It answers ok, or not ok with a reason.')
     expect(promptModelLine('Claude Opus 5', false)).toBe('Runs with Claude Opus 5. It answers ok, or not ok with a reason.')
     expect(projectSavedText('.claude/settings.json', 0)).toBe('Saved .claude/settings.json.')
     expect(projectSavedText('.claude/settings.json', 1)).toBe('Saved .claude/settings.json. 1 item needs your approval.')

@@ -443,7 +443,7 @@ defineExpose<{ create: () => void, import: () => void }>({ create, import: impor
         :model-value="runHooks"
         :aria-describedby="ids.help"
         :data-testid="testIds.hooksEnabled"
-        class="mt-0.5 pointer-coarse:after:-inset-y-[11px]"
+        class="mt-0.5 pointer-coarse:after:-inset-y-3"
         @update:model-value="onRunHooks"
       />
     </div>

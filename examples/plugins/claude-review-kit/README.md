@@ -16,7 +16,7 @@ namespace.
 1. Install this folder: **Plugins** -> **Install…** -> **Local folder** (or zip it and use the **Zip** tab). The
    preview says **Claude Code plugin**, lists the hook command under the commands it runs and asks for the two settings.
    Check **I trust …**: the pin covers every file of the folder, `scripts/after-edit.sh` included.
-2. Type `/review-kit:review src/app.ts` (or `/review` while no other command ends in `:review`). The body uses the
+2. Type `/review-kit:review src/app.ts` (the bare `/review` is the builtin command, which always wins its exact name). The body uses the
    **Review focus** setting (`${user_config.FOCUS}`).
 3. Ask for a review with `task { type: 'review-kit:code-reviewer', … }`: the agent runs on the model chosen for `sonnet`
    under Settings -> General -> Agent ("Claude model names"), without `Bash`.

@@ -106,6 +106,8 @@ describe('hooksPanel', () => {
     expect(byTestId(testIds.hooksPanel)).not.toBeNull()
     const toggle = byTestId(testIds.hooksEnabled)!
     expect(toggle.dataset.state).toBe('checked')
+    // W12.19: a 40 px hit area on a coarse pointer (the `::after` counts from inside the 1 px border: 16.4 + 2 * 12).
+    expect(toggle.className.split(/\s+/)).toContain('pointer-coarse:after:-inset-y-3')
     expect(byTestId(testIds.hooksPanel)?.textContent).toContain('Shell commands that run at points of the agent\'s work, like before a tool call. Off: no command hook runs, from any source.')
     expect(byTestId(testIds.hooksDisabled)).toBeNull()
     expect(sections().map(section => [section.dataset.source, section.dataset.count])).toEqual([['personal', '2'], ['plugin', '2']])

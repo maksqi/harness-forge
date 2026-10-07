@@ -10,7 +10,8 @@
 // | `npm` (default registry) | the npm pipeline (`package@version`) |
 // | anything else | unsupported (400, the parser's reason) |
 //
-// The marketplace and the entry must exist (`not_found`); nothing here touches the network.
+// The marketplace and the entry must exist (`not_found`); nothing here touches the network. `offlineError` is the one
+// `HF_OFFLINE=1` refusal of the installer and the marketplace service.
 import type { ClaudeEntrySource, ClaudeMarketplaceEntry } from '@harness-forge/shared'
 import type { ClaudeEntryOverlay } from '../types.ts'
 import type { StoredMarketplace } from './store.ts'
@@ -45,6 +46,19 @@ export function entryOverlay(entry: ClaudeMarketplaceEntry): ClaudeEntryOverlay 
     ...(entry.description === undefined ? {} : { description: entry.description }),
     overlay: entry.overlay,
   }
+}
+
+/**
+ * The message of every `HF_OFFLINE=1` refusal (409 `conflict` `offline`, ADR-054; W12.18-T4): adding or refreshing a
+ * GitHub or URL marketplace, installing a marketplace entry that needs the network (its `github`, `archive` or `npm`
+ * source, or a relative entry of a GitHub marketplace) and the install dialog's GitHub source. It says what is refused
+ * and what still works: the dialog's npm and URL sources, zip uploads and local folders (a folder marketplace too).
+ */
+export const OFFLINE_MESSAGE = 'Adding, refreshing and installing from marketplaces and GitHub need the network (HF_OFFLINE=1). npm and URL installs from the install dialog, zip uploads and local folders work offline.'
+
+/** `409 conflict` (`offline`) with `OFFLINE_MESSAGE`. */
+export function offlineError(): HarnessError {
+  return new HarnessError({ code: 'conflict', message: OFFLINE_MESSAGE, details: { reason: 'offline' } })
 }
 
 function unsupported(reason: string): HarnessError {

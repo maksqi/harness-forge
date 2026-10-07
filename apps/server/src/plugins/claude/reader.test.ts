@@ -258,7 +258,7 @@ describe('readClaudePluginDirectory: plugin.json path rules and the entry overla
     'styles/fancy.md': file('---\nname: Fancy Style\ndescription: Fancy\n---\nFancy.\n'),
   }
 
-  it('commands, agents and output styles paths replace the scan; skills paths add to it; inline commands are added', async () => {
+  it('commands, agents and output styles paths replace the scan; skills paths add to it; inline commands join the declared paths', async () => {
     const root = await folder({
       ...base,
       '.claude-plugin/plugin.json': file(JSON.stringify({
@@ -275,6 +275,15 @@ describe('readClaudePluginDirectory: plugin.json path rules and the entry overla
     expect(claude.agents.map(agent => agent.name)).toEqual(['paths:y'])
     expect(claude.skills.map(skill => [skill.name, skill.baseDir])).toEqual([['paths:s1', 'skills/s1'], ['paths:s2', 'other-skills/s2']])
     expect(claude.styles.map(style => style.name)).toEqual(['paths:fancy-style'])
+  })
+
+  it('the object form of commands alone replaces the commands/ scan too (as in Claude Code)', async () => {
+    const root = await folder({
+      ...base,
+      '.claude-plugin/plugin.json': file(JSON.stringify({ name: 'inline', commands: { about: { content: '---\ndescription: About\n---\nAbout.\n' }, extra: { source: './extra/c.md' } } })),
+    }, 'inline')
+    const claude = (await readClaudePluginDirectory(root)).claude!
+    expect(claude.commands.map(command => [command.name, command.path])).toEqual([['inline:about', null], ['inline:extra', 'extra/c.md']])
   })
 
   it('without plugin.json paths: the default scans, subfolders as segments', async () => {

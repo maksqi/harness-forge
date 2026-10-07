@@ -6,7 +6,8 @@
 //   waits for the trust checkbox.
 // - Installed without trust (`untrusted`): the card summary reads "1 output style · 1 hook", the detail's banner shows
 //   the same warning, the Hooks tab of Customize lists no hook of it, and a project chat's `write_file` runs without a
-//   hook record (`mock:hooks` `call write_file …` answers `hooks: none`).
+//   hook record (`mock:hooks` `call write_file …` answers `hooks: none`); Phase 12: the Hooks tab lists it as a pending
+//   "Plugin not trusted" row whose menu offers Review plugin… (the plugin's trust dialog with the command).
 // - "Review and trust" on the detail page trusts it: the Hooks section lists the PostToolUse hook ("Runs only while you
 //   trust this plugin."), the Output styles section lists `reviewer`, and the next `write_file` of a project chat gets
 //   the hook's context: the reply's `hooks:` names it and the tool row holds the note "Hook added context ·
@@ -100,6 +101,17 @@ test.describe('plugin hooks @plugins', () => {
     await expect(hookRow(page, { 'data-plugin-id': PLUGIN_ID })).toHaveCount(1)
     await expect(hookRow(page, { 'data-plugin-id': PLUGIN_ID })).toHaveAttribute('data-state', 'pending')
     await expect(hookRow(page, { 'data-plugin-id': PLUGIN_ID })).toContainText('Plugin not trusted')
+    // Its menu offers Review plugin…, which opens the plugin's trust dialog with the hook's command (closed again here).
+    await hookRow(page, { 'data-plugin-id': PLUGIN_ID }).getByTestId(testIds.hookRowMenu).click()
+    const reviewPlugin = page.getByRole('menu').locator('[data-action="trust-plugin"]')
+    await expect(reviewPlugin).toHaveText('Review plugin…')
+    await reviewPlugin.click()
+    const review = page.getByTestId(testIds.trustDialog)
+    await expect(review).toBeVisible()
+    await expect(review.locator('[data-slot="trust-run-commands"] code')).toHaveText([HOOK_COMMAND])
+    await page.keyboard.press('Escape')
+    await expect(review).toBeHidden()
+    expect((await getPlugin(request, PLUGIN_ID))?.trust).toMatchObject({ trusted: false })
 
     // The detail page: the warning lists the command; "Review and trust" trusts it.
     await page.goto(`/plugins/${PLUGIN_ID}`)

@@ -16,6 +16,8 @@
 // the one the cached listing shows at its position, else the save is refused like the server's stale answer (409
 // `conflict`, reason `stale`): the file changed after the editor opened it. `workspace.changed` with a project settings
 // file among its paths marks that project's scope stale (HooksPanel subscribes to the event while it is shown).
+// W12.19: a project hook save (or delete) refetches the project's cached scope at once (the Hooks tab showed the old row
+// until a reload when the save's answer overtook the fetch an event of the same write had started).
 import type {
   HookCreate,
   HookEntry,
@@ -294,8 +296,10 @@ export const useHooksStore = defineStore('hooks', () => {
    * handler; `spliceProjectHook`), then `PUT`s the key with the sha256 it read (409 `conflict` reason `stale` when the
    * file changed meanwhile). An edited or removed handler must still be the one the cached listing of the project shows
    * at that position (else the same 409 `stale` is thrown before any write: the file changed after the editor opened
-   * it). No fresh auth; saving never approves (the result counts the pending items). Marks the project's scope stale.
-   * Throws `HarnessError` (a 400 for a file whose JSON or `hooks` value can't be read).
+   * it). No fresh auth; saving never approves (the result counts the pending items). Marks the project's scope stale and
+   * (W12.19) refetches it at once when it is cached: the save overtakes any fetch in flight (an event of the write can
+   * start one before the answer arrives), and a scope that was stale already would otherwise keep the old rows, since
+   * nothing else notices the save. Throws `HarnessError` (a 400 for a file whose JSON or `hooks` value can't be read).
    */
   async function saveProjectHook(projectId: string, target: ProjectHookTarget, draft: HookDraft | null): Promise<ProjectDefinitionWriteResult> {
     const scope = hookScopeKey(projectId)
@@ -314,7 +318,10 @@ export const useHooksStore = defineStore('hooks', () => {
       }))
     }
     finally {
+      const cached = scope in lists.value
       markStale([scope])
+      if (cached)
+        fetch(projectId).catch(() => {})
     }
   }
 

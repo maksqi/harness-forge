@@ -503,8 +503,11 @@ describe('agentSettingsSection: plan files (Phase 10)', () => {
   it('gives the switches and inputs 40px targets on coarse pointers', async () => {
     preloadCatalog()
     await mountAgent()
-    for (const id of [testIds.settingsAutoCompact, testIds.settingsPlanFiles])
-      expect(byTestId(id).className, id).toContain('pointer-coarse:after:-inset-y-[11px]')
+    // W12.19: the switch's `::after` counts from inside its 1px border (16.4px), so -12px each way makes 40.4px.
+    for (const id of [testIds.settingsAutoCompact, testIds.settingsPlanFiles]) {
+      expect(byTestId(id).className, id).toContain('pointer-coarse:after:-inset-y-3')
+      expect(byTestId(id).className, id).not.toContain('-inset-y-[11px]')
+    }
     for (const id of [testIds.settingsSubagentMaxSteps, testIds.settingsPlanDirectory])
       expect(byTestId(id).className, id).toContain('pointer-coarse:h-10')
   })

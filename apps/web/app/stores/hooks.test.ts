@@ -3,7 +3,7 @@
 // recent ones, `{ enabled: false }` is optimistic with a rollback, and the fresh-auth 403 is thrown for the component.
 // Phase 12: `saveProjectHook` reads a settings file, splices the handler into its `hooks` key and writes it with the
 // sha256 it read (a changed file is a 409 `stale`, before or by the server); `workspace.changed` for a settings file marks
-// the project stale.
+// the project stale. W12.19: a save refetches the project's cached scope at once (even when its answer overtook a fetch).
 import type { HookList } from '@harness-forge/shared'
 import type { MockApi } from '~/utils/testing/mock-api'
 import { createServerEvent, HarnessError, LIMITS } from '@harness-forge/shared'
@@ -30,6 +30,11 @@ afterEach(() => {
   vi.useRealTimers()
   disposePinia(pinia)
 })
+
+async function flushMicrotasks(): Promise<void> {
+  for (let index = 0; index < 10; index++)
+    await Promise.resolve()
+}
 
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -239,8 +244,49 @@ describe('hooks store: project hooks (Phase 12, W12.12-T5)', () => {
       params: { id: projectId(1) },
       body: { path: settingsPath, expectedSha256: trustSha(4), hooks: { ...FILE_HOOKS, Stop: [{ hooks: [{ type: 'prompt', prompt: 'Did the tests pass?' }] }] } },
     })
-    expect(store.stale[projectId(1)]).toBe(true)
+    // W12.19: the cached scope is refetched at once.
+    await vi.waitFor(() => expect(store.stale[projectId(1)]).toBeUndefined())
+    expect(api.hooks.list).toHaveBeenCalledTimes(2)
+    expect(api.hooks.list).toHaveBeenLastCalledWith({ query: { projectId: projectId(1) } })
     expect(api.auth.login).not.toHaveBeenCalled()
+  })
+
+  it('shows the saved hook at once when the save\'s answer overtakes the fetch its own event started (W12.19)', async () => {
+    const store = useHooksStore()
+    api.hooks.list.mockResolvedValueOnce(listed)
+    await store.fetch(projectId(1))
+    const edited = hookList({ items: [hookEntry({ key: `project:${trustSha(2)}`, source: 'project', id: undefined, event: 'PreToolUse', matcher: 'Bash', command: 'sh .claude/hooks/guard.sh --edited', state: 'pending', path: settingsPath, sha256: trustSha(2), position: [0, 0] })] })
+    api.projectDefinitions.read.mockResolvedValueOnce(projectDefinitionFile({ path: settingsPath, kind: 'settings', content: fileText(FILE_HOOKS), sha256: trustSha(4) }))
+    const write = deferred<ReturnType<typeof projectDefinitionWriteResult>>()
+    api.projectDefinitions.write.mockReturnValueOnce(write.promise)
+    const saving = store.saveProjectHook(projectId(1), target({ groupIndex: 0, handlerIndex: 0 }), { event: 'PreToolUse', matcher: 'Bash', command: 'sh .claude/hooks/guard.sh --edited', timeout: null, enabled: true })
+    await vi.waitFor(() => expect(api.projectDefinitions.write).toHaveBeenCalled())
+
+    // The server's `workspace.changed` of the write arrives before the PUT's answer: a refetch starts (still in flight).
+    const early = deferred<HookList>()
+    api.hooks.list.mockReturnValueOnce(early.promise)
+    store.applyEvent(createServerEvent('workspace.changed', { projectId: projectId(1), chatId: null, batchId: null, source: 'user', paths: [settingsPath] }, 1))
+    expect(store.stale[projectId(1)]).toBe(true)
+    expect(api.hooks.list).toHaveBeenCalledTimes(2)
+
+    // The PUT answers (overtaking that refetch); then the early refetch answers.
+    api.hooks.list.mockResolvedValueOnce(edited)
+    write.resolve(projectDefinitionWriteResult({ trust: { pending: 1 } }))
+    await saving
+    early.resolve(edited)
+    await vi.waitFor(() => expect(store.list(projectId(1))).toEqual(edited))
+    expect(store.stale[projectId(1)]).toBeUndefined()
+    expect(api.hooks.list).toHaveBeenCalledTimes(3)
+  })
+
+  it('does not fetch a project scope nobody loaded after a save', async () => {
+    const store = useHooksStore()
+    api.projectDefinitions.read.mockResolvedValueOnce(projectDefinitionFile({ path: settingsPath, kind: 'settings', content: fileText(FILE_HOOKS), sha256: trustSha(4) }))
+    api.projectDefinitions.write.mockResolvedValueOnce(projectDefinitionWriteResult())
+    await store.saveProjectHook(projectId(1), target(), { event: 'Stop', matcher: '', command: 'pnpm lint', timeout: null, enabled: true })
+    await flushMicrotasks()
+    expect(api.hooks.list).not.toHaveBeenCalled()
+    expect(store.list(projectId(1))).toBeNull()
   })
 
   it('creates the key of a missing file (expectedSha256 null)', async () => {

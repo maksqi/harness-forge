@@ -24,7 +24,7 @@
 //   todo-write.ts      `todo_write`      policy safe,   60 s                                                  W9.4
 //   exit-plan-mode.ts  `exit_plan_mode`  policy always, 60 s; the plan file: W10.5 (`savePlan`)             W9.3
 //   task.ts            `task`            policy safe,  600 s; async generator over `runSubagent`           W9.5 / W10.3
-//   skill.ts           `skill`           policy safe,   60 s; execute: W10.5 (`loadSkill`); P11: model-invocable
+//   skill.ts           `skill`           policy safe,  600 s (P12 forks); execute: W10.5 (`loadSkill`); P11: model-invocable
 //                      skills only (the filter: W11.6)                                                  W10.5 / W11.6
 //
 // Input and output schemas come from `@harness-forge/shared` (`AGENT_TOOL_SCHEMAS`); `toModelOutput` builds the model's

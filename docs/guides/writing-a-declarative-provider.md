@@ -79,7 +79,7 @@ run no code, so they need no trust (unless they declare a stdio MCP server).
 | `models` | `[]` | models that are always listed, with their metadata |
 | `reasoningStyle` | `none` | maps the effort menu to the request (see below) |
 | `modelsDevId` | the provider id | models.dev key for limits, capabilities and prices |
-| `smallModelId` | none | a cheap model for chat titles |
+| `smallModelId` | none | a cheap model for chat titles; v1.8: also answers the prompt hooks of a chat on this provider when neither the hook's own model nor the Hook model setting resolves ([hooks](hooks-and-project-mcp.md)) |
 | `icon` | the plugin icon | `lobe:<slug>` of the bundled LobeHub icons |
 
 ## Credentials and headers

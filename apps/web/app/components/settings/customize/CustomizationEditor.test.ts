@@ -18,6 +18,7 @@ import { testIds } from '~/utils/testids'
 import { agentCustomization, commandCustomization, customizationId, styleCustomization, toolSummary } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import CustomizationEditor from './CustomizationEditor.vue'
+import { SHEET_CLOSE_TOUCH_CLASS } from './customize'
 
 const mocks = vi.hoisted(() => ({
   api: null as unknown,
@@ -102,6 +103,15 @@ async function mountEditor(initial: EditorProps = {}) {
 
 function byTestId<T extends HTMLElement = HTMLElement>(id: string): T | null {
   return document.body.querySelector<T>(`[data-testid="${id}"]`)
+}
+
+/** How the open Select list is placed (`popper` | `item-aligned`). */
+function listPosition(): string | null {
+  return document.body.querySelector('[data-slot="select-content"] [data-position]')?.getAttribute('data-position') ?? null
+}
+
+function classesOf(element: Element | null): string[] {
+  return (element?.getAttribute('class') ?? '').split(/\s+/)
 }
 
 async function type(element: HTMLInputElement | HTMLTextAreaElement | null, value: string, blur = true) {
@@ -439,6 +449,8 @@ describe('customizationEditor: Claude Code fields (Phase 12, W12.11-T3)', () => 
 
     byTestId(testIds.customizationColor)!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
     await flushPromises()
+    // W12.19: the list opens as a popper next to its trigger (the item-aligned default put it off-screen in the sheet).
+    expect(listPosition()).toBe('popper')
     const options = [...document.body.querySelectorAll<HTMLElement>('[role="option"]')]
     expect(options.map(option => option.dataset.value)).toEqual(['', 'red', 'blue', 'green', 'yellow', 'purple', 'orange', 'pink', 'cyan'])
     expect(options[1]!.querySelector('[data-slot="customization-color-dot"]')?.getAttribute('aria-hidden')).toBe('true')
@@ -469,6 +481,7 @@ describe('customizationEditor: Claude Code fields (Phase 12, W12.11-T3)', () => 
     expect(agent.dataset.value).toBe('general')
     agent.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
     await flushPromises()
+    expect(listPosition()).toBe('popper')
     document.body.querySelector<HTMLElement>('[role="option"][data-value="explore"]')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
     await flushPromises()
     expect(byTestId(testIds.customizationForkAgent)?.dataset.value).toBe('explore')
@@ -498,5 +511,36 @@ describe('customizationEditor: Claude Code fields (Phase 12, W12.11-T3)', () => 
     const content = (api.customizations.update.mock.calls[0]![0] as { body: { content: string } }).body.content
     expect(content).toContain('arguments:\n  - who')
     expect(content).toContain('when_to_use: When you meet someone')
+  })
+})
+
+describe('customizationEditor: touch targets (W12.19, docs/UI.md 14.5)', () => {
+  it('gives an agent\'s Color trigger and the × Close 40 px on a coarse pointer', async () => {
+    await mountEditor()
+    expect(classesOf(byTestId(testIds.customizationEditor))).toEqual(expect.arrayContaining(SHEET_CLOSE_TOUCH_CLASS.split(' ')))
+    expect(SHEET_CLOSE_TOUCH_CLASS.split(' ')).toContain('pointer-coarse:**:data-[slot=sheet-close]:size-10')
+    expect(document.body.querySelector('[data-slot="sheet-close"]')).not.toBeNull()
+    // The SelectTrigger sets its height on `data-size`: a plain `pointer-coarse:h-10` would lose to it.
+    const color = classesOf(byTestId(testIds.customizationColor))
+    expect(color).toContain('pointer-coarse:data-[size=default]:h-10')
+    expect(color).not.toContain('pointer-coarse:h-10')
+  })
+
+  it('gives a skill\'s switches a 40 px hit area and its Agent trigger 40 px on a coarse pointer', async () => {
+    await mountEditor({ kind: 'skill' })
+    const switches = [testIds.customizationFork, testIds.customizationUserInvocable, testIds.customizationModelInvocation]
+    for (const id of switches) {
+      // The `::after` counts from inside the 1 px border (16.4 px): -12 px each way makes 40.4 px.
+      expect(classesOf(byTestId(id)), id).toContain('pointer-coarse:after:-inset-y-3')
+      expect(classesOf(byTestId(id)), id).not.toContain('pointer-coarse:after:-inset-y-[11px]')
+    }
+    byTestId(testIds.customizationFork)!.click()
+    await flushPromises()
+    expect(classesOf(byTestId(testIds.customizationForkAgent))).toContain('pointer-coarse:data-[size=default]:h-10')
+  })
+
+  it('gives a style\'s Keep coding instructions switch a 40 px hit area', async () => {
+    await mountEditor({ kind: 'style' })
+    expect(classesOf(byTestId(testIds.customizationKeepCoding))).toContain('pointer-coarse:after:-inset-y-3')
   })
 })

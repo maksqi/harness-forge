@@ -12,7 +12,10 @@ import { HarnessError } from '@harness-forge/shared'
 export const TODO_WRITE_TIMEOUT_MS = 60_000
 /** Guard timeout of `exit_plan_mode` (the default 60 s, explicit; the approval wait is not part of the call). */
 export const EXIT_PLAN_MODE_TIMEOUT_MS = 60_000
-/** Guard timeout of `skill` (Phase 10, ADR-045; the default 60 s, explicit). */
+/**
+ * Guard timeout of `skill` in Phase 10 / 11 (ADR-045; 60 s). Kept for compatibility: since Phase 12 the tool uses
+ * `SKILL_TOOL_TIMEOUT_MS` (`skill.ts`, = `TASK_TIMEOUT_MS`, 600 s) because a fork skill runs a sub-agent (ADR-058).
+ */
 export const SKILL_TIMEOUT_MS = 60_000
 /**
  * Guard timeout of `task`: the frozen guard maximum (600 s). A child has its own deadline below it

@@ -5,29 +5,32 @@ with a web UI. Connect your own API keys for Claude, ChatGPT, Gemini, Grok, Deep
 point it at a local Ollama. Then chat, watch the models reason, and let them call tools, or let them work on the files
 of a project folder on your server. By default, every tool call that can change something waits for your approval. A **Plugins** tab adds LLM providers, models, tools, MCP servers, slash commands, sub-agent types, skills, hooks and
 output styles, either
-from a JSON manifest or from code you edit in the browser. The interface is a simplified take on the Claude Code
-desktop app, and it starts in dark mode.
+from a JSON manifest, from code you edit in the browser or as Claude Code plugins (from a folder, a zip, a GitHub
+repository or a marketplace). The interface is a simplified take on the Claude Code desktop app, and it starts in dark
+mode.
 
-> **In progress:** v1.8 ("Claude Code ecosystem", Phase 12 of the [roadmap](docs/ROADMAP.md)): what you already have
-> in Claude Code is meant to work here too. Planned: Claude Code plugins installed in their own format (from a zip, a
-> folder, a GitHub repository or a marketplace; their commands named `/plugin:command`; a trust pin over every file),
-> Claude Code marketplaces (Anthropic's official catalog offered as a suggestion; GitHub read as HTTPS archives of a
-> resolved commit, never with git), a one-time **Import from Claude Code** of your `~/.claude` agents, commands, skills,
-> hooks, allowed shell commands, `CLAUDE.md` and MCP servers, editing a project's agents, commands, skills, hooks and
-> `.mcp.json` from Settings → Customize, prompt hooks and five more hook events with `transcript_path`, Claude Code's
-> newer agent and skill frontmatter, and plugin API 1.6.0. Until the release, the items marked v1.8 below describe the
-> planned behavior; guides: [Claude Code plugins](docs/guides/claude-code-plugins.md) and
+> **Status:** v1.8 ("Claude Code ecosystem"): what you already have in Claude Code works here too. Claude Code plugins
+> install in their own format from a folder, a zip, a GitHub repository or a marketplace entry; their commands, agents,
+> skills and output styles keep the plugin's prefix (`/review-kit:review`; a bare name works when nothing else has it),
+> their `userConfig` becomes the plugin's settings form, and a plugin that runs programs needs your trust over a
+> fingerprint of all its files. **Plugins → Marketplaces** browses Claude Code marketplaces (Anthropic's official one is
+> a suggestion that sends nothing before you click; GitHub is read as HTTPS archives of a resolved commit, never with
+> git; updates wait for a refresh and a new review). A one-time **Import from Claude Code** (Settings → Customize)
+> previews and copies your `~/.claude` agents, commands, skills, output styles, hooks, allowed shell commands,
+> `CLAUDE.md` and MCP servers. A project's agents, commands, skills, output styles, hooks and `.mcp.json` can be edited
+> in the app (saving never approves what a file runs). Prompt hooks let a small model check a step; five more hook
+> events, Claude Code's handler fields and `transcript_path` follow Claude Code; agents, commands and skills read Claude
+> Code's newer frontmatter; and plugin API 1.6.0 carries it all to harness plugins. See [Features](#features) and the
+> guides [Claude Code plugins](docs/guides/claude-code-plugins.md) and
 > [Import from Claude Code](docs/guides/claude-code-import.md).
->
-> **Status:** v1.7 ("Hooks, project MCP and output styles"): Claude Code-format shell hooks (eight events, such as
-> before a tool call, when you send a message or when a reply ends) from Settings → Customize → Hooks, a project's
-> `.harness/` or `.claude/` settings files and plugins; project files that can run commands (hooks, `.mcp.json`
-> servers, commands with `` !`cmd` `` lines) run only after you review and approve each item, pinned by a hash of the
-> item and of the scripts it names; MCP servers from a project's `.mcp.json` for that project's chats, with variables
-> stored encrypted per project; output styles (Default, Explanatory, Learning or your own) per chat, project or as your
-> default; skills you run as `/name`; `` !`cmd` `` / `@file` in command files; and plugin API 1.5.0 (command hooks,
-> output styles and six new hook events for plugins). See [Features](#features) and the guides
-> [hooks and project MCP](docs/guides/hooks-and-project-mcp.md) and [output styles](docs/guides/output-styles.md).
+> v1.7 ("Hooks, project MCP and output styles") added Claude Code-format shell hooks (eight events, such as before a
+> tool call, when you send a message or when a reply ends) from Settings → Customize → Hooks, a project's `.harness/`
+> or `.claude/` settings files and plugins; project files that can run commands (hooks, `.mcp.json` servers, commands
+> with `` !`cmd` `` lines) that run only after you review and approve each item, pinned by a hash of the item and of
+> the scripts it names; MCP servers from a project's `.mcp.json` for that project's chats, with variables stored
+> encrypted per project; output styles (Default, Explanatory, Learning or your own) per chat, project or as your
+> default; skills you run as `/name`; `` !`cmd` `` / `@file` in command files; and plugin API 1.5.0 (see the guides
+> [hooks and project MCP](docs/guides/hooks-and-project-mcp.md) and [output styles](docs/guides/output-styles.md)).
 > v1.6 ("Agent customization") added your own sub-agent types, slash commands and skills, as Markdown files in
 > a project's `.harness/` (or `.claude/`) folder or as personal definitions on the new Settings → Customize page, plugins
 > that contribute agents and skills (plugin API 1.4.0), background agents that keep working after the reply and report
@@ -57,6 +60,10 @@ desktop app, and it starts in dark mode.
 ![Settings -> Customize: personal agents, the project's agents from .harness/agents and .claude/agents with a shadowed and an invalid file, and the built-in explore and general agents (dark theme)](docs/assets/screenshots/customize-dark.png)
 
 ![Settings -> Customize -> Hooks: personal hooks, the project's hooks from .harness/settings.json with their approval state (Approved / Needs approval), and a plugin's command hook (dark theme)](docs/assets/screenshots/hooks-dark.png)
+
+![Plugins -> Marketplaces: the suggestion for Anthropic's official marketplace, a marketplace with its plugins (Install…), entries whose sources are not supported, search and category filter (dark theme)](docs/assets/screenshots/marketplaces-dark.png)
+
+![Import from Claude Code, step 2: the agents, commands and skills found in a .claude folder with their status (New, Replaces yours); a command with shell lines comes in turned off (dark theme)](docs/assets/screenshots/claude-import-dark.png)
 
 | Plugins | Provider wizard |
 |---|---|
@@ -161,19 +168,21 @@ desktop app, and it starts in dark mode.
   - Skills you run as `/name` from the slash menu (unless they set `user-invocable: false`), and `` !`cmd` `` lines and
     `@file` references in command files: an approved project command runs its shell lines and inlines the files when
     you send it, and a regenerate reuses the result instead of running them again.
-- **Claude Code ecosystem** (v1.8, in progress; guides: [Claude Code plugins](docs/guides/claude-code-plugins.md),
+- **Claude Code ecosystem** (v1.8; guides: [Claude Code plugins](docs/guides/claude-code-plugins.md),
   [Import from Claude Code](docs/guides/claude-code-import.md)):
   - Claude Code plugins as they are: install a plugin folder, a zip, a GitHub repository (an archive of the exact
     commit, no git) or an entry of a marketplace; its commands, agents, skills, output styles, hooks and MCP servers
-    work with the plugin's prefix (`/review-kit:review`), its `userConfig` becomes its settings form, and a plugin that
-    runs programs needs your trust over a fingerprint of all its files.
+    work with the plugin's prefix (`/review-kit:review`; a bare name works when no other entry has it, so the builtin
+    `/review` keeps its meaning), its `userConfig` becomes its settings form (sensitive options are stored encrypted),
+    and a plugin that runs programs needs your trust over a fingerprint of all its files.
   - Plugins → Marketplaces: add Claude Code marketplaces from GitHub, a URL or a folder (Anthropic's official one is a
     one-click suggestion), browse and search their plugins, install, and update after a review when a refresh finds a
     new version; nothing is fetched or updated by itself.
   - Import from Claude Code (Settings → Customize): pick your `.claude` folder in the browser, upload a zip, or scan
     the server's own folder; a preview shows what is new, changed or unsupported, and one import copies your agents,
-    commands, skills, output styles, hooks, `Bash(…)` allow rules (as shell rules), `CLAUDE.md` (into your
-    instructions) and the MCP servers of `~/.claude.json`. Hooks and commands that run shell lines arrive turned off;
+    commands, skills, output styles, hooks, `Bash(…)` allow rules (as shell rules), whole-tool deny rules (as tool
+    overrides), your output style, `CLAUDE.md` (appended to or replacing your instructions) and the MCP servers of
+    `~/.claude.json`. Hooks and commands that run shell lines arrive turned off unless you turn them on in the preview;
     credentials and conversations are never read.
   - Edit a project's agents, commands, skills and output styles (**Edit…** on a project row), its hooks and its
     `.mcp.json` in the app; saving never approves what a file runs, and a file changed on disk is never overwritten
@@ -218,7 +227,7 @@ desktop app, and it starts in dark mode.
   - v1.5: `@` file mentions in project chats, and a queue for messages sent while a reply runs.
   - Slash commands: `/explain`, `/review`, `/fix`, `/translate`, `/proofread` and more, plus commands from plugins;
     v1.5: `/compact [focus]`; v1.6: project and personal commands with argument hints, and `/remember`; v1.7: skills
-    and `/output-style`.
+    and `/output-style`; v1.8: plugin commands as `/plugin:command`.
   - v1.7: an output style menu (Automatic, Default, Explanatory, Learning and your styles).
   - A microphone button for dictation.
 - **Sidebar and navigation**: a Chat | Plugins switch, a project switcher, chats grouped by date with live status
@@ -243,7 +252,11 @@ desktop app, and it starts in dark mode.
     `ctx.agents.register` / `ctx.skills.register`); plugin API 1.5.0 (v1.7) adds command hooks and output styles
     (`contributes.hooks` / `contributes.outputStyles`, `ctx.outputStyles.register`) and six hook events for code
     plugins.
-  - Install from a zip, npm, a URL with an integrity hash, or a local folder, with an explicit trust step for code.
+    Plugin API 1.6.0 (v1.8) adds Claude Code's frontmatter fields to commands, skills and agents, prompt hooks, five
+    hook events and the `args` / `async` / `if` / `statusMessage` handler fields, and the `github` / `marketplace`
+    install sources.
+  - Install from a zip, npm, a URL with an integrity hash, or a local folder (v1.8: also a GitHub repository or a
+    marketplace entry, and Claude Code plugins in their own format), with an explicit trust step for code.
 - **Tools and MCP**: MCP servers over stdio, Streamable HTTP and SSE. The builtin tools are `current_time`,
   `web_fetch` (SSRF-guarded) and `generate_image`, plus the seven workspace tools of project chats and (v1.5) the agent
   tools `todo_write`, `exit_plan_mode` and `task` (v1.6: and `skill`). Every tool has an approval policy and a per-tool
@@ -327,7 +340,10 @@ docker run -d --name harness-forge -p 8787:8787 -v harness-forge-data:/data -e H
 
 The container runs as the unprivileged `node` user (uid 1000); a bind-mounted data directory must be writable by
 it. v1.8: the image sets `HF_CLAUDE_HOME=0`, so **Import from Claude Code** works through the browser; to let it scan a
-folder instead, mount it read-only and name it: `-v ~/.claude:/claude:ro -e HF_CLAUDE_HOME=/claude`. Put a TLS reverse proxy in front before exposing it beyond your machine or LAN (see
+folder instead, mount it and your `~/.claude.json` read-only (readable by uid 1000) and name the folder:
+`-v ~/.claude:/home/node/.claude:ro -v ~/.claude.json:/home/node/.claude.json:ro -e HF_CLAUDE_HOME=/home/node/.claude`
+(the one-mount form `-v ~/.claude:/claude:ro -e HF_CLAUDE_HOME=/claude` imports everything except the MCP servers of
+`~/.claude.json`). Put a TLS reverse proxy in front before exposing it beyond your machine or LAN (see
 [Behind a reverse proxy](#behind-a-reverse-proxy)).
 
 ### Projects (agent workspace)
@@ -356,9 +372,9 @@ Every variable is optional. [`.env.example`](.env.example) lists them with comme
 | `HF_PASSWORD` | unset | enables the login screen; overrides a password stored in Settings |
 | `HF_MASTER_KEY` | unset | base64 of 32 bytes used to encrypt secrets; otherwise `data/secret.key` is generated (mode 0600) |
 | `HF_MOCK_PROVIDER` | unset | `1` registers the dev-only `mock` provider (deterministic models for tests and demos) |
-| `HF_SAFE_MODE` | unset | `1` loads builtin plugins only (recovery when a plugin breaks the start); v1.7: also runs no command hook and starts no project MCP server |
+| `HF_SAFE_MODE` | unset | `1` loads builtin plugins only (recovery when a plugin breaks the start); v1.7: also runs no command hook and starts no project MCP server; v1.8: and no prompt hook |
 | `HF_PLUGIN_WATCH` | unset | `1` hot-reloads code plugins in the data directory when their files change (linked folders always reload) |
-| `HF_OFFLINE` | unset | `1` never downloads the models.dev catalog (the bundled snapshot is used); v1.8: also refuses adding or refreshing GitHub or URL marketplaces and installing from GitHub or a marketplace |
+| `HF_OFFLINE` | unset | `1` never downloads the models.dev catalog (the bundled snapshot is used); v1.8: also refuses adding or refreshing GitHub or URL marketplaces and installing from GitHub or from a marketplace entry that needs the network (a folder marketplace, zip, folder, npm and URL installs still work) |
 | `HF_INSECURE` | unset | `1` allows a non-loopback bind without a password (only behind another authentication layer); it also disables the DNS-rebinding guard that restricts a password-less server to `localhost` host names |
 | `HF_WORKSPACE_ROOTS` | `<data dir>/workspaces` | folders that may hold project folders: a comma list of absolute paths; a relative path, `/`, a missing folder (or a file), the data directory or a folder inside it (other than `<data dir>/workspaces`) stops the start. See [using projects](docs/guides/using-projects.md) |
 | `HF_WORKSPACE_SHELL` | `1` | `0` removes the `shell` tool from every chat (the file tools keep working); v1.7: also runs no command hook and no `` !`cmd` `` line of a command; no setting in the app can turn it back on |
@@ -377,7 +393,8 @@ A key saved in Settings wins over its environment variable; the key dialog shows
 Flags accept `1` / `true` / `yes` / `on` and `0` / `false` / `no` / `off`; an empty value counts as unset, and any
 other invalid value stops the start with a message naming the variable. Test-only variables (`HF_LIVE_PROVIDERS`,
 `HF_LIVE_MAX_COST_USD`, `HF_LIVE_MEDIA`, `HF_TEST_REQUIRE_WEB_BUILD`, `HF_TEST_FILE_SWEEP_DELAY_MS` (only with
-`HF_MOCK_PROVIDER=1`), `E2E_SCREENSHOTS`, `E2E_BASE_URL`) are described in
+`HF_MOCK_PROVIDER=1`), `HF_TEST_REMOTE_URL` (v1.8, only with `HF_MOCK_PROVIDER=1`), `E2E_SCREENSHOTS`, `E2E_BASE_URL`)
+are described in [`.env.example`](.env.example),
 [`docs/PROVIDERS.md`](docs/PROVIDERS.md#12-live-provider-suite), [`e2e/README.md`](e2e/README.md) and
 [`docs/DECISIONS.md`](docs/DECISIONS.md).
 
@@ -420,11 +437,11 @@ Or develop in your own editor with a linked folder that reloads on save.
   [adding an MCP server](docs/guides/adding-an-mcp-server.md).
 - Examples that load as they are: [`examples/plugins/`](examples/plugins/) (LM Studio, Together AI, a dice-roller
   tool, a TypeScript echo provider, the MCP "everything" server; v1.6: `agent-pack`, sub-agent types and skills; v1.7:
-  `hook-pack`, a command hook and an output style).
+  `hook-pack`, a command hook and an output style; v1.8: `claude-review-kit`, a Claude Code plugin).
 - The full contract (manifest, `PluginContext`, hooks, lifecycle, install, trust): [`docs/PLUGINS.md`](docs/PLUGINS.md).
-- v1.8 (in progress): Claude Code plugins install as they are, and **Plugins → Marketplaces** browses Claude Code
-  marketplaces ([Claude Code plugins](docs/guides/claude-code-plugins.md); format reference: PLUGINS.md section 17;
-  example: `examples/plugins/claude-review-kit`, planned).
+- v1.8: Claude Code plugins install as they are, and **Plugins → Marketplaces** browses Claude Code marketplaces
+  ([Claude Code plugins](docs/guides/claude-code-plugins.md); format reference: PLUGINS.md section 17; example:
+  [`examples/plugins/claude-review-kit`](examples/plugins/claude-review-kit/)).
 
 ## Security
 
@@ -444,9 +461,10 @@ harness-forge is built for **one user** on their own machine or server.
 - **Sessions and CSRF.** An HttpOnly, SameSite=Strict HMAC session cookie; state-changing requests must come from
   the same origin. With a password set, creating, installing, trusting, editing, building or reloading code plugins,
   adding stdio MCP servers, changing the password, creating or updating share links, adding a project, rotating the
-  master key, deleting all data and (v1.7) creating or changing a personal hook, approving a project's files and
-  storing project MCP variables require a login within the last 10 minutes; when the last login is older, the app
-  asks for the password once and then carries out the action.
+  master key, deleting all data, (v1.7) creating or changing a personal hook, approving a project's files and
+  storing project MCP variables and (v1.8) scanning the server's Claude Code folder and applying an import require a
+  login within the last 10 minutes; when the last login is older, the app asks for the password once and then carries
+  out the action.
 - **Share links.** A link shows a sanitized snapshot of one conversation path: no instructions, errors, usage, costs
   or approvals; reasoning, tool details and files and images only when you include them. Its token is an HMAC that is
   never stored and never logged; revoking the link or changing the master key ends it, and every response carries
@@ -490,13 +508,16 @@ harness-forge is built for **one user** on their own machine or server.
   only from values you store per project, and a project MCP server runs in the project folder in its own process
   group. An approved command's `@file` references go through the same path guard as the file tools. Hook commands,
   payloads and outputs are never logged at the `info` level.
-- **Claude Code plugins, marketplaces and the import (v1.8, in progress).** Nothing from the network runs before you
+- **Claude Code plugins, marketplaces and the import (v1.8).** Nothing from the network runs before you
   review it: a Claude Code plugin that runs programs needs your trust (with your password) over a fingerprint of all its
-  files, GitHub sources are pinned to a resolved commit and downloaded over HTTPS (never with git), and marketplaces
-  never refresh or update by themselves. The import reads only an allowlist of your Claude Code folder (never
-  credentials or conversations), keeps file contents and secret values on the server, needs your password to scan or
-  apply, and imports hooks and commands that run shell lines turned off. Saving a project file from the app never
-  approves what it runs. Prompt-hook answers can block or continue the agent but never approve a call.
+  files (checked again whenever the plugin loads, reloads or is trusted, so an edited script stays blocked from then
+  on), GitHub sources are pinned to a resolved commit and downloaded over HTTPS (never with git), and marketplaces
+  never refresh or update by themselves. A plugin's sensitive `userConfig` values are stored encrypted, never appear in
+  its Markdown or in API answers, and reach a hook only when its process starts. The import reads only an allowlist of
+  your Claude Code folder (never credentials or conversations), keeps file contents and secret values on the server,
+  needs your password to scan or apply, and imports hooks and commands that run shell lines turned off. Saving a
+  project file from the app never approves what it runs. Prompt-hook answers can block or continue the agent but never
+  approve a call.
 - **Microphone and media.** Dictation needs a secure context: browsers allow the microphone only on HTTPS or on
   `localhost`. Opened as plain `http://<lan-address>:8787` from another machine, the mic button stays disabled ("Voice
   input needs HTTPS or localhost"); use the TLS reverse proxy below. The page may use only its own microphone
@@ -603,7 +624,7 @@ Set `HF_PASSWORD` before exposing the server; share links need it.
 | Document | Contents |
 |---|---|
 | [`docs/guides/`](docs/guides/) | step-by-step guides: [using projects](docs/guides/using-projects.md), [agent features](docs/guides/agent-features.md) (v1.5: compaction, plan mode, todos, mentions, steering, sub-agents), [customizing the agent](docs/guides/customizing-agents.md) (v1.6: custom agents, commands and skills, background agents, plan files, `/remember`), [hooks and project MCP](docs/guides/hooks-and-project-mcp.md) (v1.7: hooks, project approvals, `.mcp.json`), [output styles](docs/guides/output-styles.md) (v1.7), [Claude Code plugins](docs/guides/claude-code-plugins.md) (v1.8: plugins and marketplaces), [Import from Claude Code](docs/guides/claude-code-import.md) (v1.8), [declarative provider](docs/guides/writing-a-declarative-provider.md), [code plugin](docs/guides/writing-a-code-plugin.md), [MCP server](docs/guides/adding-an-mcp-server.md) |
-| [`examples/plugins/`](examples/plugins/) | example plugins with READMEs and a test that loads them (v1.6 adds `agent-pack`, v1.7 `hook-pack`; v1.8 plans `claude-review-kit`, a Claude Code plugin) |
+| [`examples/plugins/`](examples/plugins/) | example plugins with READMEs and a test that loads them (v1.6 adds `agent-pack`, v1.7 `hook-pack`, v1.8 `claude-review-kit`, a Claude Code plugin) |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | components, flows, data directory, database, security model, topology |
 | [`docs/API.md`](docs/API.md) | every HTTP endpoint, the error envelope, the chat stream protocol, server events |
 | [`docs/PLUGINS.md`](docs/PLUGINS.md) | plugin manifest, contribution points, `PluginContext`, hooks, lifecycle, install, trust |
@@ -611,7 +632,7 @@ Set `HF_PASSWORD` before exposing the server; share links need it.
 | [`docs/UI.md`](docs/UI.md) | layout, design tokens, components, routes, shortcuts, test ids |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | phases, tasks and progress |
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | architecture decision records and the contract seed |
-| [`docs/phases/`](docs/phases/) | per-phase task lists: [0 foundation](docs/phases/phase-0-foundation.md), [1 core services](docs/phases/phase-1-core-services.md), [2 chat](docs/phases/phase-2-chat.md), [3 plugins](docs/phases/phase-3-plugins.md), [4 hardening](docs/phases/phase-4-hardening.md), [5 v1.1](docs/phases/phase-5-v1-1.md), [6 v1.2](docs/phases/phase-6-v1-2.md), [7 v1.3](docs/phases/phase-7-v1-3.md), [8 v1.4](docs/phases/phase-8-v1-4.md), [9 v1.5](docs/phases/phase-9-v1-5.md), [10 v1.6](docs/phases/phase-10-v1-6.md), [11 v1.7](docs/phases/phase-11-v1-7.md), [12 v1.8](docs/phases/phase-12-v1-8.md) (in progress) |
+| [`docs/phases/`](docs/phases/) | per-phase task lists: [0 foundation](docs/phases/phase-0-foundation.md), [1 core services](docs/phases/phase-1-core-services.md), [2 chat](docs/phases/phase-2-chat.md), [3 plugins](docs/phases/phase-3-plugins.md), [4 hardening](docs/phases/phase-4-hardening.md), [5 v1.1](docs/phases/phase-5-v1-1.md), [6 v1.2](docs/phases/phase-6-v1-2.md), [7 v1.3](docs/phases/phase-7-v1-3.md), [8 v1.4](docs/phases/phase-8-v1-4.md), [9 v1.5](docs/phases/phase-9-v1-5.md), [10 v1.6](docs/phases/phase-10-v1-6.md), [11 v1.7](docs/phases/phase-11-v1-7.md), [12 v1.8](docs/phases/phase-12-v1-8.md) |
 | [`AGENT.md`](AGENT.md) | rules for AI agents working on this repository |
 
 ## Development
@@ -625,7 +646,7 @@ on SQLite), and the TypeScript-only packages `packages/shared` (schemas, DTOs, r
 | `pnpm dev` | server (`tsx watch`, :8787) + web (`nuxt dev`, :3000, proxies `/api`) |
 | `pnpm build` | `nuxt generate` (web) + `tsdown` (server) |
 | `pnpm start` | production server on :8787 serving the API and the web app |
-| `pnpm start:e2e` | production server with `HF_MOCK_PROVIDER=1 HF_PORT=8899 HF_DATA_DIR=.tmp/e2e` |
+| `pnpm start:e2e` | production server with `HF_MOCK_PROVIDER=1 HF_OFFLINE=1 HF_CLAUDE_HOME=0 HF_PORT=8899 HF_DATA_DIR=.tmp/e2e` |
 | `pnpm test` | Vitest (all projects); `pnpm -F <pkg> test` for one package; `pnpm exec vitest run --project examples` for the example plugins |
 | `pnpm test:live` | opt-in live provider suite: **paid** calls with the provider keys in your environment or `.env` (`ANTHROPIC_API_KEY=… pnpm test:live`); never part of `pnpm test` ([details](docs/PROVIDERS.md#12-live-provider-suite)) |
 | `pnpm test:e2e` | Playwright (projects `chromium`, `mobile` and `tablet`) |

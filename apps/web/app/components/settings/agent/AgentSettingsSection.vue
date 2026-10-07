@@ -74,8 +74,11 @@ const ids = {
   alias: Object.fromEntries(MODEL_ALIAS_NAMES.map(name => [name, useId()])) as Record<ModelAliasName, string>,
 }
 
-/** Switches: a 40px tall hit area on coarse pointers (the switch itself stays 18px). */
-const SWITCH_CLASS = 'pointer-coarse:after:-inset-y-[11px]'
+/**
+ * Switches: a 40px tall hit area on coarse pointers (the switch itself stays 18px; its `::after` counts from inside the
+ * 1px border, so 16.4 + 2 * 12 = 40.4px, W12.19).
+ */
+const SWITCH_CLASS = 'pointer-coarse:after:-inset-y-3'
 
 onMounted(loadModelCatalog)
 

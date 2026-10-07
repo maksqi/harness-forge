@@ -9,6 +9,8 @@ import type { MarketplaceSummary } from '@harness-forge/shared'
 // the chips. The selected marketplace's menu (`marketplace-row-menu`, "Actions for {name}"): Refresh
 // (`marketplace-refresh`) and Remove… (`marketplace-remove`). Store-free.
 // Props, emits and the root test ids are frozen from Gate P12-0b (C46 stub); implementation W12.8 (P12-A).
+// W12.19: the narrow Select is 40 px tall (`data-[size=default]:h-10`: a plain `h-10` loses to the frozen SelectTrigger's
+// `data-[size=default]:h-9`).
 import type { AcceptableValue } from 'reka-ui'
 import { CircleArrowUpIcon, MoreHorizontalIcon, RotateCwIcon, Trash2Icon, TriangleAlertIcon } from '@lucide/vue'
 import { useMediaQuery } from '@vueuse/core'
@@ -137,7 +139,7 @@ function onKeydown(event: KeyboardEvent): void {
     </div>
 
     <Select v-else :model-value="selectedId ?? ALL_VALUE" @update:model-value="onSelectValue">
-      <SelectTrigger aria-label="Marketplace" data-slot="marketplace-select" class="h-10 min-w-0 flex-1">
+      <SelectTrigger aria-label="Marketplace" data-slot="marketplace-select" class="min-w-0 flex-1 data-[size=default]:h-10">
         <SelectValue />
       </SelectTrigger>
       <SelectContent position="popper" align="start">

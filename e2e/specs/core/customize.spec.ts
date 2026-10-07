@@ -14,6 +14,12 @@
 //   commands, skills, output-styles, hooks); New follows the tab (`data-kind` agent / command / skill / style / hook,
 //   "New output style", "New hook") and so does `?tab=`; the Hooks tab shows the hooks panel, the Output styles tab its
 //   default select and the built-in styles; an unknown `?tab=` falls back to Agents.
+// - Phase 12 (W12.14, docs/UI.md 9.14; ADR-056, ADR-058): the agent editor's Claude Code fields (Tools not allowed, Max
+//   turns with its range check, Skills from the catalog) and the command editor's When to use and Run in a sub-agent
+//   with its Agent (`general`); the stored files carry `disallowedTools`, `maxTurns`, `skills`, `when_to_use`, `context:
+//   fork`; the command row says "Runs in a sub-agent". A Color picked in the editor shows as the row's dot (the
+//   editor's Selects open next to their trigger since W12.19). Project rows offer Edit… (the project file editor on
+//   the raw file) and Delete…; closing the editor unchanged asks nothing.
 import { Buffer } from 'node:buffer'
 import { readFile } from 'node:fs/promises'
 import {
@@ -286,6 +292,21 @@ test.describe('customize', () => {
     await page.keyboard.press('Escape')
     await expect(viewer).toBeHidden()
 
+    // Phase 12: Edit… opens the project file editor on the raw file; Delete… is offered too. Closed unchanged, it asks
+    // nothing.
+    await winner.getByTestId(testIds.customizationRowMenu).click()
+    const rowMenu = page.getByRole('menu')
+    await expect(byTestId(rowMenu, testIds.customizationDelete, { 'data-source': 'project' })).toBeVisible()
+    await byTestId(rowMenu, testIds.customizationEdit, { 'data-source': 'project' }).click()
+    const fileEditor = page.getByTestId(testIds.projectFileEditor)
+    await expect(fileEditor).toHaveAttribute('data-mode', 'edit')
+    await expect(fileEditor).toHaveAttribute('data-kind', 'agent')
+    await expect(fileEditor).toHaveAttribute('data-path', `.harness/agents/${agent}.md`)
+    await expect(fileEditor.getByTestId(testIds.projectFileContent)).toContainText('PERSONA: harness reviewer')
+    await page.keyboard.press('Escape')
+    await expect(fileEditor).toBeHidden()
+    await expect(page.getByTestId(testIds.projectFileDiscardConfirm)).toHaveCount(0)
+
     // Copy to personal: the editor in import mode, prefilled from the file.
     await chooseRowAction(page, winner, testIds.customizationDuplicate)
     const editor = page.getByTestId(testIds.customizationEditor)
@@ -315,6 +336,108 @@ test.describe('customize', () => {
     await selectCustomizeProject(page, null)
     await expect(customizeSection(page, 'project')).toHaveCount(0)
     await expect(personal).toHaveAttribute('data-state', 'active')
+  })
+
+  test('Phase 12 fields: an agent with Tools not allowed, Max turns and Skills; a command that runs in a sub-agent @smoke', async ({ page, api, cleanup }) => {
+    test.setTimeout(60_000)
+    const skill = uniqueId('preload')
+    await createPersonalDefinition(api, cleanup, { kind: 'skill', name: skill, content: definitionFile({ name: skill, description: 'Preloaded by the e2e agent.' }, 'Follow the e2e checklist.\n') })
+    const agent = uniqueId('colored')
+    cleanupPersonalDefinition(cleanup, 'agent', agent)
+    const command = uniqueId('forked')
+    cleanupPersonalDefinition(cleanup, 'command', command)
+
+    await page.goto('/settings/customize')
+    await page.getByTestId(testIds.customizeNew).click()
+    const editor = page.getByTestId(testIds.customizationEditor)
+    await expect(editor).toHaveAttribute('data-kind', 'agent')
+    await editor.getByTestId(testIds.customizationName).fill(agent)
+    await editor.getByTestId(testIds.customizationDescription).fill('An agent with the Claude Code fields.')
+
+    // Tools not allowed: one tool from the list.
+    const disallowed = editor.getByTestId(testIds.customizationDisallowedTools)
+    await expect(disallowed).toHaveAttribute('data-count', '0')
+    await disallowed.click()
+    await byTestId(page, testIds.customizationToolOption, { 'data-tool-name': 'shell' }).click()
+    await disallowed.click()
+    await expect(page.getByTestId(testIds.customizationToolOption)).toHaveCount(0)
+    await expect(disallowed).toHaveAttribute('data-count', '1')
+
+    // Max turns: 1 – 200, checked inline.
+    const maxTurns = editor.getByTestId(testIds.customizationMaxTurns)
+    const save = editor.getByTestId(testIds.customizationSave)
+    await maxTurns.fill('500')
+    await maxTurns.blur()
+    await expect(editor).toContainText('Enter a whole number from 1 to 200.')
+    await expect(maxTurns).toHaveAttribute('aria-invalid', 'true')
+    await maxTurns.fill('12')
+    await expect(editor).not.toContainText('Enter a whole number from 1 to 200.')
+
+    // Skills: the catalog's skills; a chosen one is a known chip.
+    const skills = editor.getByTestId(testIds.customizationSkills)
+    await expect(skills).toHaveAttribute('data-count', '0')
+    await skills.click()
+    await page.locator(`[data-slot="customization-skill-option"][data-skill-name="${skill}"]`).click()
+    await page.keyboard.press('Escape')
+    await expect(skills).toHaveAttribute('data-count', '1')
+    await expect(editor.locator(`[data-slot="customization-skill-chip"][data-skill-name="${skill}"]`)).toHaveAttribute('data-state', 'known')
+
+    await fillMarkdownEditor(page, editor.getByTestId(testIds.customizationBody), 'PERSONA: colored agent\n')
+    await save.click()
+    await expect(toastWith(page, 'Agent saved')).toBeVisible()
+    await expect(editor).toBeHidden()
+    const storedAgent = (await personalDefinition(api, 'agent', agent)).content
+    expect(storedAgent).toMatch(/^disallowedTools:\n {2}- shell$/m)
+    expect(storedAgent).toMatch(/^maxTurns: 12$/m)
+    expect(storedAgent).toContain(`skills:\n  - ${skill}\n`)
+
+    // A command: When to use and Run in a sub-agent (Agent `general` by default).
+    await byTestId(page, testIds.customizeTab, { 'data-value': 'commands' }).click()
+    await page.getByTestId(testIds.customizeNew).click()
+    await expect(editor).toHaveAttribute('data-kind', 'command')
+    await editor.getByTestId(testIds.customizationName).fill(command)
+    await editor.getByTestId(testIds.customizationDescription).fill('Audits the project in a sub-agent.')
+    await editor.getByTestId(testIds.customizationWhenToUse).fill('When the user asks for an audit.')
+    const fork = editor.getByTestId(testIds.customizationFork)
+    await expect(fork).toHaveAttribute('data-state', 'unchecked')
+    await expect(editor.getByTestId(testIds.customizationForkAgent)).toHaveCount(0)
+    await fork.click()
+    await expect(fork).toHaveAttribute('data-state', 'checked')
+    await expect(editor.getByTestId(testIds.customizationForkAgent)).toHaveAttribute('data-value', 'general')
+    await fillMarkdownEditor(page, editor.getByTestId(testIds.customizationBody), 'Audit $ARGUMENTS.\n')
+    await save.click()
+    await expect(toastWith(page, 'Command saved')).toBeVisible()
+    await expect(editor).toBeHidden()
+    const commandRow = customizationRow(customizeSection(page, 'user'), { 'data-name': command })
+    await expect(commandRow).toContainText('Runs in a sub-agent')
+    const storedCommand = (await personalDefinition(api, 'command', command)).content
+    expect(storedCommand).toMatch(/^when_to_use: When the user asks for an audit\.$/m)
+    expect(storedCommand).toMatch(/^context: fork$/m)
+  })
+
+  test('Phase 12: an agent color from the Color select shows as the row\'s dot @smoke', async ({ page, cleanup }) => {
+    const agent = uniqueId('colored')
+    cleanupPersonalDefinition(cleanup, 'agent', agent)
+    await page.goto('/settings/customize')
+    await page.getByTestId(testIds.customizeNew).click()
+    const editor = page.getByTestId(testIds.customizationEditor)
+    await editor.getByTestId(testIds.customizationName).fill(agent)
+    await editor.getByTestId(testIds.customizationDescription).fill('An agent with a color.')
+    const color = editor.getByTestId(testIds.customizationColor)
+    await expect(color).toHaveAttribute('data-value', '')
+    await expect(color).toContainText('None')
+    await color.click()
+    const options = page.getByRole('option')
+    await expect(options).toHaveCount(9)
+    await expect(options.first()).toHaveText('None')
+    await page.getByRole('option', { name: 'Purple' }).click()
+    await expect(color).toHaveAttribute('data-value', 'purple')
+    await fillMarkdownEditor(page, editor.getByTestId(testIds.customizationBody), 'PERSONA: colored agent\n')
+    await editor.getByTestId(testIds.customizationSave).click()
+    await expect(editor).toBeHidden()
+    const row = customizationRow(customizeSection(page, 'user'), { 'data-name': agent })
+    await expect(row.locator('[data-slot="customization-color-dot"]')).toHaveAttribute('data-value', 'purple')
+    await expect(row).toContainText('Purple')
   })
 
   test('five tabs: Agents, Commands, Skills, Output styles and Hooks; New and the query follow the tab @smoke', async ({ page }) => {

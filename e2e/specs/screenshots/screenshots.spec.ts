@@ -36,20 +36,28 @@
 // seeded chat, then the final one, `.mcp.json` with the dependency-free stdio fixture `mcp-min.mjs`, a command with
 // shell lines, a project output style), approved through the API; two personal hooks (made last: no seeded turn runs
 // them) and a personal style; the hook-pack plugin is installed by its screens and removed again in `close`.
+// Phase 12 screens (W12.14): the Marketplaces page with a local-folder marketplace, the install dialog's GitHub tab and a
+// Claude Code plugin's install preview (a zip, never installed), the import from Claude Code at its preview step (a fake
+// Claude Code home uploaded as a folder; `GET /api/claude-import/home` stubbed in the browser), the project file editor
+// on a `notes` agent, the hook editor with the Prompt type, and the project trust dialog with a partly selected group
+// (the mixed Select all). Their data: the marketplace folder and the fake home live in temp folders outside the
+// repository, removed with the server; nothing is installed or imported.
 // A screen that starts something (a run, a recording, a dialog, settings only it needs, the open changes panel) undoes
 // it in `close`, so the other screens look the same in every run.
 // `@readme` (also `@screenshots`): the README images as full 1440x900 frames, written to `.tmp/screenshots/readme/`
 // with the file names of `docs/assets/screenshots/` (chat-dark, chat-light, plugins-dark, provider-wizard-dark,
-// settings-dark, workspace-dark, changes-panel-dark) plus customize-dark (Phase 10: Settings -> Customize) and hooks-dark
-// (Phase 11: Settings -> Customize -> Hooks), candidates for the README.
+// settings-dark, workspace-dark, changes-panel-dark) plus customize-dark (Phase 10: Settings -> Customize), hooks-dark
+// (Phase 11: Settings -> Customize -> Hooks), marketplaces-dark and claude-import-dark (Phase 12: the Marketplaces page
+// and the import preview), candidates for the README.
 import type { Locator, Page } from '@playwright/test'
-import type { HooksConfig, HookScriptName, HookScriptOptions, StartedServer, UiStreamChunk } from '../../helpers/index.ts'
+import type { HooksConfig, HookScriptName, HookScriptOptions, StartedServer, TempFolder, UiStreamChunk } from '../../helpers/index.ts'
 import { createHash } from 'node:crypto'
 import { copyFile, mkdir, utimes, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import process from 'node:process'
 import { devices } from '@playwright/test'
 import { createMessageId } from '../../../packages/shared/src/index.ts'
+import { chooseClaudeFolder, continueToPreview, fakeClaudeHomeTree, openClaudeImport } from '../../helpers/claude-home.ts'
 import {
   approveProjectItems,
   byTestId,
@@ -69,6 +77,7 @@ import {
   hookNote,
   initGitRepository,
   lastAssistantMessage,
+  makeTempFolder,
   mcpVariable,
   MOCK_CHECKPOINT_DIR,
   MOCK_CHECKPOINT_DONE,
@@ -83,6 +92,7 @@ import {
   REPO_ROOT,
   sendMessage,
   startServer,
+  stubClaudeHome,
   test,
   testIds,
   trustItem,
@@ -91,10 +101,21 @@ import {
   workspaceRoot,
   writeHookScript,
   writeProjectFile,
+  writeTree,
+  zipTree,
 } from '../../helpers/index.ts'
+import { openProjectFileEditor, projectRow } from '../../helpers/project-files.ts'
+import { claudeKitTree, claudeNotesTree, marketplaceEntry, marketplaceTree } from '../plugins/_support/claude.ts'
 
 const ENABLED = process.env.E2E_SCREENSHOTS === '1'
 const OUTPUT_DIR = join(REPO_ROOT, '.tmp/screenshots')
+/** Phase 12: the screenshot marketplace and its plugins (local folders: no network). */
+const MARKETPLACE_NAME = 'acme-tools'
+const MARKETPLACE_PLUGINS = [
+  { name: 'review-kit', tree: claudeKitTree('review-kit', '1.2.0'), version: '1.2.0', description: 'Review commands, a reviewer agent, a release-notes skill and a format hook.', category: 'development', tags: ['review', 'testing'] },
+  { name: 'release-notes', tree: claudeNotesTree('release-notes', '0.3.0'), version: '0.3.0', description: 'Note and summary commands for release work.', category: 'productivity', tags: ['notes'] },
+  { name: 'db-migrations', tree: claudeKitTree('db-migrations', '2.0.1'), version: '2.0.1', description: 'Plan and review database migrations before they ship.', category: 'database', tags: ['sql'] },
+]
 /** The README images (`@readme`), named like the files in `docs/assets/screenshots/`. */
 const README_DIR = join(OUTPUT_DIR, 'readme')
 const PASSWORD = 'screenshots-password'
@@ -156,6 +177,12 @@ interface Seed {
   hookNotes: string
   /** Phase 11: a `mock:hooks` chat in `hooks-demo` whose Stop hook asked the agent to continue (the carrier note). */
   hookContinuation: string
+  /** Phase 12: the `acme-tools` marketplace (a local folder outside the repository). */
+  marketplace: string
+  /** Phase 12: the `.claude` folder of the fake Claude Code home (outside the repository) and its `.claude.json`. */
+  claudeHome: { home: string, claudeDir: string, claudeJson: string, writeClaudeFile: (relative: string, content: string) => Promise<void> }
+  /** Phase 12: the temp folders of the seed, removed with the server. */
+  tempFolders: TempFolder[]
   /** The screenshot server (API calls of the screens that start something). */
   baseURL: string
   /** The start of the browser clock: a little after the seed, so relative times read "2m ago". */
@@ -272,7 +299,8 @@ const HOOK_IMPORT_JSON = JSON.stringify({
       { matcher: 'Bash', hooks: [{ type: 'command', command: './scripts/guard.sh', timeout: 60 }] },
       { matcher: '^Bash.*$', hooks: [{ type: 'command', command: './scripts/audit.sh' }] },
     ],
-    Stop: [{ hooks: [{ type: 'command', command: 'pnpm lint --quiet' }, { type: 'prompt', prompt: 'Check the work.' }] }],
+    // Phase 12: prompt hooks import; the ignored example is an http hook.
+    Stop: [{ hooks: [{ type: 'command', command: 'pnpm lint --quiet' }, { type: 'http', url: 'https://hooks.example.com/notify' }] }],
   },
 }, null, 2)
 
@@ -1186,7 +1214,7 @@ const SCREENS: Screen[] = [
     open: page => openSettings(page, '/settings/general', async (page) => {
       await expect(page.getByTestId(testIds.settingsSubagentModel)).toHaveAttribute('data-value', 'mock:subagent')
       await expect(page.getByTestId(testIds.settingsCompactionModel)).toHaveAttribute('data-value', 'mock:compact')
-      await page.getByText('Long chats, sub-agents and plans.').evaluate(element => element.scrollIntoView({ block: 'center' }))
+      await page.getByText('Long chats, sub-agents, plans and hooks.').evaluate(element => element.scrollIntoView({ block: 'center' }))
     }),
   },
   {
@@ -1264,6 +1292,123 @@ const SCREENS: Screen[] = [
     close: async (page) => {
       await page.keyboard.press('Escape')
       await expect(page.getByTestId(testIds.hookImportDialog)).toHaveCount(0)
+    },
+  },
+  // ---------- Phase 12 ----------
+  {
+    name: 'plugins-marketplaces',
+    open: async (page, seed) => {
+      await page.goto(`/plugins/marketplaces?m=${seed.marketplace}`)
+      const view = page.getByTestId(testIds.marketplacesPage)
+      await expect(marketplaceEntry(view, 'review-kit')).toBeVisible()
+      await expect(view.getByTestId(testIds.marketplaceEntry)).toHaveCount(MARKETPLACE_PLUGINS.length + 2)
+      await expect(view.locator('[data-slot="marketplace-skeleton"]')).toHaveCount(0)
+    },
+  },
+  {
+    name: 'install-github',
+    only: 'desktop',
+    open: async (page) => {
+      await page.goto('/plugins')
+      await page.getByTestId(testIds.pageHeader).getByTestId(testIds.pluginsInstall).click()
+      const dialog = page.getByTestId(testIds.installDialog)
+      await expect(dialog).toHaveAttribute('data-step', 'source')
+      await dialog.getByTestId(testIds.installTabGithub).click()
+      await dialog.getByTestId(testIds.installGithubRepo).fill('acme/review-kit')
+      await dialog.getByTestId(testIds.installGithubRef).fill('v1.2.0')
+      await dialog.getByTestId(testIds.installGithubRef).blur()
+    },
+    close: async (page) => {
+      await page.keyboard.press('Escape')
+      await expect(page.getByTestId(testIds.installDialog)).toHaveCount(0)
+    },
+  },
+  {
+    name: 'install-claude-preview',
+    open: async (page) => {
+      await page.goto('/plugins')
+      await page.getByTestId(testIds.pageHeader).getByTestId(testIds.pluginsInstall).click()
+      const dialog = page.getByTestId(testIds.installDialog)
+      await expect(dialog).toHaveAttribute('data-step', 'source')
+      const zip = zipTree(claudeKitTree('review-kit', '1.2.0'), { folder: 'review-kit' })
+      await dialog.getByTestId(testIds.installZipInput).setInputFiles({ name: 'review-kit-1.2.0.zip', mimeType: 'application/zip', buffer: zip })
+      await dialog.getByTestId(testIds.installInspect).click()
+      await expect(byTestId(dialog, testIds.installPreview, { 'data-format': 'claude' })).toBeVisible()
+      await expect(dialog.getByTestId(testIds.trustWarning)).toBeVisible()
+    },
+    close: async (page) => {
+      // Nothing is installed: the dialog is closed on its review.
+      await page.keyboard.press('Escape')
+      await expect(page.getByTestId(testIds.installDialog)).toHaveCount(0)
+    },
+  },
+  {
+    name: 'claude-import-preview',
+    open: async (page, seed) => {
+      const dialog = await openClaudeImport(page)
+      await chooseClaudeFolder(dialog, seed.claudeHome)
+      const preview = await continueToPreview(dialog)
+      await expect(byTestId(preview, testIds.claudeImportGroup, { 'data-kind': 'agent' })).toBeVisible()
+      await dialog.locator('[data-slot="claude-import-step"]').focus()
+    },
+    close: async (page) => {
+      await page.keyboard.press('Escape')
+      await page.getByRole('alertdialog').getByRole('button', { name: 'Discard' }).click()
+      await expect(page.getByTestId(testIds.claudeImportDialog)).toHaveCount(0)
+    },
+  },
+  {
+    name: 'project-file-editor',
+    open: async (page, seed) => {
+      await openSettings(page, `/settings/customize?tab=agents&project=${seed.notes}`, async (page) => {
+        await expect(projectRow(page, 'agent', 'test-writer').first()).toBeVisible()
+      })
+      const row = byTestId(page, testIds.customizationRow, { 'data-source': 'project', 'data-name': 'test-writer', 'data-path': '.harness/agents/test-writer.md' })
+      await openProjectFileEditor(page, row, '.harness/agents/test-writer.md', 'Write focused tests first.')
+      await page.getByTestId(testIds.projectFileContent).locator('.cm-content').blur()
+    },
+    close: async (page) => {
+      await page.keyboard.press('Escape')
+      await expect(page.getByTestId(testIds.projectFileEditor)).toHaveCount(0)
+    },
+  },
+  {
+    name: 'hook-editor-prompt',
+    only: 'desktop',
+    open: async (page, seed) => {
+      await openHooksTab(page, seed)
+      await page.getByTestId(testIds.customizeNew).click()
+      const editor = page.getByTestId(testIds.hookEditor)
+      await expect(editor).toHaveAttribute('data-mode', 'new')
+      await editor.getByTestId(testIds.hookType).locator('[data-value="prompt"]').click()
+      await editor.getByTestId(testIds.hookMatcher).fill('WebFetch')
+      await editor.getByTestId(testIds.hookPrompt).fill('Refuse fetches of internal hosts (*.corp, 10.x, localhost). The call: $ARGUMENTS')
+      await editor.locator('[data-field="hook-continue-on-block"]').click()
+      await expect(editor.getByTestId(testIds.hookMatcherPreview)).toContainText('Matches')
+      await editor.getByTestId(testIds.hookPrompt).blur()
+    },
+    close: async (page) => {
+      await page.keyboard.press('Escape')
+      await page.getByTestId(testIds.hookDiscardConfirm).click()
+      await expect(page.getByTestId(testIds.hookEditor)).toHaveCount(0)
+    },
+  },
+  {
+    name: 'trust-select-partial',
+    open: async (page, seed) => {
+      // The trust dialog of `hooks-demo`: one of the two new / changed hooks selected, so their Select all is mixed.
+      await openChat(page, seed.hookNotes)
+      await page.getByTestId(testIds.projectTrustChip).click()
+      const dialog = page.getByTestId(testIds.projectTrustDialog)
+      const hooks = byTestId(dialog, testIds.projectTrustGroup, { 'data-kind': 'hook' })
+      await expect(hooks).toHaveAttribute('data-count', '2')
+      await trustItem(hooks, { 'data-state': 'new' }).getByTestId(testIds.projectTrustSelect).click()
+      await expect(hooks.getByTestId(testIds.projectTrustSelectAll)).toHaveAttribute('aria-checked', 'mixed')
+      await hooks.getByTestId(testIds.projectTrustSelectAll).scrollIntoViewIfNeeded()
+    },
+    close: async (page) => {
+      await page.keyboard.press('Escape')
+      await expect(page.getByTestId(testIds.projectTrustDialog)).toHaveCount(0)
     },
   },
   {
@@ -1586,6 +1731,22 @@ async function seed(server: StartedServer): Promise<Seed> {
     await api.client.hooks.create({ body: { event: 'PreToolUse', matcher: 'Bash|Edit', command: './scripts/guard.sh', timeout: 30 } })
     await api.client.hooks.create({ body: { event: 'Stop', command: 'pnpm lint --quiet', enabled: false } })
     await api.client.customizations.create({ body: { kind: 'style', content: PERSONAL_STYLE } })
+    // Phase 12: a local-folder marketplace and a fake Claude Code home, both in temp folders outside the repository.
+    const tempFolders: TempFolder[] = []
+    const marketplaceFolder = await makeTempFolder('screenshots-marketplace')
+    tempFolders.push(marketplaceFolder)
+    await writeTree(marketplaceFolder.path, marketplaceTree(MARKETPLACE_NAME, MARKETPLACE_PLUGINS))
+    const marketplace = (await api.client.marketplaces.add({ body: { source: { type: 'path', path: marketplaceFolder.path } } })).id
+    const homeFolder = await makeTempFolder('screenshots-claude-home')
+    tempFolders.push(homeFolder)
+    await writeTree(homeFolder.path, fakeClaudeHomeTree())
+    const claudeDir = join(homeFolder.path, '.claude')
+    const claudeHome = {
+      home: homeFolder.path,
+      claudeDir,
+      claudeJson: join(homeFolder.path, '.claude.json'),
+      writeClaudeFile: (relative: string, content: string) => writeFile(join(claudeDir, ...relative.split('/')), content),
+    }
     return {
       markdown,
       reasoning,
@@ -1614,6 +1775,9 @@ async function seed(server: StartedServer): Promise<Seed> {
       hooksDemo: hooks.project,
       hookNotes: hooks.notes,
       hookContinuation: hooks.continuation,
+      marketplace,
+      claudeHome,
+      tempFolders,
       baseURL: server.baseURL,
       now: Date.now() + 2 * 60_000,
     }
@@ -1636,6 +1800,8 @@ async function captureAll(page: Page, seedData: Seed, theme: Theme, viewport: Vi
   // run, and the transcript's stick-to-bottom scrolling (it measures elapsed time) still works.
   await page.clock.install({ time: seedData.now })
   await page.clock.resume()
+  // Phase 12: the import dialog never asks the server for its Claude Code folder.
+  await stubClaudeHome(page)
   await page.goto('/')
   await expect(page.getByTestId(testIds.loginForm)).toBeVisible()
   await expect(page.locator('html')).toContainClass(theme)
@@ -1692,6 +1858,9 @@ const README_SHOTS: readonly { file: string, screen: string, theme: Theme }[] = 
   { file: 'customize-dark', screen: 'settings-customize', theme: 'dark' },
   // Phase 11: a candidate for the README (W11.14 decides).
   { file: 'hooks-dark', screen: 'settings-customize-hooks', theme: 'dark' },
+  // Phase 12: candidates for the README (W12.15 decides).
+  { file: 'marketplaces-dark', screen: 'plugins-marketplaces', theme: 'dark' },
+  { file: 'claude-import-dark', screen: 'claude-import-preview', theme: 'dark' },
 ]
 
 /** Captures the README images of one theme as full 1440x900 frames (no crops) into `.tmp/screenshots/readme/`. */
@@ -1699,6 +1868,8 @@ async function captureReadme(page: Page, seedData: Seed, theme: Theme): Promise<
   await mkdir(README_DIR, { recursive: true })
   await page.clock.install({ time: seedData.now })
   await page.clock.resume()
+  // Phase 12: the import dialog never asks the server for its Claude Code folder.
+  await stubClaudeHome(page)
   await page.goto('/')
   await expect(page.getByTestId(testIds.loginForm)).toBeVisible()
   await page.getByTestId(testIds.loginPassword).fill(PASSWORD)
@@ -1728,11 +1899,15 @@ const shots = test.extend<object, ScreenshotFixtures>({
   // eslint-disable-next-line no-empty-pattern -- Playwright fixtures must destructure their first argument.
   screenshotServer: [async ({}, use) => {
     const server = await startServer({ env: { HF_PASSWORD: PASSWORD }, label: 'hf-e2e-screenshots' })
+    let seeded: Seed | undefined
     try {
-      await use({ server, seed: await seed(server) })
+      seeded = await seed(server)
+      await use({ server, seed: seeded })
     }
     finally {
       await server.stop()
+      for (const folder of seeded?.tempFolders ?? [])
+        await folder.remove()
     }
   }, { scope: 'worker', timeout: 60_000 }],
   // Pages and `page.goto('/...')` go to the screenshot server.

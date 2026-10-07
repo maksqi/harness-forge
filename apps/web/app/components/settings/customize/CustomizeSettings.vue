@@ -807,7 +807,7 @@ defineExpose<{ create: () => void, import: () => void }>({ create, import: impor
               :id="ids.project"
               :data-testid="testIds.customizeProjectSelect"
               :data-value="projectId ?? ''"
-              class="w-full min-w-0 sm:w-56 pointer-coarse:h-10"
+              class="w-full min-w-0 sm:w-56 pointer-coarse:data-[size=default]:h-10"
             >
               <span class="min-w-0 truncate">{{ projectId ? (projectName ?? 'Project') : 'No project' }}</span>
             </SelectTrigger>

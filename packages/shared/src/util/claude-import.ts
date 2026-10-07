@@ -21,7 +21,7 @@
  *   diagnostic `name-from-path`) and written into the frontmatter (`setDefinitionName`), so the stored content names
  *   itself. Status by (kind, name) against the baseline: byte-equal content → `unchanged`; other content → `update`
  *   (skip by default; overwrite or rename `<name>-2`); a builtin or reserved name, or a name an earlier file of this
- *   import already uses → `conflict` (rename only); parser errors → `invalid`. A command with `` !`cmd` `` spans is
+ *   import already uses → `conflict` (skip or rename); parser errors → `invalid`. A command with `` !`cmd` `` spans is
  *   `executable` (`runs-commands`).
  * - `settings.json`: one `hook` item per handler (identity `claudeImportHookIdentity` against `baseline.hooks`; command
  *   handlers are `executable`; unsupported handler types and unknown events are `unsupported` items, invalid handlers
@@ -250,7 +250,7 @@ export interface ClaudeImportPlanItem {
 export interface ClaudeImportBaseline {
   /** Personal definitions with their raw markdown. */
   readonly definitions: readonly { readonly kind: 'agent' | 'command' | 'skill' | 'style', readonly name: string, readonly content: string }[]
-  /** Builtin and reserved names that can never be taken (rename only). */
+  /** Builtin and reserved names that can never be taken (skip or rename). */
   readonly reservedNames: readonly { readonly kind: 'agent' | 'command' | 'skill' | 'style', readonly name: string }[]
   /** Canonical handler texts of personal hooks (`canonicalJson` of `{ event, matcher, handler }`). */
   readonly hooks: readonly string[]

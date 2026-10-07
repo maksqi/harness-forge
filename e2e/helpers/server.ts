@@ -2,7 +2,7 @@
 // 127.0.0.1, a temporary data directory, the mock provider, offline mode and no provider keys (every `*_API_KEY` of the
 // environment and the documented provider variables are set empty, which also beats a repository `.env`). Used for a
 // password (`startPasswordServer`) and for the screenshots, which need a data directory with nothing but their own
-// chats. `stop()` ends the process and removes the directory.
+// chats. `stop()` ends the process and removes the directory. Phase 12: `HF_CLAUDE_HOME=0` (no Claude Code home scan).
 import type { Buffer } from 'node:buffer'
 import type { ChildProcess } from 'node:child_process'
 import { spawn } from 'node:child_process'
@@ -129,6 +129,9 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
       HF_DATA_DIR: dataDir,
       HF_MOCK_PROVIDER: '1',
       HF_OFFLINE: '1',
+      // Phase 12: never the real `~/.claude` (the server-side scan is off; `GET /api/claude-import/home` answers
+      // `disabled`), like `pnpm start:e2e`.
+      HF_CLAUDE_HOME: '0',
       ...options.env,
     },
     stdio: ['ignore', 'pipe', 'pipe'],

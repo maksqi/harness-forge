@@ -22,6 +22,7 @@ import {
 import { createFakeRemoteRoutes } from '../../testing/fake-remote.ts'
 import { RELATIVE_FROM_URL_REASON } from './catalog.ts'
 import { createMarketplaceService } from './index.ts'
+import { OFFLINE_MESSAGE } from './sources.ts'
 import { createSourcesTestApp } from './testing.ts'
 import { GITHUB_API_BASE, GITHUB_CODELOAD_BASE, GITHUB_RAW_BASE } from './types.ts'
 
@@ -269,6 +270,31 @@ describe('hF_OFFLINE', () => {
     await app.t.db.insert(marketplacesTable).values({ id, name: 'online', source: { type: 'github', repo: 'acme/online' }, resolvedRef: 'a'.repeat(40), catalog: null, fetchedAt: now, lastError: null, createdAt: now, updatedAt: now })
     await expect(app.t.deps.marketplaces.refresh(id)).rejects.toMatchObject({ code: 'conflict', details: { reason: 'offline' } })
     expect((await app.t.deps.marketplaces.get(id)).lastError).toMatchObject({ code: 'conflict' })
+  })
+
+  it('one message says what is refused and what still works (W12.18-T4): marketplaces, entries and the GitHub source', async () => {
+    expect(OFFLINE_MESSAGE).toBe('Adding, refreshing and installing from marketplaces and GitHub need the network (HF_OFFLINE=1). npm and URL installs from the install dialog, zip uploads and local folders work offline.')
+    const { routes } = marketplaceRoutes()
+    const app = await start({ routes, env: { HF_OFFLINE: '1' } })
+    const offline = { code: 'conflict', message: OFFLINE_MESSAGE, details: { reason: 'offline' } }
+    await expect(app.t.deps.marketplaces.add({ source: { type: 'github', repo: CLAUDE_MARKETPLACE.repo } })).rejects.toMatchObject(offline)
+    await expect(app.t.deps.marketplaces.add({ source: { type: 'url', url: CLAUDE_MARKETPLACE.jsonUrl } })).rejects.toMatchObject(offline)
+    const folder = await tempFolder()
+    await writeFileTree(folder, claudeMarketplaceFiles())
+    const added = await app.t.deps.marketplaces.add({ source: { type: 'path', path: folder } })
+    // A folder marketplace's npm, archive and GitHub entries need the network, like the install dialog's GitHub source.
+    for (const plugin of ['npm-plugin', 'archive-plugin', 'gh-plugin'])
+      await expect(app.t.deps.installer.inspect({ source: 'marketplace', marketplaceId: added.id, plugin })).rejects.toMatchObject(offline)
+    await expect(app.t.deps.installer.inspect({ source: 'github', repo: CLAUDE_MARKETPLACE.githubRepo })).rejects.toMatchObject(offline)
+    // Its relative entries are local folders.
+    await expect(app.t.deps.installer.inspect({ source: 'marketplace', marketplaceId: added.id, plugin: 'notes-only' })).resolves.toMatchObject({ format: 'claude' })
+    expect(app.routes.requests).toEqual([])
+
+    const now = Date.now()
+    const id = createMarketplaceId()
+    await app.t.db.insert(marketplacesTable).values({ id, name: 'online', source: { type: 'github', repo: 'acme/online' }, resolvedRef: 'a'.repeat(40), catalog: null, fetchedAt: now, lastError: null, createdAt: now, updatedAt: now })
+    await expect(app.t.deps.marketplaces.refresh(id)).rejects.toMatchObject(offline)
+    expect((await app.t.deps.marketplaces.get(id)).lastError).toMatchObject({ code: 'conflict', message: OFFLINE_MESSAGE })
   })
 })
 

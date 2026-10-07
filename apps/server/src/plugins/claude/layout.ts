@@ -2,10 +2,11 @@
 // the plugin tree are commands, agents, skills, output styles, hook files and MCP files, from the folder layout and the
 // effective `plugin.json` (paths are stored without the leading `./`; `.` is the root).
 //
-// - `commands`: the `commands/` scan (`**/*.md`; subfolders become name segments). `plugin.json` `commands` paths
-//   **replace** the scan (a file is one command named by its stem, a folder is scanned like `commands/`), unless a
-//   marketplace entry added them (`appendToDefault`); its object form adds inline commands (read by the reader). A field
-//   whose every path was refused (and without inline commands) falls back to the scan.
+// - `commands`: the `commands/` scan (`**/*.md`; subfolders become name segments). `plugin.json` `commands` **replace**
+//   the scan, in every form: paths (a file is one command named by its stem, a folder is scanned like `commands/`) and
+//   the object form (inline commands, read by the reader) alike, as in Claude Code. Only the commands a marketplace
+//   entry adds to a `plugin.json` that declares none are appended to the scan (`appendToDefault`). A field whose every
+//   path was refused (and without inline commands) falls back to the scan.
 // - `agents`: the `agents/` scan (`**/*.md`, subfolders become segments); `plugin.json` `agents` (`.md` files) replace it.
 // - `skills`: `skills/<name>/SKILL.md`, and a root `SKILL.md` when there is no `skills/` folder; `plugin.json` `skills`
 //   paths **add** to that (`.` = the root `SKILL.md`; a folder holding a `SKILL.md` is one skill, else its

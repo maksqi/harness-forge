@@ -13,7 +13,7 @@
 //    preview expired. Start again." with Start again (back to step 1). Escape, × or the overlay ask "Discard this
 //    import?" (Keep reviewing focused); nothing closes the dialog while the import runs.
 // 3. ClaudeImportResult (+ the turned-off lines) → Open Customize (the tab of the first imported kind), MCP servers (when
-//    servers were imported: Plugins → Core MCP) and Close.
+//    servers were imported: Plugins → MCP servers) and Close.
 //    The server's warnings show as they are (W12.17: it never repeats the per-item turned-off notes, so nothing is
 //    filtered).
 // Errors: `claude-import-error` (`data-code`, `role="alert"`). After an apply the customizations, the hooks, the shell
@@ -268,7 +268,7 @@ function openCustomize(): void {
     router.push({ path: '/settings/customize', query: { ...query, tab } }).catch(() => {})
 }
 
-/** MCP servers: closes the dialog and opens Plugins → Core MCP, where the imported servers are listed. */
+/** MCP servers: closes the dialog and opens Plugins → MCP servers (`core-mcp`), where the imported servers are listed. */
 function openServers(): void {
   emit('update:open', false)
   router.push(`/plugins/${CORE_MCP_PLUGIN_ID}`).catch(() => {})

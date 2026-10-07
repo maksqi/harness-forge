@@ -164,6 +164,12 @@ export function tabOf(tab: unknown): CustomizeTab {
   return CUSTOMIZE_TAB_ORDER.find(item => CUSTOMIZE_TAB_VALUES[item] === value) ?? 'agent'
 }
 
+/**
+ * W12.19 (docs/UI.md 14.5): the classes of a sheet of this page that make the frozen SheetContent's × Close (a `size-8`
+ * button at `top-4 right-4`) a 40 px target on a coarse pointer, around the same center.
+ */
+export const SHEET_CLOSE_TOUCH_CLASS = 'pointer-coarse:**:data-[slot=sheet-close]:top-3 pointer-coarse:**:data-[slot=sheet-close]:right-3 pointer-coarse:**:data-[slot=sheet-close]:size-10'
+
 /** W11.19: the space kept beside the active tab when the tab row scrolls it into view (px). */
 export const TAB_REVEAL_INSET = 16
 

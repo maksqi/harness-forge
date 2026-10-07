@@ -69,7 +69,7 @@ Where styles live (a higher source wins a name; the others are listed as **Shado
 | Source | Where |
 |---|---|
 | Built-in | Default, Explanatory, Learning |
-| Plugins | `contributes.outputStyles` or `ctx.outputStyles.register` (plugin API 1.5.0) |
+| Plugins | `contributes.outputStyles` or `ctx.outputStyles.register` (plugin API 1.5.0 and later); a Claude Code plugin's `output-styles/*.md` (v1.8, named `<plugin>:<name>`: [Claude Code plugins](claude-code-plugins.md)) |
 | Personal | Settings → Customize → **Output styles** → **New output style** (or **Import…** a `.md` file) |
 | Project, `.claude/` | `.claude/output-styles/*.md` in the project folder |
 | Project, `.harness/` | `.harness/output-styles/*.md` (wins over everything) |
@@ -98,8 +98,9 @@ The project line, the plan-mode block and the lists of agent types and skills st
 ## 5. Claude Code compatibility
 
 Claude Code style files work as they are when you put them into `.claude/output-styles/` of a project (or import them
-into Settings → Customize). Differences: harness-forge never reads `~/.claude/output-styles` (import your personal
-styles instead), and a chat's choice is remembered per chat instead of per folder.
+into Settings → Customize). Differences: harness-forge never reads `~/.claude/output-styles` by itself (copy your
+personal styles, and the `outputStyle` of your `settings.json` as the global default, with
+[Import from Claude Code](claude-code-import.md)), and a chat's choice is remembered per chat instead of per folder.
 
 ## 6. Troubleshooting
 

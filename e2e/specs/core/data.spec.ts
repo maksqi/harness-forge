@@ -10,6 +10,8 @@
 // Phase 11 (W11.13, ADR-048 - ADR-051): a personal output style travels with the backup like the other definitions
 // ("3 personal definitions restored"); a personal hook, a project approval and a project MCP variable never do (no
 // entry of the zip holds the hook's command, the approved hash or the variable's value), and delete-all keeps all three.
+// Phase 12 (W12.14, ADR-056): the personal command has a `` !`…` `` shell line, so the restore brings it back turned off
+// and the result panel says "1 command turned off (it runs shell lines)"; the second import (kept) says nothing.
 import type { Locator, Page } from '@playwright/test'
 import type { Buffer } from 'node:buffer'
 import type { PasswordServer } from '../../helpers/index.ts'
@@ -86,7 +88,7 @@ test.describe('data', () => {
         chats.push({ id: chat.id, title: chat.title ?? '', text })
       }
       await owner.client.customizations.create({ body: { kind: 'agent', content: definitionFile({ name: definitions.agent, description: 'Kept in the backup.' }, 'PERSONA: backup\n') } })
-      await owner.client.customizations.create({ body: { kind: 'command', content: definitionFile({ name: definitions.command, description: 'A personal command.' }, 'Personal: $ARGUMENTS\n') } })
+      await owner.client.customizations.create({ body: { kind: 'command', content: definitionFile({ name: definitions.command, description: 'A personal command.' }, 'Status: !`echo hi`\nPersonal: $ARGUMENTS\n') } })
       await owner.client.customizations.create({ body: { kind: 'style', content: definitionFile({ name: definitions.style, description: 'A personal style.' }, 'Answer briefly.\n') } })
       // Phase 11: a personal hook (Notification: never shown, never run here), and a project whose hook is approved and
       // whose MCP variable is stored (the login above is fresh).
@@ -229,7 +231,10 @@ test.describe('data', () => {
     const imported = await importBackup(page, backup)
     await expect(imported).toContainText('Imported 2 chats')
     await expect(imported.locator('[data-slot="data-import-customizations"]')).toHaveText('3 personal definitions restored')
+    // Phase 12: the command with a shell line came back turned off, and the panel counts it.
+    await expect(imported.locator('[data-slot="data-import-turned-off"]')).toHaveText('1 command turned off (it runs shell lines)')
     expect(await listed()).toEqual(all)
+    expect((await session.client.customizations.list({})).items.find(item => item.source === 'user' && item.name === definitions.command)).toMatchObject({ enabled: false })
     await expect(imported.getByTestId(testIds.dataImportItem)).toHaveCount(2)
     for (const chat of chats)
       await expect(byTestId(imported, testIds.dataImportItem, { 'data-chat-id': chat.id })).toHaveAttribute('data-status', 'imported')
@@ -253,6 +258,7 @@ test.describe('data', () => {
     const again = await importBackup(page, backup)
     await expect(again).toContainText('Imported 0 chats · skipped 2')
     await expect(again.locator('[data-slot="data-import-customizations"]')).toHaveText('0 personal definitions restored · 3 kept')
+    await expect(again.locator('[data-slot="data-import-turned-off"]')).toHaveCount(0)
     await expect(again.getByTestId(testIds.dataImportItem)).toHaveCount(2)
     await expect(byTestId(again, testIds.dataImportItem, { 'data-status': 'skipped' })).toHaveCount(2)
     for (const chat of chats)

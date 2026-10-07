@@ -3,10 +3,11 @@
 //
 // - `list`: the stored rows (no network), the suggestions not added yet (matched by name or source) and the installed
 //   plugins with an update available (`updates.ts`, from the stored catalogs and the `plugins` rows).
-// - `add`: `HF_OFFLINE=1` refuses `github` / `url` sources (409 `offline`); at most `LIMITS.marketplacesMax` (409
-//   `exists`); the source is fetched at once (`fetch.ts`: a GitHub ref resolved to its commit, a hosted JSON, a server
-//   folder) and parsed (`catalog.ts`); a reserved name (`isOfficialMarketplaceName`) is accepted only from a repository of
-//   `anthropics` (400); a taken name is 409 `exists`; nothing is stored when any of this fails.
+// - `add`: `HF_OFFLINE=1` refuses `github` / `url` sources (409 `offline`, `offlineError` of ./sources.ts, also for
+//   `refresh`); at most `LIMITS.marketplacesMax` (409 `exists`); the source is fetched at once (`fetch.ts`: a GitHub ref
+//   resolved to its commit, a hosted JSON, a server folder) and parsed (`catalog.ts`); a reserved name
+//   (`isOfficialMarketplaceName`) is accepted only from a repository of `anthropics` (400); a taken name is 409
+//   `exists`; nothing is stored when any of this fails.
 // - `refresh`: fetches again; a failure keeps the stored catalog, stores `lastError` (and emits) and throws; a
 //   `marketplace.json` that now has another name is refused like a failure (installed plugins name the marketplace).
 //   Plugins whose update state changed get `plugin.changed`.
@@ -33,6 +34,7 @@ import { createPluginRecordStore } from '../state.ts'
 import { diagnosticDtos, entryDto, readCatalog } from './catalog.ts'
 import { fetchMarketplaceSource } from './fetch.ts'
 import { githubBases, isRepoOfOwner, shortSha } from './github.ts'
+import { offlineError } from './sources.ts'
 import { createMarketplaceStore } from './store.ts'
 import { hasUpdate, installedEntries, updatesOf } from './updates.ts'
 
@@ -86,14 +88,6 @@ export function marketplaceDetail(row: StoredMarketplace, records: readonly Plug
 export function summaryOf(detail: MarketplaceDetail): MarketplaceSummary {
   const { entries: _entries, diagnostics: _diagnostics, ...summary } = detail
   return summary
-}
-
-function offlineError(): HarnessError {
-  return new HarnessError({
-    code: 'conflict',
-    message: 'This server is offline (HF_OFFLINE=1): GitHub and URL marketplaces cannot be fetched. Folder marketplaces still work.',
-    details: { reason: 'offline' },
-  })
 }
 
 function reservedNameError(name: string): HarnessError {

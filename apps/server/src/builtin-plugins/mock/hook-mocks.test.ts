@@ -222,6 +222,13 @@ describe('mock:hooks call / run (rule 3)', () => {
     expect(planOf(before, ['shell'])).toEqual(text('Called shell: ok | Exit code: 0 stdout: hi | hooks: none'))
   })
 
+  it('a request right after an ended turn (the history ends in a tool result) opens a new turn (Phase 12)', () => {
+    // A PreToolUse prompt hook ended the turn: the stored denial reaches the model as `error-text`, with no closing text.
+    const ended = step('mock_call_1', 'write_file', { type: 'error-text', value: 'Blocked by hook: no writes' })
+    const prompt = [BASE, user('call write_file {"path":"a.txt","content":"x"}'), ...ended, user('call write_file {"path":"a.txt","content":"x"}')]
+    expect(callsOf(planOf(prompt, ['write_file']))).toEqual([{ id: 'mock_call_2', name: 'write_file', input: { path: 'a.txt', content: 'x' } }])
+  })
+
   it('the detail is cut to 120 code points', () => {
     const long: LanguageModelV4ToolResultOutput = { type: 'text', value: `Exit code: 0\nstdout:\n${'word '.repeat(60)}` }
     const plan = planOf([BASE, user('run seq'), ...step('mock_call_1', 'shell', long)], ['shell'])

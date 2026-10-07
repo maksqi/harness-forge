@@ -13,10 +13,14 @@
 //   `write_file` runs without a card (allowed badge). PostToolUse: `additionalContext` -> "Hook added context ·
 //   PostToolUse" (Show context) and the agent reads it; exit 1 -> "A PostToolUse hook failed: exit 1" (Show output);
 //   a hook that outlives its 1 s timeout -> "A PostToolUse hook timed out after 1s".
+// - Phase 12 (W12.14, docs/UI.md 9.14; ADR-057): the editor's Event select lists the 13 events in order with their
+//   descriptions; the Type toggle's Prompt works only for its seven events ("Prompt hooks work only for …", Save keeps
+//   the editor open), a matcher-less event hides Tools, and a prompt-capable one clears the error. Nothing is saved.
 import type { Locator, Page } from '@playwright/test'
 import type { PasswordServer } from '../../helpers/index.ts'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
+import { HOOK_EVENTS, PROMPT_HOOK_EVENTS } from '../../../packages/shared/src/index.ts'
 import {
   byTestId,
   expect,
@@ -314,5 +318,45 @@ test.describe('the Hooks tab', () => {
     await expect(byTestId(personal, testIds.hooksEmpty, { 'data-source': 'personal' })).toBeVisible()
     await expect(newButton).toBeFocused()
     expect((await session.client.hooks.list({ query: {} })).items.filter(item => item.source === 'personal')).toEqual([])
+  })
+})
+
+test.describe('the hook editor (Phase 12)', () => {
+  test('the 13 events with their descriptions; the Prompt type only for its seven events @smoke', async ({ page }) => {
+    await page.goto('/settings/customize?tab=hooks')
+    await expect(page.getByTestId(testIds.hooksPanel)).toBeVisible()
+    await page.getByTestId(testIds.customizeNew).click()
+    const editor = page.getByTestId(testIds.hookEditor)
+    await expect(editor).toHaveAttribute('data-mode', 'new')
+    const event = editor.getByTestId(testIds.hookEvent)
+    await expect(event).toHaveAttribute('data-value', 'PreToolUse')
+
+    // The Event select: every event in order, each with its description.
+    await event.click()
+    const options = page.getByRole('option')
+    await expect(options).toHaveCount(HOOK_EVENTS.length)
+    expect(await options.evaluateAll(items => items.map(item => item.getAttribute('data-value')))).toEqual([...HOOK_EVENTS])
+    for (const name of ['PostToolUseFailure', 'PermissionRequest', 'SubagentStart', 'PostCompact', 'SessionEnd'])
+      await expect(page.getByRole('option').and(page.locator(`[data-value="${name}"]`)).locator('.text-muted-foreground'), `${name} has a description`).toHaveText(/\w{3,}/)
+    await page.getByRole('option').and(page.locator('[data-value="SessionEnd"]')).click()
+    await expect(event).toHaveAttribute('data-value', 'SessionEnd')
+    await expect(editor.getByTestId(testIds.hookMatcher)).toHaveCount(0)
+
+    // Prompt on an event that takes none: the rule shows once a save is tried, and the editor stays open.
+    await editor.getByTestId(testIds.hookType).locator('[data-value="prompt"]').click()
+    await editor.getByTestId(testIds.hookPrompt).fill('Is the session done?')
+    await editor.getByTestId(testIds.hookSave).click()
+    const rule = editor.locator('[data-field="hook-event-error"]')
+    await expect(rule).toHaveText(`Prompt hooks work only for ${PROMPT_HOOK_EVENTS.slice(0, -1).join(', ')} and ${PROMPT_HOOK_EVENTS.at(-1)}.`)
+    await expect(editor).toBeVisible()
+
+    // A prompt-capable event clears it; Cancel asks before the edits are dropped.
+    await event.click()
+    await page.getByRole('option').and(page.locator('[data-value="Stop"]')).click()
+    await expect(event).toHaveAttribute('data-value', 'Stop')
+    await expect(rule).toHaveCount(0)
+    await editor.getByRole('button', { name: 'Cancel' }).click()
+    await page.getByTestId(testIds.hookDiscardConfirm).click()
+    await expect(editor).toBeHidden()
   })
 })

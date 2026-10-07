@@ -276,7 +276,7 @@ async function onConfirmRemove(): Promise<void> {
         <div class="flex min-w-0 flex-1 items-start gap-3">
           <Switch
             :id="ids.auto"
-            class="mt-0.5 pointer-coarse:after:-inset-y-[11px]"
+            class="mt-0.5 pointer-coarse:after:-inset-y-3"
             :model-value="autoOn"
             :aria-describedby="ids.autoDescription"
             :data-testid="testIds.dataCleanupAuto"

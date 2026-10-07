@@ -20,7 +20,9 @@
 // Phase 12 (docs/UI.md 7.34; W12.13): a group's "Select all {n}" is mixed while some but not all of its pending items in
 // the filter are selected (`selectAllState`): it draws its own `Minus` through the frozen Checkbox's default slot (reka
 // sets `aria-checked="mixed"` and `data-state="indeterminate"`), filled like a checked box; a click on a mixed box
-// selects every pending item of the group, a second click clears them.
+// selects every pending item of the group, a second click clears them. W12.19: the fill names the dark variant too
+// (`dark:data-[state=indeterminate]:bg-primary`, like the Checkbox's own `dark:data-checked:bg-primary`), else the
+// Checkbox's `dark:bg-input/30` wins in the dark theme and the mixed box looks empty.
 import type { ProjectTrustList, TrustItem, TrustItemKind } from '@harness-forge/shared'
 import { LIMITS } from '@harness-forge/shared'
 import { CheckIcon, CircleAlertIcon, MinusIcon, ShieldAlertIcon } from '@lucide/vue'
@@ -482,7 +484,7 @@ function onOpenChange(value: boolean): void {
                       :model-value="selectAllState(group.items, selected)"
                       :disabled="busy"
                       :data-testid="testIds.projectTrustSelectAll"
-                      class="data-[state=indeterminate]:border-primary data-[state=indeterminate]:bg-primary data-[state=indeterminate]:text-primary-foreground pointer-coarse:after:-inset-[13px]"
+                      class="data-[state=indeterminate]:border-primary data-[state=indeterminate]:bg-primary data-[state=indeterminate]:text-primary-foreground dark:data-[state=indeterminate]:bg-primary pointer-coarse:after:-inset-[13px]"
                       @update:model-value="value => selectAll(group.items, value)"
                     >
                       <template #default="{ state }">

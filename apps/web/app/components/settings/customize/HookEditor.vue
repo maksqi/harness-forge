@@ -11,11 +11,11 @@
 // SubagentStart / SubagentStop); a command hook's Command (`hook-command`, a mono textarea), Arguments (one per line,
 // `data-field="hook-args"`) and Run in the background (`data-field="hook-async"`); a prompt hook's Prompt (`hook-prompt`,
 // mono), Model (SettingsModelSelect, none = "Hook model", `data-field="hook-model"`) with the line "Runs with {model}
-// (Settings → General → Hook model). It answers ok, or not ok with a reason." and Continue on block (PreToolUse and
-// PostToolUse, `data-field="hook-continue-on-block"`); Only when (`if`, tool events, `data-field="hook-if"`), Status
-// message (`data-field="hook-status-message"`), Timeout (`hook-timeout`, 1 – 600 seconds, empty = 60, 30 for a prompt
-// hook) and On (`hook-editor-enabled`; personal hooks only: settings files have no on / off). TanStack Form holds the
-// fields; the inline errors show once a field was left or a save was tried.
+// (Settings → General → Agent → Hook model). It answers ok, or not ok with a reason." and Continue on block
+// (PreToolUse and PostToolUse, `data-field="hook-continue-on-block"`); Only when (`if`, tool events,
+// `data-field="hook-if"`), Status message (`data-field="hook-status-message"`), Timeout (`hook-timeout`, 1 – 600
+// seconds, empty = 60, 30 for a prompt hook) and On (`hook-editor-enabled`; personal hooks only: settings files have no
+// on / off). TanStack Form holds the fields; the inline errors show once a field was left or a save was tried.
 // Save hook (`hook-save`, also Mod+Enter in any field): a personal hook → `useFreshAuth().run(() => hooks.create(body) |
 // hooks.update(id, patch), { required })` ("Saving a hook needs your password."; an edit that only turns the hook off
 // needs none; the bodies from `hookCreateBody` / `hookPatch`) → toast "Hook saved", `saved`, close. A project hook
@@ -31,6 +31,7 @@
 // (edit, project); reka returns focus to the element that had it when the sheet opened. Tab is never captured.
 // Props, emits and the root test id are frozen from Gate P11-0b (C39 stub, + the Phase 12 `mode: 'project'` / `target`
 // of C46); implementation W11.8, Phase 12 W12.12.
+// W12.19: on a coarse pointer the select triggers, the switches and the × Close are 40 px targets.
 import type { HookEvent, ModelAliasName, PersonalHook } from '@harness-forge/shared'
 import type { AcceptableValue } from 'reka-ui'
 import type { HookDraft, ProjectHookTarget } from './hooks'
@@ -62,6 +63,7 @@ import { useSettingsStore } from '~/stores/settings'
 import { toHarnessError } from '~/utils/errors'
 import { testIds } from '~/utils/testids'
 import SettingsModelSelect from '../SettingsModelSelect.vue'
+import { SHEET_CLOSE_TOUCH_CLASS } from './customize'
 import {
   argsError,
   commandError,
@@ -663,6 +665,7 @@ function onWhere(value: AcceptableValue, handleChange: (value: string) => void):
       :data-testid="testIds.hookEditor"
       :data-mode="mode"
       class="gap-0 data-[side=right]:w-full data-[side=right]:sm:max-w-2xl"
+      :class="SHEET_CLOSE_TOUCH_CLASS"
       @open-auto-focus="onOpenAutoFocus"
     >
       <SheetHeader class="border-b pr-14">
@@ -720,7 +723,7 @@ function onWhere(value: AcceptableValue, handleChange: (value: string) => void):
                     :id="ids.where"
                     data-field="hook-where"
                     :data-value="state.value"
-                    class="w-full sm:w-80 pointer-coarse:h-10"
+                    class="w-full sm:w-80 pointer-coarse:data-[size=default]:h-10"
                   >
                     <span :class="state.value === 'personal' ? undefined : 'font-mono text-[13px]'">{{ state.value === 'personal' ? HOOK_COPY.personal : state.value }}</span>
                   </SelectTrigger>
@@ -781,7 +784,7 @@ function onWhere(value: AcceptableValue, handleChange: (value: string) => void):
                     :data-value="state.value"
                     :aria-describedby="ids.eventHelp"
                     :aria-invalid="shownError('event') ? true : undefined"
-                    class="w-full sm:w-64 pointer-coarse:h-10"
+                    class="w-full sm:w-64 pointer-coarse:data-[size=default]:h-10"
                   >
                     <span>{{ HOOK_EVENT_INFO[state.value].label }}</span>
                   </SelectTrigger>
@@ -912,7 +915,7 @@ function onWhere(value: AcceptableValue, handleChange: (value: string) => void):
                     :model-value="state.value"
                     :aria-describedby="ids.continueOnBlockHelp"
                     data-field="hook-continue-on-block"
-                    class="mt-0.5 pointer-coarse:after:-inset-y-[11px]"
+                    class="mt-0.5 pointer-coarse:after:-inset-y-3"
                     @update:model-value="value => field.handleChange(value === true)"
                   />
                 </div>
@@ -986,7 +989,7 @@ function onWhere(value: AcceptableValue, handleChange: (value: string) => void):
                     :model-value="state.value"
                     :aria-describedby="ids.asyncHelp"
                     data-field="hook-async"
-                    class="mt-0.5 pointer-coarse:after:-inset-y-[11px]"
+                    class="mt-0.5 pointer-coarse:after:-inset-y-3"
                     @update:model-value="value => field.handleChange(value === true)"
                   />
                 </div>
@@ -1079,7 +1082,7 @@ function onWhere(value: AcceptableValue, handleChange: (value: string) => void):
                   :id="ids.enabled"
                   :model-value="state.value"
                   :data-testid="testIds.hookEditorEnabled"
-                  class="pointer-coarse:after:-inset-y-[11px]"
+                  class="pointer-coarse:after:-inset-y-3"
                   @update:model-value="value => field.handleChange(value === true)"
                 />
               </div>

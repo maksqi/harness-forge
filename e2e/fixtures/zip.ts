@@ -11,6 +11,11 @@ export interface ZipEntry {
   data: string | Uint8Array
   /** Store instead of deflate. */
   store?: boolean
+  /**
+   * Unix permission bits of a regular file (e.g. `0o755` for a script, Phase 12): written as the external attributes
+   * with "version made by" Unix, like `zip` on Linux / macOS does. Omitted: no attributes (the reader's default).
+   */
+  mode?: number
 }
 
 const LOCAL_HEADER = 0x04034B50
@@ -18,6 +23,9 @@ const CENTRAL_HEADER = 0x02014B50
 const END_OF_CENTRAL_DIRECTORY = 0x06054B50
 const UTF8_NAMES = 0x0800
 const VERSION = 20
+/** "Version made by" Unix (3) and 2.0: the external attributes hold `st_mode` in their high 16 bits. */
+const VERSION_MADE_BY_UNIX = (3 << 8) | VERSION
+const REGULAR_FILE = 0o100000
 /** 2026-01-01 00:00:00 in MS-DOS format. */
 const DOS_DATE = ((2026 - 1980) << 9) | (1 << 5) | 1
 const DOS_TIME = 0
@@ -50,7 +58,7 @@ export function createZip(entries: readonly ZipEntry[]): Buffer {
 
     const central = Buffer.alloc(46)
     central.writeUInt32LE(CENTRAL_HEADER, 0)
-    central.writeUInt16LE(VERSION, 4)
+    central.writeUInt16LE(entry.mode === undefined ? VERSION : VERSION_MADE_BY_UNIX, 4)
     central.writeUInt16LE(VERSION, 6)
     central.writeUInt16LE(UTF8_NAMES, 8)
     central.writeUInt16LE(method, 10)
@@ -64,7 +72,7 @@ export function createZip(entries: readonly ZipEntry[]): Buffer {
     central.writeUInt16LE(0, 32)
     central.writeUInt16LE(0, 34)
     central.writeUInt16LE(0, 36)
-    central.writeUInt32LE(0, 38)
+    central.writeUInt32LE(entry.mode === undefined ? 0 : ((REGULAR_FILE | (entry.mode & 0o7777)) << 16) >>> 0, 38)
     central.writeUInt32LE(offset, 42)
     centrals.push(central, name)
 

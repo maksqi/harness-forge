@@ -213,9 +213,11 @@ the provider docs and models.dev when implementing** (all chat seed ids below ex
 `smallModelId` is used for chat titles (when `titleModelRef` is unset) and for the credential ping when the provider
 has no listing; without `smallModelId` the ping takes the first chat seed, else the first visible chat model, never an
 image, transcription or speech model (Phase 6). Phase 12 (ADR-057): it also answers **prompt hooks**: a prompt hook
-uses its handler's `model`, else the setting `hookModelRef` (Settings → General → Agent → "Hook model"), else the run
-provider's `smallModelId`, else the run's own model (the order of title generation); the call has reasoning off, no
-retries and at most 512 output tokens, and writes a usage row with purpose `hook`.
+tries its handler's `model` (a model ref, or a Claude model name resolved as below), then the setting `hookModelRef`
+(Settings → General → Agent → "Hook model"), then the run provider's `smallModelId`, then the run's own model, and uses
+the first that resolves (the order of title generation), so a handler `model` naming a missing provider falls back to
+the next one; only when none resolves is the hook a non-blocking error ("No model is available for the prompt hook.").
+The call has reasoning off, no retries and at most 512 output tokens, and writes a usage row with purpose `hook`.
 
 **Claude model names** (Phase 12, ADR-058): agents, skills, commands and hooks from Claude Code may name a model as
 `sonnet`, `opus`, `haiku` or `fable` (also `opusplan`, read as `opus`, and a `[1m]` suffix, dropped) or as a full
@@ -514,14 +516,16 @@ Definitions:
   carrier or of a SubagentStop round). A block's **first line** is the first non-empty line of the text between its
   tags, trimmed; its **item** is `<Event>:<first line>` (the `event` attribute, a colon, no space). Blocks are searched
   in the user and assistant messages of the prompt, never in the system text.
-- **The user text**: the text parts of the turn's user message (the last user message of the prompt that is not a steer
-  and is not made of hook blocks only), with every hook block removed, joined with a space, trimmed; it is the text
-  after command
-  expansion, so the outputs of `` !`cmd` `` spans and the `<file path="…">` blocks of `@path` references are part of it.
+- **The user text**: the text parts of the turn's user message (the last user message of the prompt that is not made of
+  hook blocks only; since Gate P12-B a user message right after a tool message opens the turn too: a turn a hook ended
+  (`continue: false`) or a superseded approval leaves the history ending in a tool result), with every hook block
+  removed, joined with a space, trimmed; it is the text after command expansion, so the outputs of `` !`cmd` `` spans and the `<file path="…">` blocks of `@path` references are part of it.
   An empty user text reads `(empty message)`. The **trigger** is the last non-empty line of the user text, trimmed (so a
   command whose body has no placeholder reaches the trigger rules with its appended input).
-- **The turn** and its results follow the shared Turn rule from the turn's user message; a user message that holds only
-  hook blocks (hook context injected at a step boundary) never opens a turn.
+- **The turn** and its results run from the turn's user message (above), not from the shared Turn rule (whose steer
+  reading `mock:steer` keeps); a user message that holds only hook blocks (hook context injected at a step boundary)
+  never opens a turn. A denial stored in an earlier turn reaches the model as an `error-text` result (the AI SDK
+  converts a stored `output-denied` part), so an old denied call reads `failed` there.
 - **The steer reading** (reported by C38): rules 1(a) and 2 look at the last user message of the prompt only when it is
   not a steer (a user message right after a tool message, or after such a steer). A Stop carrier and a SubagentStop
   round follow an assistant message, so they count; PostToolUse context or feedback delivered at a step boundary is a
@@ -590,24 +594,34 @@ e2e specs** (with the `mock:hooks` chat model above). Model info: `kind: 'chat'`
 tool), listed and visible like the other chat mocks, so it can be chosen as the **Hook model** (`hookModelRef:
 'mock:prompt-hook'`) or named by a handler (`"model": "mock:prompt-hook"`).
 
-**Input**: the text of the call's user messages in order (the prompt-hook runner sends the hook's prompt with
-`$ARGUMENTS` replaced by the hook input JSON, or the JSON appended when the prompt has no `$ARGUMENTS`). The mock looks
-for the **first marker** in that text, so a marker written in the hook's prompt wins over one inside the hook input
-(which follows the prompt unless the prompt places `$ARGUMENTS` before its own marker); the system text is never
-searched.
+**Input**: the text parts of the call's user messages in order (each message's text parts joined with a newline, the
+messages joined with a newline; the prompt-hook runner sends the hook's prompt with `$ARGUMENTS` replaced by the hook
+input JSON, or the JSON appended after a blank line when the prompt has no `$ARGUMENTS`). The mock looks for the
+**first marker** in that text, so a marker written in the hook's prompt wins over one inside the hook input (which
+follows the prompt unless the prompt places `$ARGUMENTS` before its own marker); the system text and assistant messages
+are never searched. A marker is `[[ph:<keyword>` followed by `]]` or a blank, then everything up to the first `]]`;
+`ok`, `fenced` and `invalid` take nothing but blanks before `]]`, and an unknown keyword is no marker (the search goes
+on).
 
 | Marker | Answer (the whole text of the reply) |
 |---|---|
 | `[[ph:ok]]` | `{"ok":true}` |
-| `[[ph:deny R]]` | `{"ok":false,"reason":"R"}` (`R` = the text between `deny` and `]]`, trimmed; may be empty) |
+| `[[ph:deny R]]` | `{"ok":false,"reason":"R"}` (`R` = the text between `deny` and `]]`, trimmed; an empty `R` (`[[ph:deny]]`) answers `{"ok":false,"reason":""}`, which `readPromptHookAnswer` reads as invalid: a "no" needs a reason) |
 | `[[ph:impossible R]]` | `{"ok":false,"reason":"R","impossible":true}` |
 | `[[ph:fenced]]` | the line `Here is my answer:`, then `{"ok":false,"reason":"fenced"}` inside a `json` code fence (proves that `readPromptHookAnswer` strips fences and takes the first object) |
-| `[[ph:invalid]]` | `I cannot decide.` (no JSON: a non-blocking error, "The model's answer could not be read.") |
+| `[[ph:invalid]]` | `I cannot decide.` (no JSON: a non-blocking error, "The hook model did not answer with a JSON object.") |
 | none | `{"ok":true}` |
 
 **Usage** is fixed at 10 input and 5 output tokens (`finishReason: 'stop'`), so a probe can check the `hook` usage row
 and the chat totals. It streams and answers at once: there are **no waits** (timeouts are tested with
-`MockLanguageModelV4` in unit tests), and it ignores the reasoning setting and the output-token cap.
+`MockLanguageModelV4` in unit tests), and it ignores the reasoning setting and the output-token cap; an aborted call
+rejects with its signal's reason.
+
+**Choosing it**: the runner tries, in order, the handler's `model`, the setting `hookModelRef`, the run provider's small
+model and the run model, and uses the first that resolves (`promptHookModelCandidates`, ARCHITECTURE.md 6.37). The mock
+provider's `smallModelId` stays `echo` (chat titles depend on it), so a prompt hook without a model in a mock chat runs
+on `mock:echo`, whose reply is not a verdict (a non-blocking error); probes and e2e specs therefore set `hookModelRef:
+'mock:prompt-hook'` (or the handler's `model`).
 
 **How the probes use it** (ARCHITECTURE.md 6.37): `mock:hooks` as the chat model of a project chat with a prompt hook
 on `PreToolUse` · `Write` (model `mock:prompt-hook`): `call write_file {"path":"a.txt","content":"[[ph:deny no writes]]"}`
@@ -619,7 +633,10 @@ never approves: in Ask mode the card still shows); `[[ph:fenced]]` → denied wi
 prompt holds `[[ph:deny run the tests]]` → a turn with `origin: 'hook'` (`Hook continuation: run the tests`), and
 `[[ph:impossible done]]` → the stop is allowed with the reason recorded; a `UserPromptSubmit` prompt hook and a message
 holding `[[ph:deny no secrets]]` → 409 `hook-blocked`, nothing stored; a handler whose `model` names a missing provider
-→ a non-blocking error; with `hooksEnabled: false` or `HF_SAFE_MODE=1` no prompt hook runs (no usage row).
+(or a Claude model name without a mapped model) falls back to `hookModelRef`, then the small model, then the run model
+(only when none of them resolves is it a non-blocking error, "No model is available for the prompt hook."); with
+`hooksEnabled: false` or `HF_SAFE_MODE=1` no prompt hook runs (no usage row; `HF_WORKSPACE_SHELL=0` does not stop
+them).
 
 ## 9. Declarative provider templates (wizard)
 

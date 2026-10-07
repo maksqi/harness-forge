@@ -148,7 +148,8 @@ Read this file fully before doing anything. Then read the docs listed in "Where 
   `packages/shared/src/util/claude-plugins.ts`); a plugin that runs anything needs a trust pin over a sha256 of its
   **whole file tree**; Claude entries use qualified names `<pluginId>:<name>` (`catalogNameSchema`); plugin variables
   (`${CLAUDE_PLUGIN_ROOT}`, `${CLAUDE_PLUGIN_DATA}`, `${user_config.KEY}`, …) are substituted only by
-  `substitutePluginVariables`, never from `process.env`. Marketplaces (table `marketplaces`, `mkt_` ids) and GitHub
+  `substitutePluginVariables`, never from `process.env`; in exec-form hook `args` a `${user_config.KEY}` stays as written in
+  the registry and every listing and is filled only when the hook process starts (from `CLAUDE_PLUGIN_OPTION_<KEY>`). Marketplaces (table `marketplaces`, `mkt_` ids) and GitHub
   sources use **HTTPS archives only, never git**: ref → commit via the GitHub API, the commit's zip from codeload, all
   through `safeFetch`; `HF_OFFLINE=1` refuses them (409 `offline`). The home-folder import reads **only** the allowlist
   of `packages/shared/src/util/claude-import.ts` (`isClaudeHomeImportPath`) at `HF_CLAUDE_HOME` (default `~/.claude`,

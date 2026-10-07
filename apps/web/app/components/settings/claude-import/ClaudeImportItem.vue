@@ -185,7 +185,7 @@ function onVariable(name: string, value: string | number): void {
             :disabled="choice === null"
             :aria-describedby="ids.note"
             data-action="enable"
-            class="pointer-coarse:after:-inset-y-[11px]"
+            class="pointer-coarse:after:-inset-y-3"
             @update:model-value="onEnable"
           />
           Turn on after import

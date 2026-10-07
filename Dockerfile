@@ -18,8 +18,10 @@
 #     node apps/server/dist/main.mjs rotate-key
 #
 # Import from Claude Code (ADR-055): HF_CLAUDE_HOME=0 turns the server-side scan off (the browser upload still works).
-# To scan a Claude Code folder from the container, mount it read-only (readable by uid 1000) and name it:
-#   docker run ... -v ~/.claude:/claude:ro -e HF_CLAUDE_HOME=/claude harness-forge
+# To scan a Claude Code folder from the container, mount it read-only (readable by uid 1000) and name it; mount
+# ~/.claude.json next to it so its MCP servers are found too (the scan reads a .claude.json beside a folder named .claude):
+#   docker run ... -v ~/.claude:/home/node/.claude:ro -v ~/.claude.json:/home/node/.claude.json:ro \
+#     -e HF_CLAUDE_HOME=/home/node/.claude harness-forge
 
 ARG NODE_VERSION=24
 

@@ -1,7 +1,8 @@
-// The `skill` tool of `core-agent` (Phase 10, ADR-045; policy `safe`, no workspace access, timeout 60 s): loads the body
-// of one skill of the run's catalog, so the model reads a skill's instructions only when a task matches it (the skills
-// block of the instructions lists the names and descriptions). The host offers it only when the run's catalog has at
-// least one active skill (`assembleTools({ skillsAvailable })`) and never to a sub-agent (ARCHITECTURE.md 6.25).
+// The `skill` tool of `core-agent` (Phase 10, ADR-045; policy `safe`, no workspace access; timeout 600 s since Phase 12,
+// `SKILL_TOOL_TIMEOUT_MS`, see below, 60 s before): loads the body of one skill of the run's catalog, so the model reads
+// a skill's instructions only when a task matches it (the skills block of the instructions lists the names and
+// descriptions). The host offers it only when the run's catalog has at least one active skill (`assembleTools({
+// skillsAvailable })`) and never to a sub-agent (ARCHITECTURE.md 6.25).
 //
 // P10-0b (C32): the definition (name, description, schema, policy, timeout, model text) is final and frozen. `execute`
 // (W10.5) loads the skill through the run's agent scope (`agentScopeOf(c).loadSkill(name, c.signal)`, `chat/skills.ts`):

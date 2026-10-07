@@ -19,15 +19,19 @@ rows), section 17 "Claude Code plugins" and the example 15 (h) `claude-review-ki
 model `mock:prompt-hook` from `docs/PROVIDERS.md` (8, "Prompt hook mock (Phase 12)": the probe contract); the user
 guides `docs/guides/claude-code-import.md` and `docs/guides/claude-code-plugins.md` (and the updated
 `docs/guides/hooks-and-project-mcp.md` and `docs/guides/customizing-agents.md`). The UI.md, ARCHITECTURE.md, PLUGINS.md
-and PROVIDERS.md sections and the guides were written by D17 in P12-0a, API.md by C40. W12.15 reconciles every doc with
-the code in P12-B.
+and PROVIDERS.md sections and the guides were written by D17 in P12-0a, API.md by C40. W12.15 reconciled every doc with
+the code in P12-B (the facts that changed are listed under "Deviations found while building", P12-B).
 
-**Status (2026-10-06): in progress.** P12-00 is done: `c89ca97` `ci: pin ubuntu-24.04 runners` (pushed; actionlint
-1.7.12 clean), `bdc9348` `chore(deps): patch shell-quote (GHSA-pqg4-j6r4-53mv)` (a pnpm override; on `main`, pushed with
-the next push the user asks for), the baseline `pnpm check` on `b3fa452` green with **11787 tests** and `git status`
-unchanged, the six ignored advisories re-checked (still unpatched; katex < 0.18.2 through mermaid is low and left as
-is), `.tmp/v17` (a worktree of `b3fa452`) installed and built, the old `.tmp` content archived. P12-0a runs now.
-"Deviations found while building" is empty until the first gate; "Outcome" is filled in at each gate.
+**Status (2026-10-07): done** (v1.8; the final gate passed, see "Outcome"). P12-00: `c89ca97`
+`ci: pin ubuntu-24.04 runners` (pushed; actionlint 1.7.12 clean), `bdc9348` `chore(deps): patch shell-quote
+(GHSA-pqg4-j6r4-53mv)` (a pnpm override), the baseline `pnpm check` on `b3fa452` green with **11787 tests** and `git
+status` unchanged, the six ignored advisories re-checked (still unpatched; katex < 0.18.2 through mermaid is low and
+left as is), `.tmp/v17` (a worktree of `b3fa452`) installed and built, the old `.tmp` content archived. P12-0a `215fe1f`
+(12678 tests); P12-0b `9809bab` (12988 tests, v1.7 upgrade probe 95/98 with the 3 failures moved to Gate P12-A, seam
+probe 76/76); P12-A `1e62a59` (13720 tests, G12P probes 345/347 → green after the W12.16 fix, the P11-A / P10-A / P9-A /
+P8-A regressions passed, e2e 191, the W12.16 / W12.17 fix-ups at the gate); P12-B + the final gate `chore: final gate for
+harness-forge v1.8` (13740 tests, e2e 215 ×3, probes 360/360, v1.7 → v1.8 upgrade 98/98 + 69/69, Docker 63/63). "Deviations found while building" holds
+what each wave changed; "Outcome" the gate results.
 
 Paths: `S` = `apps/server/src`, `W` = `apps/web/app`, `SH` = `packages/shared/src`, `SDK` = `packages/plugin-sdk/src`.
 File:line references point at `main` = `b3fa452` (the source files are identical on `bdc9348`; the references drift as
@@ -197,8 +201,9 @@ red P12-A gate items) = 24 (27 with the probe and seed agents, 29 with the fix-u
   budget holds); the `@screenshots` run (dark + light) was reviewed; the README images come from the `@readme`
   full-frame shots.
 - The gate probes (Gate P12-A, repeated at the final gate on a fresh `.tmp/e2e`) and the regressions (the coordinator's
-  copies `.tmp/gates/P12-A/p11a-regression.mjs` and `.tmp/gates/P12-A/p10a-regression.mjs`, `node
-  .tmp/gates/P9-A/probe.mjs`, `node .tmp/gates/P8-A/probe.mjs ws git`) are green.
+  copies `node .tmp/gates/P12-A-p11a-regression/probe.mjs` and `node
+  .tmp/gates/P12-A-p10a-regression/p10a-regression.mjs`, `node .tmp/gates/P9-A/probe.mjs`, `node
+  .tmp/gates/P8-A/probe.mjs ws git`) are green.
 - CI on `main` is green on `ubuntu-24.04` (`check`, `e2e`, `docker`, `audit`, `actionlint`); the advisory decision is
   recorded.
 - **Upgrade**: a v1.7 data directory (seeded by the `.tmp/v17` build) boots on v1.8 with every chat, secret, share,
@@ -244,8 +249,8 @@ the real `~/.claude`.
 | P12-0b | coordinator (K3) + C43, C44, C45, C46, G12B | schema + migration `0009`, server skeleton, chat seams (complete), mocks + fixtures + fake remote (complete), web skeleton, upgrade probe, FREEZE |
 | Gate P12-0b | coordinator | audit, `0009` inspection, `nuxi prepare`, check, build, CSP test, e2e 191 on a fresh `.tmp/e2e`, v1.7 upgrade probe + seam no-op probe (G12B), FREEZE, commit |
 | P12-A | W12.1 – W12.13 + G12P (one launch) | features + gate probes |
-| Gate P12-A | coordinator | CCR batch, `nuxi prepare`, check, build, CSP, G12P probes + the P11-A / P10-A copies, P9-A, P8-A regressions, e2e 191, screenshots, audit, commit |
-| P12-B | W12.14, W12.15 (+ W12.16 / W12.17 when the P12-A gate is red) | feature e2e, docs reconciliation |
+| Gate P12-A | coordinator + W12.16 / W12.17 (the red items) | CCR batch, `nuxi prepare`, check, build, CSP, G12P probes + the P11-A / P10-A copies, P9-A, P8-A regressions, e2e 191, audit, commit (the screenshot review moved to P12-B) |
+| P12-B | W12.14, W12.15 (+ W12.18 / W12.19 only if needed) | feature e2e, screenshots, docs reconciliation |
 | Final gate | coordinator | e2e ×3, v1.7 → v1.8 upgrade, Docker, audit, hermetic `pnpm test`, ROADMAP, memory, commit |
 
 ## Deviations from the plan (binding)
@@ -484,6 +489,75 @@ reconciled docs (W12.15) follow these, not the task text further down.
   - `renderCommandExpansion(…, options)` applies `${NAME}` and `\$` in text parts without argument placeholders.
   - W12.13 fixed the pre-existing `mobile/agent.spec.ts:191` flake (a stopped row lingers 3 s in the open dock).
   - The screenshot review of the new screens moves to P12-B (W12.14 writes the screenshot specs).
+  - W12.17 (web fix-ups at the gate): `SubmittedPlaceholder` shows the hook status message (`HOOK_ACTIVITY.label`,
+    trimmed to one line) instead of "Running hooks…"; the install review's Enter rules: Enter on the review, a checkbox,
+    Install or during IME composition does nothing, Enter in the trust consent's password field acts as Install
+    (`TrustConsent` emit `confirm`), a wrong password refocuses the field with its text selected, `TrustDialog` keeps
+    Enter-to-trust in its password field; the import dialog's warning filter (`isSupersededWarning`) is removed
+    (`ClaudeImportApplyResult.warnings` is always empty; server warnings are shown as they are).
+  - Coordinator CCRs: `W/stores/settings.ts` rolls a failed object setting (`modelAliases`) back by value
+    (`isPatchedValue`); `W/components/chat/chat-context.ts` `HOOK_ACTIVITY` gains `label?`. Accepted additive CCRs:
+    `childSpec(…, catalog?)` (W12.6), `CustomizationDraft.arguments?` / `.modelAlias?` and the `CustomizationSection`
+    slot `heading-actions` (W12.11). Kept as local adapters: `workspace.changed` → the hooks store through `HooksPanel`'s
+    own `useServerEvents().on` (W12.12), `PluginInstallRequestInput` / `requestedFormat()` for the multipart `format`
+    field (W12.2; `PluginInstallInput` unchanged). Deferred: `commandInvocationSchema.disallowedTools?` (W12.7; the
+    `turnToolRestrictionFor` workaround re-reads the run catalog's entry, a W12.16 candidate if a regenerate drifts).
+  - Cuts: only the plugins store's `updates` filter (W12.9; the seven filters stay). No first cut of the Wave P12-A list was
+    needed.
+  - Accepted from G12P: the inspection's executables list every command handler, also a refused shell-form
+    `${user_config.*}` one and one of an unknown event (a conservative trust consent); `HF_OFFLINE=1` stops the
+    models.dev download and the plugin-source requests but not the provider listing refresh of a stored key (v1.7
+    behavior; backlog candidate).
+  - Regressions: the copies live at `.tmp/gates/P12-A-p11a-regression/` and `.tmp/gates/P12-A-p10a-regression/` (not the
+    paths of open point 18); the P11-A copy was updated for the Phase 12 changes (`type` is a known `POST /hooks` key,
+    `transcript_path` in the payload, the prompt hook of a project settings file is read and listed as pending); P9-A
+    needed its archived `upgrade-v14` seed restored from `.tmp/_archive/`.
+  - e2e pins updated for the new behavior: `core/customize.spec.ts` (the exported file keeps `model: sonnet`, two
+    notes), `plugins/plugin-hooks.spec.ts` (an untrusted plugin hook is a pending "Plugin not trusted" row), and by
+    W12.12 `core/hook-import.spec.ts` (a prompt hook imports; the ignored example is an http hook) and
+    `core/settings.spec.ts` (the Agent description).
+  - W12.1 was denied `chmod 0755` on `examples/plugins/claude-review-kit/scripts/after-edit.sh`; not needed (the hook
+    runs it as `sh <path>`), surfaced to the user.
+- **P12-B — W12.15 docs** (the docs now follow the code; the items below are what the reconciliation decided or found):
+  - Documented as built: the `skill` tool timeout 600 s; the prompt-hook model is the first of handler `model` →
+    `hookModelRef` → the run provider's small model → the run model that resolves (a missing provider falls back; only
+    "No model is available for the prompt hook." is an error); exec-form `${user_config.KEY}` stays as written in every
+    listing and is filled at spawn (the variables table of `S/plugins/claude/variables.ts`); the tree hash is re-checked
+    on load, reload and trust only, and a **linked** folder is pinned by its path (its edits never ask again); the
+    stopped background row lingers 3 s; the install review's Enter rules; `start:e2e` with `HF_OFFLINE=1
+    HF_CLAUDE_HOME=0`; the `HF_TEST_REMOTE_URL` rules (npm included); the settings splice formatting and BOM (open point
+    11); every project-definition save emits one `project-trust.changed` (also before the project config was first
+    read; W12.4's "only when read before" note is superseded by W12.5's code); a reserved, builtin or duplicate import
+    name is `conflict` with skip / rename.
+  - Docker (relayed from the Docker probe): `-v ~/.claude:/claude:ro -e HF_CLAUDE_HOME=/claude` never reads
+    `~/.claude.json` (it is read next to a root named `.claude`, else inside the root); the docs give the two-mount form
+    `-v ~/.claude:/home/node/.claude:ro -v ~/.claude.json:/home/node/.claude.json:ro -e
+    HF_CLAUDE_HOME=/home/node/.claude` and say the one-mount form imports everything except the `.claude.json` MCP
+    servers (the `Dockerfile` comment is the coordinator's).
+  - Resolved by **W12.18** (server fix-ups round 2, Gate P12-B; the docs follow): a Claude Code plugin exports as its
+    installed tree below `<id>/` (same paths and bytes, the owner exec bit kept as Unix attributes, UTF-8 path order,
+    `<id>-<version>.zip`, the same skip rules and caps; a folder without files is a 400; a marketplace plugin's entry
+    overlay is not in the zip, so a re-inspection gives another hash); a Claude Code plugin without a manifest version
+    keeps its npm version (`origin.npmVersion` / the stored record version) on every load (`versionHintOf`); a scan
+    stopped at shutdown answers 409 `conflict` `reason: 'busy'`; every offline refusal has one text,
+    `OFFLINE_MESSAGE` ("Adding, refreshing and installing from marketplaces and GitHub need the network (HF_OFFLINE=1).
+    npm and URL installs from the install dialog, zip uploads and local folders work offline."); the `layout.ts` /
+    `claude-plugins.ts` comments now say that the object form of `commands` replaces the folder scan (the code was
+    right). Also fixed with it: the `skill` timeout comments of `core-agent`, the "rename only" comment of
+    `SH/util/claude-import.ts`, the "Core MCP" comments of `ClaudeImportDialog.vue`, AGENT.md (the exec-form spawn
+    substitution) and the `Dockerfile` recipe (the two-mount form).
+  - Still open (the docs describe the code; fix-up candidates or accepted): reloading a Claude plugin that runs commands
+    needs no fresh auth; installing or removing a marketplace plugin emits only `plugin.changed`;
+    `ClaudeImportApplyBody.instructions` never decides (the item's action wins) and any action on an `unchanged` /
+    `unsupported` / `invalid` item is a 400; the scan's "could not be read in time" 409 looks unreachable; `\$` and
+    `${NAME}` now apply to every command body (v1.6 / v1.7 bodies included); the import note `model-alias` says "model
+    aliases" (UI.md 15 keeps "aliases" out of UI copy); the hook editor's title "New project hook" is never shown (New
+    hook with Where = a project file keeps "New hook").
+  - Comments and files outside W12.15's globs that still state the plan: `S/services/claude-import/{types,apply}.ts`
+    (the stub note, `warnings`), `S/chat/commands.ts:245`, `S/plugins/types.ts` / `SH/schemas/plugins.ts` (`sourceRef`,
+    trust hash), the prompt-hook model line of `settings/customize/hooks.ts` ("Settings → General → Hook model": the
+    select sits in General → Agent) and `examples/plugins/claude-review-kit/README.md` (the `/review` alias: the builtin
+    `/review` always wins).
 
 ## Rules for every Phase 12 agent
 
@@ -2823,10 +2897,11 @@ home>`; restarts with `HF_OFFLINE=1`, `HF_CLAUDE_HOME=0`, `HF_SAFE_MODE=1` where
 1. `node scripts/audit-ownership.mjs .tmp/waves/P12-A.json`
 2. Batch the CCRs → `nuxi prepare` → `pnpm check` → `pnpm build` → the CSP test with `HF_TEST_REQUIRE_WEB_BUILD=1`.
 3. `mv .tmp/e2e .tmp/e2e-old-p12-a` → the G12P probes (the catalogue above).
-4. **Regressions** (one after another: shared ports) — the coordinator's copy `.tmp/gates/P12-A/p11a-regression/` (open
-   point 18; every section incl. its v1.6 upgrade on `.tmp/upgrade-v16`), the P10-A copy
-   `.tmp/gates/P11-A/p10a-regression.mjs` (incl. its v1.5 upgrade), `node .tmp/gates/P9-A/probe.mjs` (incl. its v1.4
-   upgrade) and `node .tmp/gates/P8-A/probe.mjs ws git`.
+4. **Regressions** (one after another: shared ports) — the coordinator's copy `.tmp/gates/P12-A-p11a-regression/` (open
+   point 18, as built; every section incl. its v1.6 upgrade on `.tmp/upgrade-v16`), the P10-A copy
+   `.tmp/gates/P12-A-p10a-regression/p10a-regression.mjs` (incl. its v1.5 upgrade), `node .tmp/gates/P9-A/probe.mjs`
+   (incl. its v1.4 upgrade; the `upgrade-v14` seed restored from `.tmp/_archive/`) and `node .tmp/gates/P8-A/probe.mjs ws
+   git`.
 5. `pnpm test:e2e` (`chromium` + `mobile` + `tablet`; the feature specs come in P12-B) → 191 green.
 6. `E2E_SCREENSHOTS=1 pnpm test:e2e --grep @screenshots` → review `.tmp/screenshots/{dark,light}/` (the new screens on
    desktop and 390 px).
@@ -2924,7 +2999,12 @@ home>`; restarts with `HF_OFFLINE=1`, `HF_CLAUDE_HOME=0`, `HF_SAFE_MODE=1` where
 
 ### W12.16 / W12.17 fix-ups
 
-Launched only for red P12-A gate items (W12.16 server, W12.17 web), with the globs of those items.
+Planned for P12-B, they ran **at Gate P12-A** instead (see "Deviations found while building", Gate P12-A): W12.16
+(server) fixed the red security item (a sensitive `${user_config.*}` value in the exec-form `args` of `GET /hooks`:
+`S/plugins/claude/{register,variables}.ts`, `S/services/hooks/{exec-form,snapshot}.ts`), W12.17 (web) the message-level
+hook status message, the install review's Enter rules and the import warning filter. Fix-ups found in P12-B would be
+W12.18 (server) / W12.19 (web), with the globs of their items; the ownership file below keeps the empty W12.16 / W12.17
+rows of `.tmp/waves/P12-B.json`.
 
 ### Wave P12-B ownership
 
@@ -2988,10 +3068,16 @@ Launched only for red P12-A gate items (W12.16 server, W12.17 web), with the glo
 
 ## Outcome
 
-Completed by the coordinator at each gate ("audit" is the ownership audit of `scripts/audit-ownership.mjs`). P12-00 is
-summarized in the status line at the top.
+Completed by the coordinator at each gate ("audit" is the ownership audit of `scripts/audit-ownership.mjs`).
 
-(Nothing yet.)
+| Wave | Agents | Gate result | Commit |
+|---|---|---|---|
+| P12-00 | coordinator | baseline `pnpm check` 11787 green on `b3fa452`, `git status` unchanged; runners pinned to `ubuntu-24.04` (actionlint clean); the shell-quote override; the six ignored advisories still unpatched (katex via mermaid low, left as is); design reports in `.tmp/p12-designs`; `.tmp/v17` built; `.tmp` archived | `c89ca97`, `bdc9348` |
+| P12-0a | coordinator (K1, K2, contract skeletons, K3 seed by K3S), C40, C41, C42, D16, D17 | audit ok (117 paths); frozen install ok (TypeScript 6.0.3, `yaml` 2.9.1); 12678 tests; build ok (web js +9.5 KB gz vs v1.7); CSP 38/38; `pluginApiVersion` 1.6.0; the 12 new routes answer 501 / 400; e2e 191 on a fresh `.tmp/e2e` (after the customize pin; the pre-existing `mobile/agent.spec.ts:191` flake → W12.13); `pnpm audit --prod` clean (6 ignored); v1.7 seed 30 chats / 160 messages / 14 approvals | `215fe1f` |
+| P12-0b | coordinator (K3), C43, C44, C45, C46, G12B | audit ok (190 paths); `0009` = 1 CREATE TABLE + 1 CREATE UNIQUE INDEX + 6 ALTER ADD (a second generate: no changes); 12988 tests; build ok; CSP 38/38; e2e 191; v1.7 upgrade probe 95/98 (the v1.8-only project prompt hook not listed yet → W12.5, moved to Gate P12-A; nothing ran) + seam probe 76/76; audit clean; FREEZE | `9809bab` |
+| P12-A | W12.1 – W12.13, G12P, W12.16 / W12.17 (fix-ups at the gate) | audit ok (331+ paths, no agent touched a frozen file); 13720 tests; build ok; CSP 38/38; G12P probes 345/347 → the red security item fixed by W12.16 (group 1 48/48 on the rebuild) + 1 spec-differs decision (the prompt-hook model fallback); `pnpm test` group 4/4 (git status identical, no `.claude*` in the repository); regressions P11-A copy / P10-A copy / P9-A / P8-A passed; e2e 191 on a fresh `.tmp/e2e` (the fixed `mobile/agent.spec.ts:191` 3× green); audit clean; screenshot review moved to P12-B | `1e62a59` |
+| P12-B | W12.14, W12.15, W12.18 / W12.19 (fix-ups for the bugs W12.14 found), W12.20 (investigation), G12D (Docker probe) | audit ok; the new specs 3× green (W12.14), five `fixme`s re-enabled after the fixes (the `mock:hooks` turn-rule CCR, the hooks store race, the Select in a Sheet, the 40 px switches, the Claude plugin export); docs reconciled with the code (W12.15), README "v1.8" | (final gate commit) |
+| Final gate v1.8 | coordinator | frozen install ok (TypeScript 6.0.3); 13740 tests, `git status` unchanged by `pnpm check`, the only `.claude*` path in the repository is the review-kit `plugin.json`; build ok; CSP 38/38; G12P probes 360/360 on fresh data + regressions P11-A copy / P10-A copy / P9-A / P8-A passed; e2e 215 passed ×3 (6 screenshot tests skipped); `@screenshots` dark + light reviewed, README images refreshed (+ `marketplaces-dark`, `claude-import-dark`); `pnpm audit --prod` clean (6 ignored); real v1.7 → v1.8 upgrade on a fresh seed: G12B 98/98 + G12P upgrade 69/69 (every v1.7 approval kept, nothing new ran before approval); Docker G12D 63/63 (scan off by default, a read-only mounted home as uid 1000 without the canaries, plugin scripts 0755, hooks / MCP after trust only, no orphans) | `chore: final gate for harness-forge v1.8` |
 
 ---
 

@@ -140,6 +140,10 @@ describe('marketplaceStrip: below sm', () => {
     const trigger = document.querySelector<HTMLElement>('[data-slot="marketplace-select"]')!
     expect(trigger.getAttribute('aria-label')).toBe('Marketplace')
     expect(trigger.textContent).toContain('claude-plugins-official 14 · 2 updates')
+    // W12.19: 40 px tall (the SelectTrigger's own `data-[size=default]:h-9` is replaced, a plain `h-10` would lose to it).
+    const classes = trigger.className.split(/\s+/)
+    expect(classes).toContain('data-[size=default]:h-10')
+    expect(classes).not.toContain('data-[size=default]:h-9')
     // The row menu stays next to the Select.
     expect(byTestId(testIds.marketplaceRowMenu)).not.toBeNull()
     await openWithKeyboard(trigger)

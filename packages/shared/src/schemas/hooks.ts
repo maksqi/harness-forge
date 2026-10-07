@@ -415,8 +415,9 @@ export const hookEntrySchema = z.discriminatedUnion('kind', [
     ...hookEntryBaseShape,
     kind: z.literal('command'),
     /**
-     * Phase 12 (ADR-057): the handler type; absent = `command`. Plugin hooks of an untrusted plugin are listed with
-     * `state: 'pending'` (the web shows "Plugin not trusted").
+     * Phase 12 (ADR-057): the handler type; absent = `command`. The command hooks of an untrusted harness-format plugin
+     * are listed with `state: 'pending'` (the web shows "Plugin not trusted"); an untrusted Claude Code plugin's hooks
+     * are listed on its plugin page only (`claude.executables`), not here.
      */
     type: hookHandlerTypeSchema.optional(),
     event: hookEventSchema,

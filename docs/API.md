@@ -76,8 +76,8 @@ to `/login` only on `code === 'unauthorized'`, never on the HTTP status alone.
 | `validation_error` | 400 | - | Request failed zod validation or a semantic check (`details.issues`). |
 | `unauthorized` | 401 | `login` | No valid session (or wrong password on `POST /auth/login`). |
 | `forbidden` | 403 | `login` when fresh auth is missing | Origin check failed, fresh auth missing, operation not allowed for this resource (builtin plugin, read-only source). |
-| `not_found` | 404 | - | Unknown route, chat, message, plugin, provider, file, tool, MCP server, icon, share link, project, shell rule or change batch, a file the chat never changed, a missing project folder, or a message that is not queued (already delivered or started; Phase 9). Every failure of the public share routes is the same 404 (section 5.20). |
-| `conflict` | 409 | - | State conflict: a run is active for the chat (or for a chat of the project, also during a rewind, revert or undo), id already exists (also a project for the folder, the new folder, or a shell rule), stale file `baseEtag` (or a revert's `expectedSha`), password managed by `HF_PASSWORD`, another maintenance operation (import, delete-all, key rotation, file cleanup) is running, a chat request arrives during a key rotation, the message to delete is its only version, the master key comes from `HF_MASTER_KEY` or fails the key check, a message is queued for a chat with no active run and no pending approval, or the chat's queue is full (Phase 9), a `UserPromptSubmit` / `SessionStart` hook refused the turn or a queued message, a project command's `!` spans are not approved, a command's `!` spans while `HF_WORKSPACE_SHELL=0`, a project approval whose hashes changed, or the personal hook (100) or project MCP variable (50) limit (Phase 11), `HF_OFFLINE=1` refusing a marketplace or GitHub fetch, a marketplace name or plugin id already taken, the marketplace limit (50), the import scan while `HF_CLAUDE_HOME=0`, or a project definition file that changed since the editor read it (Phase 12). |
+| `not_found` | 404 | - | Unknown route, chat, message, plugin, provider, file, tool, MCP server, icon, share link, project, shell rule or change batch, a file the chat never changed, a missing project folder, or a message that is not queued (already delivered or started; Phase 9); Phase 12: a marketplace or one of its entries, a GitHub repository, ref or folder, an expired import plan, the Claude Code folder of a scan, an unavailable project folder or a missing project definition file. Every failure of the public share routes is the same 404 (section 5.20). |
+| `conflict` | 409 | - | State conflict: a run is active for the chat (or for a chat of the project, also during a rewind, revert or undo), id already exists (also a project for the folder, the new folder, or a shell rule), stale file `baseEtag` (or a revert's `expectedSha`), password managed by `HF_PASSWORD`, another maintenance operation (import, delete-all, key rotation, file cleanup) is running, a chat request arrives during a key rotation, the message to delete is its only version, the master key comes from `HF_MASTER_KEY` or fails the key check, a message is queued for a chat with no active run and no pending approval, or the chat's queue is full (Phase 9), a `UserPromptSubmit` / `SessionStart` hook refused the turn or a queued message, a project command's `!` spans are not approved, a command's `!` spans while `HF_WORKSPACE_SHELL=0`, a project approval whose hashes changed, or the personal hook (100) or project MCP variable (50) limit (Phase 11), `HF_OFFLINE=1` refusing a marketplace or GitHub fetch, a marketplace name or plugin id already taken, the marketplace limit (50), the import scan while `HF_CLAUDE_HOME=0` or stopped by a shutdown (without `details`), or a project definition file that changed since the editor read it (Phase 12). |
 | `payload_too_large` | 413 | - | Body, upload, zip, backup, recording, share snapshot or file over the limit (`details.limitBytes`; a backup with too many entries: `details.limitEntries`). |
 | `provider_not_configured` | 400 | `configure-provider` | Provider unknown/disabled or required credentials missing, wherever a model ref is resolved (chat, media routes, `ctx.ai`, `ctx.models.resolve`, `ctx.images`, `generate_image`; an unknown provider since Phase 7). Returned before any streaming. Routes that address a provider by id (`/providers/:id/...`, `GET /models?providerId=`, model prefs, custom models) answer `404 not_found` for an unknown one. |
 | `auth_invalid` | 502 | `configure-provider` | Provider rejected the credentials (upstream 401/403). |
@@ -97,7 +97,7 @@ to `/login` only on `code === 'unauthorized'`, never on the HTTP status alone.
 | Code | `details` shape |
 |---|---|
 | `validation_error` | `{ issues: Array<{ path: Array<string \| number>; message: string; code: string }> }` (zod issues, flattened) |
-| `conflict` | `{ reason: 'run-active' \| 'exists' \| 'stale' \| 'disabled' \| 'env-password' \| 'insecure-bind' \| 'busy' \| 'only-version' \| 'env-key' \| 'key-mismatch' \| 'run-idle' \| 'queue-full' \| 'hook-blocked' \| 'untrusted' \| 'offline', chatId?: string, hook?: HookData }` (15 reasons) (`run-active`: a run holds the chat, or its active leaf moved during a version switch or delete, section 5.9, or a chat of the project runs while the project is deleted, or the chat runs while it is moved, sections 5.9 and 5.22, or a chat of the project runs during a rewind, revert or undo, section 5.24; `exists`: a chat or message id is already used, a project already uses the folder, the new folder exists, section 5.22, or the shell rule already exists, section 5.25, or the id of a queued message is already queued or stored, section 5.26, or 100 personal hooks are stored, section 5.31, or 50 variables of a project, section 5.33 (Phase 11); `stale`: a plugin file or package changed since it was read or reviewed, or a chat request was stopped before its history was stored, section 5.10, or the file to revert changed since the client read it (`expectedSha`), section 5.24, or (Phase 11) a project trust approval whose hash is no longer current ("The project files changed while you reviewed them. Review them again."), section 5.32; `busy`: another maintenance operation (import, delete-all, key rotation, file cleanup) is running, sections 5.19 and 5.23, or a chat request arrives while a key rotation runs, section 5.10; `only-version`: the message to delete has no other version, section 5.9; `env-key`: the master key comes from `HF_MASTER_KEY` and is rotated offline, section 5.23; `key-mismatch`: the master key fails the stored key check, section 5.23; `run-idle` (Phase 9): a message was queued for a chat with no active run and no pending approval (send it with `POST /chat` instead), section 5.26; `queue-full` (Phase 9): the chat already has 10 queued messages, section 5.26; `hook-blocked` (Phase 11, ADR-048): a `UserPromptSubmit` hook blocked (exit 2, `decision: 'block'`, `continue: false`, or a plugin `prompt.submit` `block`) or a `SessionStart` hook answered `continue: false`, and nothing was stored or queued (the message is "A hook blocked this message: <reason>", or "A hook blocked this message." without one; `chatId` is set), sections 5.10 and 5.26; only this reason sets `hook` = the `HookData` record of the blocking event (section 4.31; checked by `conflictDetailsSchema` only as an object, its shape is `hookDataSchema`); `untrusted` (Phase 11, ADR-049 / ADR-052): a project command file with `` !`cmd` `` spans whose trust hash is not approved, section 5.10 (the web opens the project trust review); `disabled` also answers a command with spans while `HF_WORKSPACE_SHELL=0` and a project MCP reconnect in safe mode (Phase 11); `offline` (Phase 12, ADR-054): `HF_OFFLINE=1` refuses adding or refreshing a marketplace and installing from a `github` or `marketplace` source (npm and URL installs are unchanged), sections 5.16 and 5.34; Phase 12 also answers `exists` for a marketplace name already added, the 50th marketplace and a plugin id held by another origin or format (sections 5.16 and 5.34), `stale` for a project definition file whose sha256 is not `expectedSha256` (section 5.36) and `disabled` for the import scan while `HF_CLAUDE_HOME=0` (section 5.35)) |
+| `conflict` | `{ reason: 'run-active' \| 'exists' \| 'stale' \| 'disabled' \| 'env-password' \| 'insecure-bind' \| 'busy' \| 'only-version' \| 'env-key' \| 'key-mismatch' \| 'run-idle' \| 'queue-full' \| 'hook-blocked' \| 'untrusted' \| 'offline', chatId?: string, hook?: HookData }` (15 reasons) (`run-active`: a run holds the chat, or its active leaf moved during a version switch or delete, section 5.9, or a chat of the project runs while the project is deleted, or the chat runs while it is moved, sections 5.9 and 5.22, or a chat of the project runs during a rewind, revert or undo, section 5.24; `exists`: a chat or message id is already used, a project already uses the folder, the new folder exists, section 5.22, or the shell rule already exists, section 5.25, or the id of a queued message is already queued or stored, section 5.26, or 100 personal hooks are stored, section 5.31, or 50 variables of a project, section 5.33 (Phase 11); `stale`: a plugin file or package changed since it was read or reviewed, or a chat request was stopped before its history was stored, section 5.10, or the file to revert changed since the client read it (`expectedSha`), section 5.24, or (Phase 11) a project trust approval whose hash is no longer current ("The project files changed while you reviewed them. Review them again."), section 5.32; `busy`: another maintenance operation (import, delete-all, key rotation, file cleanup) is running, sections 5.19 and 5.23, or a chat request arrives while a key rotation runs, section 5.10, or (Phase 12) the shutdown stopped a Claude Code folder scan, section 5.35; `only-version`: the message to delete has no other version, section 5.9; `env-key`: the master key comes from `HF_MASTER_KEY` and is rotated offline, section 5.23; `key-mismatch`: the master key fails the stored key check, section 5.23; `run-idle` (Phase 9): a message was queued for a chat with no active run and no pending approval (send it with `POST /chat` instead), section 5.26; `queue-full` (Phase 9): the chat already has 10 queued messages, section 5.26; `hook-blocked` (Phase 11, ADR-048): a `UserPromptSubmit` hook blocked (exit 2, `decision: 'block'`, `continue: false`, or a plugin `prompt.submit` `block`) or a `SessionStart` hook answered `continue: false`, and nothing was stored or queued (the message is "A hook blocked this message: <reason>", or "A hook blocked this message." without one; `chatId` is set), sections 5.10 and 5.26; only this reason sets `hook` = the `HookData` record of the blocking event (section 4.31; checked by `conflictDetailsSchema` only as an object, its shape is `hookDataSchema`); `untrusted` (Phase 11, ADR-049 / ADR-052): a project command file with `` !`cmd` `` spans whose trust hash is not approved, section 5.10 (the web opens the project trust review); `disabled` also answers a command with spans while `HF_WORKSPACE_SHELL=0` and a project MCP reconnect in safe mode (Phase 11); `offline` (Phase 12, ADR-054): `HF_OFFLINE=1` refuses adding or refreshing a `github` or `url` marketplace and installing from a `github` source or a marketplace entry that needs the network (folder marketplaces and their relative entries, npm and URL installs are unchanged), sections 5.16 and 5.34; Phase 12 also answers `exists` for a marketplace name already added, a 51st marketplace (section 5.34) and a plugin id installed from another source, format or origin (section 5.16), `stale` for a project definition file whose sha256 is not `expectedSha256` (section 5.36) and `disabled` for the import scan while `HF_CLAUDE_HOME=0` (section 5.35)) |
 | `payload_too_large` | `{ limitBytes: number }`, or `{ limitEntries: number }` when `GET /data/export` refuses a backup for its entry count (section 5.19) |
 | `plugin_error` | `{ pluginId: string; phase?: 'load' \| 'setup' \| 'dispose' \| 'hook' \| 'tool' \| 'build' \| 'install' }` |
 | `internal_error` | `{ requestId: string }` |
@@ -283,24 +283,25 @@ Other exports:
 | `createHookId` / `createHookRecordId` | `() => string` `hok_` / `hev_` + 16 chars of `[0-9A-Za-z]` (Phase 11, ADR-048; generated by the server) |
 | `createMarketplaceId` / `createImportPlanId` | `() => string` `mkt_` / `cip_` + 16 chars of `[0-9A-Za-z]` (Phase 12, ADR-054 / ADR-055; generated by the server; also exported as `newMarketplaceId` / `newImportPlanId`, the names of the Phase 12 design) |
 | `QUALIFIED_NAME_PATTERN` / `CATALOG_NAME_PATTERN` / `qualifiedName` / `splitQualifiedName` | qualified catalog names (Phase 12, ADR-053; section 4.1): `<pluginId>:<segment>[:<segment>…]` (1–3 segments of `^[a-z][a-z0-9-]{0,63}$`, at most 128 characters, `QUALIFIED_NAME_MAX_CHARS`, `QUALIFIED_NAME_SEGMENTS_MAX`); a catalog name is bare (`AGENT_NAME_PATTERN`) or qualified; `qualifiedName(pluginId, ...segments)` joins with `:` (throws `validation_error` when the result is not valid); `splitQualifiedName(name)` → `{ pluginId, segments, name }` (`name` = the last segment) or null for a bare or invalid name |
-| `parseClaudePluginManifest` / `parseMarketplaceJson` / `claudePluginId` / `mergeEntryOverlay` / `substitutePluginVariables` / `userConfigToSettings` / `parseMarketplaceShorthand` | Claude Code plugins and marketplaces (Phase 12, `util/claude-plugins.ts`, the only parser of `.claude-plugin/plugin.json` and `marketplace.json`; section 4.33): pure, isomorphic, never throw; `CLAUDE_PLUGIN_LIMITS`, `CLAUDE_ENTRY_SOURCE_KINDS`, `CLAUDE_PLUGIN_DIAGNOSTIC_CODES`, `CLAUDE_USER_CONFIG_TYPES` |
-| `isClaudeHomeImportPath` / `planClaudeImport` / `claudeImportItemKey` / `extractClaudeJsonMcpServers` | the import from a Claude Code home folder (Phase 12, `util/claude-import.ts`; section 4.34): the allowlist, the one planner, the item key, the reduction of `~/.claude.json` to its MCP server maps; `CLAUDE_HOME_LIMITS`, `CLAUDE_JSON_PATH`, `CLAUDE_IMPORT_KINDS`, `CLAUDE_IMPORT_STATUSES`, `CLAUDE_IMPORT_ACTIONS`, `CLAUDE_IMPORT_WARNINGS` |
-| `parseClaudePermissionRule` / `shellRuleFromPermission` / `toolNamesFromPermission` | Claude Code permission rules (Phase 12, `util/claude-permissions.ts`): `Bash(npm test:*)` → a shell rule prefix (through `parseShellRule`, fails closed), a whole-tool `deny` → harness tool names; also the hook `if` field |
-| `isReservedMarketplaceName` / `RESERVED_MARKETPLACE_NAMES` / `OFFICIAL_MARKETPLACE_OWNER` / `MARKETPLACE_SUGGESTIONS` | marketplaces (Phase 12, ADR-054; section 4.33): `claude-plugins-official`, `claude-code-plugins`, `claude-community` and `anthropic-*` only from repositories of `anthropics`; the suggestion card `anthropics/claude-plugins-official` |
-| `projectDefinitionPathKind` / `isMarkdownDefinitionKind` | project definition files (Phase 12, ADR-056; section 4.35): the kind of an editable project path, or null; whether a kind can be deleted |
+| `parseClaudePluginManifest` / `parseMarketplaceJson` / `claudePluginId` / `mergeEntryOverlay` / `substitutePluginVariables` / `userConfigToSettings` / `parseMarketplaceShorthand` | Claude Code plugins and marketplaces (Phase 12, `util/claude-plugins.ts`, the only parser of `.claude-plugin/plugin.json` and `marketplace.json`; section 4.33): pure, isomorphic, never throw; `CLAUDE_PLUGIN_LIMITS`, `CLAUDE_ENTRY_SOURCE_KINDS`, `CLAUDE_PLUGIN_DIAGNOSTIC_CODES`, `CLAUDE_USER_CONFIG_TYPES`, `CLAUDE_REPLACING_COMPONENTS` (`commands`, `agents`, `outputStyles`: manifest paths that replace the default folder scan; the other components add to it), `CLAUDE_PLUGIN_VARIABLE_NAMES` (`CLAUDE_PLUGIN_ROOT`, `CLAUDE_PLUGIN_DATA`, `CLAUDE_PROJECT_DIR`, `CLAUDE_SKILL_DIR`; besides `user_config.KEY`), `OFFICIAL_MARKETPLACE_NAMES` / `isOfficialMarketplaceName` (the parser's copy of the reserved marketplace names) |
+| `isClaudeHomeImportPath` / `planClaudeImport` / `claudeImportItemKey` / `extractClaudeJsonMcpServers` | the import from a Claude Code home folder (Phase 12, `util/claude-import.ts`; section 4.34): the allowlist, the one planner, the item key, the reduction of `~/.claude.json` to its MCP server maps; `normalizeClaudeHomePath` / `classifyClaudeHomePath` (a collected path relative to the `.claude` folder: null for an absolute path, a backslash, a control character, a `..` or hidden segment other than `.claude.json`, or more than 1024 characters; its kind `agent \| command \| skill \| style \| settings \| instructions \| claude-json`, or null off the allowlist); `claudeImportHookIdentity` / `claudeImportMcpFingerprint` (the identities the planner compares with the server's baseline: `canonicalJson` of `{ event, matcher, handler }`, and of an MCP transport with env / header names only, never values); `CLAUDE_HOME_LIMITS`, `CLAUDE_JSON_PATH`, `CLAUDE_IMPORT_KINDS`, `CLAUDE_IMPORT_STATUSES`, `CLAUDE_IMPORT_ACTIONS`, `CLAUDE_IMPORT_WARNINGS`, `CLAUDE_IMPORT_INSTRUCTIONS_MAX_CHARS` (20000, the global instructions limit) |
+| `parseClaudePermissionRule` / `shellRuleFromPermission` / `toolNamesFromPermission` | Claude Code permission rules (Phase 12, `util/claude-permissions.ts`): `Bash(npm test:*)` → a shell rule prefix (through `parseShellRule`, fails closed), a whole-tool `deny` → harness tool names; also the hook `if` field; `PERMISSION_RULE_MAX_CHARS` (4096), `SHELL_RULE_FROM_PERMISSION_REASONS` / `SHELL_RULE_FROM_PERMISSION_MESSAGES` (one sentence per rule that maps to no shell rule) |
+| `isReservedMarketplaceName` / `RESERVED_MARKETPLACE_NAMES` / `OFFICIAL_MARKETPLACE_OWNER` / `MARKETPLACE_SUGGESTIONS` | marketplaces (Phase 12, ADR-054; section 4.33): `claude-plugins-official`, `claude-code-plugins`, `claude-community` and `anthropic-*` (any case) only from repositories of `anthropics`; the suggestion card `anthropics/claude-plugins-official`; `isGitRef` (the check of `gitRefSchema`) |
+| `projectDefinitionPathKind` / `isMarkdownDefinitionKind` | project definition files (Phase 12, ADR-056; section 4.35): the kind of an editable project path, or null; whether a kind can be deleted (the markdown kinds); `PROJECT_DEFINITION_PATH_MAX_CHARS` (512) |
 | `SLASH_NAME_PATTERN` / `slashNameSchema` | slash names `^[a-z][a-z0-9-]{0,63}$` (= `AGENT_NAME_PATTERN`; commands stay <= 32 characters, user-invocable skills <= 64; Phase 11, ADR-052) |
-| `isHookTurnOff` / `countHookHandlers` / `countCommandHookHandlers` | `(update: HookUpdate) => boolean`: true for exactly `{ enabled: false }` (the one `PATCH /hooks/:id` body without fresh auth); `(config) => number`: the handlers of a `hooks` object (Phase 11, section 4.31); since Phase 12 the command handlers only (a handler without `type: 'prompt'`) |
+| `isHookTurnOff` / `countHookHandlers` / `countCommandHookHandlers` | `(update: HookUpdate) => boolean`: true for exactly `{ enabled: false }` (the one `PATCH /hooks/:id` body without fresh auth); `(config) => number`: the handlers of a `hooks` object, command and prompt handlers together (Phase 11, section 4.31); `countCommandHookHandlers` (Phase 12): the command handlers only (a handler without `type: 'prompt'`, the ones that need trust) |
 | `isPromptHookEvent` / `PROMPT_HOOK_EVENTS` | `(event) => boolean`: the events a prompt handler may use (Phase 12, ADR-057; section 4.31) |
 | `declaresCommandHooks` / `declaresCommandShellSpans` / `manifestRequiresTrust` | `(manifest) => boolean`: `contributes.hooks` has a command handler (prompt handlers of plugin API 1.6.0 run no command and need no trust); a command template holds a `` !`cmd` `` span (scanned with `planCommandExpansion`); code plugins, stdio MCP servers and (plugin API 1.5.0) either of the former two require trust |
 | `readHooksConfig` / `readSettingsHooks` / `compileMatcher` / `hookTargetNames` / `claudeToolName` / `hookPermissionMode` / `buildHookPayload` / `readHookOutput` / `combineHookOutcomes` | command hooks (Phase 11, `util/hooks.ts`, the only reader of hook configurations; section 4.31): pure, isomorphic, never throw, never build a `RegExp` from input; `HOOK_EVENTS`, `HOOK_SOURCES`, `HOOK_LIMITS`, `HOOK_DIAGNOSTIC_CODES` |
+| `readPromptHookAnswer` / `expandHookPrompt` / `promptHookOutcome` / `execFormCommand` / `checkHookIf` / `matchHookIf` / `hookAgentNames` | prompt hooks, exec form, `if` rules and agent matchers (Phase 12, ADR-057, `util/hooks.ts`; section 4.31): the model's `{ ok, reason?, impossible? }` answer (a JSON fence unwrapped, the first JSON object; `reason` required when `ok` is false; anything else is invalid, never quoted); the prompt text (`$ARGUMENTS` = the payload JSON, appended after a blank line without one; `\$` = `$`); the outcome of an answer per event (an answer never allows); the shell text of `command` + `args` (`${NAME}` of the given variables only, each word single-quoted; null for an empty command or a NUL); why an `if` rule is invalid (or null) and whether it matches a tool call (a shell command that cannot be split matches); an agent type and its Claude Code names (`general` → `general-purpose`, `explore` → `Explore`); `TOOL_HOOK_EVENTS`, `HOOK_MATCHER_SUBJECTS` |
 | `canonicalJson` / `trustHashInput` / `extractCommandFileRefs` / `extractArgsFileRefs` | project trust (Phase 11, `util/trust.ts`; section 4.32): the canonical text whose sha256 pins an item (the server hashes it), the script files a command (or a stdio server's command and args) names, bare script names such as `sh count.sh` included; `TRUST_ITEM_KINDS`, `TRUST_LIMITS` |
 | `parseMcpJson` / `mcpServerIdFromName` / `extractVariables` / `serverVariables` / `expandVariables` / `isAllowedMcpUrl` | project `.mcp.json` (Phase 11, `util/mcp-config.ts`; section 4.32): never reads the server environment; the URL check of an expanded URL; `MCP_JSON_TRANSPORTS`, `MCP_VARIABLE_NAME_PATTERN`, `MCP_CONFIG_LIMITS` |
 | `planCommandExpansion` / `renderCommandExpansion` / `formatShellSpanOutput` | command `` !`cmd` `` spans and `@path` files (Phase 11, `util/command-template.ts`; section 6.11): the body is scanned before the arguments are expanded, so arguments never reach a span; `COMMAND_TEMPLATE_LIMITS` |
 | `BUILTIN_OUTPUT_STYLES` / `effectiveStyleName` / `outputStyleBlock` / `isBuiltinOutputStyle` | output styles (Phase 11, `util/output-styles.ts`; ADR-051): the builtins `default`, `explanatory`, `learning`, chat ?? project ?? global, the `Output style: <label>` block; `DEFAULT_OUTPUT_STYLE`, `OUTPUT_STYLE_HEADER` |
 | `AGENT_NAME_PATTERN` / `agentNameSchema` / `BUILTIN_AGENT_TYPES` / `AGENT_TYPE_ALIASES` / `isReservedAgentName` | agent and skill names `^[a-z][a-z0-9-]{0,63}$`; the builtin agent types `['explore', 'general']`; `{ 'general-purpose': 'general' }`; `(name) => boolean`: a builtin type or an alias (Phase 10, ADR-044 / ADR-045) |
-| `parseDefinition` / `formatDefinition` / `definitionRank` / `resolvePrecedence` | definition files (Phase 10, `util/definitions.ts`, the only parser; section 4.28): `(kind, text, { fileName?, folderName?, maxBytes? }) => { definition, diagnostics }` (never throws; `yaml` core schema, no aliases, unique keys, byte caps before parsing), the markdown of parsed fields (round-trips), the precedence rank of a source, one winner per kind and name with the shadowed losers |
-| `expandArguments` / `splitArguments` | command arguments (Phase 10, `util/arguments.ts`): `$ARGUMENTS`, `$1` … `$9` (quotes group words), `{{input}}`; without a placeholder the input is appended |
-| `normalizeToolList` / `matchToolAllowlist` / `CLAUDE_TOOL_ALIASES` | `tools` / `allowed-tools` lists (Phase 10, `util/tool-names.ts`): Claude Code names mapped to harness tools, `mcp__*` kept, patterns such as `Bash(git:*)` reduced to the tool with a diagnostic; an allowlist only ever narrows |
+| `parseDefinition` / `formatDefinition` / `definitionRank` / `resolvePrecedence` | definition files (Phase 10, `util/definitions.ts`, the only parser; section 4.28): `(kind, text, { fileName?, folderName?, maxBytes? }) => { definition, diagnostics }` (never throws; `yaml` core schema, no aliases, unique keys, byte caps before parsing), the markdown of parsed fields (round-trips), the precedence rank of a source, one winner per kind and name with the shadowed losers; Phase 12 (ADR-058): `claudeModelAlias` (a Claude model name normalized: lowercased, `[1m]` removed, `opusplan` → `opus`; `sonnet`, `opus`, `haiku`, `fable` or a `claude-…` id, else null), `setDefinitionName` (inserts or replaces the `name:` line, every other byte kept), `AGENT_COLORS`, `ARGUMENT_NAME_PATTERN` (`^[a-z_][a-z0-9_]{0,31}$`), `CLAUDE_UNSUPPORTED_DEFINITION_KEYS` (read, then reported as `ignored-key` infos) |
+| `expandArguments` / `splitArguments` | command arguments (Phase 10, `util/arguments.ts`): `$ARGUMENTS`, `$1` … `$9` (quotes group words), `{{input}}`; without a placeholder the input is appended; Phase 12 (ADR-058): `argumentBase(body, names?)` = 0 when the body uses `$0` or `$ARGUMENTS[` or the definition declares `arguments` (Claude Code counting), else 1 (so a legacy template with a literal `$0`, e.g. an awk snippet, next to `$1` switches to 0-based); with `options` (`ExpandArgumentsOptions { names?, base?, vars? }`) also `$ARGUMENTS[N]` / `$N` (the word `N - base`), `$name` (a declared argument), `\$` (a literal `$`) and `${NAME}` (a value of `vars`; unknown names stay as written) |
+| `normalizeToolList` / `matchToolAllowlist` / `CLAUDE_TOOL_ALIASES` | `tools` / `allowed-tools` lists (Phase 10, `util/tool-names.ts`): Claude Code names mapped to harness tools, `mcp__*` kept, patterns such as `Bash(git:*)` reduced to the tool with a diagnostic; an allowlist only ever narrows; Phase 12: `normalizeToolList(value, { mode: 'deny' })` reads `disallowedTools` / `disallowed-tools` (a value that is not a list removes nothing), `CLAUDE_AGENT_TOOL_ALIASES` (`Task` / `Agent` → `task`, `TodoWrite`, `ExitPlanMode`, `Skill`: hook matchers and `if` rules only), `CLAUDE_AGENT_TYPE_ALIASES` / `claudeAgentTypeNames` (`general-purpose` → `general`, `Explore` → `explore`) |
 | `isSafePlanDirectory` | `(value) => boolean`: the rule of the `planDirectory` setting (section 4.3) |
 | `parseShellCommand` / `parseShellRule` / `matchShellRules` / `suggestShellRules` | the shared shell command parser and rule matcher (Phase 8, ADR-038; section 4.24): pure, isomorphic, fails closed |
 | `findCompaction` / `compactionMarkers` / `splitSteers` / `latestTodos` | history-derived agent state (Phase 9, `util/agent-state.ts`; section 6.9): the latest compaction marker on a message path (its message and part index, and the kept user message), every marker of a path, the messages with each assistant message split at its steers (assistant / user / assistant), the todo list of the latest `todo_write` output on a path; pure, isomorphic, branch-aware; the server and the web never re-implement them. Phase 10 (ADR-046): `splitTaskResults` (a separate stage after `splitSteers`, which is unchanged) and `taskResultText` (`<background-task …>…</background-task>`), `TASK_RESULT_PART_TYPE` (section 6.10) |
@@ -358,7 +359,7 @@ noted, strings are trimmed and non-empty in request schemas.
 | `pluginSourceSchema` / `PluginSource` | `'builtin' \| 'created' \| 'zip' \| 'npm' \| 'url' \| 'link' \| 'copy' \| 'github' \| 'marketplace'` (Phase 12, ADR-054: `github` = an archive of a resolved commit of a GitHub repository; `marketplace` = an entry of an added marketplace, `PluginDetail.origin`) |
 | `pluginFormatSchema` / `PluginFormat` | `'harness' \| 'claude'` (Phase 12, ADR-053; column `plugins.format`): a root `plugin.json` (the harness manifest), or a Claude Code plugin (`.claude-plugin/plugin.json` and / or Claude components) |
 | `marketplaceSourceTypeSchema` / `MarketplaceSourceType` | `'github' \| 'url' \| 'path'` (Phase 12, ADR-054): where a marketplace is read from (section 4.33) |
-| `marketplaceEntrySourceKindSchema` / `ClaudeEntrySourceKind` | `'relative' \| 'github' \| 'git' \| 'git-subdir' \| 'url' \| 'archive' \| 'npm' \| 'command' \| 'unknown'` (`CLAUDE_ENTRY_SOURCE_KINDS` of `util/claude-plugins.ts`; Phase 12): the source kind of a marketplace entry; installable: `relative`, `github`, `archive`, `npm` (default registry); a github.com `url` / `git-subdir` entry is classified as `github` |
+| `marketplaceEntrySourceKindSchema` / `ClaudeEntrySourceKind` | `'relative' \| 'github' \| 'git' \| 'git-subdir' \| 'url' \| 'archive' \| 'npm' \| 'command' \| 'unknown'` (`CLAUDE_ENTRY_SOURCE_KINDS` of `util/claude-plugins.ts`; Phase 12): the source kind of a marketplace entry; installable: `relative`, `github`, `archive` (https only), `npm` (default registry); a GitHub `url` / `git` / `git-subdir` entry is classified as `github` |
 | `pluginStateSchema` / `PluginState` | `'disabled' \| 'untrusted' \| 'incompatible' \| 'loading' \| 'active' \| 'error'` |
 | `apiFormatSchema` / `ApiFormat` | `'openai-chat' \| 'openai-responses' \| 'anthropic' \| 'google'` |
 | `harnessErrorCodeSchema` / `HarnessErrorCode` | the 16 codes of table 2.2 |
@@ -372,7 +373,7 @@ noted, strings are trimmed and non-empty in request schemas.
 | `workspaceChangeKindSchema` / `WorkspaceChangeKind` | `'edit' \| 'revert' \| 'rewind' \| 'undo' \| 'shell' \| 'untracked'`: kind of a row of the change journal (Phase 8, ADR-036) |
 | `changeSourceSchema` / `ChangeSource` | `'chat' \| 'git'`: the "This chat" (change journal) or "Git" (against HEAD) view of the changes panel (ADR-037) |
 | `conflictHandlingSchema` / `ConflictHandling` | `'skip' \| 'force'`: what a rewind or an undo does with a file that changed since its last recorded change (ADR-036) |
-| `workspaceChangedSourceSchema` / `WorkspaceChangedSource` | `'tool' \| 'rewind' \| 'revert' \| 'undo' \| 'user'`: what wrote the files of a `workspace.changed` event (ADR-036; `user`: Phase 12, ADR-056, a project definition file saved from the UI, not journaled, `chatId: null`) |
+| `workspaceChangedSourceSchema` / `WorkspaceChangedSource` | `'tool' \| 'rewind' \| 'revert' \| 'undo' \| 'user'`: what wrote the files of a `workspace.changed` event (ADR-036; `user`: Phase 12, ADR-056, a project definition file saved or deleted from the UI, not journaled, `chatId` and `batchId` null, section 5.36) |
 | `fileSweepModeSchema` / `FileSweepMode` | `'off' \| 'daily' \| 'weekly'`: the automatic orphaned-file sweep (setting `fileSweep`, ADR-039) |
 | `todoStatusSchema` / `TodoStatus` | `'pending' \| 'in_progress' \| 'completed'`: status of a todo item of `todo_write` (Phase 9, ADR-041; section 4.25) |
 | `taskTypeSchema` / `TaskType` | `'explore' \| 'general'`: the builtin sub-agent types of the `task` tool (Phase 9, ADR-043; `explore` is read-only). Since Phase 10 `task.type` is any catalog agent name (`agentTypeInputSchema`, section 4.25); this enum stays the builtin set (the web picks the builtin icons with it) |
@@ -497,8 +498,9 @@ type Settings = {                       // settingsSchema; every key always pres
                                         // read as '/' and a trailing separator is dropped ('docs\plans/' is
                                         // 'docs/plans')
   // Hooks and output styles (Phase 11, ADR-048 / ADR-051); neither needs fresh auth
-  outputStyle: AgentName                // default 'default': the global output style (a style name of the catalog;
-                                        // builtins 'default', 'explanatory', 'learning'); a project's and a chat's own
+  outputStyle: CatalogName              // default 'default': the global output style (a style name of the catalog;
+                                        // builtins 'default', 'explanatory', 'learning'; a qualified plugin style name
+                                        // since Phase 12, catalogNameSchema); a project's and a chat's own
                                         // choice win over it; an unknown name is not refused (runs use 'default' with
                                         // the notice output-style-unavailable)
   hooksEnabled: boolean                 // default true: run command hooks (personal, project, plugin); false = no command
@@ -506,18 +508,20 @@ type Settings = {                       // settingsSchema; every key always pres
                                         // a change emits hooks.changed { projectId: null }; since Phase 12 it also
                                         // turns prompt hooks off
   // Claude Code ecosystem (Phase 12, ADR-057 / ADR-058); neither needs fresh auth
-  hookModelRef: ModelRef | null         // default null: the model of prompt hooks without their own `model`; null = the
-                                        // provider's smallModelId, else the run model
+  hookModelRef: ModelRef | null         // default null: the model of prompt hooks whose own `model` is unset or does
+                                        // not resolve; the first candidate that resolves runs the hook: the handler's
+                                        // `model`, this setting, the run provider's smallModelId, the run model (none:
+                                        // a non-blocking error "No model is available for the prompt hook.")
   modelAliases: ModelAliases            // default { sonnet: null, opus: null, haiku: null, fable: null }: the model each
                                         // Claude model alias (`model: sonnet` in an agent, a command, a skill or a
                                         // prompt hook) runs on; sent whole
 }
 
 type ModelAliases = {                   // modelAliasesSchema (strict); keys MODEL_ALIAS_NAMES
-  sonnet: ModelRef | null               // null = the fallback: a full claude-… id resolves on 'anthropic' when that
-  opus: ModelRef | null                 // provider is configured, else the default model with a notice
-  haiku: ModelRef | null
-  fable: ModelRef | null
+  sonnet: ModelRef | null               // null = the caller's fallback with its notice or warning (the chat's model, the
+  opus: ModelRef | null                 // default sub-agent model, the next prompt hook model candidate); a full
+  haiku: ModelRef | null                // claude-… id is no alias: it runs as anthropic:<id> when that provider knows
+  fable: ModelRef | null                // the model, else the same fallback (resolveClaudeModel, server)
 }
 
 type SettingsUpdate = Partial<Settings> // settingsUpdateSchema; strict, at least one key
@@ -689,8 +693,8 @@ type ChatSummary = {                    // chatSummarySchema
 }
 
 type UsageTotals = {                    // usageTotalsSchema; sums over the chat's usage rows (purposes 'chat',
-                                        // 'image' (ADR-028), and since Phase 9 'compact' and 'subagent'), every
-                                        // message version included, deleted versions
+                                        // 'image' (ADR-028), since Phase 9 'compact' and 'subagent', since Phase 12
+                                        // 'hook': prompt hook calls), every message version included, deleted versions
                                         // too (the cost actually paid)
   inputTokens: number; outputTokens: number; reasoningTokens: number
   cacheReadTokens: number; cacheWriteTokens: number
@@ -819,7 +823,9 @@ type MessageUsage = {                   // messageUsageSchema; tokens, summed ov
 type CommandInvocation = {              // commandInvocationSchema
   name: CatalogName                     // a command name (<= 32 chars) or, since Phase 11, a skill name (<= 64);
                                         // Phase 12 (ADR-053): a qualified name of a Claude Code plugin entry
-                                        // ('review-kit:db:migrate', <= 128; catalogNameSchema)
+                                        // ('review-kit:db:migrate', <= 128; catalogNameSchema); the resolved name
+                                        // is recorded (a unique bare alias as its qualified name; a harness
+                                        // plugin's '<pluginId>:<name>' as typed)
   input: string                         // text after '/name '
   type: 'prompt' | 'reply' | 'compact'  // 'compact': the harness command /compact [focus] (Phase 9, ADR-040)
   expansion?: string                    // prompt commands: text sent to the model instead (<= 64 KB)
@@ -906,8 +912,12 @@ type SteerData = {                      // steerDataSchema; data of 'data-steer'
 type ActivityData = {                   // activityDataSchema; transient 'data-activity' chunks (Phase 9): reach only
   kind: 'compacting' | 'idle' | 'hooks' // useChat onData, never stored; 'hooks' (Phase 11, ADR-048): the hooks
   event?: HookEvent                     // of `event` are running (the tool row shows "Running hook…" for
-  toolCallId?: string                   // PreToolUse / PostToolUse, with the tool call they run for; else the
-                                        // reply shows "Running hooks…")
+  toolCallId?: string                   // PreToolUse / PostToolUse and, Phase 12, PostToolUseFailure /
+                                        // PermissionRequest, with the tool call they run for; else the reply
+                                        // shows "Running hooks…")
+  label?: string                        // 'hooks' (Phase 12, ADR-057): the trimmed statusMessage of the first
+                                        // matching handler (1..200 chars), shown instead of "Running hook…" /
+                                        // "Running hooks…"; absent when no handler sets one
 }
 ```
 
@@ -919,7 +929,8 @@ optional fields: messages, settings and chat exports written by v1.4 parse uncha
 `TaskOutput` / `ExitPlanModeOutput` fields, `task.type` widened to agent names): v1.5 data parses unchanged. Phase 11
 too (the `data-hook` part, three notices, the activity kind `hooks`, the optional `CommandInvocation` fields `kind` and
 `inlined`, `name` widened to 64 characters, the optional chat setting `outputStyle`): v1.6 messages, chat settings and
-exports parse unchanged.
+exports parse unchanged. Phase 12 too (`name` and `outputStyle` widened to `catalogNameSchema`, the optional
+`ActivityData.label`, optional `HookData` fields (section 4.31)): v1.7 data parses unchanged.
 
 #### Chat request
 
@@ -1040,7 +1051,8 @@ type CommandSummary = {                 // commandSummarySchema (server-side com
                                         // Phase 12: a qualified Claude Code plugin entry ('<pluginId>:<name>', <= 128)
   kind?: InvocationKind                 // Phase 11 (ADR-052): 'command' or 'skill' (a user-invocable skill); the
                                         // server always sends it since v1.7 (absent = a command, the v1.6 shape)
-  description: string
+  description: string                  // Phase 12: '<description> - <when_to_use>' when the definition has
+                                        // when_to_use
   source: CommandSource                 // Phase 10: 'harness' | 'plugin' | 'user' | 'project'
   pluginId?: PluginId                   // plugin commands and (Phase 11) plugin skills, and 'core-agent' for the
                                         // harness command (optional since Phase 10: personal and project commands
@@ -1062,6 +1074,10 @@ command file with such a name is `invalid` (`reserved-name`). The harness comman
 ADR-040; `HARNESS_COMMANDS`) is run by the server itself: `GET /commands` lists it, and plugins cannot register it
 either. Phase 11 (ADR-052): user-invocable skills join the list (`kind: 'skill'`, names up to 64 characters,
 `argumentHint` from the skill's `argument-hint`); a command wins a name over a skill (the skill is not listed).
+Phase 12 (ADR-053): the commands and user-invocable skills of Claude Code plugins are listed under their qualified
+names (`review-kit:review`, `review-kit:db:migrate`); a typed `/name` resolves the exact name first, then a unique bare
+alias (`/review` while only `review-kit:review` ends in `:review` and nothing is named `review`), then a harness
+plugin's `<pluginId>:<name>` (its bare command or skill).
 
 ### 4.10 Plugins
 
@@ -1084,9 +1100,13 @@ type PluginContributions = {            // pluginContributionsSchema
 
 type PluginTrust = {                    // pluginTrustSchema
   required: boolean                     // code plugin, or declares a stdio MCP server, or (plugin API 1.5.0) command
-                                        // hooks or a command template with a !`cmd` span (manifestRequiresTrust)
+                                        // hooks or a command template with a !`cmd` span (manifestRequiresTrust);
+                                        // Phase 12: a Claude Code plugin with a command hook handler, a stdio MCP
+                                        // server or a !`cmd` span (any claude.executables item)
   trusted: boolean                      // !required, or trustedHash === hash (source 'link': path pinned)
-  hash: Sha256Hex | null                // current sha256 of plugin.json + entry; null for builtins
+  hash: Sha256Hex | null                // current sha256 of plugin.json + entry; a Claude Code plugin: the
+                                        // whole-tree hash (hf-claude-plugin/v1, = the inspection's sha256); null for
+                                        // builtins
   trustedHash: TrustPin | null          // Sha256Hex, or path:<sha256> for linked folders
 }
 
@@ -1107,7 +1127,8 @@ type PluginSummary = {                  // pluginSummarySchema
   state: PluginState
   runsCode: boolean                     // "Runs code" badge: not builtin and a code plugin or a manifest that requires
                                         // trust (manifestRequiresTrust: a stdio MCP server, plugin API 1.5.0 command
-                                        // hooks or !`cmd` spans in a command template)
+                                        // hooks or !`cmd` spans in a command template; a Claude Code plugin: as
+                                        // PluginTrust.required)
   contributions: PluginContributions
   lastError: HarnessErrorInit | null
   installedAt: Timestamp
@@ -1166,7 +1187,9 @@ type PluginInspectBody = PluginInstallSource      // pluginInspectBodySchema
 
 type PluginInstallBody = PluginInstallSource & {  // pluginInstallBodySchema
   trust?: boolean                       // pin the sha256 in the same step (code plugins need it to become active)
-  enable?: boolean                      // default true
+  enable?: boolean                      // default true for a fresh install (Phase 12: a Claude Code plugin whose
+                                        // defaultEnabled is false, after the entry overlay, installs disabled); an
+                                        // update keeps the current choice unless set
   sha256?: Sha256Hex                    // the hash reviewed in the inspect preview; the install is refused with
 }                                       // 409 conflict (reason 'stale') when the package now differs
 
@@ -1185,17 +1208,28 @@ type PluginInspection = {               // pluginInspectionSchema
   format: PluginFormat                  // Phase 12 (ADR-053): the detected (or requested) format
   source: PluginSource                  // 'zip' | 'npm' | 'url' | 'link' | 'copy'; Phase 12: 'github' | 'marketplace'
   sourceRef?: string                    // resolved source shown in "I trust <source>": 'name@1.2.3' (npm), the URL,
-                                        // the folder path, or the zip file name
+                                        // the folder path, or the zip file name; Phase 12: 'owner/repo@<sha12>[/path]'
+                                        // (github); a marketplace entry: its resolved source (that GitHub form, the
+                                        // folder, the archive URL or 'name@version'); the installed row's sourceRef
+                                        // is '<plugin>@<marketplace>' (section 4.10)
   sha256: Sha256Hex                     // the hash that trust pins
   contributions: PluginContributions    // declared in the manifest (code plugins may register more at runtime)
-  networkHosts: string[]                // hosts of provider baseURLs and MCP http/sse URLs (code plugins: unknown)
+  networkHosts: string[]                // hosts of provider baseURLs and MCP http/sse URLs (code plugins: unknown);
+                                        // Phase 12: also claude.hosts
   secretsRequested: string[]            // credential keys, secret settings, MCP header/env names
   permissions: string[]                 // manifest.permissions (advisory)
   requiresTrust: boolean
   compatible: boolean                   // engines.harness satisfies PLUGIN_API_VERSION
   existing: { version: string; state: PluginState; source: PluginSource } | null   // install = update
   files: { count: number; bytes: number }
-  warnings: string[]                    // e.g. 'Runs code with full server privileges', 'Replaces version 1.2.0'
+  warnings: string[]                    // e.g. 'Runs code with full server privileges.', 'Replaces the installed
+                                        // version 1.2.0.'; Phase 12, a Claude Code plugin: one line per
+                                        // claude.executables item, 'The files are pinned as a whole: editing any file
+                                        // of the plugin asks for your trust again.' when it runs anything, 'This
+                                        // plugin installs turned off.' (a fresh install with defaultEnabled false),
+                                        // the conflict of another source, format or origin, the GitHub rate-limit
+                                        // note; what it asks for and what it ignores are no warnings (the web's
+                                        // "Asks for:" / "Ignored:" lines come from claude.userConfig / unsupported)
   claude: ClaudePluginInfo | null       // Phase 12 (ADR-053; section 4.33): what a Claude Code plugin is and can run
 }                                       // (the trust consent lists `executables`); null for harness plugins
 
@@ -1373,8 +1407,10 @@ section 4.32: `{ projectId, pending }`) says the approvals or the executable ite
 items that wait for a review, the trust chip count); `project-mcp.changed` (`ProjectMcpChangedData`, section 4.32:
 `{ projectId, servers }`) carries the servers of a project after a state change. Phase 12 (19 event types):
 `marketplace.changed` (`MarketplaceChangedData`, section 4.33: `{ id, marketplace }`, `marketplace: null` = removed)
-after a marketplace was added, refreshed or removed; the update badges of installed plugins follow `plugin.changed`;
-`workspace.changed` gains the source `user` (a project definition file saved from the UI, section 5.36).
+after every marketplace add, refresh (also a failed one, which stores `lastError`) and remove; a refresh that changes
+the update state of installed plugins also emits `plugin.changed` for each of them (the update badges follow it);
+`workspace.changed` gains the source `user` (a project definition file saved or deleted from the UI, `chatId` and
+`batchId` null, section 5.36).
 
 ### 4.15 Params and form schemas
 
@@ -1464,8 +1500,9 @@ type DataImportResult = {               // dataImportResultSchema (POST /data/im
     skipped: number                     // the kind and name already existed (kept)
     failed: number                      // invalid items or content, or the per-kind limit (200); each with a warning
                                         // that names the kind and the name, never the content
-    turnedOff?: number                  // Phase 12: restored personal commands with !`cmd` spans that were turned
-  }                                     // off (ADR-052); absent in older results (= 0)
+    turnedOff?: number                  // Phase 12: restored personal commands with !`cmd` spans that the backup had
+  }                                     // turned on and that came back off (ADR-052); always set since v1.8, absent
+                                        // in older results (= 0)
   items: DataImportItem[]
   warnings: string[]                    // <= 100, each <= 300 chars: unknown entries, a chat count that differs from
 }                                       // the manifest, attachments not restored, settings keys that are unknown or
@@ -1572,7 +1609,8 @@ Never in a backup: secrets, credentials, the password, plugins, MCP servers, mod
 projects (and the `projectId` of chats, ADR-031; so no project definition files either), background tasks (Phase 10;
 delivered results stay in their messages), personal hooks, project approvals and project MCP variables (Phase 11,
 ADR-048 … ADR-050; `data-hook` parts stay in their messages, the settings `outputStyle` / `hooksEnabled` are public
-settings), usage rows (`totals` of imported chats restart at 0; `metadata.usage` of each message is kept). An attachment whose
+settings), marketplaces, Claude Code plugins, hook transcripts and home-folder import plans (Phase 12, ADR-053 …
+ADR-057; the settings `hookModelRef` / `modelAliases` are public settings), usage rows (`totals` of imported chats restart at 0; `metadata.usage` of each message is kept). An attachment whose
 stored blob is missing or no longer matches its sha256 is left out (an import counts it in `filesMissing`); a chat
 deleted while the zip is written is left out. An import also accepts the same layout inside a single top-level folder.
 
@@ -2279,7 +2317,8 @@ type WorkspaceChangedData = {           // workspaceChangedDataSchema (event wor
   chatId: ChatId | null                 // the chat that wrote the files; null when unknown
   batchId: ChangeBatchId | null         // the rewind, revert or undo batch; null for agent tool edits
   source: WorkspaceChangedSource        // 'tool' | 'rewind' | 'revert' | 'undo' | (Phase 12) 'user': a project
-                                        // definition file saved from the UI (chatId and batchId null; section 5.36)
+                                        // definition file saved or deleted from the UI (chatId and batchId null;
+                                        // section 5.36)
   paths: string[]                       // <= 200 (LIMITS.workspaceEventPathsMax): the first ones when more changed
 }
 ```
@@ -2386,7 +2425,7 @@ run offers (and, in `plan`, the plan-mode block), after the workspace block and 
 | `todo_write` | `todoWriteInputSchema` | `todoWriteOutputSchema` | `safe` |
 | `exit_plan_mode` | `exitPlanModeInputSchema` | `exitPlanModeOutputSchema` | `always`: the plan approval card always shows (overrides and hooks cannot approve it) |
 | `task` | `taskInputSchema` | `taskOutputSchema` (streamed as preliminary outputs, section 6.9) | `safe` / 600 s |
-| `skill` (Phase 10) | `skillInputSchema` | `skillOutputSchema` | `safe` / 60 s; offered only when the run's catalog has at least one active skill the model may load (Phase 11: not `disable-model-invocation`), never inside a sub-agent |
+| `skill` (Phase 10) | `skillInputSchema` | `skillOutputSchema` | `safe` / 600 s since Phase 12 (`SKILL_TOOL_TIMEOUT_MS` = the `task` timeout, because a fork skill runs a sub-agent; 60 s before); offered only when the run's catalog has at least one active skill the model may load (Phase 11: not `disable-model-invocation`), never inside a sub-agent |
 
 ```ts
 type TodoItem = {                       // todoItemSchema
@@ -2463,7 +2502,8 @@ type SkillOutput = {                    // skillOutputSchema (Phase 10)
   name: CatalogName                     // Phase 12: may be qualified ('<pluginId>:<name>')
   description: string                   // <= 1024 chars
   source: CustomizationSource
-  content: string                       // the skill body (Markdown), <= 65536 chars
+  content: string                       // the skill body (Markdown), <= 65536 chars; Phase 12: a fork skill
+                                        // (context: fork) answers its child's report here
   truncated: boolean                    // the body was cut
   baseDir?: string                      // project skills, when the project folder is open: the project-relative
                                         // folder of its SKILL.md ('.harness/skills/<name>')
@@ -2474,7 +2514,8 @@ type SkillOutput = {                    // skillOutputSchema (Phase 10)
   fileAccess?: 'workspace' | 'skill'    // Phase 12: how the model reads the files: 'workspace' (a project skill:
                                         // read_file on baseDir) or 'skill' (a plugin skill: skill with `file`); absent
                                         // in v1.7 outputs (= 'workspace' with baseDir)
-  file?: {                              // Phase 12: the supporting file a `file` call read (content is '' then)
+  file?: {                              // Phase 12: the supporting file a `file` call read (content is '' then; a
+                                        // plugin skill's file, or a project skill's through the workspace)
     path: string                        // relative to the skill folder
     content: string                     // UTF-8 text, at most 64 KiB (LIMITS.skillFileReadBytes)
     truncated: boolean
@@ -2535,7 +2576,16 @@ type SkillOutput = {                    // skillOutputSchema (Phase 10)
   `failed` at once: "Unknown agent type <type>. Available: explore, general, …" (the builtins first, then by name).
   The run instructions list the agent types right after the `task` hint, as the block "Agent types (the type of a
   task call):" with one `- name: description` line per active agent (at most 30, `LIMITS.agentTypesListedMax`,
-  descriptions on one line cut to 250 characters with "…"); the tool description stays static.
+  descriptions on one line cut to 250 characters with "…"); the tool description stays static. Phase 12 (ADR-058): a
+  qualified Claude Code plugin agent (`review-kit:reviewer`) or its unique bare alias is a valid `type`; the definition
+  adds `maxTurns` (the child's steps are `min(subagentMaxSteps, maxTurns)`), `disallowedTools` (removed before `tools`
+  narrows the set: restrict-only) and the `skills` preload (at most 5 names, each looked up like the `skill` tool does
+  and read again, at most 32 KiB in total, appended to the child's instructions after the agent's body as "# Preloaded
+  skills", the line "Your agent definition preloads these skills. Follow their instructions where they apply to your
+  task." and one "## Skill: <name>" section each; a missing, turned-off or unreadable skill is skipped, a bare and a
+  qualified name of the same skill load once). A `model` that is a Claude model name (`sonnet`, `opus`, …) runs on the
+  model the setting `modelAliases` names (a full `claude-…` id on `anthropic` when that provider knows it); an unmapped
+  name falls back to the default child model with a warning in the log. `color` is display only.
 - **Background sub-agents** (Phase 10, ADR-046): with `background: true` the type is resolved first (an unknown type
   fails without a launch), then the call returns at once with `status: 'background'` and a `taskId`; the child runs
   detached (section 4.29). The model reads "Started background agent <taskId>. Its report will arrive as a message;
@@ -2544,7 +2594,7 @@ type SkillOutput = {                    // skillOutputSchema (Phase 10)
   10 per server (`LIMITS.backgroundTasksMax`); past a limit the call ends as `failed` ("At most 3 background agents run
   per chat. Wait for one to finish.", "At most 10 background agents run on this server. Wait for one to finish."; during
   shutdown "The server is shutting down.").
-- **Skills** (`skill`, Phase 10, ADR-045; 60 s): the run instructions list the catalog's active skills when `skill` is
+- **Skills** (`skill`, Phase 10, ADR-045; 60 s, 600 s since Phase 12): the run instructions list the catalog's active skills when `skill` is
   offered, as the block "Skills (when a request matches one, load it with the skill tool before you start; it gives you
   its instructions):" with one `- name: description` line each (by name, at most 50, `LIMITS.skillsListedMax`,
   descriptions cut to 250 characters); the model loads one body on demand (read and validated again; a body over 64 KiB
@@ -2557,7 +2607,22 @@ type SkillOutput = {                    // skillOutputSchema (Phase 10)
   "Skills are not available yet.". Phase 11 (ADR-052): the listing and the " Available skills: …" suffix hold only the
   skills the model may load; a user-only skill (`disable-model-invocation: true`) is refused with `forbidden` ("The
   skill "<name>" can only be run by the user (as /<name>); you cannot load it." plus the suffix), and user-invocable
-  skills run as `/name [arguments]` (sections 5.14 and 6.11).
+  skills run as `/name [arguments]` (sections 5.14 and 6.11). Phase 12 (ADR-053 / ADR-058): the listing (like the
+  agent type listing) shows catalog names as they are (`review-kit:pdf`) and `<description> - <when_to_use>` when the
+  definition has `when_to_use`; `name` resolves a qualified name, a unique bare alias (exactly one active entry ends
+  with `:<name>` and no entry has the bare name) or a harness plugin's `<pluginId>:<name>`. A loaded body is expanded
+  with no input (`$ARGUMENTS` empty, `\$` → `$`) and the variables `${CLAUDE_SESSION_ID}` (the chat id),
+  `${CLAUDE_PROJECT_DIR}` (the open project folder) and `${CLAUDE_SKILL_DIR}` (a project skill's project-relative
+  folder, a plugin skill's absolute folder; a personal skill's stays as written). A plugin skill lists its supporting
+  files with `fileAccess: 'skill'` (no `baseDir`; the model text "Supporting files (read one with the skill tool: name
+  "<name>", file set to its path): …"), and `skill { name, file }` reads one of them (also a project skill's file,
+  whose listing keeps `baseDir` and `read_file`); the model reads "File <path> of the skill <name>:" and the text (at
+  most 64 KiB, "(The file was cut here: it is longer than 64 KB.)"); a refused path (`../x`, a link, a hidden or
+  secret-looking file) is a tool error. A **fork skill** (`context: fork`) runs ONE child of its `agent` type (default
+  `general`) through the run's sub-agent runner under the `skill` call's id, with the expanded body as the prompt (at
+  most 20000 characters), and answers the child's report as `content`; a child at its limit answers its partial
+  report plus "(The sub-agent stopped at its limit; this report may be incomplete.)" (`FORK_LIMIT_NOTE`); a child that
+  failed or was stopped is the call's error ("The skill "<name>" runs in a sub-agent, which did not finish. <reason>").
 - **Plan files** (Phase 10, ADR-047): with `planFiles` on, approving `exit_plan_mode` in a project chat (a chat run
   with its project folder open) writes the plan to `<planDirectory>/<YYYY-MM-DD>-<slug>.md` (UTC date; the slug from
   the first heading, else the first non-empty line: accents dropped, `[a-z0-9-]`, cut at 48 characters, else `plan`;
@@ -2709,16 +2774,22 @@ one folder the first sorted path wins (`duplicate-name`).
 
 | Kind | Project files | Frontmatter (besides `name`, `description`) | Body |
 |---|---|---|---|
-| `agent` | `.harness/agents/<name>.md`, `.claude/agents/<name>.md` (top level) | `tools` (a comma string or a list; Claude Code names map: Read → `read_file`, Write → `write_file`, Edit / MultiEdit → `edit_file`, Grep → `search_files`, Glob → `find_files`, LS → `list_directory`, Bash → `shell`, WebFetch → `web_fetch`; `mcp__*` kept; a pattern such as `Bash(git:*)` keeps the tool with `tool-pattern`; other tool-like names are kept and checked against the registered tools, `unknown-tool` when nothing matches; anything else dropped with `unknown-tool`), `model` (`provider:model` or `inherit`; `sonnet` / `opus` / `haiku` fall back to the default with `model-alias`) | the child's instructions |
-| `command` | `.harness/commands/**/<name>.md`, `.claude/commands/**/<name>.md` (up to 3 folders deep, at most 100 subfolders; a folder is a display-only `namespace`) | `argument-hint`, `model`, `allowed-tools` (narrows the turn's tools; never a grant) | the prompt: `$ARGUMENTS`, `$1` … `$9` (quotes group words), `{{input}}`; without a placeholder the input is appended; in Phase 10 `!` lines and `@file` stay text; Phase 11 (ADR-052): the `` !`cmd` `` spans of a trusted command run in the project folder and `@path` references are inlined in project chats (section 6.11); arguments are never substituted inside a span |
-| `skill` | `.harness/skills/<name>/SKILL.md`, `.claude/skills/<name>/SKILL.md` | Phase 11 (ADR-052): `user-invocable` (default true: `/name [arguments]` in the slash menu), `disable-model-invocation` (default false: true leaves the skill out of the skills listing, the `skill` tool and `loadSkill`), `argument-hint` | the skill content (loaded by `skill`; as `/name` it expands its arguments like a command body (`$ARGUMENTS`, `$1` …, `{{input}}`), but its `!` spans and `@path` stay text) |
+| `agent` | `.harness/agents/<name>.md`, `.claude/agents/<name>.md` (top level) | `tools` (a comma string or a list; Claude Code names map: Read → `read_file`, Write → `write_file`, Edit / MultiEdit → `edit_file`, Grep → `search_files`, Glob → `find_files`, LS → `list_directory`, Bash → `shell`, WebFetch → `web_fetch`; `mcp__*` kept; a pattern such as `Bash(git:*)` keeps the tool with `tool-pattern`; other tool-like names are kept and checked against the registered tools, `unknown-tool` when nothing matches; anything else dropped with `unknown-tool`), `model` (`provider:model` or `inherit`; a Claude model name (`sonnet`, `opus`, `haiku`, `fable`, `opusplan`, a `claude-…` id; `[1m]` dropped) is kept as `modelAlias` with a `model-alias` info, Phase 12: it runs on the model the setting `modelAliases` names, else the default); Phase 12 (ADR-058): `disallowedTools` (removed from the child's tools before `tools` narrows them), `maxTurns` (1..200), `color` (`AGENT_COLORS`, display only), `skills` (<= 5 skill names, bare or qualified, preloaded into the child's instructions; section 4.25) | the child's instructions |
+| `command` | `.harness/commands/**/<name>.md`, `.claude/commands/**/<name>.md` (up to 3 folders deep, at most 100 subfolders; a folder is a display-only `namespace`) | `argument-hint`, `model` (Phase 12: a Claude model name resolves through `modelAliases`; one that does not runs the chat's model with the notice `command-model-unavailable`), `allowed-tools` (narrows the turn's tools; never a grant); Phase 12 (ADR-058): `when_to_use` (appended to the description in listings: `<description> - <when_to_use>`), `arguments` (<= 9 names, `ARGUMENT_NAME_PATTERN`), `disallowed-tools` (removed from the turn's tools), `context: fork` with `agent` (default `general`; `agent` without `context: fork` is an `ignored-key` info) | the prompt: `$ARGUMENTS`, `$1` … `$9` (quotes group words), `{{input}}`; without a placeholder the input is appended; in Phase 10 `!` lines and `@file` stay text; Phase 11 (ADR-052): the `` !`cmd` `` spans of a trusted command run in the project folder and `@path` references are inlined in project chats (section 6.11); arguments are never substituted inside a span; Phase 12 (ADR-058): `$ARGUMENTS[N]`, `$N` (0-based when the body uses `$0` or `$ARGUMENTS[` or declares `arguments`, else 1-based as before, `argumentBase`; so a legacy body with a literal `$0` next to `$1` counts from 0), `$name` (a declared argument), `\$` (a literal `$`), `${CLAUDE_SESSION_ID}`, `${CLAUDE_PROJECT_DIR}` (an open project folder), `${CLAUDE_SKILL_DIR}` (skills); a fork command's `/name` expands into a directive that asks the main agent to call `task` once with the definition's `agent` type and the expanded body as the prompt (`task` stays in the turn's tools) |
+| `skill` | `.harness/skills/<name>/SKILL.md`, `.claude/skills/<name>/SKILL.md` | Phase 11 (ADR-052): `user-invocable` (default true: `/name [arguments]` in the slash menu), `disable-model-invocation` (default false: true leaves the skill out of the skills listing, the `skill` tool and `loadSkill`), `argument-hint`; Phase 12 (ADR-058): `when_to_use`, `arguments`, `allowed-tools` and `model` (applied to the turn of `/name` like a command's; restrict-only), `disallowed-tools`, `context: fork` with `agent` | the skill content (loaded by `skill`; as `/name` it expands its arguments like a command body (`$ARGUMENTS`, `$1` …, `{{input}}`; Phase 12: the command placeholders above), but its `!` spans and `@path` stay text; Phase 12: a fork skill loaded by `skill` runs a sub-agent and answers its report, as `/name` it expands into the fork directive) |
 | `style` (Phase 11, ADR-051) | `.harness/output-styles/<name>.md`, `.claude/output-styles/<name>.md` (top level) | `keep-coding-instructions` (default false: the workspace tool rules and the todo / task hints are left out while the style is active); `name` may be a display name (`Terse Reviews`): the catalog name is its slug (`terse-reviews`), the original is the `label`; a missing `description` is the first line of the body | the style block (`Output style: <label>` + the body, first in the main agent's instructions) |
 
 Names: agents, skills and styles `AGENT_NAME_PATTERN` (`^[a-z][a-z0-9-]{0,63}$`), commands `COMMAND_NAME_PATTERN`; the
 `name` key, else the file stem (agents, commands, styles) or the folder name (skills). Reserved: the agent types
 `explore`, `general`, `general-purpose`, the client and harness command names, and (Phase 11) the builtin style names
 `default`, `explanatory`, `learning` (`reserved-name`). Unknown keys are ignored (`ignored-key`,
-`info`). The `description` is cut to 1024 characters. Project files are untrusted: read only through the workspace path
+`info`; since Phase 12 also the Claude Code keys the harness does not support, `CLAUDE_UNSUPPORTED_DEFINITION_KEYS`:
+`permissionMode`, `mcpServers`, `hooks`, `memory`, `background`, `effort`, `isolation`, `initialPrompt`, `paths`,
+`shell`, `metadata`, `license`, `compatibility`; at most 20 reported one by one, the rest counted in one more). Phase 12
+(ADR-053): the entries of Claude Code plugins have qualified names (`<pluginId>:<name>`, a command in a subfolder
+`<pluginId>:<folder>:<name>`, `catalogNameSchema`); a bare name resolves to a qualified entry only when exactly one
+active entry ends with `:<name>` and no entry has the bare name, and a harness plugin's `<pluginId>:<name>` resolves to
+its bare entry. The `description` is cut to 1024 characters. Project files are untrusted: read only through the workspace path
 guard (no links anywhere on the path, regular files only, binary skipped, at most 200 files per folder), never written
 by the harness, read-only in the UI; their `tools` / `allowed-tools` only narrow, and their `model` resolves only to
 providers the user configured.
@@ -2920,7 +2991,13 @@ type DeclarativeOutputStyle = {         // declarativeOutputStyleSchema (plugin 
   above). They are in backups (`customizations.json`) and survive delete-all.
 - **Plugin commands** are listed in the catalog too (`source: 'plugin'`), so a project or personal command that
   shadows one shows it; plugin agents and skills come from the registries of plugin API 1.4.0 and plugin output styles
-  from `registry.styles` of plugin API 1.5.0 (PLUGINS.md; a plugin style with a builtin name is `invalid`).
+  from `registry.styles` of plugin API 1.5.0 (PLUGINS.md; a plugin style with a builtin name is `invalid`). Phase 12
+  (plugin API 1.6.0, ADR-053 / ADR-058): plugin entries carry the 1.6.0 fields (commands `argumentHint`, `model`,
+  `allowedTools`; skills `argumentHint`, `userInvocable`, `modelInvocable`, `allowedTools`, `model`; both
+  `disallowedTools`, `arguments`, `whenToUse`, `context`, `agent`; agents `disallowedTools`, `maxTurns`, `color`,
+  `skills`; a Claude model name as `modelAlias`), and a Claude Code plugin's entries are listed under their registered
+  qualified names. A home-folder import (section 4.34) writes personal definitions in one pass; the apply emits
+  exactly one `customization.changed {}` in total (section 5.35).
 
 ### 4.29 Background tasks and task results
 
@@ -3062,27 +3139,55 @@ non-blocking error. Kill switches (command hooks only; plugin code hooks still r
 backups.
 
 Phase 12 (ADR-057): handlers may be **prompt hooks** (`{ type: 'prompt', prompt, model?, timeout?, continueOnBlock?,
-if?, statusMessage? }`, `promptHookSpecSchema`) on `PROMPT_HOOK_EVENTS` (`util/hooks.ts`) = `PreToolUse`, `PostToolUse`, `PostToolUseFailure`,
-`UserPromptSubmit`, `Stop`, `SubagentStop`, `PermissionRequest` (elsewhere `unsupported-type`): a small model (the
-handler's `model`, a model ref or a Claude alias through `modelAliases`, else the setting `hookModelRef`, else the
-provider's small model, else the run model; reasoning off, at most 512 output tokens, 30 s by default, at most 8 calls
-server-wide, usage purpose `hook`) answers `{ ok, reason?, impossible? }` about the hook input (`$ARGUMENTS` = the payload
-JSON); `ok: true` decides nothing (never an allow); an unreadable answer is a non-blocking error; `hooksEnabled` and
-`HF_SAFE_MODE` turn prompt hooks off, `HF_WORKSPACE_SHELL=0` does not; project prompt hooks need an approval like
-command hooks. Five more events: `PostToolUseFailure` (a tool call failed; feedback), `PermissionRequest` (an approval
-card is about to be shown; main agent only; `hookSpecificOutput.decision.{ behavior: 'allow' | 'deny', updatedInput?,
-message? }`), `SubagentStart` (before a child's first step; `additionalContext` goes into the child's first message),
-`PostCompact` (observe only) and `SessionEnd` (only `DELETE /chats/:id`, detached). Matcher subjects: tool names for
-`PostToolUseFailure` / `PermissionRequest`, the agent type for `SubagentStart` / `SubagentStop` (Claude names
-included: `general-purpose` matches `general`), the trigger for `PostCompact`, the reason for `SessionEnd`. Command
-handlers gain `args` (exec form: `command` is the program, every argument single-quoted, still run through the shell
-runner), `async` (detached, tracked, no effect), `if` (tool events only, `TOOL_HOOK_EVENTS`; command and prompt
-handlers: a tool name such as `Write` or `mcp__github__*`, or a `Bash(...)` rule, checked with `checkHookIf`; anything
-else is `invalid-if` and never runs) and `statusMessage` (the activity label); unknown events stay `unknown-event` infos, `http` / `mcp_tool` /
-`agent` handlers are `unsupported-type` warnings. The payload gains `transcript_path` (a Claude Code-compatible JSONL of
-the chat's active path, written only when a hook runs), `error` (`PostToolUseFailure`), `agent_id` / `agent_type` and
-`reason` (`SessionEnd`). The hooks of an untrusted plugin are listed by `GET /hooks` with `state: 'pending'`
-(`source: 'plugin'`; the web shows "Plugin not trusted").
+if?, statusMessage? }`, `promptHookSpecSchema`) on `PROMPT_HOOK_EVENTS` (`util/hooks.ts`) = `PreToolUse`, `PostToolUse`,
+`PostToolUseFailure`, `UserPromptSubmit`, `Stop`, `SubagentStop`, `PermissionRequest` (elsewhere `unsupported-type`): a
+model answers `{ ok, reason?, impossible? }` about the hook input (`expandHookPrompt`: `$ARGUMENTS` = the payload JSON,
+appended after a blank line when the prompt has none; `\$` = `$`). The model is the **first candidate that resolves**:
+the handler's `model` (a model ref, or a Claude model name through the setting `modelAliases`), the setting
+`hookModelRef`, the run provider's small model, the run model; a `model` that names a missing provider or an unmapped
+Claude name therefore falls back, and only when nothing resolves the hook is the non-blocking error "No model is
+available for the prompt hook." (the mock provider's small model is `mock:echo`, whose answer is no verdict: an invalid
+answer, unless `hookModelRef` or the handler names `mock:prompt-hook`). The call runs with reasoning off, no retries, at
+most 512 output tokens, the handler's timeout (30 s by default, at most 600 s) and at most 8 calls server-wide (the
+others wait); it adds a usage row with purpose `hook`. Only `readPromptHookAnswer` reads the answer and only
+`promptHookOutcome` turns it into an outcome, so the chat seams apply it like a command hook's: `ok: true` decides
+nothing (never an allow); `ok: false` denies and ends the turn on `PreToolUse` (`continueOnBlock`: denies only), ends
+the turn on `PostToolUse` (`continueOnBlock`: feeds the reason back), blocks on `PostToolUseFailure` and
+`UserPromptSubmit`, continues the agent with the reason on `Stop` / `SubagentStop` unless `impossible`; a "no" that
+changes nothing (`impossible`, any `PermissionRequest` "no") is recorded as outcome `context` with its `reason`. An
+unreadable answer ("The hook model did not answer with a JSON object.", ...), a timeout ("The hook model did not answer
+in time.") or a failing provider ("The hook model could not be reached.") is a non-blocking error that never quotes the
+answer; prompts and answers are never logged. `hooksEnabled` and `HF_SAFE_MODE` turn prompt hooks off,
+`HF_WORKSPACE_SHELL=0` does not; project prompt hooks need an approval like command hooks (v2 trust items, section
+4.32). Five more events: `PostToolUseFailure` (a tool call failed after its approval, never on an abort; feedback like
+`PostToolUse`), `PermissionRequest` (an approval card is about to be shown: once per call, main agent only, with the
+input a `PreToolUse` hook rewrote; `hookSpecificOutput.decision.{ behavior: 'allow' | 'deny', updatedInput?, message?,
+interrupt? }`; a `deny` or a block denies the call ("Blocked by hook: …"), an `allow` approves it (its `updatedInput`
+becomes the call's input) only outside plan mode, for a tool without workspace access `execute` and with the policy
+`safe` or `ask`, else the card stays), `SubagentStart` (before a child's first step; `additionalContext` goes into the
+child's first message), `PostCompact` (observe only; its record right after the compaction marker) and `SessionEnd`
+(only `DELETE /chats/:id`, detached, `reason: 'other'`, section 5.9). Matcher subjects: tool names for
+`PostToolUseFailure` / `PermissionRequest` (also the `.mcp.json` name of a project MCP server and the Claude name
+`plugin_<name>_<server>` of a plugin MCP server), the agent type for `SubagentStart` / `SubagentStop` (Claude names
+included: `general-purpose` matches `general`, `Explore` matches `explore`; a `SubagentStop` without an agent ignores
+the matcher, as in v1.7), the trigger for `PostCompact`, the reason for `SessionEnd`. Command handlers gain `args` (exec
+form, `execFormCommand`: `command` is the program, every word single-quoted after the known `${NAME}` placeholders are
+filled, still run through the shell runner; the script files named in `args` are trust refs of a project item), `async`
+(started detached: tracked, its timeout enforced, killed only by the service's stop, so it holds a process slot until it
+ends; its outcome reaches only the run log), `if` (tool events only, `TOOL_HOOK_EVENTS`; command and prompt handlers: a
+tool name such as `Write` or `mcp__github__*`, or a `Bash(...)` rule, checked with `checkHookIf`; anything else is
+`invalid-if` and never runs; a shell command the parser cannot split counts as a match, so a guarding hook still runs)
+and `statusMessage` (the `ActivityData.label` while the hooks of the event run: the first matching handler's); unknown
+events stay `unknown-event` infos, `http` / `mcp_tool` / `agent` handlers are `unsupported-type` warnings. The payload
+gains `transcript_path` (`<dataDir>/transcripts/<chatId>.jsonl`: a Claude Code-compatible JSON Lines file of the chat's
+active path, written only when a matching command or prompt hook runs, rebuilt when the leaf changed, folder mode 0700,
+removed with the chat, never in a backup; absent when it cannot be written, and for `SessionEnd`), `error`
+(`PostToolUseFailure`), `agent_id` / `agent_type` (a child's events, `SubagentStart` / `SubagentStop`) and `reason`
+(`SessionEnd`). Plugin hooks also get the plugin's extra environment (`CLAUDE_PLUGIN_DATA`, `CLAUDE_PLUGIN_OPTION_<KEY>`
+of a Claude Code plugin; never `process.env`); a Claude Code plugin's exec-form `${user_config.KEY}` is filled only at
+spawn (section 4.33). The hooks of an untrusted harness plugin (its manifest's `contributes.hooks`) are listed by `GET
+/hooks` with `state: 'pending'` (`source: 'plugin'`; the web shows "Plugin not trusted"); an untrusted Claude Code
+plugin's hooks show only on its plugin page (`claude.executables`).
 
 ```ts
 type PersonalHook =                     // personalHookSchema (GET via the listing, create / update answers);
@@ -3097,8 +3202,8 @@ type PersonalHook =                     // personalHookSchema (GET via the listi
   | (PersonalHookBase & {
       type: 'prompt'                    // Phase 12 (ADR-057)
       prompt: string                    // <= 16384 chars
-      model: string | null              // a model ref or a Claude model name; null = hookModelRef, else the small
-                                        // model, else the run model
+      model: string | null              // a model ref or a Claude model name; null (or one that does not resolve) =
+                                        // hookModelRef, else the run provider's small model, else the run model
       continueOnBlock?: boolean         // PreToolUse / PostToolUse: a block denies or feeds back instead of ending
                                         // the turn
       if?: string                       // tool events: runs only when the call matches
@@ -3169,20 +3274,25 @@ type HookEntry =                        // hookEntrySchema: one hook of GET /hoo
       matcher: string | null            // shown even when invalid
       command: string                   // the exact command (project items: as the settings file has it); '' for a
                                         // prompt hook
-      args?: string[]; async?: boolean; if?: string   // Phase 12: command handler fields, when set
+      args?: string[]; async?: boolean; if?: string   // Phase 12: command handler fields, when set (a Claude Code
+                                        // plugin's exec form: plugin folders as absolute paths, ${user_config.KEY}
+                                        // as written, never an option value)
       prompt?: string; model?: string; continueOnBlock?: boolean   // Phase 12: prompt hooks
       statusMessage?: string            // Phase 12
-      timeout: number | null            // seconds; null = 60 s
+      timeout: number | null            // seconds; null = the default (60 s; prompt hooks 30 s)
       path?: string                     // project hooks: the settings file ('.claude/settings.json')
       sha256?: Sha256Hex                // project hooks: the current trust hash (POST /projects/:id/trust)
-    })
+      position?: [number, number]       // Phase 12 (ADR-056), project hooks: [group index, handler index] of the
+    })                                  // handler in its file's hooks[event] (the project hook editor writes exactly it)
   | (HookEntryBase & { kind: 'code'; event: string })   // a plugin code hook: event = the HookMap key
 type HookEntryBase = {
-  key: string                           // stable UI key: 'personal:<id>', 'project:<sha256>', 'plugin:<id>:<n>';
-                                        // a code hook 'plugin:<id>:code:<HookMap key>:<n>'
+  key: string                           // stable UI key: 'personal:<id>', 'project:<sha256>', 'plugin:<id>:<n>'
+                                        // (Phase 12: a plugin prompt hook 'plugin:<id>:prompt:<n>'); a code hook
+                                        // 'plugin:<id>:code:<HookMap key>:<n>'
   source: HookSource                    // 'personal' | 'project' | 'plugin'
   state: HookState                      // 'active' | 'pending' | 'off' | 'invalid' | 'blocked' (Phase 12: the hooks of
-                                        // an untrusted plugin are listed 'pending')
+                                        // an untrusted harness plugin are listed 'pending', 'invalid' with an invalid
+                                        // matcher; prompt hooks are 'blocked' only by hooksEnabled / HF_SAFE_MODE)
   id?: HookId                           // personal hooks
   pluginId?: PluginId                   // plugin hooks
   diagnostics: HookDiagnostic[]         // <= 100
@@ -3228,8 +3338,8 @@ type HookData = {                       // hookDataSchema (chat.ts): data of 'da
   id: HookRecordId
   event: HookEvent
   outcome: HookRecordOutcome            // section 4.1
-  toolCallId?: string                   // PreToolUse / PostToolUse: the tool part with the same toolCallId
-  toolName?: string
+  toolCallId?: string                   // PreToolUse / PostToolUse (Phase 12: also PostToolUseFailure /
+  toolName?: string                     // PermissionRequest): the tool part with the same toolCallId
   createdAt: Timestamp
   hooks: HookResult[]                   // every hook that ran for the event (<= 20)
   context?: string                      // <= 10000 chars, model-visible (joined, capped)
@@ -3243,7 +3353,10 @@ type HookResult = {                     // hookResultSchema: one hook of a recor
   source: HookSource
   label: string                         // <= 200 chars: the redacted command with whitespace collapsed (a project
                                         // hook prefixed '<file>: '), '<pluginId>: <HookMap key>' for a code hook
-                                        // ('p: run.stop'), 'tool.after' for a plugin's tool.after context
+                                        // ('p: run.stop'), 'tool.after' for a plugin's tool.after context; Phase 12:
+                                        // an exec-form hook is its command and args joined by spaces (a Claude Code
+                                        // plugin's ${user_config.KEY} as written), a prompt hook the first non-empty
+                                        // line of its prompt
   pluginId?: PluginId
   exitCode: number | null
   timedOut?: boolean
@@ -3282,8 +3395,11 @@ type HooksConfigInput = Partial<Record<HookEvent, HookMatcherGroupInput[]>>     
   a `UserPromptSubmit` / `SessionStart` record with something to show (context, errors, system messages); the `Stop`
   record in the reply before `finish`, and a copy with the same id in the user-role **carrier message** (only
   `data-hook` parts) of a `Stop` continuation (`run.started.origin = 'hook'`); the `PreCompact` record right before the
-  compaction marker. `Notification` records and every sub-agent record (`PreToolUse`, `PostToolUse`, `SubagentStop`)
-  are never stored. A plugin's `tool.after` `context` (plugin API 1.5.0) gets its own `PostToolUse` record (source
+  compaction marker. `Notification` records and every sub-agent record (`PreToolUse`, `PostToolUse`, `SubagentStop`;
+  Phase 12 also `SubagentStart` and a child's `PostToolUseFailure`) are never stored. Phase 12: a `PostToolUseFailure`
+  or `PermissionRequest` record goes into the reply with the call's `toolCallId` (the records of a call are held until
+  its approval settles, so a `PreToolUse` `allowed` record can get `harnessAsked`); a `PostCompact` record right after
+  the compaction marker; `SessionEnd` stores no record (the chat is gone; its runs are in the run log). A plugin's `tool.after` `context` (plugin API 1.5.0) gets its own `PostToolUse` record (source
   `plugin`, label `tool.after`, outcome `context`), even without PostToolUse hooks. The model reads `context`
   (`<hook-context event tool>`) and the `reason` of a `PostToolUse` block or of a Stop / SubagentStop continuation
   (`<hook-feedback event>`, "(no reason given)" when empty) through `splitHooks` / `hookModelText`
@@ -3292,7 +3408,10 @@ type HooksConfigInput = Partial<Record<HookEvent, HookMatcherGroupInput[]>>     
 - **Outcome of a record** (`services/hooks/record.ts`): `PreToolUse` decisions first (`denied` > `asked` > `allowed` >
   `rewritten`), then `stopped` (`continue: false`; it wins over a Stop block; its `reason` is the `stopReason`), then a
   block (`continued` for `Stop`, `blocked` for the other events, `SubagentStop` included), then `context`, then
-  `error`; a record with only a `systemMessage` is `context`.
+  `error`; a record with only a `systemMessage` is `context`. Phase 12: `PermissionRequest` is `denied` (a `deny` or a
+  block) before `allowed` (an `allow`, also recorded); a prompt hook's "no" that changes nothing (`impossible` on
+  `Stop` / `SubagentStop`, any `PermissionRequest` "no") is `context` with its `reason` (display only); the results of
+  prompt hooks carry `kind: 'prompt'` and the answering `model`.
 - **Refusals**: a `UserPromptSubmit` hook that blocks (exit 2, `decision: 'block'`, `continue: false`, or a plugin
   `prompt.submit` `block`) or a `SessionStart` hook with `continue: false` answers `409 conflict` with
   `details.reason: 'hook-blocked'`, `details.chatId` and `details.hook` (the `HookData` of the event; the message is "A
@@ -3306,10 +3425,11 @@ ADR-049, ADR-050. An executable item of a project folder runs only while the sha
 (`trustHashInput(item)` of `util/trust.ts`: the item **and** the script files it names) is in the project's approved set
 (table `project_trust`, one row per project and hash; never in backups; delete-all keeps it; cascades with the
 project). The named files come from `extractCommandFileRefs` (hook commands and `!` spans) and `extractArgsFileRefs`
-(the command and args of a stdio server): `$CLAUDE_PROJECT_DIR/…` / `$HARNESS_PROJECT_DIR/…`, `./…`, `.claude/…`,
+(the command and args of a stdio server, and since Phase 12 the `args` of an exec-form hook, each one literal word): `$CLAUDE_PROJECT_DIR/…` / `$HARNESS_PROJECT_DIR/…`, `./…`, `.claude/…`,
 `.harness/…`, or a relative path or bare name with a script extension (`scripts/x.py`, `sh count.sh`,
 `node hook.mjs`); options, option values, assignments, URLs and remote paths are never references; at most 8 files of
-at most 1 MiB. Items: the hooks of the project's settings files, the servers of its `.mcp.json` (stdio, http and sse)
+at most 1 MiB. Items: the hooks of the project's settings files (command and, since Phase 12, prompt handlers), the
+servers of its `.mcp.json` (stdio, http and sse)
 and the command files with `` !`cmd` `` spans. Identical hooks are one item (listed in the first file; at most 100 hook
 items); a command file whose name is longer than 64 characters or that has a span longer than 4096 characters is never
 listed, so it can never be approved. The hash is recomputed right before every spawn (verify-before-run): a mismatch
@@ -3352,9 +3472,10 @@ type TrustHookDetail = {                // trustHookDetailSchema: exactly what t
   event: HookEvent; matcher: string | null; command: string   // command: '' for a prompt hook
   timeout: number | null                // seconds; null = the default (60 s; prompt hooks 30 s)
   type?: HookHandlerType                // Phase 12 (ADR-057): absent = 'command'; the fields below are present only
-  args?: string[]; async?: boolean      // when the file sets them (such items hash as trust item v2; every other
-  if?: string; statusMessage?: string   // item keeps its v1.7 hash)
-  prompt?: string; model?: string; continueOnBlock?: boolean   // prompt hooks
+  args?: string[]; async?: boolean      // when the file sets them; a prompt hook or a command hook with args, async
+  if?: string; statusMessage?: string   // or if hashes as trust item v2 (`extra`), every other item keeps its v1.7
+  prompt?: string; model?: string; continueOnBlock?: boolean   // hash; statusMessage runs nothing and is never
+                                        // hashed (prompt hooks: prompt, model, continueOnBlock)
 }
 type TrustMcpDetail = {                 // trustMcpDetailSchema: unexpanded (${VAR} kept); values are never shown
   name: string                          // the name in .mcp.json
@@ -3452,24 +3573,33 @@ stored byte for byte under `<dataDir>/plugins/<id>/` and read in place; `plugin.
 only by `util/claude-plugins.ts`. Detection: a root `plugin.json` is a harness plugin, else `.claude-plugin/plugin.json`
 or any Claude component is a Claude Code plugin (at the archive root or in one top folder); `format` overrides it. Its
 id is a slug of its name (`claudePluginId`: at most 40 characters, a hashed suffix when longer, `cc-` before a reserved
-id, `plugin-<8 hex>` when empty; another origin or format holding the id is `409 exists`); its entries have qualified
-names (`catalogNameSchema`, section 4.1); its MCP servers get the ids `<pluginId>` / `<pluginId>-<name>` (at most 32).
+id, `plugin-<8 hex>` when empty; another source, format or origin holding the id is `409 exists` at install); its
+entries have qualified names (`catalogNameSchema`, section 4.1); its MCP servers get the id `<pluginId>` (one server) or
+`<pluginId>-<name>` (several; `<pluginId>-<4 hex>` when longer than 32 or taken; a server using `${CLAUDE_PROJECT_DIR}`
+is skipped, plugin servers are global).
 A Claude Code plugin that runs anything (a command hook handler, a stdio MCP server, a `` !`cmd` `` span) requires a
 trust pin over a sha256 of its whole file tree (paths, modes, sizes, contents, the marketplace overlay); pure markdown,
-http MCP servers and prompt-only hooks do not. The DTO manifest is synthesized (`engines.harness: '^1.6.0'`, settings
+http MCP servers and prompt-only hooks do not. The tree hash is computed again only on load, reload, trust and hot
+reload, so an edited file makes the plugin `untrusted` from the next of these on (until then an edited script can still
+run); a link or a special file in the tree makes it `error`. The DTO manifest is synthesized (`engines.harness: '^1.6.0'`, settings
 from `userConfig`, no `contributes`); `.lsp.json`, `bin/`, `themes/`, `monitors/`, `workflows/` and the plugin's
 `settings.json` are listed as `unsupported`, never run.
 
 A **marketplace** (table `marketplaces`, `mkt_` ids, at most 50, unique by name) is a `.claude-plugin/marketplace.json`
-read from a GitHub repository (the ref resolves to a commit through `api.github.com`, the file comes from
-`raw.githubusercontent.com` at that commit, at most 1 MiB), a hosted `marketplace.json` (`url`) or a folder on the server
-host (`path`); every request goes through `safeFetch` (https only, no private addresses). Nothing is refreshed
+read from a GitHub repository (the ref resolves to a commit through `api.github.com`, a full 40-hex sha without a
+request; GitHub's 404 and 422 (an unknown ref) are `404`; the file comes from `raw.githubusercontent.com` at that
+commit, at most 1 MiB), a hosted `marketplace.json` (`url`) or a folder on the server host (`path`: outside the data
+directory and not containing it; `.claude-plugin/marketplace.json` a regular file, no links; read again on every
+refresh); every request goes through `safeFetch` (https only, no private addresses). Nothing is refreshed
 automatically; installs go through `POST /plugins/inspect` / `POST /plugins/install` with the source `marketplace`
-(the normal review, trust pin and fresh auth); relative entries come from the stored commit's subtree. The names in
+(the normal review, trust pin and fresh auth); relative entries come from the stored commit's subtree (a folder
+marketplace: its folder, no links on the way; a `url` marketplace has no files, so its relative entries are
+unsupported). The names in
 `RESERVED_MARKETPLACE_NAMES` and every `anthropic-*` name are accepted only from repositories of
 `OFFICIAL_MARKETPLACE_OWNER` (`anthropics`; `isReservedMarketplaceName`). Marketplaces are never in backups and survive
 delete-all; removing one keeps its installed plugins (their origin dangles). `HF_OFFLINE=1` refuses github and url
-fetches with `409 offline`.
+fetches, and installs of marketplace entries that need the network, with `409 offline` (a folder marketplace and its
+relative entries still work).
 
 ```ts
 type MarketplaceSource =                // marketplaceSourceSchema, discriminated on type (marketplaceSourceTypeSchema)
@@ -3486,7 +3616,10 @@ type RepoSubpath = string               // repoSubpathSchema: a relative folder 
 
 type ClaudeDiagnostic = {               // claudeDiagnosticSchema: a problem of a marketplace or a Claude Code plugin
   level: 'error' | 'warning' | 'info'
-  code: string                          // <= 64: CLAUDE_PLUGIN_DIAGNOSTIC_CODES, or a hook, definition or .mcp.json code
+  code: string                          // <= 64: CLAUDE_PLUGIN_DIAGNOSTIC_CODES, a hook, definition or .mcp.json code,
+                                        // or a plugin reader code: 'renamed', 'plugin-error', 'read-failed',
+                                        // 'secret-in-body', 'unknown-option', 'missing-manifest', 'invalid-server',
+                                        // 'invalid-variable'
   message: string                       // one English sentence; never a command, a secret or file contents
   component?: string                    // 'commands', 'hooks', 'mcpServers', 'plugins[3]', ...
   path?: string                         // plugin- or marketplace-relative file
@@ -3511,12 +3644,19 @@ type MarketplaceEntry = {               // marketplaceEntrySchema: one plugin en
   description: string | null; version: string | null; category: string | null; author: string | null
   tags: string[]                        // tags and keywords, <= 20
   source: { kind: ClaudeEntrySourceKind; text: string }   // marketplaceEntrySourceKindSchema + one display line
-                                        // ('owner/repo@ref', a URL, './path'; <= 512)
-  supported: boolean                    // relative, github, archive, npm (default registry)
+                                        // ('owner/repo@<sha12 or ref>[/path]', a URL, './path', 'package@version';
+                                        // <= 512)
+  supported: boolean                    // relative (not in a url marketplace), github, archive (https), npm (default
+                                        // registry)
   unsupportedReason?: string            // <= 300: one sentence when not supported (other git hosts, command, a custom
                                         // npm registry)
-  installedPluginId: PluginId | null    // the installed plugin of this entry
-  updateAvailable: boolean              // the entry version differs from the installed one (else the commit)
+  installedPluginId: PluginId | null    // the installed plugin whose origin names this entry and this marketplace (by
+                                        // id, or by name: a marketplace added again finds its plugins)
+  updateAvailable: boolean              // the entry version differs from origin.version (the entry version at install
+                                        // time); without an entry version, one of these differs: the marketplace
+                                        // commit (relative entries of a GitHub marketplace), the entry's pinned sha
+                                        // (github), sha256 (archive) or exact version (npm); a GitHub ref without a
+                                        // sha and a folder marketplace never report an update
 }
 type MarketplaceDetail = MarketplaceSummary & {   // marketplaceDetailSchema (get, add, refresh)
   entries: MarketplaceEntry[]           // <= 1000
@@ -3571,6 +3711,8 @@ type ClaudePluginInfo = {               // claudePluginInfoSchema (PluginDetail.
 }
 type ClaudePluginExecutable = {         // claudePluginExecutableSchema
   kind: 'hook' | 'mcp' | 'span'         // a command hook handler, a stdio MCP server, a !`cmd` span of a command
+                                        // (every command handler of any event, supported or not, and every stdio
+                                        // server declared, a skipped one included: a conservative consent)
   label: string                         // <= 200: where it is ('PostToolUse Write|Edit', the server, the command)
   command: string                       // <= 4096: the command line with its arguments, as written
 }
@@ -3584,7 +3726,14 @@ type ClaudePluginExecutable = {         // claudePluginExecutableSchema
   `enum`, `multiple` → arrays, `number` with `minimum` / `maximum`, `directory` / `file` → absolute paths; saving the
   settings reloads the plugin. `${CLAUDE_PLUGIN_ROOT}`, `${CLAUDE_PLUGIN_DATA}`, `${CLAUDE_PROJECT_DIR}`,
   `${CLAUDE_SKILL_DIR}` and `${user_config.KEY}` are substituted where Claude Code substitutes them, never from the
-  server environment (`substitutePluginVariables`); secret values never reach a markdown body.
+  server environment (`substitutePluginVariables`); secret values never reach a markdown body. Exec-form hook `args`
+  keep `${user_config.KEY}` as written in the registry, `GET /hooks`, `/hooks/runs` and `data-hook` labels
+  (`${CLAUDE_PLUGIN_ROOT}` / `${CLAUDE_PLUGIN_DATA}` are filled at load, so plugin folders show as absolute paths);
+  option values are filled only when the hook process starts, from `CLAUDE_PLUGIN_OPTION_<KEY>` of the registration
+  environment (never `process.env`). A missing option reaches the hook as the literal placeholder; a value with a NUL,
+  or one that makes the command longer than 4096 characters, keeps the hook from starting. Shell-form hooks refuse
+  `${user_config.*}`; MCP servers get `{{settings.KEY}}`. Text a trusted hook writes itself (`systemMessage`, `reason`,
+  context) is not redacted.
 
 ### 4.34 Import from Claude Code
 
@@ -3594,12 +3743,16 @@ browser upload (the picked `.claude` folder's allowlisted files, or a zip) or a 
 (`isClaudeHomeImportPath`: `agents/*.md`, `commands/**/*.md` at most 3 levels deep, `skills/<name>/SKILL.md`,
 `output-styles/*.md`, `settings.json`, `CLAUDE.md`, and `~/.claude.json` reduced at once to its `mcpServers` maps;
 never `.credentials.json`, `projects/`, histories, `plugins/` or `settings.local.json`). The server builds the plan
-(`planClaudeImport`) and holds it in memory (`cip_` ids, 10 minutes, at most 4 plans; dropped on apply, expiry, key
+(`planClaudeImport`) and holds it in memory (`cip_` ids, 10 minutes, at most 4 plans, the oldest dropped first; dropped on apply, expiry, key
 rotation and shutdown); the browser gets the items without their payloads (contents, env and header values never
-leave the server) and applies a selection by item key. Re-import compares by kind and name (`unchanged`, `update`:
-skip by default, overwrite or rename; `conflict` for builtin or reserved names: rename only). Command hooks and
-commands with `` !`cmd` `` spans arrive turned off unless the apply item says `enable: true`; `${VAR}` in imported MCP
-servers resolves from the imported `settings.json` `env` or `variables`, never from the server environment.
+leave the server) and applies a selection by item key. Re-import compares definitions by kind and name (byte-equal →
+`unchanged`; other content → `update`: skip by default, overwrite or rename; a builtin or reserved name, or a name an
+earlier file of the same import uses → `conflict`: skip by default or rename), hooks by `claudeImportHookIdentity`, MCP
+servers by id and `claudeImportMcpFingerprint` (another command or URL → `conflict`: skip, overwrite or rename), shell
+rules by prefix, tool denies by tool. Command hooks, commands with `` !`cmd` `` spans and stdio MCP servers arrive
+turned off unless the apply item says `enable: true` (a per-project server always arrives off); `${VAR}` in imported MCP
+servers resolves from the apply body's `variables` of the item, then the imported `settings.json` `env`, then the
+`${VAR:-default}`, never from the server environment (an unresolved reference fails the item).
 
 ```ts
 type ClaudeImportHome = {               // claudeImportHomeSchema (GET /claude-import/home)
@@ -3632,16 +3785,18 @@ type ClaudeImportPlanItemDto = {        // claudeImportPlanItemSchema (the util 
 type ClaudeImportPlan = {               // claudeImportPlanSchema (upload and scan answers)
   id: ImportPlanId
   source: 'upload' | 'scan'             // claudeImportSourceSchema
-  root: string                          // for display: the scanned folder, or the uploaded folder / zip name
+  root: string                          // for display: the scanned folder, or the upload's label (default '.claude')
   createdAt: Timestamp
   expiresAt: Timestamp                  // after this, apply answers 404
   items: ClaudeImportPlanItemDto[]      // <= 1000, sorted by kind, then name
   skipped: { path: string; reason: string }[]   // <= 200: collected but not used (too large, not allowlisted, ...)
-  diagnostics: ClaudeImportDiagnosticDto[]   // <= 200
+  diagnostics: ClaudeImportDiagnosticDto[]   // <= 200: problems of the whole intake (e.g. 'timeout': a scan passed
+                                        // 10 s and kept the files read so far)
 }
-type ClaudeImportUploadForm = { label?: string }   // claudeImportUploadFormSchema: the picked folder or zip name;
-// the parts (CLAUDE_IMPORT_UPLOAD_PARTS): one zip in 'file', or the folder's files in 'files' (each part's file name is
-// its path relative to the .claude folder), plus ~/.claude.json in 'claudeJson'; never both 'file' and 'files'
+type ClaudeImportUploadForm = { label?: string }   // claudeImportUploadFormSchema: the picked folder or zip name
+// (1..256 chars, no control characters); the parts (CLAUDE_IMPORT_UPLOAD_PARTS): one zip in 'file', or the folder's
+// files in 'files' (each part's file name is its path relative to the .claude folder; at most 10 000), plus
+// ~/.claude.json in 'claudeJson'; never both 'file' and 'files'; a lone 'claudeJson' part is accepted
 type ClaudeImportApplyBody = {          // claudeImportApplyBodySchema (POST /claude-import/apply, fresh); strict
   planId: ImportPlanId
   items: {                              // claudeImportApplyItemSchema (strict); 1..1000, unique keys; items not sent
@@ -3650,7 +3805,8 @@ type ClaudeImportApplyBody = {          // claudeImportApplyBodySchema (POST /cl
     renameTo?: string                   // required with 'rename' (1..128 chars)
     enable?: boolean                    // executable items: import them turned on (default off)
   }[]
-  instructions?: 'append' | 'replace'   // CLAUDE.md: append to the global instructions (default) or replace them
+  instructions?: 'append' | 'replace'   // CLAUDE.md: read only as a fallback; the CLAUDE.md item's own action
+                                        // ('append' / 'replace') decides
   variables?: Record<string, Record<string, string>>   // per item key: ${VAR} values (names ENV_VAR_NAME_PATTERN,
 }                                                      // values <= 4096 chars)
 type ClaudeImportApplyResult = {        // claudeImportApplyResultSchema
@@ -3661,20 +3817,22 @@ type ClaudeImportApplyResult = {        // claudeImportApplyResultSchema
     message?: string                    // <= 500: why it failed or was skipped (never a value)
   }[]
   counts: { created: number; updated: number; unchanged: number; skipped: number; failed: number }
-  warnings: string[]                    // <= 100
-}
+  warnings: string[]                    // <= 100, each <= 300 chars; always empty in v1.8 (what arrived turned off
+}                                       // follows from the plan and the enable sent)
 ```
 
 - Mapping: definitions → personal agents, commands, skills and output styles (a missing `name:` is inserted from the
   file name; nested commands are named `<folder>-<name>`); `settings.json` hooks → personal hooks (prompt hooks
-  imported on, command hooks off); `permissions.allow` `Bash(p:*)` / `Bash(p *)` / `Bash(p)` → global shell rules
+  imported on, command hooks off; an unsupported handler type or event → `unsupported`); `permissions.allow` `Bash(p:*)` / `Bash(p *)` / `Bash(p)` → global shell rules
   (`Bash(p)` with `prefix-broader`; refused prefixes, bare `Bash`, inner wildcards, `ask` and non-Bash rules →
   `unsupported`); whole-tool `deny` rules → tool overrides `deny`; `outputStyle` → the setting (the style must exist or
   be imported too); `CLAUDE.md` → the global instructions (append / replace; already contained → `unchanged`; over
   20000 characters → `invalid`); `~/.claude.json` `mcpServers` → global MCP servers (per-project servers as disabled
-  global servers, `project-server`); `env` is listed by name only; `apiKeyHelper`, `statusLine`, `enabledPlugins`,
-  `extraKnownMarketplaces` are `unsupported`, never run. One apply emits one `customization.changed` and one
-  `hooks.changed`.
+  global servers, `project-server`); `env` is listed by name only (an `unsupported` item); `model`, the command-running
+  settings (`apiKeyHelper`, `statusLine`, `awsAuthRefresh`, `awsCredentialExport`, `otelHeadersHelper`),
+  `permissions.ask` rules and other `permissions` keys, `enabledPlugins` and `extraKnownMarketplaces` are `unsupported`
+  items, never run (other keys: one `info` diagnostic). One apply emits exactly one `customization.changed` and one
+  `hooks.changed`, also when nothing of that kind changed.
 
 ### 4.35 Project definition files
 
@@ -3682,22 +3840,40 @@ ADR-056. The project's definition files can be edited from Settings → Customiz
 style files of its `.claude` / `.harness` folders (raw markdown, so unknown keys survive), the `hooks` key of its four
 settings files (`.claude` / `.harness` `settings{,.local}.json`; every other key and the key order are kept) and the
 `mcpServers` key of `.mcp.json`. `projectDefinitionPathKind(path)` names the kind of an editable path (or null):
-`PROJECT_DEFINITION_FILE_KINDS` = `agent | command | skill | style | settings | mcp`. Writes go through the workspace
-path guard (no links on the path, `.git` and secret-looking names refused, re-checked under the file lock), compare the
-file with `expectedSha256` under the lock (`409 stale`), are written atomically **without** the change journal (they
+`PROJECT_DEFINITION_FILE_KINDS` = `agent | command | skill | style | settings | mcp`; the path is POSIX, relative to
+the project folder, at most 512 characters (`PROJECT_DEFINITION_PATH_MAX_CHARS`), and one of `agents/<name>.md`,
+`commands/[<folder>/…]<name>.md` (at most 3 subfolders), `skills/<name>/SKILL.md`, `output-styles/<name>.md`,
+`settings.json` or `settings.local.json` below `.claude/` or `.harness/`, or `.mcp.json`. Reads and writes go through
+the workspace path guard: the path must resolve to itself (no link anywhere on it), a `.git` or secret-looking segment
+anywhere in it is refused (`400` on `['path']`), and writes check it again under the file lock. Writes compare the file
+with `expectedSha256` under the lock (`409 stale`), are written atomically **without** the change journal (they
 are user edits, like an IDE save), emit `workspace.changed { source: 'user', chatId: null, batchId: null }` and **never
 approve anything**: the answer carries the number of project items that wait for an approval. No fresh auth and no
 idle rule (nothing written here can run before a fresh approval; the agent can write the same files).
+
+A settings file or `.mcp.json` is spliced: the edited key replaces the old one in place (a new key goes last, `null`
+removes it, a missing file starts from `{}`, so `null` on a missing file writes `{}`), every other key keeps its value
+and the key order is kept, and the file is written as `JSON.stringify(object, null, 2)` + a newline (the formatting of
+the other keys may change; their trust hashes do not, they are canonical). A file on disk that is larger than 256 KiB,
+not valid JSON or not a JSON object is refused with `400` (diagnostic `too-large`, `invalid-json` or `not-an-object`,
+issue on `['hooks']` / `['mcpServers']`) and never replaced. A read keeps a leading byte order mark (a markdown save
+writes the text it is sent); the splice drops it.
 
 ```ts
 type ProjectDefinitionFile = {          // projectDefinitionFileSchema (GET /projects/:id/definitions/file)
   path: string                          // projectDefinitionPathSchema (projectDefinitionPathKind is not null)
   kind: ProjectDefinitionFileKind       // projectDefinitionFileKindSchema
   exists: boolean                       // a missing file is exists: false (not 404)
-  content: string | null                // the raw text (definitions <= 64 KiB, settings and .mcp.json <= 256 KiB)
+  content: string | null                // the raw text (definitions <= 64 KiB, settings and .mcp.json <= 256 KiB; a
+                                        // byte order mark is kept); null when missing, larger than the cap or binary
+                                        // (a NUL byte in the first 8 KiB): then sha256 is set and one error
+                                        // diagnostic too-large / binary says why
   sha256: Sha256Hex | null              // of the bytes on disk; send it back as expectedSha256
   diagnostics: ProjectDefinitionDiagnostic[]   // projectDefinitionDiagnosticSchema { level, code, message, line? },
-}                                       // <= 200: the parser's diagnostics (definition, hooks or .mcp.json)
+}                                       // <= 200: the parser's diagnostics (definition, hooks with prompt handlers,
+                                        // or .mcp.json); a hook diagnostic starts with '<Event> (group g, hook h): '
+                                        // (1-based; '<Event>: ' without a position), a server one with
+                                        // 'Server "<name>": '
 type ProjectDefinitionQuery = { path: string }   // projectDefinitionQuerySchema (GET)
 type ProjectDefinitionRemoveQuery = {   // projectDefinitionRemoveQuerySchema (DELETE): markdown definitions only
   path: string                          // isMarkdownDefinitionKind; a skill folder left empty is removed
@@ -3707,14 +3883,17 @@ type ProjectDefinitionWriteBody =       // projectDefinitionWriteBodySchema (PUT
   | { path: string; expectedSha256: Sha256Hex | null; content: string }    // a definition: the raw markdown
                                         // (1 char .. 64 KiB); expectedSha256 null = the file must not exist yet
   | { path: string; expectedSha256: Sha256Hex | null; hooks: Record<string, unknown> | null }   // a settings file:
-                                        // its hooks key (null removes it)
+                                        // its hooks key (keys <= 256 chars; null removes it; a missing file starts
+                                        // from {})
   | { path: '.mcp.json'; expectedSha256: Sha256Hex | null; mcpServers: Record<string, unknown> | null }
-                                        // PROJECT_MCP_JSON_PATH: its mcpServers key (null removes it)
+                                        // PROJECT_MCP_JSON_PATH: its mcpServers key (null removes it; a missing file
+                                        // starts from {})
 type ProjectDefinitionWriteResult = {   // projectDefinitionWriteResultSchema
   path: string
   sha256: Sha256Hex                     // of the bytes written (the next expectedSha256)
   created: boolean                      // the file did not exist
-  diagnostics: ProjectDefinitionDiagnostic[]   // warnings and infos (an error is refused with 400)
+  diagnostics: ProjectDefinitionDiagnostic[]   // warnings and infos of the saved file (a settings file or
+                                        // .mcp.json: of the whole spliced file); an error is refused with 400
   trust: { pending: number }            // the project's items that now wait for an approval (POST /projects/:id/trust)
 }
 ```
@@ -3769,7 +3948,9 @@ body exceeds its limit; `500 internal_error`.
 **`PUT /settings`** — `settings.update`
 - Body `SettingsUpdate` (partial; keys not sent are unchanged).
 - Response `200 Settings` (full, after the update).
-- Notes: model refs are validated for format only (the model may be offline).
+- Notes: model refs are validated for format only (the model may be offline). Phase 12: `hookModelRef` is a model ref
+  or null; `modelAliases` is sent whole (strict, all four keys, each a model ref or null); a value equal to the stored
+  one (for `modelAliases`: the same JSON) is no change. Neither needs fresh auth.
 
 ### 5.4 `events.ts`
 
@@ -3919,7 +4100,11 @@ body exceeds its limit; `500 internal_error`.
   empties the chat's steer queue (`queue.changed` with reason `stopped`; also a queue request still in flight for the
   chat fails with `404`; clients drop their copy on `chat.deleted`). Since Phase 10 (ADR-046) it first stops the
   chat's background tasks (their rows saved as `aborted`, then deleted with the chat; undelivered results are
-  dropped).
+  dropped). Since Phase 12 (ADR-057) the chat row read before the delete is handed to the `SessionEnd` hooks of the
+  chat's scope (its project, tool mode and model; `reason: 'other'`, no `transcript_path`): detached, the answer never
+  waits for them and a failure never fails the delete (logged); they run within 1.5 s (`LIMITS.sessionEndBudgetMs`),
+  raised by the explicit timeouts of the matching handlers up to 60 s, then the processes are killed. Only this route
+  runs `SessionEnd` (never delete-all, a project delete or shutdown). The chat's hook transcript is removed with it.
 - Response `204`. Emits `chat.deleted`.
 - Errors: `404 not_found`.
 - Note: "Undo" in the UI delays this call (toast), the server has no soft delete.
@@ -4195,15 +4380,22 @@ body exceeds its limit; `500 internal_error`.
   (ADR-052): every item carries `kind`: `'command'` for the entries above (`/compact` included) and `'skill'` for the
   active user-invocable skills of the scope (`user-invocable` not false), which join the list with names up to 64
   characters, `argumentHint` from their `argument-hint`, `source` `project`, `user` or `plugin` (with `pluginId`); a
-  command wins a name over a skill (the skill is left out).
+  command wins a name over a skill (the skill is left out). Phase 12 (ADR-053 / ADR-058): Claude Code plugin commands
+  and skills are listed under their qualified names, and a description is `<description> - <when_to_use>` when the
+  definition has `when_to_use`.
 - Errors: `404 not_found` (unknown project, "Project <id> not found."). An unavailable project folder lists no project
   commands (no error; the catalog reports it).
 
 ### 5.15 `plugins.ts`
 
+Phase 12 (ADR-053 / ADR-054): every `PluginDetail` the plugin routes answer (`plugins.get` / `enable` / `disable` /
+`reload`, `pluginInstall.install` / `trust`) carries the row's `format`, its `origin` without the server-side entry
+overlay, the `claude` info of a Claude Code plugin (read again when the host has none; null when it cannot be read) and
+`editable: false` for one; `plugins.list` carries each row's `format`.
+
 **`GET /plugins`** — `plugins.list`
 - Response `200 ListResponse<PluginSummary>`: builtins first, then by id. The Plugins tab filters
-  (`/plugins?filter=all|providers|tools|mcp|commands|disabled` on the web route) are applied client-side from
+  (`/plugins?filter=all|providers|tools|mcp|commands|agents|disabled` on the web route) are applied client-side from
   `contributions` and `enabled`/`state`.
 
 **`GET /plugins/:id`** — `plugins.get`
@@ -4233,7 +4425,9 @@ body exceeds its limit; `500 internal_error`.
 - Errors: `404 not_found`.
 
 **`POST /plugins/:id/reload`** — `plugins.reload` · **fresh** when the plugin is a code plugin
-- Params `{ id: PluginId }`. Dispose + load again (cache-busted import).
+- Params `{ id: PluginId }`. Dispose + load again (cache-busted import). Phase 12: a Claude Code plugin is read again
+  and its whole-tree hash recomputed (an edited file leaves it `untrusted`); it is not a code plugin, so its reload
+  needs no fresh auth.
 - Response `200 PluginDetail` with the resulting state. Emits `plugin.changed`.
 - Errors: `404 not_found`; `409 conflict` (`reason: 'disabled'`).
 
@@ -4246,7 +4440,8 @@ body exceeds its limit; `500 internal_error`.
 - Params `{ id: PluginId }`. Body `PluginSettingsUpdate`, validated against the plugin's `SettingsSchema`
   (issues carry the property path). Secret properties are encrypted (scope `plugin:<id>`, name
   `settings.<key>`); other values go to `plugin_settings`.
-- Response `200 PluginSettingsView`. The plugin's `ctx.settings.onChange` handlers run (guarded).
+- Response `200 PluginSettingsView`. The plugin's `ctx.settings.onChange` handlers run (guarded); Phase 12: a loaded
+  Claude Code plugin is reloaded instead (its `userConfig` values are substituted when it loads).
 - Errors: `404 not_found`; `400 validation_error` (also when the plugin has no settings schema).
 
 **`GET /plugins/:id/icon`** — `plugins.icon` · response `'binary'`
@@ -4268,18 +4463,29 @@ body exceeds its limit; `500 internal_error`.
 **`POST /plugins/inspect`** — `pluginInstall.inspect` · JSON or multipart
 - Body `PluginInspectBody` (JSON), or `multipart/form-data` with the zip in part `file` (<= 20 MB) and the
   `PluginInspectForm` fields (Phase 12: `format`).
-- Phase 12 (ADR-053, ADR-054): the sources `github` (`repo`, `ref?`, `path?`: the ref is resolved to a commit and the
-  commit's zip downloaded from `codeload.github.com` without redirects, at most 50 MB compressed; only the chosen subtree
-  is extracted) and `marketplace` (`marketplaceId`, `plugin`: the entry's source, relative entries from the stored
-  commit), and `format` on every source (absent = detected). Claude Code plugins answer `format: 'claude'` and
-  `claude` (`ClaudePluginInfo`, section 4.33); `sourceRef` is `owner/repo@<sha12>[/path]` for GitHub sources. Errors
-  also `404 not_found` (unknown marketplace or entry), `409 conflict` (`reason: 'offline'`, `HF_OFFLINE=1`, for the
-  `github` and `marketplace` sources), `429 rate_limited` (the GitHub API) and `400` for an unsupported entry source.
+- Phase 12 (ADR-053, ADR-054): the source `github` (`repo`, `ref?`, `path?`): the ref is resolved to a commit (a full
+  40-hex sha needs no API request) and the commit's zip downloaded from `codeload.github.com` without redirects, at
+  most 50 MB compressed; its zip comment must be the commit and every entry must sit in one top folder; only the chosen
+  subtree is extracted. When the GitHub API is rate limited, the ref's zip (`zip/refs/heads/<ref>`, `zip/HEAD`) is read
+  instead, its commit taken from the zip comment, with a warning. The source `marketplace` (`marketplaceId`, `plugin`)
+  uses the entry's source: relative entries from the stored commit's subtree or the marketplace folder; `github`
+  entries from their pinned `sha`, else their ref; `archive` entries over https, their `sha256` checked when given;
+  `npm` entries through the npm pipeline. Every source takes `format` (absent = detected; `harness` still needs a
+  `plugin.json`); the multipart form reads `format` next to `file`. Claude Code plugins answer `format: 'claude'` and
+  `claude` (`ClaudePluginInfo`, section 4.33); `sourceRef` is `owner/repo@<sha12>[/path]` for GitHub sources and the
+  resolved source for a marketplace entry (section 4.11). Errors also `404 not_found` (an unknown marketplace,
+  "Marketplace <id> not found."; an unknown entry, "The marketplace "<name>" has no plugin named "<plugin>"."; an
+  unknown repository, ref (GitHub's 422 included) or repository folder), `409 conflict` (`reason: 'offline'`,
+  `HF_OFFLINE=1`) for the `github` source and marketplace entries that need the network (one text for every offline
+  refusal, `OFFLINE_MESSAGE`: "Adding, refreshing and installing from marketplaces and GitHub need the network (HF_OFFLINE=1). npm and URL installs from the install dialog, zip uploads and local folders work offline."), `429
+  rate_limited` (GitHub; `retryAfterMs` when known) and `400 validation_error` on `['plugin']` (an entry this server
+  cannot install: "This plugin cannot be installed: <reason>"; an archive whose sha256 differs from the entry's; an
+  archive that is neither zip nor tgz).
 - Fetches/extracts into `plugins/.staging/<uuid>` with all install guards, validates, reports, then deletes the
   staging dir. Nothing is installed.
 - Response `200 PluginInspection`.
-- Errors: `400 validation_error` (invalid manifest, zip guard violation, integrity mismatch, folder is not a
-  plugin, reserved id); `413 payload_too_large`; upstream fetch failures as `not_found` (npm 404),
+- Errors: `400 validation_error` (invalid manifest, zip guard violation, integrity mismatch, a folder or archive with
+  neither a harness nor a Claude Code plugin (the message names both layouts), reserved id); `413 payload_too_large`; upstream fetch failures as `not_found` (npm 404),
   `provider_unreachable` or `provider_error` with `status`.
 
 **`POST /plugins/install`** — `pluginInstall.install` · JSON or multipart · **fresh** when the plugin requires trust
@@ -4287,18 +4493,22 @@ body exceeds its limit; `500 internal_error`.
 - Fresh auth is required whenever the plugin requires trust (code plugin, or a declarative plugin with a stdio MCP
   server; ADR-017; since Phase 12 a Claude Code plugin with a command hook handler, a stdio MCP server or a `!` span),
   with or without `trust`. Phase 12: the same sources and `format` as `inspect`; an update from a marketplace is a new
-  inspect → install of the same entry (a new review and trust pin); another origin or format holding the id is `409`
-  (`reason: 'exists'`); a Claude Code plugin with `defaultEnabled: false` installs disabled. A code plugin installed without `trust` ends `untrusted` (inert) until
+  inspect → install of the same entry (a new review and trust pin); another source, format or origin holding the id is
+  `409` (`reason: 'exists'`; origins compare the marketplace name (any case) and entry, or the GitHub repository (any
+  case) and folder); a fresh Claude Code plugin with `defaultEnabled: false` installs disabled unless `enable` is set; a
+  marketplace install stores `sourceRef` = `<plugin>@<marketplace>`. A code plugin installed without `trust` ends `untrusted` (inert) until
   `POST /plugins/:id/trust`.
 - Installs via staging + atomic swap (ARCHITECTURE.md 6.5). Same id and same source = update (the previous
   version is restored if the new one fails to load).
 - What was reviewed is what gets installed: `sha256` (optional) is the hash shown by `inspect`. The server also
-  remembers the hash of npm and folder sources inspected in the last 30 minutes; when the source now yields other
+  remembers the hash of npm and folder sources (Phase 12: also GitHub sources and marketplace entries, keyed with the
+  requested format; their hash is the tree hash, so the zip bytes need not be stable) inspected in the last 30 minutes; when the source now yields other
   files (a moved npm tag or range, an edited folder), the install is refused. Zip uploads and URL installs are
   pinned by their bytes / SRI integrity.
 - Response `201 PluginDetail`. Emits `plugin.changed` (+ `catalog.changed`, `provider.changed`).
 - Errors: as `inspect`; `400 validation_error` (incompatible `engines.harness`); `403 forbidden` (reserved or
-  builtin id, fresh auth missing); `409 conflict` (`reason: 'exists'`, id installed from a different source;
+  builtin id, fresh auth missing); `409 conflict` (`reason: 'exists'`, id installed from a different source, format or origin, or a folder
+  `plugins/<id>` without a row;
   `reason: 'stale'`, the package changed since it was reviewed).
 
 **`POST /plugins/:id/trust`** — `pluginInstall.trust` · **fresh**
@@ -4311,8 +4521,15 @@ body exceeds its limit; `500 internal_error`.
 **`GET /plugins/:id/export`** — `pluginInstall.export` · response `'binary'`
 - Params `{ id: PluginId }`.
 - Response `200 application/zip`, `Content-Disposition: attachment; filename="<id>-<version>.zip"`: the plugin
-  directory (without build output, `node_modules`, `.git`), installable with `POST /plugins/install`.
-- Errors: `404 not_found`; `403 forbidden` (builtin).
+  directory below `<id>/` (without build output, `node_modules`, `.git`, local credential files `.env`, `.env.*`,
+  `.npmrc` and links), its entries in the UTF-8 byte order of their paths, installable with `POST /plugins/install`.
+  Phase 12: a Claude Code plugin (`format: 'claude'`) is exported as its installed tree: the same paths and bytes, each
+  file's owner exec bit kept in the Unix attributes (0755, else 0644; a harness plugin's files are all 0644), no root
+  `plugin.json` needed, the same skip rules and caps. Inspecting the zip gives the plugin's whole-tree hash, except for a
+  plugin installed from a marketplace entry: its entry overlay is not a file in the zip, so the export's hash differs.
+- Errors: `404 not_found`; `403 forbidden` (builtin); `400 validation_error` (a harness plugin without `plugin.json`;
+  a Claude Code plugin folder without files, "The plugin folder has no files, so it cannot be exported."; a name the
+  installer would refuse; more than 2000 files and folders); `413 payload_too_large` (more than 100 MB).
 
 ### 5.17 `plugin-drafts.ts`
 
@@ -4473,9 +4690,10 @@ event types: the chat events of section 7 report the changes.
   definitions emits `customization.changed` (`{}`). Nothing in the file can grant a tool, a mode or a shell rule
   (definitions only narrow, ADR-045), or run a shell line: a restored personal command with `` !`cmd` `` spans is stored
   turned off (`enabled: false`; Phase 11, ADR-052); it still counts in `imported`, with no warning (the info log
-  `customizations restored` carries `turnedOff`). The warnings speak of "personal definitions" (agents, commands,
-  skills and output styles), e.g. "Personal definitions are restored only from a backup zip.". Hooks, project
-  approvals and project MCP variables are never in a backup.
+  `customizations restored` carries `turnedOff`; since Phase 12 the result's `customizations.turnedOff` counts the ones
+  the backup had turned on). The warnings speak of "personal definitions" (agents, commands, skills and output styles),
+  e.g. "Personal definitions are restored only from a backup zip.". Hooks, project approvals and project MCP variables
+  (Phase 11), marketplaces, Claude Code plugins and hook transcripts (Phase 12) are never in a backup.
 - Response `200 DataImportResult`. Emits `chat.created` for every imported or copied chat.
 - Errors: `400 validation_error` (the whole-upload failures above); `409 conflict` (`reason: 'busy'`);
   `413 payload_too_large` (an upload over 256 MB, a chat JSON over 64 MB, a backup whose entries declare more than
@@ -4492,7 +4710,9 @@ event types: the chat events of section 7 report the changes.
   no chats). Since Phase 10 (ADR-046) the background tasks of every chat are stopped before the runs (their rows go
   with their chats; also tasks of chats that started meanwhile), and the personal agents, commands and skills are kept;
   since Phase 11 also the personal output styles, the personal hooks, the project approvals and the project MCP
-  variables.
+  variables; since Phase 12 also the marketplaces (plugins of both formats were already kept). The hook transcript of
+  every deleted chat is removed with it (`chat.deleted`); no `SessionEnd` hook runs (only a single chat delete runs
+  them, section 5.9).
 - Response `200 DataDeleteResult` (the checkpoint store is not counted in it; the `data deleted` log line carries
   `checkpointBlobs` / `checkpointBytes`). Emits `chat.deleted` for every deleted chat.
 - Errors: `403 forbidden` (fresh auth missing, `action: 'login'`); `409 conflict` (`reason: 'busy'`).
@@ -4996,6 +5216,10 @@ builtins `default`, `explanatory`, `learning`, plugin styles, personal styles an
 `.claude/output-styles` / `.harness/output-styles`) joins every route (`kind=style`); skills carry `userInvocable`,
 `modelInvocable` and `argumentHint`; a builtin style name is `reserved-name` for kind `style`; a personal command
 whose content holds `` !`cmd` `` spans is stored like any other (its spans run only in project chats with the shell on).
+Phase 12 (ADR-053 / ADR-058): entries list the newer frontmatter keys they set (section 4.28; the unsupported Claude
+Code keys as `ignored-key` infos) and the entries of Claude Code plugins under their qualified names; `name` of
+`GET /customizations/source` is the name as listed (qualified for such an entry); personal definitions keep bare
+names.
 
 **`GET /customizations?projectId=&kind=&refresh=`** — `customizations.list`
 - Query `CustomizationsQuery`.
@@ -5116,24 +5340,41 @@ duration and the outcome). Personal hooks are never in backups and survive delet
   files read, the pending count); the kill switches as `switches` (a switch that is off makes every otherwise active
   command hook `blocked`; `off`, `invalid` and `pending` win, so a project hook stays `pending` whatever the switches);
   configuration problems as diagnostics (an invalid personal or plugin matcher makes its hook `invalid`; an invalid
-  project matcher drops its group, so it is only a diagnostic).
+  project matcher drops its group, so it is only a diagnostic). Phase 12: prompt hooks are `kind: 'command'` entries
+  with `type: 'prompt'`, `command: ''`, their `prompt`, `model` (as written) and `continueOnBlock` (only
+  `hooksEnabled` and `HF_SAFE_MODE` make them `blocked`); every entry shows the handler fields it has (`args`, `async`,
+  `if`, `statusMessage`); a project entry carries its `position`; the `contributes.hooks` of an untrusted harness
+  plugin (which registers nothing) are listed from its manifest with `state: 'pending'`, while an untrusted Claude Code
+  plugin's hooks are not listed (its plugin page shows them); a Claude Code plugin's exec-form `command` / `args` are
+  listed as registered (plugin folders as absolute paths, every `${user_config.KEY}` as written: no option value is
+  ever listed).
 - Errors: `404 not_found` (unknown project). An unavailable project folder is not an error (`project.available: false`).
 
 **`GET /hooks/runs`** — `hooks.runs`
 - Response `200 HookRunList`: the in-memory run log, the last 200 hook runs (`LIMITS.hookRunsKept`), newest first;
-  lost on restart. No `GET /hooks/:id` exists, so the static `runs` segment never meets a param route.
+  lost on restart. No `GET /hooks/:id` exists, so the static `runs` segment never meets a param route. Phase 12: prompt
+  hooks, `async` hooks (their outcome reaches only this log) and `SessionEnd` runs are listed too; labels as
+  `HookResult.label` (a Claude Code plugin's exec-form `${user_config.KEY}` as written).
 
 **`POST /hooks`** — `hooks.create` · **fresh** · 201
-- Body `HookCreate` (strict). The matcher must be of the safe subset (`compileMatcher`).
+- Body `HookCreate` (strict). The matcher must be of the safe subset (`compileMatcher`). Phase 12: the handler fields
+  are stored in the row's `options` (`continueOnBlock` and `async` only when true).
 - Response `201 PersonalHook`. Emits `hooks.changed`.
-- Errors: `400 validation_error` (an invalid matcher on `['matcher']`, a blank command, a timeout outside 1..600);
+- Errors: `400 validation_error` (an invalid matcher on `['matcher']`, a blank command, a timeout outside 1..600; Phase
+  12: a prompt hook on an event outside `PROMPT_HOOK_EVENTS` on `['event']` ("<Event> hooks cannot use prompt
+  handlers."), an `if` on an event without a tool on `['if']`, an invalid `if`, `model`, `prompt`, `args` or
+  `statusMessage`);
   `409 conflict` (`reason: 'exists'`) at 100 personal hooks (`LIMITS.personalHooksMax`: "At most 100 personal hooks
   can be stored; delete one first.").
 
 **`PATCH /hooks/:id`** — `hooks.update` · **fresh** unless the body only turns the hook off
-- Params `HookParams`. Body `HookUpdate` (strict, at least one key).
+- Params `HookParams`. Body `HookUpdate` (strict, at least one key). Phase 12: `type` switches the hook between a
+  command and a prompt hook (the other type's fields are cleared; the new type's required field, `command` or
+  `prompt`, must come with it).
 - Response `200 PersonalHook`. Emits `hooks.changed`.
-- Errors: `400 validation_error`; `403 forbidden` (action `login`) without fresh auth for any body other than
+- Errors: `400 validation_error` (Phase 12 also: command fields and prompt fields mixed, a field of the other type than
+  the hook's after the change, a switch without the required field, a prompt hook or an `if` on an event that does not
+  allow it); `403 forbidden` (action `login`) without fresh auth for any body other than
   `{ enabled: false }`; `404 not_found` (unknown hook, "Hook <id> not found.").
 
 **`DELETE /hooks/:id`** — `hooks.remove`
@@ -5148,7 +5389,8 @@ Project trust (ADR-049; DTOs in section 4.32): the executable items of a project
 emit `project-trust.changed` (`{ projectId, pending }`) and `hooks.changed` (`{ projectId }`); the project MCP manager
 then stops the servers whose item lost its approval. `project-trust.changed` is also sent when a rebuild of the
 project's items finds other hashes (after a settings, `.mcp.json`, command or referenced file changed, also after a
-verify-before-run mismatch; with `hooks.changed` when hook items changed), when a list finds another pending count than
+verify-before-run mismatch; with `hooks.changed` when hook items changed), after every save or delete of a project
+definition file from the UI (Phase 12, section 5.36), when a list finds another pending count than
 the last one announced, and with `pending: 0` after the project is deleted. Commands, URLs and variable names are never
 logged at `info` (approve logs the project, the count and the kinds; revoke a 12-character hash prefix and the orphans
 removed). Approvals are never in backups; delete-all keeps them; deleting the project drops them.
@@ -5156,7 +5398,7 @@ removed). Approvals are never in backups; delete-all keeps them; deleting the pr
 **`GET /projects/:id/trust`** — `projectTrust.list`
 - Params `ProjectParams`.
 - Response `200 ProjectTrustList`: the items of a fresh scan of the folder (hooks of `.claude` / `.harness`
-  `settings{,.local}.json`, servers of `.mcp.json`, command files with `` !`cmd` `` spans) with their state, the
+  `settings{,.local}.json`: command and, since Phase 12, prompt handlers), servers of `.mcp.json`, command files with `` !`cmd` `` spans) with their state, the
   referenced script files and their hashes, the review warnings, and the count of orphaned approvals (at most 200
   items, hooks then servers then commands; the pending count covers every item).
 - Errors: `404 not_found` (unknown project). An unavailable folder answers `available: false`, `issue` and no items.
@@ -5179,7 +5421,9 @@ removed). Approvals are never in backups; delete-all keeps them; deleting the pr
 ### 5.33 `project-mcp.ts`
 
 Project MCP servers (ADR-050; DTOs in section 4.32): the servers of a project's `.mcp.json`, offered only in that
-project's chats after their item is approved. Every route needs a session; setting variables needs fresh auth (a value
+project's chats after their item is approved (since Phase 12 `.mcp.json` can also be edited through `PUT
+/projects/:id/definitions/file`, section 5.36; a saved server stays `pending` until approved). Every route needs a
+session; setting variables needs fresh auth (a value
 can change what an approved stdio server runs). Every state change emits `project-mcp.changed` (`{ projectId,
 servers }`; coalesced, also when a server's tools change or it is removed, never for a deleted project). Variable
 values, resolved environments, arguments, headers and URLs are never answered or logged; connection errors are logged
@@ -5220,7 +5464,10 @@ Plugin marketplaces (Phase 12, ADR-054; DTOs in section 4.33). Every route needs
 (adding a marketplace installs nothing: installs go through `pluginInstall.install` with the source `marketplace`,
 which needs fresh auth when the plugin runs anything). Every add, refresh and remove emits `marketplace.changed`.
 Marketplace logs carry only the id, the name, the repository and a 12-character sha (never the JSON). Marketplaces are
-never in backups and survive delete-all. Until P12-A the five routes are stubs (`501`) that validate their input first.
+never in backups and survive delete-all. Logs: `marketplace added` / `marketplace refreshed` / `marketplace removed` at
+`info`, `marketplace refresh failed` at `warn` (with the error code). A server shutdown aborts the fetches in flight
+(`502 provider_unreachable`, "The server is shutting down: the marketplace was not fetched."; nothing stored). (Between
+P12-0a and P12-A the routes answered `501 not_implemented` after validating their input.)
 
 **`GET /marketplaces`** — `marketplaces.list`
 - Response `200 MarketplaceList`: every marketplace (no fetch), the suggestions that are not added yet (only
@@ -5231,11 +5478,18 @@ never in backups and survive delete-all. Until P12-A the five routes are stubs (
 - Body `MarketplaceAddBody` (strict). The marketplace is fetched at once (a GitHub ref is resolved to a commit); nothing
   is stored when that fails.
 - Response `201 MarketplaceDetail`. Emits `marketplace.changed`.
-- Errors: `400 validation_error` (an invalid source; a `marketplace.json` that does not parse; a reserved name from a
-  repository outside `anthropics/*`); `404 not_found` (no such repository, ref or file); `409 conflict` (`reason:
-  'exists'`: the name is already added, or 50 marketplaces exist; `reason: 'offline'`: `HF_OFFLINE=1` for a `github` or
-  `url` source); `413 payload_too_large` (a `marketplace.json` over 1 MiB); `429 rate_limited` (the GitHub API, with
-  `retryAfterMs` when known); `502 provider_unreachable` / `provider_error` (the remote failed).
+- Errors: `400 validation_error` on `['source']` (an invalid source; a `marketplace.json` that is not UTF-8 or does not
+  parse: "The marketplace.json cannot be used: <the parser's first error>"; a reserved name from any source but a
+  repository of `anthropics`: "The marketplace name "<name>" is reserved for the official marketplaces of anthropics;
+  only repositories of anthropics can use it.") or on `['source', 'path']` (a `path` that is not a folder, lies inside
+  or contains the data directory, or whose `.claude-plugin` folder or file is a link); `404 not_found` (no such
+  repository, ref (GitHub's 422 included), folder or `.claude-plugin/marketplace.json`; a URL answering 404 or 410);
+  `409 conflict` (`reason: 'exists'`: "A marketplace named "<name>" is already added." or "At most 50 marketplaces can
+  be added; remove one first."; `reason: 'offline'`: `HF_OFFLINE=1` for a `github` or `url` source, `OFFLINE_MESSAGE`
+  "Adding, refreshing and installing from marketplaces and GitHub need the network (HF_OFFLINE=1). npm and URL installs from the install dialog, zip uploads and local folders work offline.");
+  `413 payload_too_large` (a `marketplace.json` over 1 MiB); `429 rate_limited` (the GitHub API, "GitHub's request
+  limit for this server is used up (60 requests per hour without a token). Try again later.", with `retryAfterMs` when
+  known); `502 provider_unreachable` / `provider_error` (the remote failed).
 
 **`GET /marketplaces/:id`** — `marketplaces.get`
 - Params `MarketplaceParams`.
@@ -5244,10 +5498,14 @@ never in backups and survive delete-all. Until P12-A the five routes are stubs (
 
 **`POST /marketplaces/:id/refresh`** — `marketplaces.refresh`
 - Params `MarketplaceParams`. Fetches the source again (a moved ref resolves to a new commit; a `path` source is read
-  again); a failure keeps the stored catalog and sets `lastError`.
+  again); a failure keeps the stored catalog, stores the error as `lastError`, emits `marketplace.changed` and answers
+  the error. A failure is any error `add` can answer, or a `marketplace.json` that now has another name (`400` "The
+  marketplace is now named "<new>" instead of "<old>": remove it and add it again.").
 - Response `200 MarketplaceDetail`. Emits `marketplace.changed` (and `plugin.changed` for plugins whose update state
   changed).
-- Errors: `404 not_found`; `409 conflict` (`reason: 'offline'`); `429 rate_limited`; `502`.
+- Errors: `400 validation_error` (as `add`, or the new name); `404 not_found`; `409 conflict` (`reason: 'offline'`,
+  `OFFLINE_MESSAGE`);
+  `413 payload_too_large`; `429 rate_limited`; `502`.
 
 **`DELETE /marketplaces/:id`** — `marketplaces.remove`
 - Params `MarketplaceParams`. Installed plugins of the marketplace are kept (their `origin` dangles).
@@ -5258,35 +5516,68 @@ never in backups and survive delete-all. Until P12-A the five routes are stubs (
 
 Import from a Claude Code home folder (Phase 12, ADR-055; DTOs in section 4.34). Every route needs a session;
 scanning the server's folder and applying a plan need fresh auth; the upload has no side effect. File contents,
-prompts, commands, env and header values are never answered or logged (info logs: the source, counts and duration; the
-scanned path only at `debug`). Until P12-A the four routes are stubs (`501`) that validate their input first (the
-upload checks its content type: `multipart/form-data` only).
+prompts, commands, env and header values are never answered or logged (info logs `claude import planned`: the source,
+the file, item and skipped counts, the duration; `claude import applied`: the outcome counts and the duration; the
+scanned path only at `debug`). (Between P12-0a and P12-A the routes answered `501 not_implemented` after validating
+their input.)
 
 **`GET /claude-import/home`** — `claudeImport.home`
-- Response `200 ClaudeImportHome` (whether `POST /claude-import/scan` can read `HF_CLAUDE_HOME`).
+- Response `200 ClaudeImportHome` (whether `POST /claude-import/scan` can read `HF_CLAUDE_HOME`): one `stat` of the
+  folder (links followed), never a file read; `{ available: false, reason: 'disabled', path: null }` while
+  `HF_CLAUDE_HOME=0` (the Docker and `start:e2e` default), `missing` when nothing (or a file) is there, `unreadable`
+  when the `stat` fails otherwise.
 
 **`POST /claude-import/scan`** — `claudeImport.scan` · **fresh**
-- No body. Reads only the allowlist of `HF_CLAUDE_HOME` (links to regular files outside the data folder are followed
-  and shown as `linked`; caps: a definition 64 KiB, `settings.json` 256 KiB, `CLAUDE.md` 1 MiB, `.claude.json` 16 MiB,
-  32 MiB in total, 10 s).
+- No body. Reads only the allowlist of `HF_CLAUDE_HOME`: `settings.json` and `CLAUDE.md` are opened by name; only
+  `agents/`, `commands/` (3 levels below), `skills/` (each `<name>/SKILL.md` opened by name) and `output-styles/` are
+  listed (at most 2000 entries each, hidden names ignored); `.claude.json` is read next to a folder named `.claude`
+  (`~/.claude.json`), else inside it. Links to regular files outside the data folder are followed and shown as
+  `linked`. Caps (checked before a byte is read): a definition 64 KiB, 200 per kind, `settings.json` 256 KiB,
+  `CLAUDE.md` 1 MiB, `.claude.json` 16 MiB, 32 MiB in total. A file over a cap, not UTF-8, not a regular file, or a
+  link into the data folder is listed in `skipped`. Past 10 s (`LIMITS.claudeImportScanTimeoutMs`) the scan ends with
+  the files it read so far and a plan diagnostic `timeout` (warning).
 - Response `200 ClaudeImportPlan` (`source: 'scan'`).
-- Errors: `403 forbidden` (action `login`) without fresh auth; `409 conflict` (`reason: 'disabled'`) while
-  `HF_CLAUDE_HOME=0`; `404 not_found` (the folder is missing).
+- Errors: `403 forbidden` (action `login`) without fresh auth; `409 conflict` (`reason: 'disabled'`, "Scanning a
+  Claude Code folder on the server is turned off (HF_CLAUDE_HOME=0). Upload the folder instead.") while
+  `HF_CLAUDE_HOME=0`; `404 not_found` (the folder is missing or not a folder, "The Claude Code folder was not found on
+  the server.", or its root cannot be read, "The Claude Code folder on the server cannot be read."); `409 conflict`
+  (`reason: 'busy'`) when shutdown stops the scan ("The scan of the Claude Code folder was stopped."; no plan is kept).
 
 **`POST /claude-import/upload`** — `claudeImport.upload` · multipart
-- Multipart only (`ClaudeImportUploadForm` + the parts `file` or `files` and `claudeJson`, at most 32 MiB in total);
-  a zip is read on the server with the install zip guards, only allowlisted entries are inflated, one shared top folder
-  is stripped.
+- Multipart only: one zip in `file`, or at most 10 000 parts `files` (each part's file name is its path relative to
+  the `.claude` folder), plus the optional `claudeJson` (`~/.claude.json`; a lone `claudeJson` part is accepted) and the
+  text field `label` (`ClaudeImportUploadForm`: the plan's `root`, default `.claude`); at most 32 MiB in total; the
+  route parses the body itself. Every path is checked again with the allowlist (anything else is listed in `skipped`
+  and never read); the scan's caps apply (a file over its cap or past the 32 MiB total, or one that is not UTF-8, is
+  `skipped`). A zip is read with the plugin installer's zip guards (at most 20 000 entries; a link, a special file, an
+  encrypted entry or a duplicate name refuses the whole zip); only allowlisted entries are inflated; one top folder
+  shared by every entry is stripped unless it is `agents`, `commands`, `skills` or `output-styles`; a `.claude.json` at
+  the zip root is `~/.claude.json` (one next to a `claudeJson` part is skipped as listed twice).
 - Response `200 ClaudeImportPlan` (`source: 'upload'`). Nothing else changes.
-- Errors: `400 validation_error` (not `multipart/form-data`, both `file` and `files`, no file, an unreadable zip);
-  `413 payload_too_large`.
+- Errors: `400 validation_error` (not `multipart/form-data`, an unknown field, text in a file part, a repeated `file`,
+  `claudeJson` or `label`, both `file` and `files`, none of `file` / `files` / `claudeJson`, more than 10 000 `files`
+  (on `['files']`), a zip that is damaged or that the guards refuse); `413 payload_too_large` (a body over 32 MiB,
+  `limitBytes` 33554432).
 
 **`POST /claude-import/apply`** — `claudeImport.apply` · **fresh**
-- Body `ClaudeImportApplyBody` (strict). Applies the picked items in one pass (the statuses are checked again against
-  the current state; executable items stay off unless `enable`); the plan is dropped afterwards.
-- Response `200 ClaudeImportApplyResult`. Emits one `customization.changed` and one `hooks.changed` (and what the
-  settings, MCP server and shell rule writes emit).
-- Errors: `400 validation_error` (an unknown item key, an action the item does not offer, an invalid rename);
+- Body `ClaudeImportApplyBody` (strict). Checked first against the plan the browser saw (errors below). Then the plan's
+  files are planned again against the current state and each picked item is re-checked: `skip` → `skipped`; an item
+  that is gone or no longer offers the action → `failed` ("The item changed since the folder was read. Read the folder
+  again."); one that is now `unchanged` → `unchanged`; one that is now `unsupported` / `invalid` → `failed` with its
+  summary. Then one pass: definitions in one batch (`overwrite` keeps `enabled`; a command with `` !`cmd` `` spans
+  arrives off unless `enable`); hooks in one batch (outcome `created`; command hooks off unless `enable`, prompt hooks
+  on; the 100 personal hook cap holds); MCP servers (a stdio server off unless `enable`, a per-project server always
+  off, an `overwrite` of a remote server keeps its `enabled`; an unresolved `${VAR}` fails the item); global shell
+  rules (an existing prefix → `unchanged`); tool overrides `deny` (a tool this server lacks fails the item); then
+  `CLAUDE.md` and `outputStyle` in one settings update (the instructions at most 20000 characters, else `failed`; the
+  style must exist or be imported by the same apply). The plan is dropped, also when items fail.
+- Response `200 ClaudeImportApplyResult` (`warnings` is always empty in v1.8). Emits exactly one `customization.changed
+  {}` and one `hooks.changed { projectId: null }`, also when nothing of that kind changed (plus the coalesced
+  `plugin.changed` of MCP server writes).
+- Errors: `400 validation_error` (a key sent twice, `rename` without `renameTo`, an unknown item key ("The plan has no
+  such item. Read the folder again."), an action the item does not offer (items without actions, i.e. `unchanged`,
+  `unsupported` and `invalid` ones, cannot be sent at all, not even with `skip`), an invalid rename, `variables` for an
+  item that is not an MCP server; a 400 keeps the plan);
   `403 forbidden` (action `login`) without fresh auth; `404 not_found` (an unknown or expired plan: "The import plan
   expired. Read the folder again.").
 
@@ -5294,31 +5585,51 @@ upload checks its content type: `multipart/form-data` only).
 
 Project definition files edited from the UI (Phase 12, ADR-056; DTOs in section 4.35), next to `/projects/:id/files`.
 Every route needs a session; no fresh auth and no idle rule (writes are allowed while a chat of the project runs:
-one-file writes under the file lock with a sha check). Writes are not journaled and emit `workspace.changed { source:
-'user', chatId: null, batchId: null, paths }` (which drops the catalog, the project configuration and emits
-`hooks.changed` / `project-trust.changed` as an agent write would); saving never approves anything. File contents are
-never logged. Until P12-A the three routes are stubs (`501`) that validate their input first.
+one-file writes under the file lock with a sha check). Saves and deletes are not journaled and emit `workspace.changed
+{ source: 'user', chatId: null, batchId: null, paths: [path] }`. As for an agent write, the catalog and the hook service
+drop their caches (`customization.changed { projectId }` when the project's catalog was cached, `hooks.changed` for a
+`.claude/` / `.harness/` path); the project configuration drops the project's snapshot and announces the new pending
+count after every save or delete, whether or not the project was read before (`project-trust.changed { projectId,
+pending }`, with `hooks.changed` when its hook items changed). Saving never approves anything. Logs: `project definition
+saved` (`projectId`, `kind`, `created`, `bytes`, `pending`) and `project definition deleted` (`projectId`, `kind`) at
+`info`, the path only at `debug`, never file contents. (Between P12-0a and P12-A the routes answered `501
+not_implemented` after validating their input.)
 
 **`GET /projects/:id/definitions/file?path=`** — `projectDefinitions.read`
 - Params `ProjectParams`. Query `ProjectDefinitionQuery`.
-- Response `200 ProjectDefinitionFile` (a missing file: `exists: false`, `content` and `sha256` null).
-- Errors: `400 validation_error` (not an editable path; a path the guard refuses: a link, `.git`, a secret-looking
-  name); `404 not_found` (unknown project, or its folder is unavailable).
+- Response `200 ProjectDefinitionFile` (a missing file: `exists: false`, `content` and `sha256` null, no diagnostics; a
+  file over its cap or a binary one: `content: null` with its `sha256` and one `error` diagnostic `too-large` /
+  `binary`).
+- Errors: `400 validation_error` on `['path']` (not an editable path: "Use a definition file under .claude/ or .harness/
+  (agents, commands, skills/<name>/SKILL.md, output-styles), a settings file or .mcp.json."; a `.git` or secret-looking
+  segment anywhere in the path; a link anywhere on it); `404 not_found` (unknown project, or its folder is unavailable:
+  "The project folder <path> is not available: <issue>").
 
 **`PUT /projects/:id/definitions/file`** — `projectDefinitions.write`
 - Params `ProjectParams`. Body `ProjectDefinitionWriteBody` (strict; the field must match the kind of the path).
-- A definition is parsed with `parseDefinition`, a settings `hooks` value with `readHooksConfig`, `mcpServers` with
-  `parseMcpJson`; a settings file keeps every other key and the key order (`hooks: null` removes the key).
+- The value is checked before anything is touched: a definition with `parseDefinition` (the file or skill folder name),
+  a settings `hooks` value with `readHooksConfig` (prompt handlers allowed), `mcpServers` with `parseMcpJson`. Under the
+  file lock the path is resolved again, the sha256 is compared, a settings file or `.mcp.json` is spliced (section 4.35:
+  every other key and the key order kept, `null` removes the key, a missing file starts from `{}`) and the whole new
+  file is checked again.
 - Response `200 ProjectDefinitionWriteResult` (`trust.pending` > 0: the web offers the project trust review).
-- Errors: `400 validation_error` (an `error` diagnostic, with `details.diagnostics`; a guarded path); `404 not_found`
-  (unknown project); `409 conflict` (`reason: 'stale'`, "The file changed on disk. Load it again or overwrite it.")
-  when the file's sha256 is not `expectedSha256` (or it exists while `expectedSha256` is null).
+- Errors: `400 validation_error` (a field that does not match the kind of the path, on `['path']`: `This file takes
+  "hooks".`; an `error` diagnostic: the message of the first one, `details.diagnostics` and one issue on `['content']`,
+  `['hooks']` or `['mcpServers']`, also for a settings file or `.mcp.json` on disk that is larger than 256 KiB, not valid
+  JSON or not a JSON object, which is never replaced; a path the guard refuses, on `['path']`); `404 not_found`
+  (unknown project, or its folder is unavailable); `409 conflict` (`reason: 'stale'`, "The file changed on disk. Load it again or overwrite it.")
+  when the file's sha256 is not `expectedSha256` (it exists while `expectedSha256` is null, or it is missing while it
+  is set).
 
 **`DELETE /projects/:id/definitions/file?path=&expectedSha256=`** — `projectDefinitions.remove`
 - Params `ProjectParams`. Query `ProjectDefinitionRemoveQuery` (markdown definitions only; a skill folder left empty is
   removed).
 - Response `204`.
-- Errors: `400 validation_error`; `404 not_found` (unknown project or file); `409 conflict` (`reason: 'stale'`).
+- Emits `workspace.changed { source: 'user' }` like a save.
+- Errors: `400 validation_error` (a settings file or `.mcp.json`: "Only agent, command, skill and output style files can
+  be deleted."; a path the guard refuses; not a regular file); `404 not_found` (unknown project, its folder is
+  unavailable, or a missing file: `"<path>" does not exist in the project folder.`); `409 conflict` (`reason: 'stale'`,
+  the same message as a save) when the file's sha256 is not `expectedSha256`.
 
 ## 6. Chat stream protocol
 
@@ -5659,7 +5970,9 @@ Tool part states (`tool-<name>` and `dynamic-tool`):
   user-invocable skill resolves the name.
 - **Custom agents** stream like the builtin sub-agents (section 6.9): the `tool-task` part's snapshots carry the agent
   `type` (a catalog name) and `agent` (the definition snapshot).
-- **Skills**: a `tool-skill` part (`SkillInput`, `SkillOutput`); the model reads the body as the tool result.
+- **Skills**: a `tool-skill` part (`SkillInput`, `SkillOutput`); the model reads the body as the tool result. Phase 12
+  (ADR-053 / ADR-058): a `file` call reads one supporting file (`SkillOutput.file`); a fork skill's child runs under the
+  `skill` call's id (its steps are not shown in the `tool-skill` part) and its report is the output's `content`.
 - **Background sub-agents**: the `tool-task` part of a `background: true` call ends at once with `status: 'background'`
   and its `taskId` (no steps, no report); its progress reaches the web through `task.changed` and `GET /chat/:id/tasks`,
   never through the reply.
@@ -5703,13 +6016,21 @@ Tool part states (`tool-<name>` and `dynamic-tool`):
   hook `deny` makes the call `output-denied` ("Blocked by hook: <reason>", or "Blocked by hook." without one); a harness
   denial (a deny override or policy) beats every hook decision; `ask` shows the approval card even where the harness
   would run the call (a sub-agent's call is denied instead); `allow` skips the card only for a tool that would ask, is
-  neither an `execute` tool nor an `always` policy, and never in plan mode. Known limitation: the record keeps the
-  hook's own outcome (`allowed`) when the harness still asks (plan mode, an `execute` tool, an `always` policy), so the
-  hook note says allowed while the card shows.
-- **Running hooks**: a transient `data-activity` chunk `{ kind: 'hooks', event, toolCallId? }` while the hooks of
-  `PreToolUse`, `PostToolUse`, `Stop` or `PreCompact` of a chat run run (also when only plugin code hooks run), then
-  `{ kind: 'idle' }`; never stored. The tool row shows "Running hook…" (never on a `task` row), the reply "Running
-  hooks…". `UserPromptSubmit` / `SessionStart` (before the stream), `Notification` and sub-agents write none.
+  neither an `execute` tool nor an `always` policy, and never in plan mode. When the harness still asks (plan mode, an
+  `execute` tool, an `always` policy) the record keeps the hook's own outcome `allowed` and, since Phase 12, carries
+  `harnessAsked: true` (the records of a call are held until its approval settles; the web shows "Allowed by hook ·
+  still asks"). Phase 12: `PermissionRequest` runs once per call that would show the approval card (main agent only,
+  after `PreToolUse`, with the input it rewrote; not again on the approved continuation): a `deny` (or a block) makes
+  the call `output-denied` ("Blocked by hook: …"), an `allow` approves it under the same rule as a `PreToolUse` allow
+  (its `updatedInput` becomes the call's input), else the card shows; a prompt hook's "no" there changes nothing. Its
+  record and a `PostToolUseFailure` record (a call that failed after its approval; its context or block reason reaches
+  the model at the next step like `PostToolUse`, `continue: false` stops the run) carry the call's `toolCallId`.
+- **Running hooks**: a transient `data-activity` chunk `{ kind: 'hooks', event, toolCallId?, label? }` while the hooks
+  of `PreToolUse`, `PostToolUse`, `Stop` or `PreCompact` (Phase 12 also `PostToolUseFailure`, `PermissionRequest` and
+  `PostCompact`) of a chat run run (also when only plugin code hooks run), then `{ kind: 'idle' }`; never stored. The
+  tool row shows "Running hook…" (never on a `task` row), the reply "Running hooks…"; since Phase 12 `label` (the
+  `statusMessage` of the first matching handler, trimmed, <= 200 characters) replaces that text when a handler sets one.
+  `UserPromptSubmit` / `SessionStart` (before the stream), `Notification`, `SessionEnd` and sub-agents write none.
 - **Stop continuation**: when a `Stop` hook blocks the natural end of a model run (not aborted, no error, no approval
   pending, no queued message), the reply finishes normally and the server starts a follow-up turn
   (`run.started` with `origin: 'hook'` and `userMessageId`) from a **user-role carrier message** that holds only
@@ -5725,7 +6046,13 @@ Tool part states (`tool-<name>` and `dynamic-tool`):
   `custom_instructions` = the focus) and before an automatic compaction (`auto`), before the `compacting` activity;
   it only observes. `Notification` (`permission_prompt`, "The agent needs your permission to use <tools>.", at most 3
   names, then "and N more") runs without waiting once a run waits for an approval. Sub-agents never run
-  `UserPromptSubmit`, `SessionStart` or `Stop`.
+  `UserPromptSubmit`, `SessionStart` or `Stop`. Phase 12: `SubagentStart` runs before a child's first step (matched on
+  the agent type; its `additionalContext` joins the child's first message; never stored), `SubagentStop` is matched on
+  the agent type too, a child's tool events carry `agent_id` / `agent_type` (a child never runs `PermissionRequest`),
+  `PostCompact` runs right after the compaction marker of `/compact` (`manual`) or an automatic compaction (`auto`) and
+  only observes (its record follows the marker), and `SessionEnd` runs only on `DELETE /chats/:id` (section 5.9). A
+  `Stop` or `SubagentStop` prompt hook that answers "no" continues the agent like a command hook's block, unless it
+  says `impossible`.
 - **Output style**: the effective style (chat ?? project ?? global `outputStyle`) puts `Output style: <label>` and its
   body first in the main agent's instructions (sub-agents never get one; `keep-coding-instructions: false` drops the
   workspace tool rules and the todo / task hints); an unknown, inactive or unreadable style runs as `default` with the
@@ -5733,7 +6060,9 @@ Tool part states (`tool-<name>` and `dynamic-tool`):
 - **Command extras**: the `` !`cmd` `` spans of a trusted command body (a personal command, a loaded plugin's
   `template`, not a `run` result, or an approved project file) run in the project folder in every permission mode,
   after the prompt hooks passed and before the model call (one after another, 30 s each, 60 s in total, at most 10; the
-  shell tool's minimal environment plus `HARNESS_PROJECT_DIR` / `CLAUDE_PROJECT_DIR`). A span's output is stdout then
+  shell tool's minimal environment plus `HARNESS_PROJECT_DIR` / `CLAUDE_PROJECT_DIR`; Phase 12: the markdown commands of
+  a trusted Claude Code plugin are a trusted source too, their spans also get `CLAUDE_PLUGIN_ROOT`,
+  `HARNESS_PLUGIN_ROOT` and `CLAUDE_PLUGIN_DATA`, never a `CLAUDE_PLUGIN_OPTION_*` value). A span's output is stdout then
   stderr, each stream keeping its first 12 KiB and last 4 KiB, then cut to 16 KiB, with the notes `[output
   truncated]`, `[timed out]`, `[exit code N]`, `[did not finish]` or `[skipped: time limit]` ("The shell could not be
   started." when the shell fails to start). `@path` files are inlined in project chats only (otherwise the text stays):
@@ -5745,7 +6074,12 @@ Tool part states (`tool-<name>` and `dynamic-tool`):
   when something was inlined), so a regenerate or a continuation never runs the spans again. Arguments are never
   substituted inside a span. The info log `command shell lines ran` carries only counts and the duration. A
   user-invocable skill invoked as `/name [arguments]` is a prompt invocation with `metadata.command.kind: 'skill'` (its
-  arguments are expanded; its `!` spans and `@path` stay text).
+  arguments are expanded; its `!` spans and `@path` stay text). Phase 12 (ADR-058): bodies expand with the argument
+  base rule and the `${CLAUDE_…}` variables of section 4.28 (text parts without argument placeholders get the
+  variables and `\$` too); `disallowed-tools` of the turn's command or skill remove tools from the turn (read again
+  from the run catalog on a continuation or regenerate); a fork definition (`context: fork`) expands into the
+  delegation directive ("Run /<name> in a sub-agent: call the task tool once with type "<agent>", …"), `task` kept in
+  the turn's tools.
 - **Project MCP tools** are offered only in the project's chats whose folder opened, with a permission mode other than
   `off` and a tool-capable model (`mcp__<id>__<tool>` dynamic tools, like global MCP tools; never in safe mode;
   sub-agents get them from the parent run, under their ceiling, and never the global server a project server shadows); a
@@ -5785,17 +6119,19 @@ Tool part states (`tool-<name>` and `dynamic-tool`):
 | `plugin.log` | new plugin log entry (logger, guard failure, build output) | `{ pluginId, entry }` | Logs tab / build panel append |
 | `project.changed` | project created, renamed, instructions changed, deleted (Phase 7, ADR-031) | `ProjectChangedData` (`{ id, project }`, `project: null` = deleted) | projects store: patch or remove; on delete, chats of the project get `projectId: null` and a list filtered by it falls back to all chats |
 | `key.rotated` | master-key rotation finished (Phase 7, ADR-034); every stream closes right after it | `KeyRotatedData` (`{ keyVersion, rotatedAt, chatIds }`) | reload the chats store; every open chat listed in `chatIds` refetches; toast; the closed stream reconnects (or the login page shows) |
-| `workspace.changed` | an agent `write_file` / `edit_file` changed files of a project folder (coalesced: at most one event per second per chat), or a rewind, revert or undo batch wrote something (one event per batch) (Phase 8, ADR-036) | `WorkspaceChangedData` (`{ projectId, chatId, batchId, source, paths }`) | the changes panel of an open chat of that project refreshes (debounced) |
+| `workspace.changed` | an agent `write_file` / `edit_file` changed files of a project folder (coalesced: at most one event per second per chat), or a rewind, revert or undo batch wrote something (one event per batch) (Phase 8, ADR-036), or (Phase 12, ADR-056) a project definition file was saved or deleted from the UI (`source: 'user'`, `chatId` and `batchId` null, one event per save or delete) | `WorkspaceChangedData` (`{ projectId, chatId, batchId, source, paths }`) | the changes panel of an open chat of that project refreshes (debounced) |
 | `queue.changed` | a message was queued, cancelled, steered into the running reply, started as the next turn, dropped by Stop or removed by a failure (Phase 9, ADR-042) | `QueueChangedData` (`{ chatId, items, removed? }`) | chat-queue store: replace the chat's queue; a `delivered` message is shown where the model received it |
 | `task.changed` | a background task of a chat was launched, made progress (at most once per second), ended or was delivered (Phase 10, ADR-046) | `TaskChangedData` (`{ chatId, task }`) | background-tasks store: upsert; the dock of the open chat updates and announces endings |
 | `customization.changed` | a personal agent, command or skill was created, updated or deleted (`{ kind, id }`); a cached project catalog was dropped or rebuilt with other files (`{ projectId }`, at most one per second per project); plugin agents, skills or commands changed, or a backup restore added definitions (`{}`, at most one per second) (Phase 10, ADR-044); since Phase 11 output styles too | `CustomizationChangedData` (`{ kind?, id?, projectId? }`) | customizations store: mark stale and refetch what is shown (Settings → Customize, the slash menu, the style menu) |
 | `hooks.changed` | a personal hook was created, updated or deleted, the setting `hooksEnabled` changed, a plugin with hooks changed (`projectId: null`); a project's approvals changed, a write touched a `.claude/` or `.harness/` path of the project (`workspace.changed`), a rebuild of the project's items found other hook items, or an approved project hook failed verify-before-run (`{ projectId }`) (Phase 11, ADR-048) | `HooksChangedData` (`{ projectId }`) | hooks store: mark the scope stale and refetch what is shown (Settings → Customize → Hooks) |
-| `project-trust.changed` | an approval was added or revoked; a rebuild of the project's items found other hashes (after a settings, `.mcp.json`, command or referenced file changed, `project.changed`, `run.finished` of a chat of the project, or a verify-before-run mismatch); a list found another pending count than the last one announced; the project was deleted (`pending: 0`) (Phase 11, ADR-049) | `ProjectTrustChangedData` (`{ projectId, pending }`) | project-trust store: update the pending count (trust chip) and refetch an open review dialog |
+| `project-trust.changed` | an approval was added or revoked; a rebuild of the project's items found other hashes (after a settings, `.mcp.json`, command or referenced file changed, `project.changed`, `run.finished` of a chat of the project, or a verify-before-run mismatch); a list found another pending count than the last one announced; the project was deleted (`pending: 0`) (Phase 11, ADR-049); every save or delete of a project definition file from the UI (Phase 12, section 5.36) | `ProjectTrustChangedData` (`{ projectId, pending }`) | project-trust store: update the pending count (trust chip) and refetch an open review dialog |
 | `project-mcp.changed` | a project MCP server changed state (connected, stopped, error, needs variables, ...), its tools changed or it was removed (coalesced; never for a deleted project) (Phase 11, ADR-050) | `ProjectMcpChangedData` (`{ projectId, servers }`) | project-mcp store: replace the project's servers |
-| `marketplace.changed` | a marketplace was added, refreshed or removed (Phase 12, ADR-054) | `MarketplaceChangedData` (`{ id, marketplace }`, `marketplace: null` = removed) | marketplaces store: upsert or remove; the update badges follow `plugin.changed` |
+| `marketplace.changed` | a marketplace was added, refreshed (also a refresh that failed and stored `lastError`) or removed (Phase 12, ADR-054); a refresh that changes the update state of installed plugins also emits `plugin.changed` for each of them | `MarketplaceChangedData` (`{ id, marketplace }`, `marketplace: null` = removed) | marketplaces store: upsert or remove; the update badges follow `plugin.changed` |
 
 Phase 12 adds `marketplace.changed` (19 event types) and the `workspace.changed` source `user` (a project definition
-file saved from the UI); an import apply emits one `customization.changed` and one `hooks.changed`, a prompt hook, a
+file saved or deleted from the UI, followed by `project-trust.changed`); an import apply emits exactly one `customization.changed` and one `hooks.changed` (also when nothing of that kind
+changed; MCP server writes add their coalesced `plugin.changed`), a marketplace refresh that changes update states
+emits `plugin.changed` for those plugins, a prompt hook, a
 transcript and a `SessionEnd` hook emit nothing else. Phase 11 adds `hooks.changed`, `project-trust.changed` and
 `project-mcp.changed` (18 event types) and the `run.started`
 origin `hook` (a turn the server started after a `Stop` hook blocked; its `userMessageId` is the carrier message); a

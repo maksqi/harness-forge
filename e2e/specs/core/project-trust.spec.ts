@@ -12,6 +12,9 @@
 // - The entry points: the chat project chip's menu, Settings -> Projects (the "{n} to review" badge and the row menu)
 //   and the Customize Hooks tab ("Review {n}…").
 // - Approving needs a fresh password (a password server of its own, the browser clock 11 minutes past the login).
+// - Phase 12 (W12.14, docs/UI.md 7.34): a group with a command hook and a prompt hook (`data-type` command / prompt; the
+//   prompt hook shows its prompt in the "Prompt" block and "Model: …"); one item selected makes the group's "Select all 2"
+//   mixed (`aria-checked="mixed"`, the minus icon), a click selects both, another clears them; nothing is approved.
 import type { Locator, Page } from '@playwright/test'
 import { readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -304,5 +307,48 @@ test.describe('project trust', () => {
     await expect(page.getByTestId(testIds.projectTrustChip)).toHaveAttribute('data-count', '2')
     expect((await pendingTrustItems(session, seeded.projectId)).map(item => item.kind).sort()).toEqual(['command', 'mcp'])
     await expect(composer(page)).toBeVisible()
+  })
+
+  test('Phase 12: a command and a prompt hook in one group; the mixed Select all @smoke', async ({ page, api, cleanup }) => {
+    const { project, folder, chatId } = await seedProjectChat(api, cleanup, { modelRef: MOCK_HOOKS_MODEL, prefix: 'trust-mixed' })
+    const hook = await writeHookScript(folder.path, 'context')
+    const prompt = 'Check that the prompt names a ticket. $ARGUMENTS'
+    await writeProjectFile(folder.path, '.harness/settings.json', `${JSON.stringify({
+      hooks: {
+        UserPromptSubmit: [
+          { hooks: [{ type: 'command', command: hook }] },
+          { hooks: [{ type: 'prompt', prompt, model: 'mock:prompt-hook' }] },
+        ],
+      },
+    }, null, 2)}\n`)
+    await page.goto(`/chat/${chatId}`)
+    const dialog = await openTrustFromChip(page, 2)
+    const group = byTestId(dialog, testIds.projectTrustGroup, { 'data-kind': 'hook' })
+    await expect(group).toHaveAttribute('data-count', '2')
+    const commandItem = trustItem(group, { 'data-type': 'command' })
+    const promptItem = trustItem(group, { 'data-type': 'prompt' })
+    await expect(commandItem.locator('[data-slot="project-trust-command"]')).toHaveText(hook)
+    await expect(promptItem.locator('[data-slot="project-trust-command"]')).toHaveAccessibleName('Prompt')
+    await expect(promptItem.locator('[data-slot="project-trust-command"]')).toHaveText(prompt)
+    await expect(promptItem).toContainText('Model: mock:prompt-hook')
+
+    const selectAll = group.getByTestId(testIds.projectTrustSelectAll)
+    await expect(group).toContainText('Select all 2')
+    await expect(selectAll).toHaveAttribute('aria-checked', 'false')
+    await commandItem.getByTestId(testIds.projectTrustSelect).click()
+    await expect(selectAll).toHaveAttribute('aria-checked', 'mixed')
+    await expect(selectAll).toHaveAttribute('data-state', 'indeterminate')
+    await expect(selectAll.locator('[data-slot="project-trust-select-all-mixed"]')).toBeVisible()
+    await expect(dialog.getByTestId(testIds.projectTrustApprove)).toHaveText('Approve 1 item')
+    await selectAll.click()
+    await expect(selectAll).toHaveAttribute('aria-checked', 'true')
+    await expect(promptItem.getByTestId(testIds.projectTrustSelect)).toHaveAttribute('aria-checked', 'true')
+    await expect(dialog.getByTestId(testIds.projectTrustApprove)).toHaveText('Approve 2 items')
+    await selectAll.click()
+    await expect(selectAll).toHaveAttribute('aria-checked', 'false')
+    await expect(dialog.getByTestId(testIds.projectTrustApprove)).toBeDisabled()
+    await page.keyboard.press('Escape')
+    await expect(dialog).toBeHidden()
+    expect((await pendingTrustItems(api, project.id)).length, 'closing approves nothing').toBe(2)
   })
 })

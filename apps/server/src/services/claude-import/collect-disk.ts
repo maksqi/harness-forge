@@ -115,7 +115,7 @@ export async function collectDiskHome(options: CollectDiskOptions): Promise<Coll
     if (error instanceof HarnessError)
       throw error
     if (error instanceof DeadlineError)
-      throw new HarnessError({ code: 'conflict', message: 'The Claude Code folder could not be read in time.' })
+      throw new HarnessError({ code: 'conflict', message: 'The Claude Code folder could not be read in time.', details: { reason: 'busy' } })
     if (MISSING_CODES.has(errorCode(error) ?? ''))
       throw missingRoot()
     throw new HarnessError({ code: 'not_found', message: 'The Claude Code folder on the server cannot be read.' })

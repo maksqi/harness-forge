@@ -14,8 +14,22 @@
 // Phase 11 (W11.13, docs/UI.md 7.32, 7.33, 9.13): the hook rows' `⋯` menus, the trust dialog's checkboxes and Approve,
 // the MCP servers dialog's Reconnect and variable input, and the composer's output style trigger and options are 40 px
 // targets.
+// Phase 12 (W12.14, docs/UI.md 8.13, 9.14, 14.5): a marketplace's chip, row menu and an entry's Install…; the import
+// wizard's source radios, Select all and item checkboxes and a conflict's resolution select; the project file editor's
+// Copy path, Cancel, Save and × Close; the hook editor's Type toggle (Command, Prompt) are 40 px targets (the × Close
+// fixed by W12.19 at Gate P12-B).
 import type { Locator, Page } from '@playwright/test'
 import type { CleanupTask, HarnessApi } from '../../helpers/index.ts'
+import {
+  chooseClaudeFolder,
+  claudeImportGroup,
+  claudeImportItem,
+  continueToPreview,
+  FAKE_HOME_CONFLICT_AGENT,
+  fakeClaudeHomeTree,
+  openClaudeImport,
+  seedFakeClaudeHome,
+} from '../../helpers/claude-home.ts'
 import {
   approveProjectItems,
   backgroundAgents,
@@ -43,6 +57,8 @@ import {
   seedHookProjectChat,
   seedProject,
   seedProjectChat,
+  seedTempTree,
+  stubClaudeHome,
   test,
   testIds,
   touchTargetSize,
@@ -53,6 +69,16 @@ import {
   writeHookScript,
   writeProjectFile,
 } from '../../helpers/index.ts'
+import { openProjectFileEditor, projectRow } from '../../helpers/project-files.ts'
+import {
+  addFolderMarketplace,
+  claudeNotesTree,
+  marketplaceChip,
+  marketplaceEntry,
+  marketplaceTree,
+  openMarketplaces,
+  useCleanMarketplace,
+} from '../plugins/_support/claude.ts'
 
 /** The collapsed rail on touch devices (`pointer-coarse:[--sidebar-width-icon:3.5rem]`). */
 const RAIL_WIDTH = 56
@@ -424,5 +450,67 @@ test.describe('tablet touch targets of hooks, trust, project MCP and output styl
       await expect.poll(async () => (await boxOf(option)).height, { message: 'a style option height' }).toBeGreaterThanOrEqual(MIN_TARGET)
     await page.keyboard.press('Escape')
     await expect(options).toHaveCount(0)
+  })
+})
+
+test.describe('tablet touch targets of the Claude Code ecosystem (Phase 12)', () => {
+  test('a marketplace\'s chip, menu and Install…, the import wizard\'s checkboxes and resolution select are at least 40 px', async ({ page, api, cleanup }) => {
+    const name = uniqueId('e2e-tablet-marketplace')
+    const plugin = uniqueId('e2e-tablet-notes')
+    await useCleanMarketplace(api, cleanup, name)
+    const folder = await seedTempTree(cleanup, 'tablet-marketplace', marketplaceTree(name, [{ name: plugin, tree: claudeNotesTree(plugin), version: '1.0.0', description: 'Notes on a tablet.', category: 'productivity' }]))
+    const marketplace = await addFolderMarketplace(api, folder.path)
+    const view = await openMarketplaces(page, `?m=${marketplace.id}`)
+    await expectTouchTarget(marketplaceChip(view, marketplace.id), 'the marketplace chip')
+    await expectTouchTarget(view.getByTestId(testIds.marketplaceRowMenu).first(), 'the marketplace menu')
+    await expectTouchTarget(marketplaceEntry(view, plugin).getByTestId(testIds.marketplaceEntryInstall), 'Install…')
+    await expectTouchTarget(view.getByTestId(testIds.marketplaceAdd), 'Add marketplace…')
+
+    const home = await seedFakeClaudeHome(cleanup, fakeClaudeHomeTree({ builtinConflict: true }))
+    await stubClaudeHome(page)
+    const dialog = await openClaudeImport(page)
+    for (const value of ['folder', 'zip'])
+      await expect.poll(async () => (await touchTargetSize(byTestId(dialog, testIds.claudeImportSource, { 'data-value': value }))).height, { message: `the ${value} source height` }).toBeGreaterThanOrEqual(MIN_TARGET)
+    await chooseClaudeFolder(dialog, home)
+    const preview = await continueToPreview(dialog)
+    const agents = claudeImportGroup(preview, 'agent')
+    await expectTouchTarget(agents.getByTestId(testIds.claudeImportSelectAll), 'Select all')
+    await expectTouchTarget(claudeImportItem(agents, 'agent', 'reviewer').getByTestId(testIds.claudeImportSelect), 'an item checkbox')
+    await expectTouchTarget(claudeImportItem(agents, 'agent', FAKE_HOME_CONFLICT_AGENT).getByTestId(testIds.claudeImportResolution), 'the resolution select')
+    for (const id of [testIds.claudeImportBack, testIds.claudeImportSubmit])
+      await expect.poll(async () => (await touchTargetSize(dialog.getByTestId(id))).height, { message: `${id} height` }).toBeGreaterThanOrEqual(MIN_TARGET)
+    await page.keyboard.press('Escape')
+    await page.getByRole('alertdialog').getByRole('button', { name: 'Discard' }).tap()
+    await expect(dialog).toBeHidden()
+  })
+
+  test('the project file editor\'s buttons and the hook editor\'s Type toggle are at least 40 px', async ({ page, api, cleanup }) => {
+    const path = '.claude/agents/tablet-reviewer.md'
+    const { project } = await seedProject(api, cleanup, { prefix: 'tablet-file', files: { [path]: definitionFile({ name: 'tablet-reviewer', description: 'Reviews on a tablet.' }, 'Review it.\n') } })
+    await page.goto(`/settings/customize?tab=agents&project=${project.id}`)
+    const editor = await openProjectFileEditor(page, projectRow(page, 'agent', 'tablet-reviewer'), path, 'Review it.')
+    await expectTouchTarget(editor.getByRole('button', { name: 'Copy path' }), 'Copy path')
+    await expectTouchTarget(editor.getByRole('button', { name: 'Cancel' }), 'Cancel')
+    await expectTouchTarget(editor.getByTestId(testIds.projectFileSave), 'Save')
+    await page.keyboard.press('Escape')
+    await expect(editor).toBeHidden()
+
+    await page.goto('/settings/customize?tab=hooks')
+    await page.getByTestId(testIds.customizeNew).tap()
+    const hookEditor = page.getByTestId(testIds.hookEditor)
+    const type = hookEditor.getByTestId(testIds.hookType)
+    for (const value of ['command', 'prompt'])
+      await expectTouchTarget(type.locator(`[data-value="${value}"]`), `the ${value} type`)
+    await type.locator('[data-value="prompt"]').tap()
+    await expect(type).toHaveAttribute('data-value', 'prompt')
+    await expectTouchTarget(hookEditor.getByTestId(testIds.hookSave), 'Save hook')
+  })
+
+  test('the project file editor\'s Close is at least 40 px', async ({ page, api, cleanup }) => {
+    const path = '.claude/agents/tablet-close.md'
+    const { project } = await seedProject(api, cleanup, { prefix: 'tablet-close', files: { [path]: definitionFile({ name: 'tablet-close', description: 'Closes on a tablet.' }, 'Close it.\n') } })
+    await page.goto(`/settings/customize?tab=agents&project=${project.id}`)
+    const editor = await openProjectFileEditor(page, projectRow(page, 'agent', 'tablet-close'), path, 'Close it.')
+    await expectTouchTarget(editor.getByRole('button', { name: 'Close' }).last(), 'Close')
   })
 })

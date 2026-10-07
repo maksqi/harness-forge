@@ -128,7 +128,7 @@ test.describe('skills', () => {
     await input.fill(`/${hidden}`)
     await expect(byTestId(menu, testIds.slashMenuItem, { 'data-value': hidden })).toHaveCount(0)
 
-    // Picking it inserts the name (the ghost argument hint of such a long name: the fixme test below).
+    // Picking it inserts the name (the ghost argument hint of such a long name: the test below).
     await input.fill(`/${skill.slice(0, 20)}`)
     await expect(menu.getByTestId(testIds.slashMenuItem)).toHaveCount(1)
     await input.press('Enter')

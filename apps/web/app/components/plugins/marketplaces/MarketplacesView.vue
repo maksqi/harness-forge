@@ -13,6 +13,8 @@
 // every one, at most 4 requests at a time, single flight per id); a skeleton while they load, "Could not load the
 // marketplaces" with Retry after a failure. Refresh and remove toast only on failure / success as 8.13 says.
 // No props, no emits; the root test id is frozen from Gate P12-0b (C46 stub); implementation W12.8 (P12-A).
+// W12.19 (docs/UI.md 14.5): below `sm` the icon-only header buttons are 40x40 px and the category select 40 px tall (a
+// coarse pointer too): the frozen SelectTrigger's `data-[size=default]:h-9` is beaten only by a class on that attribute.
 import type { AcceptableValue } from 'reka-ui'
 import type { MarketplaceEntryView } from './marketplaces'
 import { CircleAlertIcon, PlusIcon, RotateCwIcon, SearchIcon, StoreIcon, TriangleAlertIcon, XIcon } from '@lucide/vue'
@@ -457,7 +459,7 @@ function entryBusy(view: MarketplaceEntryView): boolean {
             :disabled="items.length === 0 || refreshingAll"
             :aria-busy="refreshingAll || undefined"
             :data-testid="testIds.marketplaceRefreshAll"
-            class="pointer-coarse:h-10"
+            class="pointer-coarse:h-10 max-sm:size-10"
             @click="refreshAll"
           >
             <Spinner v-if="refreshingAll" aria-hidden="true" data-icon="inline-start" />
@@ -469,7 +471,7 @@ function entryBusy(view: MarketplaceEntryView): boolean {
             size="sm"
             aria-label="Add marketplace…"
             :data-testid="testIds.marketplaceAdd"
-            class="pointer-coarse:h-10"
+            class="pointer-coarse:h-10 max-sm:size-10"
             @click="addOpen = true"
           >
             <PlusIcon aria-hidden="true" data-icon="inline-start" />
@@ -570,7 +572,7 @@ function entryBusy(view: MarketplaceEntryView): boolean {
                 aria-label="Category"
                 :data-testid="testIds.marketplaceCategory"
                 :data-value="category ?? ''"
-                class="w-44 max-sm:h-10 max-sm:w-full"
+                class="w-44 max-sm:w-full max-sm:data-[size=default]:h-10 pointer-coarse:data-[size=default]:h-10"
               >
                 <span class="text-muted-foreground">Category:</span>
                 <SelectValue />

@@ -134,7 +134,7 @@ export interface ClaudePluginManifest {
   readonly keywords: readonly string[]
   /** Default true; false installs the plugin disabled. */
   readonly defaultEnabled: boolean
-  /** Replace the default `commands/` scan when present (paths) or add inline commands (object form). */
+  /** Replace the default `commands/` scan when present (the paths, and the inline commands of the object form). */
   readonly commands?: { readonly paths: ClaudeComponentPaths, readonly inline: readonly ClaudeInlineCommand[] }
   /** Replace the default `agents/` scan when present. */
   readonly agents?: ClaudeComponentPaths

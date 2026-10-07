@@ -20,6 +20,7 @@
 // edits asks "Discard changes?" (`project-file-discard-confirm`). Mounted by CustomizeSettings (Edit… of project rows,
 // the viewer's Edit, New file…) and ProjectMcpDialog (Edit .mcp.json…, kind `mcp`).
 // Props, emits and the root test id are frozen from Gate P12-0b (C46 stub); W12.11 implements it in P12-A.
+// W12.19: the Folder list opens as a popper below its trigger; on a coarse pointer the trigger and the × Close are 40 px.
 import type { ProjectDefinitionWriteBody } from '@harness-forge/shared'
 import type { AcceptableValue } from 'reka-ui'
 import type { ProjectFileTarget } from './customize'
@@ -54,6 +55,7 @@ import {
   projectFileName,
   projectFileTitle,
   projectSavedText,
+  SHEET_CLOSE_TOUCH_CLASS,
 } from './customize'
 
 type Folder = '.harness' | '.claude'
@@ -427,6 +429,7 @@ function onFolder(value: AcceptableValue): void {
       :data-path="path"
       :data-mode="mode"
       class="gap-0 data-[side=right]:w-full data-[side=right]:sm:max-w-2xl"
+      :class="SHEET_CLOSE_TOUCH_CLASS"
       @open-auto-focus="onOpenAutoFocus"
       @keydown="onKeydown"
     >
@@ -498,10 +501,10 @@ function onFolder(value: AcceptableValue): void {
           <div class="grid gap-2">
             <Label :for="ids.folder">Folder</Label>
             <Select :model-value="folder" @update:model-value="onFolder">
-              <SelectTrigger :id="ids.folder" data-slot="project-file-folder" :data-value="folder" class="w-full font-mono text-[13px] pointer-coarse:h-10">
+              <SelectTrigger :id="ids.folder" data-slot="project-file-folder" :data-value="folder" class="w-full font-mono text-[13px] pointer-coarse:data-[size=default]:h-10">
                 <SelectValue />
               </SelectTrigger>
-              <SelectContent>
+              <SelectContent position="popper" align="start">
                 <SelectItem v-for="item in FOLDERS" :key="item" :value="item" class="font-mono text-[13px]">
                   {{ item }}
                 </SelectItem>

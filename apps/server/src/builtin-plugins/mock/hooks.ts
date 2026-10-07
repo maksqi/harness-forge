@@ -11,8 +11,10 @@
 // - The user text: the text parts of the turn's user message with every hook block removed, joined with a space,
 //   trimmed (the text after command expansion); `(empty message)` when empty. The trigger is its last non-empty line,
 //   trimmed.
-// - The turn: from the last user message that is not a steer (a user message right after a tool message, or after such
-//   a steer) and that is not made of hook blocks only (hook context injected at a step boundary never opens a turn).
+// - The turn: from the last user message that is not made of hook blocks only (hook context injected at a step boundary
+//   never opens a turn). Phase 12 (Gate P12-B, W12.20): a user message right after a tool message opens the turn too — a
+//   turn ended by a hook (`continue: false`) or a superseded approval leaves the history ending in a tool result, so the
+//   next request follows a tool message; steers are still recognized by `lastFeedback` (rules 1a / 2).
 //
 // Checked in this order:
 // 1. Child (the system text holds `SUBAGENT_INSTRUCTIONS_MARKER`): (a) the last user message of the prompt holds
@@ -139,7 +141,7 @@ interface HooksTurn extends MockTurn {
 export function mockHooksTurn(prompt: LanguageModelV4Prompt): HooksTurn {
   let start = -1
   for (let index = prompt.length - 1; index >= 0; index--) {
-    if (prompt[index]?.role === 'user' && !isSteer(prompt, index) && !hookOnly(prompt[index])) {
+    if (prompt[index]?.role === 'user' && !hookOnly(prompt[index])) {
       start = index
       break
     }

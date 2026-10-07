@@ -308,6 +308,9 @@ describe('projectTrustDialog: the mixed select-all (Phase 12, W12.13-T1)', () =>
     expect(selectAll().dataset.state).toBe('indeterminate')
     expect(selectAll().querySelector('[data-slot="project-trust-select-all-mixed"]')).not.toBeNull()
     expect(selectAll().querySelector('svg')!.getAttribute('class')).toContain('minus')
+    // W12.19: filled like a checked box in both themes (the Checkbox's `dark:bg-input/30` must not win in the dark one).
+    const fill = selectAll().className.split(/\s+/)
+    expect(fill).toEqual(expect.arrayContaining(['data-[state=indeterminate]:bg-primary', 'dark:data-[state=indeterminate]:bg-primary', 'data-[state=indeterminate]:border-primary', 'data-[state=indeterminate]:text-primary-foreground']))
 
     await click(selectAll())
     expect(selectAll().getAttribute('aria-checked')).toBe('true')

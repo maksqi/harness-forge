@@ -73,7 +73,7 @@ async function onChange(next: AcceptableValue): Promise<void> {
           :data-testid="testIds.customizeStyleDefault"
           :data-value="value"
           :aria-describedby="projectId ? ids.note : undefined"
-          class="w-full min-w-0 sm:w-64 pointer-coarse:h-10"
+          class="w-full min-w-0 sm:w-64 pointer-coarse:data-[size=default]:h-10"
         >
           <span class="min-w-0 truncate">{{ shown }}</span>
         </SelectTrigger>
