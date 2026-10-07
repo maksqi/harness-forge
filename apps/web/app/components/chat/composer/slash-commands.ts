@@ -14,9 +14,14 @@
 // of up to 64 characters in the hint, query and command patterns. A skill row shows its source on the right ("Project",
 // "Personal", the plugin's name, "Built-in"); a pending project command shows "Needs approval" (`withPendingCommands`
 // over the project's trust list, `pendingCommandNames`) and its name adds ", needs approval".
+// Phase 12 (ADR-053; docs/UI.md 7.8, 7.34; W12.13): command and skill names may be qualified (`review-kit:review`,
+// `review-kit:db:migrate`; `CATALOG_NAME_PATTERN`, at most 128 characters) in the hint, query and command patterns;
+// typing filters on every segment of a name (`/migrate` finds `/review-kit:db:migrate`); a row shows the plugin
+// namespace muted and cuts a long name in the middle (`slashNameDisplay`, the full name in its title). The menu lists
+// what the server lists: a bare alias of a plugin command (`/review`) is never added here (the server resolves it).
 import type { ClientCommand, CommandSummary, ProjectTrustList, ReasoningEffort, ToolMode } from '@harness-forge/shared'
 import type { OutputStyleOption } from './output-style'
-import { CLIENT_COMMANDS, isClientCommand } from '@harness-forge/shared'
+import { CLIENT_COMMANDS, isClientCommand, QUALIFIED_NAME_MAX_CHARS, splitQualifiedName } from '@harness-forge/shared'
 import { EFFORT_LABELS } from './effort'
 import { resolveStyleQuery, styleOptions } from './output-style'
 import { EDITS_NEEDS_PROJECT, isProjectOnlyMode, PLAN_NEEDS_PROJECT, TOOL_MODE_OPTIONS } from './permission'
@@ -158,14 +163,28 @@ export function withPendingCommands(items: SlashItem[], pending: ReadonlySet<str
   return items.map(item => (item.group === 'project' && pending.has(item.name.toLowerCase()) ? { ...item, pending: true } : item))
 }
 
-const HINT_PATTERN = /^\/([a-z][\da-z-]{0,63})[ \t]+$/i
+/**
+ * A slash name as typed (+ Phase 12, ADR-053: `CATALOG_NAME_PATTERN`, case-insensitive): a bare name of up to 64
+ * characters, or a qualified `<pluginId>:<segment>[:<segment>…]` name (1..3 segments; at most 128 characters, checked
+ * by `isSlashName`). The two alternatives; the patterns below put them in their capture group.
+ */
+const SLASH_NAME = '[a-z][\\da-z-]{0,63}|[\\da-z](?:[\\da-z-]{0,38}[\\da-z])?(?::[a-z][\\da-z-]{0,63}){1,3}'
+
+const HINT_PATTERN = new RegExp(`^\\/(${SLASH_NAME})[ \\t]+$`, 'i')
+
+/** + Phase 12: a qualified name is at most 128 characters (the pattern alone cannot say it). */
+function isSlashName(name: string): boolean {
+  return name.length <= QUALIFIED_NAME_MAX_CHARS
+}
 
 /**
  * W11.19: the text is exactly `/name` plus one or more blanks on one line, `name` following the slash name rule (up to 64
- * characters, like `argumentHintAt`): where SlashArgumentHint shows its ghost hint.
+ * characters, like `argumentHintAt`; + Phase 12: or a qualified name of up to 128): where SlashArgumentHint shows its
+ * ghost hint.
  */
 export function isTypedCommand(text: string): boolean {
-  return HINT_PATTERN.test(text)
+  const match = text.match(HINT_PATTERN)
+  return match !== null && isSlashName(match[1]!)
 }
 
 /**
@@ -174,7 +193,7 @@ export function isTypedCommand(text: string): boolean {
  */
 export function argumentHintAt(text: string, items: readonly SlashItem[]): string | null {
   const match = text.match(HINT_PATTERN)
-  if (!match)
+  if (!match || !isSlashName(match[1]!))
     return null
   const name = match[1]!.toLowerCase()
   const hint = items.find(item => item.name.toLowerCase() === name)?.argumentHint
@@ -204,16 +223,60 @@ export function slashItemLabel(item: SlashItem): string {
 }
 
 /**
- * Items whose name starts with `query` (case-insensitive), in group order (App, Project, Personal, Plugins); the order
- * inside a group is kept (client commands before `/compact` in App).
+ * + Phase 12: a name matches the typed query when it starts with it, or (a qualified name) when one of its segments
+ * does, read on to the end (`migrate` and `db:mi` both match `review-kit:db:migrate`).
+ */
+export function slashNameMatches(name: string, query: string): boolean {
+  const lower = name.toLowerCase()
+  const needle = query.toLowerCase()
+  if (lower.startsWith(needle))
+    return true
+  for (let index = lower.indexOf(':'); index !== -1; index = lower.indexOf(':', index + 1)) {
+    if (lower.startsWith(needle, index + 1))
+      return true
+  }
+  return false
+}
+
+/**
+ * Items whose name starts with `query` (case-insensitive; + Phase 12: or one of its segments does), in group order
+ * (App, Project, Personal, Plugins, Skills); the order inside a group is kept (client commands before `/compact` in App).
  */
 export function filterSlashItems(items: readonly SlashItem[], query: string): SlashItem[] {
-  const needle = query.toLowerCase()
-  const matches = items.filter(item => item.name.toLowerCase().startsWith(needle))
+  const matches = items.filter(item => slashNameMatches(item.name, query))
   return SLASH_GROUPS.flatMap(group => matches.filter(item => item.group === group.value))
 }
 
-const QUERY_PATTERN = /^[\w-]{0,64}$/
+/** + Phase 12: characters of a name a menu row shows before it cuts the middle (the full name is in the row's title). */
+export const SLASH_NAME_SHOWN_MAX_CHARS = 40
+
+/** `text` cut in the middle to `max` characters with "…" (as it is when it fits). */
+export function middleEllipsis(text: string, max: number): string {
+  if (text.length <= max || max < 3)
+    return text
+  const head = Math.ceil((max - 1) / 2)
+  const tail = max - 1 - head
+  return `${text.slice(0, head)}…${text.slice(text.length - tail)}`
+}
+
+/**
+ * + Phase 12 (docs/UI.md 7.34): a row's name as it shows after the slash: `namespace` (a plugin's `<pluginId>:`, muted;
+ * '' for a bare name), `rest`, and `title` (the full `/name` of a qualified name, else null). A qualified name over
+ * `SLASH_NAME_SHOWN_MAX_CHARS` is cut in the middle, so its last segment stays readable; a bare name (at most 64
+ * characters) is shown whole and the row truncates it at its end.
+ */
+export function slashNameDisplay(name: string, max = SLASH_NAME_SHOWN_MAX_CHARS): { namespace: string, rest: string, title: string | null } {
+  const qualified = splitQualifiedName(name)
+  if (!qualified)
+    return { namespace: '', rest: name, title: null }
+  const shown = middleEllipsis(name, max)
+  const prefix = `${qualified.pluginId}:`
+  const namespace = shown.startsWith(prefix) ? prefix : ''
+  return { namespace, rest: shown.slice(namespace.length), title: `/${name}` }
+}
+
+/** The token being typed (+ Phase 12: up to 128 characters with up to three `:`, so a qualified name keeps the menu open). */
+const QUERY_PATTERN = /^(?=[\w:-]{0,128}$)[\w-]{0,64}(?::[\w-]{0,64}){0,3}$/
 
 /**
  * The command name being typed, or null when the slash menu should stay closed: the text starts with `/`, the caret
@@ -237,12 +300,12 @@ export interface ParsedSlashCommand {
   args: string
 }
 
-const COMMAND_PATTERN = /^\/([a-z][\da-z-]{0,63})(?:\s([\s\S]*))?$/i
+const COMMAND_PATTERN = new RegExp(`^\\/(${SLASH_NAME})(?:\\s([\\s\\S]*))?$`, 'i')
 
-/** `/name args` -> `{ name, args }`; null when the text is not a slash command. */
+/** `/name args` -> `{ name, args }` (+ Phase 12: `name` may be qualified); null when the text is not a slash command. */
 export function parseSlashCommand(text: string): ParsedSlashCommand | null {
   const match = text.trim().match(COMMAND_PATTERN)
-  if (!match)
+  if (!match || !isSlashName(match[1]!))
     return null
   return { name: match[1]!.toLowerCase(), args: (match[2] ?? '').trim() }
 }

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // Result panel of an import (docs/UI.md 2.7, 9.8): "Imported {n} chats · copied {n} · skipped {n} · failed {n}", the
 // attachments ("{n} files ({reused} reused, {missing} missing)"), "Settings restored", the personal definitions restored
-// ("{n} personal definitions restored · {k} kept · {f} failed"), then one row per chat (its title, a link to /chat/<id>
+// ("{n} personal definitions restored · {k} kept · {f} failed"), the commands turned off (Phase 12), then one row per chat (its title, a link to /chat/<id>
 // for imported and copied chats, a status badge and the error of a failed one) and the warnings.
 import type { DataImportResult, DataImportStatus } from '@harness-forge/shared'
 import { CircleAlertIcon, CircleCheckIcon } from '@lucide/vue'
@@ -9,7 +9,7 @@ import { computed } from 'vue'
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 import { testIds } from '~/utils/testids'
-import { IMPORT_STATUS_LABELS, importFilesLine, importHeadline, importItemLink, importItemTitle } from './data'
+import { IMPORT_STATUS_LABELS, importFilesLine, importHeadline, importItemLink, importItemTitle, turnedOffLine } from './data'
 
 const props = defineProps<{ result: DataImportResult }>()
 
@@ -25,8 +25,10 @@ const headline = computed(() => importHeadline(props.result))
 const filesLine = computed(() => importFilesLine(props.result))
 const failed = computed(() => props.result.counts.failed > 0)
 // Phase 10 (ADR-044): the personal definitions restored from `customizations.json`. Phase 11 (docs/UI.md 9.8): output
-// styles are personal definitions too, so the line reads "{n} personal definitions restored"; commands with shell lines
-// come back turned off (the import's help says so; the result carries no count of them).
+// styles are personal definitions too, so the line reads "{n} personal definitions restored". Phase 12 (docs/UI.md 9.14):
+// the commands with shell lines that came back turned off are counted ("{t} commands turned off (they run shell lines)",
+// `data-slot="data-import-turned-off"`, from `customizations.turnedOff`; nothing when 0).
+const turnedOff = computed(() => turnedOffLine(props.result.customizations?.turnedOff))
 const customizationsLine = computed(() => {
   const c = props.result.customizations
   if (!c)
@@ -67,6 +69,9 @@ const rows = computed(() => props.result.items.map((item, index) => ({
         </p>
         <p v-if="customizationsLine" class="text-muted-foreground tabular-nums" data-slot="data-import-customizations">
           {{ customizationsLine }}
+        </p>
+        <p v-if="turnedOff" class="text-muted-foreground tabular-nums" data-slot="data-import-turned-off">
+          {{ turnedOff }}
         </p>
       </div>
     </div>

@@ -5,6 +5,7 @@
 // text. No Vue, no stores. The signatures of C39 are frozen from Gate P11-0b; the other exports are W11.9's.
 import type { ProjectMcpList, ProjectMcpServer, ProjectTrustList, TrustApproval, TrustItem, TrustItemKind } from '@harness-forge/shared'
 import type { StatusDotStatus } from '~/components/common/status'
+import { execFormCommand } from '@harness-forge/shared'
 
 type ProjectMcpVariable = ProjectMcpList['variables'][number]
 
@@ -99,14 +100,29 @@ export function shellQuote(argument: string): string {
   return `'${argument.replaceAll('\'', '\'\\\'\'')}'`
 }
 
+/** Phase 12 (ADR-057; W12.13): a hook item that asks a model (`type: 'prompt'`) instead of running a command. */
+export function isPromptHookItem(item: TrustItem): boolean {
+  return item.kind === 'hook' && item.detail.type === 'prompt'
+}
+
+/** Phase 12: the name of the item's `pre` (and of its copy button): "Prompt" for a prompt hook, else "Command". */
+export function trustTextLabel(item: TrustItem): 'Prompt' | 'Command' {
+  return isPromptHookItem(item) ? 'Prompt' : 'Command'
+}
+
 /**
  * The exact text of an item, as the `pre` named "Command" shows it: a hook's command; a stdio server's command and its
  * arguments (an argument with spaces or quotes is quoted); an HTTP / SSE server's URL; a command file's `!` lines, one
- * per line. `${VAR}` references are kept as they are written.
+ * per line. `${VAR}` references are kept as they are written. Phase 12: a prompt hook's prompt (the `pre` is named
+ * "Prompt"); an exec-form hook (`args`) as the shell runs it: every word single-quoted (`execFormCommand`).
  */
 export function trustCommandText(item: TrustItem): string {
   switch (item.kind) {
     case 'hook':
+      if (item.detail.type === 'prompt')
+        return item.detail.prompt ?? ''
+      if (item.detail.args !== undefined)
+        return execFormCommand(item.detail.command, item.detail.args) ?? item.detail.command
       return item.detail.command
     case 'mcp':
       if (item.detail.transport === 'stdio')
@@ -121,12 +137,23 @@ export function trustCommandText(item: TrustItem): string {
  * The detail lines of an item (docs/UI.md 7.33): "timeout {n}s" (hooks with their own timeout), "Runs {path}" for every
  * referenced file ("Runs {path} (not found)" when its hash is null), "Environment: {names}" and "Headers: {names}" (names
  * only, never values), and "Variables: {name} (set | not set)" from the project's MCP list (names only while it is not
- * loaded).
+ * loaded). Phase 12 (ADR-057, docs/UI.md 7.34): a prompt hook first names its model ("Model: {model}", "Model: Hook
+ * model" without one) and "Continue on block"; the handler fields of a hook follow the timeout: "Only when {rule}"
+ * (`if`), "In the background" (`async`).
  */
 export function trustItemDetails(item: TrustItem, variables?: readonly ProjectMcpVariable[]): string[] {
   const lines: string[] = []
+  if (item.kind === 'hook' && item.detail.type === 'prompt') {
+    lines.push(`Model: ${item.detail.model?.trim() || 'Hook model'}`)
+    if (item.detail.continueOnBlock === true)
+      lines.push('Continue on block')
+  }
   if (item.kind === 'hook' && item.detail.timeout !== null)
     lines.push(`timeout ${item.detail.timeout}s`)
+  if (item.kind === 'hook' && item.detail.if !== undefined && item.detail.if.trim() !== '')
+    lines.push(`Only when ${item.detail.if.trim()}`)
+  if (item.kind === 'hook' && item.detail.async === true)
+    lines.push('In the background')
   for (const ref of item.refs)
     lines.push(ref.sha256 === null ? `Runs ${ref.path} (not found)` : `Runs ${ref.path}`)
   if (item.kind === 'mcp') {

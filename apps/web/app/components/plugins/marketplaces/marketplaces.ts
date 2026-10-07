@@ -1,10 +1,13 @@
 // Pure helpers of the Marketplaces page (Phase 12, ADR-054; docs/UI.md 8.13, 11.9): the "Add marketplace" input (over the
 // shared `parseMarketplaceShorthand`, the only parser of that text), the state of an entry against the installed plugins
 // and the updates, the source line of a marketplace or an entry, the search and category filters and the official
-// suggestion. No Vue, no stores. Signatures frozen from Gate P12-0b (C46); W12.8 owns the bodies (P12-A).
+// suggestion. No Vue, no stores. Signatures frozen from Gate P12-0b (C46); W12.8 owns the bodies (P12-A) and adds the
+// copy helpers below the frozen ones (state words, chip names, the add errors, the page query, a bounded loader).
 import type {
   MarketplaceEntry,
+  MarketplaceList,
   MarketplaceSource,
+  MarketplaceSummary,
   PluginSummary,
   PluginUpdate,
 } from '@harness-forge/shared'
@@ -164,4 +167,143 @@ export function categoriesOf(entries: readonly MarketplaceEntryView[]): string[]
       categories.add(category)
   }
   return [...categories].sort((a, b) => a.localeCompare(b))
+}
+
+// ---------- W12.8 additions (P12-A): copy, query and loading helpers of the page ----------
+
+/** The kinds of the "Add marketplace" source toggle, in order. */
+export type MarketplaceInputKind = 'github' | 'url' | 'folder'
+
+/** The source toggle of the add dialog: label and placeholder per kind (URLs live here, never in a template prop). */
+export const MARKETPLACE_INPUT_KINDS: readonly { value: MarketplaceInputKind, label: string, placeholder: string }[] = [
+  { value: 'github', label: 'GitHub', placeholder: 'owner/repo#ref' },
+  { value: 'url', label: 'URL', placeholder: 'https://example.com/marketplace.json' },
+  { value: 'folder', label: 'Folder on this server', placeholder: '/srv/marketplaces/acme' },
+]
+
+/** The state words of an entry (its accessible name "{name}, {state}"). */
+export const ENTRY_STATE_WORDS: Readonly<Record<MarketplaceEntryView['state'], string>> = {
+  available: 'Available',
+  installed: 'Installed',
+  update: 'Update available',
+  unsupported: 'Unsupported',
+}
+
+/** The version an update offers: the update's, else the entry's; null when the update is a newer commit. */
+export function offeredVersion(view: MarketplaceEntryView): string | null {
+  return view.update?.availableVersion ?? view.entry.version ?? null
+}
+
+/**
+ * The state line of an entry: "Installed", "Installed · Update to {version}" ("Installed · Update available" for a
+ * newer commit), "Unsupported source ({type})"; empty for an available entry (its button says it).
+ */
+export function entryStatusText(view: MarketplaceEntryView): string {
+  switch (view.state) {
+    case 'installed':
+      return 'Installed'
+    case 'update': {
+      const version = offeredVersion(view)
+      return version ? `Installed · Update to ${version}` : 'Installed · Update available'
+    }
+    case 'unsupported':
+      return `Unsupported source (${view.entry.source.kind})`
+    default:
+      return ''
+  }
+}
+
+/** The accessible name of a marketplace chip: "{name}, {n} plugins" (", {u} updates", ", last refresh failed"). */
+export function chipName(item: MarketplaceSummary): string {
+  let name = `${item.name}, ${item.plugins} ${item.plugins === 1 ? 'plugin' : 'plugins'}`
+  if (item.updates > 0)
+    name += `, ${item.updates} ${item.updates === 1 ? 'update' : 'updates'}`
+  if (item.lastError)
+    name += ', last refresh failed'
+  return name
+}
+
+/** "· {u} updates" of a chip ("· 1 update"). */
+export function updatesText(count: number): string {
+  return `· ${count} ${count === 1 ? 'update' : 'updates'}`
+}
+
+/** The repository of the official marketplace is this source (case-insensitive). */
+export function isOfficialSource(source: MarketplaceSource): boolean {
+  return source.type === 'github' && source.repo.toLowerCase() === OFFICIAL_MARKETPLACE
+}
+
+/**
+ * The suggestion card shows while the list's suggestions hold the official marketplace, no marketplace of that
+ * repository is added and the user did not dismiss it. Deciding sends nothing.
+ */
+export function showsOfficialSuggestion(list: MarketplaceList | null, dismissed: boolean): boolean {
+  if (dismissed || !list)
+    return false
+  if (!list.suggestions.some(suggestion => isOfficialSource(suggestion.source)))
+    return false
+  return !list.items.some(item => isOfficialSource(item.source))
+}
+
+/** The error fields the add dialog reads (a `HarnessError` or its view). */
+export interface MarketplaceAddErrorInput {
+  code: string
+  message: string
+  retryAfterMs?: number
+  details?: unknown
+}
+
+/** What the add dialog shows for a failed add: the server message as is, "Try again in {n} min" after a 429. */
+export function addErrorText(error: MarketplaceAddErrorInput): string {
+  if (error.code === 'rate_limited' && typeof error.retryAfterMs === 'number' && error.retryAfterMs > 0) {
+    const minutes = Math.max(1, Math.ceil(error.retryAfterMs / 60_000))
+    const message = error.message.trim()
+    const sentence = message === '' || /[.!?]$/.test(message) ? message : `${message}.`
+    return `${sentence} Try again in ${minutes} min`.trim()
+  }
+  return error.message
+}
+
+/** `details.reason` of a 409 `conflict` (`exists`, `offline`), else null. */
+export function conflictReasonOf(error: MarketplaceAddErrorInput): string | null {
+  if (error.code !== 'conflict' || typeof error.details !== 'object' || error.details === null)
+    return null
+  const reason = (error.details as { reason?: unknown }).reason
+  return typeof reason === 'string' ? reason : null
+}
+
+/** The first string of a route query value (`?q=a&q=b` reads `a`), else ''. */
+export function queryText(value: unknown): string {
+  const raw = Array.isArray(value) ? value[0] : value
+  return typeof raw === 'string' ? raw : ''
+}
+
+/**
+ * Shortens a long line in the middle ("github.com/acme/very-long…tools@3f2a9c1"), so the commit and the end stay
+ * readable at 390 px; the full text belongs in a `title`.
+ */
+export function middleTruncate(text: string, max = 56): string {
+  if (text.length <= max || max < 5)
+    return text
+  const keep = max - 1
+  const head = Math.ceil(keep / 2)
+  const tail = keep - head
+  return `${text.slice(0, head)}…${text.slice(text.length - tail)}`
+}
+
+/** Runs `task` for every item with at most `limit` running at a time; failures are left to the task. */
+export async function forEachLimited<T>(items: readonly T[], limit: number, task: (item: T) => Promise<unknown>): Promise<void> {
+  let next = 0
+  const worker = async (): Promise<void> => {
+    while (next < items.length) {
+      const item = items[next++] as T
+      try {
+        await task(item)
+      }
+      catch {
+        // The task reports its own failure.
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, worker))
 }

@@ -1,6 +1,7 @@
-// HookImportDialog (docs/UI.md 9.13, 8.4, 10.8; W11.8-T5): a pasted Claude Code settings file previewed (an invalid
-// matcher unchecked and disabled, a prompt hook noted), the errors, "Add {n} hooks" creating the checked handlers under
-// one password prompt, the toast and the emits, and Choose file….
+// HookImportDialog (docs/UI.md 9.13, 9.14, 8.4, 10.8; W11.8-T5, W12.12-T3): a pasted Claude Code settings file previewed
+// (an invalid matcher unchecked and disabled; Phase 12: a prompt hook imported with its prompt, an http hook noted), the
+// errors, "Add {n} hooks" creating the checked handlers under one password prompt, the toast and the emits, and Choose
+// file….
 import type { VueWrapper } from '@vue/test-utils'
 import type { MockApi } from '~/utils/testing/mock-api'
 import { HarnessError } from '@harness-forge/shared'
@@ -93,16 +94,17 @@ describe('hookImportDialog', () => {
     expect(byTestId<HTMLButtonElement>(testIds.hookImportSubmit)?.disabled).toBe(true)
   })
 
-  it('previews a real Claude Code settings file: the invalid matcher unchecked, the prompt hook noted', async () => {
+  it('previews a real Claude Code settings file: the invalid matcher unchecked, the prompt hook ready', async () => {
     await mountDialog()
     await paste(SETTINGS)
     const preview = byTestId(testIds.hookImportPreview)!
-    expect(preview.dataset.count).toBe('3')
-    expect(preview.textContent).toContain('Found 3 hooks')
+    expect(preview.dataset.count).toBe('4')
+    expect(preview.textContent).toContain('Found 4 hooks')
     expect(items().map(item => [item.dataset.event, item.dataset.state])).toEqual([
       ['PreToolUse', 'ready'],
       ['PreToolUse', 'invalid'],
       ['Stop', 'ready'],
+      ['UserPromptSubmit', 'ready'],
     ])
     const invalid = items()[1]!
     expect(invalid.textContent).toContain('Use tool names, | and * only.')
@@ -110,15 +112,28 @@ describe('hookImportDialog', () => {
     const box = invalid.querySelector<HTMLElement>('[data-slot="checkbox"]')!
     expect(box.dataset.state).toBe('unchecked')
     expect(box.hasAttribute('disabled') || box.dataset.disabled !== undefined).toBe(true)
-    expect(byTestId(testIds.hookImportDialog)?.textContent).toContain('Ignored: "prompt" hooks aren\'t supported.')
+    // Phase 12: the prompt hook is imported (its prompt instead of a command, 30 s by default); no note about it.
+    const prompt = items()[3]!
+    expect(prompt.querySelector('[data-slot="hook-import-prompt"]')?.textContent?.trim()).toBe('Check the request.')
+    expect(prompt.textContent).toContain('30s')
+    expect(prompt.querySelector('code')).toBeNull()
+    expect(document.body.querySelector('[data-slot="hook-import-notes"]')).toBeNull()
+    expect(byTestId(testIds.hookImportDialog)?.textContent).not.toContain('aren\'t supported')
     const submit = byTestId<HTMLButtonElement>(testIds.hookImportSubmit)!
-    expect(submit.textContent?.trim()).toBe('Add 2 hooks')
-    expect(submit.dataset.count).toBe('2')
+    expect(submit.textContent?.trim()).toBe('Add 3 hooks')
+    expect(submit.dataset.count).toBe('3')
 
-    // Unchecking a ready handler leaves one.
+    // Unchecking a ready handler leaves two.
     items()[0]!.querySelector<HTMLElement>('[data-slot="checkbox"]')!.click()
     await flushPromises()
-    expect(byTestId(testIds.hookImportSubmit)?.textContent?.trim()).toBe('Add 1 hook')
+    expect(byTestId(testIds.hookImportSubmit)?.textContent?.trim()).toBe('Add 2 hooks')
+  })
+
+  it('notes the handler types it can\'t import (Phase 12)', async () => {
+    await mountDialog()
+    await paste(JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'pnpm lint' }, { type: 'http', url: 'https://example.invalid/hook' }] }] } }))
+    expect(items()).toHaveLength(1)
+    expect(document.body.querySelector('[data-slot="hook-import-notes"]')?.textContent?.trim()).toBe('Ignored: http hooks aren\'t supported.')
   })
 
   it('shows the errors of invalid JSON and of a file without hooks', async () => {
@@ -135,6 +150,7 @@ describe('hookImportDialog', () => {
     api.hooks.create
       .mockResolvedValueOnce(personalHook({ id: hookId(2), event: 'PreToolUse', matcher: 'Bash', command: './guard.sh', timeout: 60 }))
       .mockResolvedValueOnce(personalHook({ id: hookId(3), event: 'Stop', matcher: null, command: 'pnpm lint' }))
+      .mockResolvedValueOnce(personalHook({ id: hookId(4), event: 'UserPromptSubmit', matcher: null }))
     const wrapper = await mountDialog()
     await paste(SETTINGS)
     byTestId(testIds.hookImportSubmit)!.click()
@@ -151,9 +167,10 @@ describe('hookImportDialog', () => {
     expect(api.hooks.create.mock.calls.map(call => call[0])).toEqual([
       { body: { event: 'PreToolUse', matcher: 'Bash', command: './guard.sh', timeout: 60, enabled: true } },
       { body: { event: 'Stop', matcher: null, command: 'pnpm lint', timeout: null, enabled: true } },
+      { body: { type: 'prompt', event: 'UserPromptSubmit', matcher: null, prompt: 'Check the request.', timeout: null, enabled: true } },
     ])
-    expect(toasts.success).toHaveBeenCalledWith('Added 2 hooks')
-    expect(wrapper.emitted('imported')?.[0]?.[0]).toHaveLength(2)
+    expect(toasts.success).toHaveBeenCalledWith('Added 3 hooks')
+    expect(wrapper.emitted('imported')?.[0]?.[0]).toHaveLength(3)
     expect(byTestId(testIds.hookImportDialog)).toBeNull()
   })
 
@@ -169,11 +186,11 @@ describe('hookImportDialog', () => {
     expect(error.dataset.code).toBe('conflict')
     expect(error.textContent).toContain('Added 1 hook')
     expect(wrapper.emitted('imported')?.[0]?.[0]).toHaveLength(1)
-    api.hooks.create.mockResolvedValueOnce(personalHook({ id: hookId(3) }))
+    api.hooks.create.mockResolvedValueOnce(personalHook({ id: hookId(3) })).mockResolvedValueOnce(personalHook({ id: hookId(4) }))
     byTestId(testIds.hookImportSubmit)!.click()
     await flushPromises()
-    expect(api.hooks.create).toHaveBeenCalledTimes(3)
-    expect(toasts.success).toHaveBeenCalledWith('Added 2 hooks')
+    expect(api.hooks.create).toHaveBeenCalledTimes(4)
+    expect(toasts.success).toHaveBeenCalledWith('Added 3 hooks')
   })
 
   it('reads a chosen file and refuses one above 256 KB', async () => {
@@ -183,7 +200,7 @@ describe('hookImportDialog', () => {
     const file = new File([SETTINGS], 'settings.json', { type: 'application/json' })
     Object.defineProperty(input, 'files', { value: [file], configurable: true })
     input.dispatchEvent(new Event('change'))
-    await vi.waitFor(() => expect(items()).toHaveLength(3))
+    await vi.waitFor(() => expect(items()).toHaveLength(4))
     expect(byTestId<HTMLTextAreaElement>(testIds.hookImportInput)?.value).toBe(SETTINGS)
 
     const huge = new File(['x'.repeat(256 * 1024 + 1)], 'huge.json')
@@ -199,6 +216,6 @@ describe('hookImportDialog', () => {
     await paste(SETTINGS)
     byTestId(testIds.hookImportInput)!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', metaKey: true, bubbles: true, cancelable: true }))
     await flushPromises()
-    expect(api.hooks.create).toHaveBeenCalledTimes(2)
+    expect(api.hooks.create).toHaveBeenCalledTimes(3)
   })
 })

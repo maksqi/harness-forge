@@ -285,3 +285,52 @@ describe('projectTrustDialog', () => {
     expect(api.projectTrust.list).not.toHaveBeenCalled()
   })
 })
+
+describe('projectTrustDialog: the mixed select-all (Phase 12, W12.13-T1)', () => {
+  function threeHooks(): ProjectTrustList {
+    return projectTrustList({
+      items: [
+        trustHookItem({ sha256: trustSha(11), label: 'sh a.sh' }),
+        trustHookItem({ sha256: trustSha(12), label: 'sh b.sh', detail: { event: 'PostToolUse', matcher: null, command: 'sh b.sh', timeout: null } }),
+        trustHookItem({ sha256: trustSha(13), label: 'Did the tests run?', refs: [], detail: { event: 'Stop', matcher: null, command: '', timeout: null, type: 'prompt', prompt: 'Did the tests run?', model: 'haiku' } }),
+      ],
+    })
+  }
+
+  it('shows the minus and aria-checked="mixed" for a partial selection; a click selects the rest, a second clears them', async () => {
+    await mountDialog(threeHooks())
+    const selectAll = () => byTestId(testIds.projectTrustSelectAll, group('hook'))!
+    expect(selectAll().getAttribute('aria-checked')).toBe('false')
+    expect(selectAll().querySelector('[data-slot="project-trust-select-all-mixed"]')).toBeNull()
+
+    await click(byTestId(testIds.projectTrustSelect, item(trustSha(12))))
+    expect(selectAll().getAttribute('aria-checked')).toBe('mixed')
+    expect(selectAll().dataset.state).toBe('indeterminate')
+    expect(selectAll().querySelector('[data-slot="project-trust-select-all-mixed"]')).not.toBeNull()
+    expect(selectAll().querySelector('svg')!.getAttribute('class')).toContain('minus')
+
+    await click(selectAll())
+    expect(selectAll().getAttribute('aria-checked')).toBe('true')
+    expect(selectAll().dataset.state).toBe('checked')
+    expect(selectAll().querySelector('[data-slot="project-trust-select-all-mixed"]')).toBeNull()
+    expect(approveButton().dataset.count).toBe('3')
+
+    await click(selectAll())
+    expect(selectAll().getAttribute('aria-checked')).toBe('false')
+    expect(approveButton().dataset.count).toBe('0')
+
+    // Every item but one selected one by one is mixed too.
+    await click(byTestId(testIds.projectTrustSelect, item(trustSha(11))))
+    await click(byTestId(testIds.projectTrustSelect, item(trustSha(13))))
+    expect(selectAll().getAttribute('aria-checked')).toBe('mixed')
+  })
+
+  it('lists a project prompt hook as a pending trust item with its prompt and model', async () => {
+    await mountDialog(threeHooks())
+    const prompt = item(trustSha(13))
+    expect(prompt.dataset.type).toBe('prompt')
+    expect(prompt.querySelector('[data-slot="project-trust-command"]')!.getAttribute('aria-label')).toBe('Prompt')
+    expect(prompt.querySelector('[data-slot="project-trust-command"]')!.textContent).toBe('Did the tests run?')
+    expect(prompt.textContent).toContain('Model: haiku')
+  })
+})

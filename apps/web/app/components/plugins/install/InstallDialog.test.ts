@@ -9,7 +9,7 @@ import { defineComponent, h, nextTick, ref } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { useAuthStore } from '~/stores/auth'
 import { testIds } from '~/utils/testids'
-import { authStatus, pluginDetail } from '~/utils/testing/fixtures'
+import { authStatus, claudePluginInfo, pluginDetail } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import InstallDialog from './InstallDialog.vue'
 
@@ -425,4 +425,59 @@ describe('installDialog', () => {
     expect(byTestId(testIds.installDialog)?.dataset.step).toBe('source')
     expect(byTestId<HTMLInputElement>(testIds.installNpmInput)!.value).toBe('')
   })
+
+  it('installs a Claude Code plugin from the GitHub tab: the repository spec fills the ref (Phase 12, W12.9)', async () => {
+    const claude = claudeInspection()
+    api.pluginInstall.inspect.mockResolvedValue(claude)
+    api.pluginInstall.install.mockResolvedValue(pluginDetail({ id: 'review-kit', name: 'review-kit', format: 'claude', source: 'github' }))
+    const { installed } = await mountDialog('github')
+    expect(byTestId(testIds.installTabGithub)?.getAttribute('data-state')).toBe('active')
+    expect(document.body.textContent).toContain('Downloads an archive of the exact commit over HTTPS. Nothing runs before you review it.')
+
+    const repo = byTestId<HTMLInputElement>(testIds.installGithubRepo)!
+    await type(repo, 'anthropics/review-kit#v1.2.0')
+    repo.dispatchEvent(new FocusEvent('blur'))
+    await nextTick()
+    expect(repo.value).toBe('anthropics/review-kit')
+    expect(byTestId<HTMLInputElement>(testIds.installGithubRef)!.value).toBe('v1.2.0')
+    await type(byTestId<HTMLInputElement>(testIds.installGithubPath), 'plugins/review-kit/')
+    await click(byTestId(testIds.installInspect))
+    expect(api.pluginInstall.inspect).toHaveBeenCalledWith({ body: { source: 'github', repo: 'anthropics/review-kit', ref: 'v1.2.0', path: 'plugins/review-kit' } })
+
+    const preview = byTestId(testIds.installPreview)!
+    expect(preview.querySelector('[data-slot="install-format"]')?.textContent?.trim()).toBe('Claude Code plugin')
+    expect(preview.querySelector('[data-slot="install-commit"]')?.textContent?.trim()).toBe('Resolved commit 3f2a9c1')
+    expect(byTestId(testIds.trustWarning)!.querySelector('[data-slot="trust-run-commands"]')?.textContent).toContain('PostToolUse hook')
+    expect(document.body.textContent).toContain('I trust anthropics/review-kit@3f2a9c1d0e4b/plugins/review-kit')
+
+    await click(byTestId(testIds.trustCheckbox))
+    await click(byTestId(testIds.installSubmit))
+    expect(api.pluginInstall.install).toHaveBeenCalledWith({ body: { source: 'github', repo: 'anthropics/review-kit', ref: 'v1.2.0', path: 'plugins/review-kit', sha256: HASH, trust: true } })
+    expect(installed).toHaveBeenCalledWith('review-kit')
+  })
+
+  it('reports a GitHub repository it cannot read before inspecting (Phase 12, W12.9)', async () => {
+    await mountDialog('github')
+    await click(byTestId(testIds.installInspect))
+    expect(document.body.textContent).toContain('Enter a repository as owner/repo.')
+    await type(byTestId<HTMLInputElement>(testIds.installGithubRepo), 'https://gitlab.com/acme/tools')
+    await click(byTestId(testIds.installInspect))
+    expect(document.body.textContent).toContain('Enter a GitHub repository as owner/repo or a github.com URL.')
+    expect(api.pluginInstall.inspect).not.toHaveBeenCalled()
+  })
 })
+
+/** A Claude Code plugin from a folder of a GitHub repository (Phase 12). */
+function claudeInspection(): PluginInspection {
+  return inspection({
+    manifest: { manifestVersion: 1, id: 'review-kit', name: 'review-kit', version: '1.2.0', engines: { harness: '^1.6.0' } },
+    format: 'claude',
+    source: 'github',
+    sourceRef: 'anthropics/review-kit@3f2a9c1d0e4b/plugins/review-kit',
+    contributions: { providers: [], models: 0, tools: [], mcpServers: ['review-kit'], commands: ['review-kit:review'], hooks: [], agents: [], skills: [], commandHooks: 1, outputStyles: [] },
+    networkHosts: [],
+    secretsRequested: [],
+    requiresTrust: true,
+    claude: claudePluginInfo(),
+  })
+}

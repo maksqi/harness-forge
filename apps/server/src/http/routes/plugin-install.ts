@@ -8,8 +8,13 @@
 // `PluginInstallOptions.authorize`, after the package was validated and before anything is committed.
 // Review pin: the optional `sha256` of the body / form (the `PluginInspection.sha256` the user reviewed) is handed to
 // the installer, which answers `409 conflict` (`reason: 'stale'`) when the package now hashes differently.
+// Phase 12 (ADR-053 / ADR-054, W12.2): the JSON bodies take the `github` and `marketplace` sources and `format?` on every
+// source; the multipart forms take `format` next to the zip (`pluginInspectFormSchema` / `pluginInstallFormSchema`);
+// `409 offline` / `429 rate_limited` / `404` come from the installer; fresh auth still applies whenever the inspection
+// requires trust (a Claude Code plugin with a command hook, a stdio MCP server or a `!` span). The details answered
+// carry the Phase 12 fields (`plugins-detail.ts`).
+import type { PluginInstallRequestInput } from '../../plugins/install/index.ts'
 import type { ReviewedInstallOptions } from '../../plugins/install/reviews.ts'
-import type { PluginInstallInput } from '../../plugins/types.ts'
 import type { AppDeps } from '../../types.ts'
 import type { AppContext, AppEnv } from '../types.ts'
 import {
@@ -18,6 +23,7 @@ import {
   HarnessError,
   LIMITS,
   pluginInspectBodySchema,
+  pluginInspectFormSchema,
   pluginInstallBodySchema,
   pluginInstallFormSchema,
   pluginParamsSchema,
@@ -28,11 +34,12 @@ import { Hono } from 'hono'
 import { contentDisposition } from '../../services/files/names.ts'
 import { requireFreshAuth } from '../middleware/fresh-auth.ts'
 import { validate } from '../validate.ts'
+import { completeDetail } from './plugins-detail.ts'
 
 const MULTIPART = /^multipart\/form-data\s*;/i
 
 interface InstallRequest {
-  input: PluginInstallInput
+  input: PluginInstallRequestInput
   trust?: boolean
   enable?: boolean
   /** The reviewed `PluginInspection.sha256`. */
@@ -41,6 +48,8 @@ interface InstallRequest {
 
 /** Multipart fields of `POST /plugins/install` besides the part `file`. */
 const INSTALL_FORM_FIELDS: ReadonlySet<string> = new Set(Object.keys(pluginInstallFormSchema.shape))
+/** Multipart fields of `POST /plugins/inspect` besides the part `file` (Phase 12: `format`). */
+const INSPECT_FORM_FIELDS: ReadonlySet<string> = new Set(Object.keys(pluginInspectFormSchema.shape))
 
 function invalidRequest(message: string, path: Array<string | number> = []): HarnessError {
   return validationError([{ path, message, code: 'custom' }], message)
@@ -94,14 +103,23 @@ async function readJson(c: AppContext): Promise<unknown> {
   }
 }
 
-async function readInspectRequest(c: AppContext): Promise<PluginInstallInput> {
+async function readInspectRequest(c: AppContext): Promise<PluginInstallRequestInput> {
   if (MULTIPART.test(c.req.header('content-type') ?? '')) {
     const { file, fields } = await readMultipart(c)
-    const extra = Object.keys(fields)
-    if (extra.length > 0)
-      throw invalidRequest(`Unknown field "${extra[0]}": send only the part "file".`, [extra[0]!])
-    fileUploadFormSchema.parse(fields)
-    return { source: 'zip', fileName: file.name, data: new Uint8Array(await file.arrayBuffer()) }
+    const unknown = Object.keys(fields).find(key => !INSPECT_FORM_FIELDS.has(key))
+    if (unknown !== undefined)
+      throw invalidRequest(`Unknown field "${unknown}": send the part "file" and optionally "format".`, [unknown])
+    const { format: formatField, ...rest } = fields
+    fileUploadFormSchema.parse(rest)
+    const parsed = pluginInspectFormSchema.safeParse(formatField === undefined ? {} : { format: formatField })
+    if (!parsed.success)
+      throw validationError(parsed.error)
+    return {
+      source: 'zip',
+      fileName: file.name,
+      data: new Uint8Array(await file.arrayBuffer()),
+      ...(parsed.data.format === undefined ? {} : { format: parsed.data.format }),
+    }
   }
   const parsed = pluginInspectBodySchema.safeParse(await readJson(c))
   if (!parsed.success)
@@ -119,7 +137,12 @@ async function readInstallRequest(c: AppContext): Promise<InstallRequest> {
     if (!parsed.success)
       throw validationError(parsed.error)
     return {
-      input: { source: 'zip', fileName: file.name, data: new Uint8Array(await file.arrayBuffer()) },
+      input: {
+        source: 'zip',
+        fileName: file.name,
+        data: new Uint8Array(await file.arrayBuffer()),
+        ...(parsed.data.format === undefined ? {} : { format: parsed.data.format }),
+      },
       ...(parsed.data.trust === undefined ? {} : { trust: parsed.data.trust === 'true' }),
       ...(parsed.data.enable === undefined ? {} : { enable: parsed.data.enable === 'true' }),
       ...(parsed.data.sha256 === undefined ? {} : { sha256: parsed.data.sha256 }),
@@ -158,14 +181,14 @@ export function createPluginInstallRoutes(deps: AppDeps): Hono<AppEnv> {
       },
     }
     const detail = await deps.installer.install(request.input, options)
-    return c.json(detail, 201)
+    return c.json(await completeDetail(deps, detail), 201)
   })
 
   app.post(apiRoutes['pluginInstall.trust'].path, validate('param', pluginParamsSchema), validate('json', pluginTrustBodySchema), async (c) => {
     requireFreshAuth(c)
     const { id } = c.req.valid('param')
     const { sha256 } = c.req.valid('json')
-    return c.json(await deps.plugins.trust(id, sha256))
+    return c.json(await completeDetail(deps, await deps.plugins.trust(id, sha256)))
   })
 
   app.get(apiRoutes['pluginInstall.export'].path, validate('param', pluginParamsSchema), async (c) => {

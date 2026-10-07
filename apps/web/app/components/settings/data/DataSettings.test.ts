@@ -678,3 +678,14 @@ describe('settings data page', () => {
     expect(head?.title.value).toBe('Data · harness-forge')
   })
 })
+
+describe('dataSettings: Import from Claude Code (Phase 12, W12.10-T3)', () => {
+  it('links to the import dialog of Customize from the Import section', async () => {
+    await mountData()
+    const link = byTestId(testIds.dataImportClaude)!
+    expect(link.getAttribute('href')).toBe('/settings/customize?import=claude')
+    expect(link.textContent?.trim()).toBe('Import from Claude Code…')
+    expect(link.closest('section')?.querySelector('h2')?.textContent?.trim()).toBe('Import')
+    expect(link.closest('section')?.textContent).toContain('Agents, commands, skills, hooks and MCP servers from a Claude Code folder.')
+  })
+})

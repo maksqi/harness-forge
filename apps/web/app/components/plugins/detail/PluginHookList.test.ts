@@ -53,4 +53,20 @@ describe('pluginHookList', () => {
     expect(list.find('[data-slot="plugin-hooks-trust-note"]').exists()).toBe(false)
     expect(list.get(`[data-testid="${testIds.pluginHook}"]`).attributes('data-kind')).toBe('code')
   })
+
+  it('shows a prompt hook with its prompt and data-kind="prompt"; prompt hooks alone need no trust note (Phase 12)', () => {
+    const prompt = pluginHook({ key: 'plugin:review-kit:0', pluginId: 'review-kit', event: 'Stop', matcher: null, type: 'prompt', command: '', prompt: 'Did the tests run and pass?' })
+    const list = mountList({ entries: [prompt], codeHooks: [] })
+    const row = list.get(`[data-testid="${testIds.pluginHook}"]`)
+    expect(row.attributes('data-kind')).toBe('prompt')
+    expect(row.text()).toContain('Did the tests run and pass?')
+    expect(row.text()).toContain('Prompt')
+    expect(row.find('code').exists()).toBe(false)
+    expect(list.find('[data-slot="plugin-hooks-trust-note"]').exists()).toBe(false)
+
+    const command = pluginHook({ key: 'plugin:review-kit:1', pluginId: 'review-kit', event: 'PostToolUse', command: 'sh hooks/format.sh' })
+    const both = mountList({ entries: [prompt, command], codeHooks: [] })
+    expect(both.findAll(`[data-testid="${testIds.pluginHook}"]`).map(item => item.attributes('data-kind'))).toEqual(['command', 'prompt'])
+    expect(both.find('[data-slot="plugin-hooks-trust-note"]').exists()).toBe(true)
+  })
 })

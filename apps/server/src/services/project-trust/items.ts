@@ -3,10 +3,12 @@
 // A scan item is a project config item of the settings files or `.mcp.json` (`projectConfig.snapshot`) or a project
 // command file with `` !`cmd` `` spans (the customization catalog + `customizations.load`); `trustItemDto` maps it to
 // the `TrustItem` of `GET /projects/:id/trust` with exactly what would run (commands, arguments, URLs; only the NAMES
-// of environment variables, headers and `${VAR}` references, never a value).
-import type { TrustHashItem, TrustItem, TrustState, TrustWarning } from '@harness-forge/shared'
-import type { ProjectConfigItem, TrustSubject } from '../project-config/types.ts'
+// of environment variables, headers and `${VAR}` references, never a value). Phase 12 (W12.5): a hook's detail shows a
+// prompt hook (`type: 'prompt'`, the prompt, its model) and the handler fields (`hookDetail`).
+import type { TrustHashItem, TrustHookDetail, TrustItem, TrustState, TrustWarning } from '@harness-forge/shared'
+import type { ProjectConfigItem, ProjectHookItem, TrustSubject } from '../project-config/types.ts'
 import { LIMITS, serverVariables } from '@harness-forge/shared'
+import { projectPromptSpec } from '../project-config/hook-items.ts'
 
 /** A project command file whose body holds `` !`cmd` `` spans. */
 export interface ProjectCommandItem extends TrustSubject {
@@ -26,6 +28,44 @@ export interface ProjectCommandItem extends TrustSubject {
 export type ProjectTrustScanItem = ProjectConfigItem | ProjectCommandItem
 
 const MCP_ARGS_MAX = 64
+/** `trustHookDetailSchema` caps of the Phase 12 fields. */
+const HOOK_ARGS_MAX = 64
+const HOOK_IF_MAX_CHARS = 512
+const HOOK_MODEL_MAX_CHARS = 64 + 1 + 256
+const HOOK_STATUS_MAX_CHARS = 200
+
+/**
+ * The detail of a hook item: exactly what runs (open point 2). A v1 command item keeps the v1.7 shape; Phase 12 adds
+ * `args` / `async` / `if` of a command item and `type: 'prompt'`, the prompt, its model and `continueOnBlock` of a prompt
+ * item (`command` is '' then), and the `statusMessage` of either.
+ */
+export function hookDetail(item: ProjectHookItem): TrustHookDetail {
+  const { spec } = item
+  const prompt = projectPromptSpec(item)
+  const common = {
+    event: spec.event,
+    matcher: spec.matcher,
+    timeout: spec.timeoutSec,
+    ...(spec.if === undefined ? {} : { if: spec.if.slice(0, HOOK_IF_MAX_CHARS) }),
+    ...(spec.statusMessage === undefined ? {} : { statusMessage: spec.statusMessage.slice(0, HOOK_STATUS_MAX_CHARS) }),
+  }
+  if (prompt !== null) {
+    return {
+      ...common,
+      command: '',
+      type: 'prompt',
+      prompt: prompt.prompt.slice(0, LIMITS.promptHookPromptMaxChars),
+      ...(prompt.model === null ? {} : { model: prompt.model.slice(0, HOOK_MODEL_MAX_CHARS) }),
+      ...(prompt.continueOnBlock ? { continueOnBlock: true } : {}),
+    }
+  }
+  return {
+    ...common,
+    command: spec.command,
+    ...(spec.args === undefined ? {} : { args: spec.args.slice(0, HOOK_ARGS_MAX) }),
+    ...(spec.async === true ? { async: true } : {}),
+  }
+}
 const MCP_ENV_NAMES_MAX = 64
 const MCP_HEADER_NAMES_MAX = 32
 
@@ -41,10 +81,8 @@ export function trustItemDto(item: ProjectTrustScanItem, state: TrustState, chan
     warnings: [...item.warnings],
   }
   switch (item.kind) {
-    case 'hook': {
-      const { spec } = item
-      return { ...base, kind: 'hook', detail: { event: spec.event, matcher: spec.matcher, command: spec.command, timeout: spec.timeoutSec } }
-    }
+    case 'hook':
+      return { ...base, kind: 'hook', detail: hookDetail(item) }
     case 'mcp': {
       const { server } = item
       const transport = server.transport

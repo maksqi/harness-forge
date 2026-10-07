@@ -5,8 +5,11 @@
 // plugin."), then the code hooks (`ctx.hooks.on`, their HookMap events as chips, `data-kind="code"`), and the footer link
 // "Open in Customize" to the Hooks tab. PluginContributions renders it with the plugin's command entries and
 // `contributions.hooks`. Props and the root test id are frozen from Gate P11-0b (C39 stub); implementation W11.8.
+// Phase 12 (ADR-057, docs/UI.md 8.13, 13.13; W12.9): a prompt hook (`type: 'prompt'`) is a row with `data-kind="prompt"`, the
+// `MessageSquareText` icon and its prompt instead of a command; the trust note shows only for command hooks (prompt hooks
+// need no trust).
 import type { HookEntry } from '@harness-forge/shared'
-import { ArrowRightIcon, WebhookIcon } from '@lucide/vue'
+import { ArrowRightIcon, MessageSquareTextIcon, WebhookIcon } from '@lucide/vue'
 import { computed } from 'vue'
 import { Button } from '@/components/ui/button'
 import { hookMatcherText, sortHookEntries } from '~/components/settings/customize/hooks'
@@ -21,7 +24,13 @@ const props = defineProps<{
 }>()
 
 const commandRows = computed(() => sortHookEntries(props.entries.filter(entry => entry.kind === 'command'))
-  .map(entry => ({ key: entry.key, event: entry.event, matcher: hookMatcherText(entry), command: entry.kind === 'command' ? entry.command : '' })))
+  .map((entry) => {
+    const prompt = entry.kind === 'command' && entry.type === 'prompt'
+    const text = entry.kind !== 'command' ? '' : prompt ? entry.prompt ?? '' : entry.command
+    return { key: entry.key, event: entry.event, matcher: hookMatcherText(entry), kind: prompt ? 'prompt' as const : 'command' as const, text }
+  }))
+/** Command hooks run only while the plugin is trusted; prompt hooks need no trust. */
+const runsCommands = computed(() => commandRows.value.some(row => row.kind === 'command'))
 const codeNames = computed(() => [...new Set(props.codeHooks)].sort())
 const count = computed(() => commandRows.value.length + codeNames.value.length)
 const route = customizeRoute('hook')
@@ -30,7 +39,7 @@ const route = customizeRoute('hook')
 <template>
   <div :data-testid="testIds.pluginHooks" :data-count="count" class="flex flex-col gap-3">
     <template v-if="commandRows.length > 0">
-      <p class="text-sm text-muted-foreground" data-slot="plugin-hooks-trust-note">
+      <p v-if="runsCommands" class="text-sm text-muted-foreground" data-slot="plugin-hooks-trust-note">
         Runs only while you trust this plugin.
       </p>
       <ul role="list" class="divide-y divide-border overflow-hidden rounded-xl border bg-card">
@@ -39,15 +48,18 @@ const route = customizeRoute('hook')
           :key="row.key"
           :data-testid="testIds.pluginHook"
           :data-event="row.event"
-          data-kind="command"
+          :data-kind="row.kind"
           class="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1 px-4 py-2.5"
         >
           <span class="flex shrink-0 items-center gap-2 text-sm font-medium">
-            <WebhookIcon aria-hidden="true" class="size-4 self-center text-muted-foreground" />
+            <MessageSquareTextIcon v-if="row.kind === 'prompt'" aria-hidden="true" class="size-4 self-center text-muted-foreground" />
+            <WebhookIcon v-else aria-hidden="true" class="size-4 self-center text-muted-foreground" />
             {{ row.event }}
+            <span v-if="row.kind === 'prompt'" class="text-xs font-normal text-muted-foreground">Prompt</span>
           </span>
           <span v-if="row.matcher" class="font-mono text-xs break-all text-muted-foreground">{{ row.matcher }}</span>
-          <code class="min-w-0 flex-1 basis-48 font-mono text-xs break-all text-foreground/85">{{ row.command }}</code>
+          <code v-if="row.kind === 'command'" class="min-w-0 flex-1 basis-48 font-mono text-xs break-all text-foreground/85">{{ row.text }}</code>
+          <span v-else class="line-clamp-2 min-w-0 flex-1 basis-48 text-xs break-words whitespace-pre-wrap text-foreground/85">{{ row.text }}</span>
         </li>
       </ul>
     </template>

@@ -293,3 +293,43 @@ describe('customizations store: project definition files (Phase 12, C46)', () =>
     expect(api.projectDefinitions.remove).toHaveBeenCalledWith({ params: { id: projectId(1) }, query: { path: '.claude/agents/reviewer.md', expectedSha256: trustSha(2) } })
   })
 })
+
+describe('customizations store: project files and qualified names (Phase 12, W12.11-T4)', () => {
+  it('maps every editable kind of project entry and refuses the others', () => {
+    const store = useCustomizationsStore()
+    expect(store.projectSource(projectId(1), customizationEntry({ kind: 'skill', name: 'pdf', path: '.harness/skills/pdf/SKILL.md' })))
+      .toEqual({ path: '.harness/skills/pdf/SKILL.md', kind: 'skill', name: 'pdf', create: false })
+    expect(store.projectSource(projectId(1), customizationEntry({ kind: 'command', name: 'review', path: '.claude/commands/frontend/review.md' }))?.kind).toBe('command')
+    expect(store.projectSource(projectId(1), customizationEntry({ kind: 'style', name: 'terse', path: '.claude/output-styles/terse.md' }))?.kind).toBe('style')
+    // A path of another kind, too deep or with a `..` segment is not editable.
+    expect(store.projectSource(projectId(1), customizationEntry({ kind: 'command', path: '.claude/agents/reviewer.md' }))).toBeNull()
+    expect(store.projectSource(projectId(1), customizationEntry({ kind: 'command', path: '.claude/commands/a/b/c/d/x.md' }))).toBeNull()
+    expect(store.projectSource(projectId(1), customizationEntry({ path: '.claude/agents/../agents/reviewer.md' }))).toBeNull()
+    expect(store.projectSource(projectId(1), customizationEntry({ source: 'plugin', pluginId: 'review-kit', name: 'review-kit:reviewer', path: undefined }))).toBeNull()
+  })
+
+  it('keeps qualified plugin names as the server lists them', async () => {
+    const store = useCustomizationsStore()
+    const migrate = customizationEntry({ kind: 'command', name: 'review-kit:db:migrate', source: 'plugin', pluginId: 'review-kit', path: undefined, namespace: 'db' })
+    api.customizations.list.mockResolvedValue(customizationList({ items: [migrate], project: null }))
+    api.commands.list.mockResolvedValue({ items: [commandSummary({ name: 'review-kit:db:migrate', pluginId: 'review-kit' })] })
+    await store.fetchCatalog(null)
+    await store.fetchCommands(null)
+    expect(store.entriesOf(null, 'command').map(entry => entry.name)).toEqual(['review-kit:db:migrate'])
+    expect(store.slashCommands(null).map(command => command.name)).toEqual(['review-kit:db:migrate'])
+  })
+
+  it('marks only the saved project\'s scope stale, also when the save fails', async () => {
+    const store = useCustomizationsStore()
+    api.customizations.list.mockImplementation(async ({ query }: { query: { projectId?: string } }) => (query.projectId ? customizationList() : customizationList({ project: null })))
+    await store.fetchCatalog(null)
+    await store.fetchCatalog(projectId(1))
+    await store.fetchCatalog(projectId(2))
+    api.projectDefinitions.write.mockRejectedValueOnce(new HarnessError({ code: 'conflict', message: 'The file changed on disk.', details: { reason: 'stale' } }))
+    const failed = await store.saveProjectFile(projectId(1), { path: '.claude/agents/reviewer.md', expectedSha256: trustSha(1), content: AGENT_MARKDOWN }).catch((error: unknown) => error)
+    expect(failed).toMatchObject({ code: 'conflict', details: { reason: 'stale' } })
+    expect(store.stale[`catalog:${customizationScopeKey(projectId(1))}`]).toBe(true)
+    expect(store.stale[`catalog:${customizationScopeKey(projectId(2))}`]).toBeUndefined()
+    expect(store.stale[`catalog:${customizationScopeKey(null)}`]).toBeUndefined()
+  })
+})

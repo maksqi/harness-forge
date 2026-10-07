@@ -5,7 +5,8 @@
 // headers are errors). The parser only reads: every entry is admitted by `EntryCollector` and kept in memory; nothing
 // is written by tar itself. Only regular files and folders are accepted; symbolic and hard links, devices, FIFOs and
 // every other entry type (including entries tar would ignore, such as sparse files) are refused. Nested compression
-// is refused as well.
+// is refused as well. Phase 12 (W12.2): the owner exec bit of the header mode is recorded (`ArchiveEntry.executable`),
+// and entries the collector does not select are skipped before any check (never admitted or counted).
 import type { ReadEntry } from 'tar'
 import type { ArchiveEntry, EntryCollector } from './archive.ts'
 import type { IssuePath } from './errors.ts'
@@ -96,6 +97,11 @@ function parseTar(tar: Buffer, collector: EntryCollector, issuePath: IssuePath):
         return
       }
       try {
+        // Phase 12: an entry outside the chosen subtree is skipped before any other check.
+        if (!collector.selects(entry.path)) {
+          entry.resume()
+          return
+        }
         const isFile = FILE_TYPES.has(entry.type)
         if (!isFile && entry.type !== 'Directory')
           throw invalid(`The entry ${quoteName(entry.path)} is ${describeType(entry.type)}; only files and folders are allowed.`, issuePath)
@@ -116,7 +122,8 @@ function parseTar(tar: Buffer, collector: EntryCollector, issuePath: IssuePath):
             fail(invalid(`The entry ${quoteName(entry.path)} is truncated.`, issuePath))
             return
           }
-          entries.push({ path, type: 'file', data: new Uint8Array(Buffer.concat(chunks, received)) })
+          const executable = ((entry.mode ?? 0) & 0o100) !== 0
+          entries.push({ path, type: 'file', data: new Uint8Array(Buffer.concat(chunks, received)), ...(executable ? { executable: true } : {}) })
         })
         entry.on('data', (chunk: Buffer) => {
           received += chunk.length
@@ -134,6 +141,16 @@ function parseTar(tar: Buffer, collector: EntryCollector, issuePath: IssuePath):
 
     parser.on('entry', onEntry)
     parser.on('ignoredEntry', (entry: ReadEntry) => {
+      let selected = true
+      try {
+        selected = collector.selects(entry.path)
+      }
+      catch (error) {
+        fail(error as Error)
+        return
+      }
+      if (!selected)
+        return
       fail(invalid(`The entry ${quoteName(entry.path)} is ${describeType(entry.type)}; only files and folders are allowed.`, issuePath))
     })
     parser.on('error', (error: Error) => {

@@ -23,7 +23,7 @@ export function createStyleRegistry(core: DefinitionRegistryCore): PluginStyleRe
   return createDefinitionRegistry<OutputStyleDefinition>(core, {
     kind: 'style',
     label: 'output style',
-    validate: validateOutputStyleDefinition,
+    validate: (definition, pluginId) => validateOutputStyleDefinition(definition, pluginId),
     perPluginMax: LIMITS.pluginOutputStylesMax,
   })
 }

@@ -5,8 +5,13 @@
 // server's business (`hookModelText`); the carrier rule is the shared `isHookCarrier` plus a valid record in every part.
 // No Vue, no stores. Signatures frozen from Gate P11-0b (C39); `hookDataOf`, `toolHooksOf` and `isHookCarrierMessage` are
 // C39's; W11.12 wrote the texts (`hookOutcomeText`, `hookSourceText`, `hookAnnouncement`) and the note helpers below.
+// Phase 12 (ADR-057; docs/UI.md 7.34; W12.13): `harnessAsked` ("Allowed by hook · still asks", `hookStillAsks`), prompt
+// hooks (`hooks[].kind: 'prompt'`: "Personal prompt hook" / "Project prompt hook" / "Prompt hook from {plugin}" plus "·
+// {model}", the label's first line, "The model's answer could not be read." for an unreadable answer), the record that
+// decides a tool row's badge (`toolHookDecision`: a `PermissionRequest` decision over the `PreToolUse` one), and a
+// `context` record without a context (a prompt hook's reason, or system messages only: `PostCompact`).
 import type { HarnessUIMessage, HookData } from '@harness-forge/shared'
-import { HOOK_PART_TYPE, hookDataSchema, isHookCarrier } from '@harness-forge/shared'
+import { HOOK_PART_TYPE, hookDataSchema, isHookCarrier, safeParseModelRef } from '@harness-forge/shared'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -71,6 +76,15 @@ function failedHook(data: HookData): HookData['hooks'][number] | null {
     ?? null
 }
 
+/** + Phase 12: the line of a record whose `PreToolUse` allow harness-forge did not follow (it still showed the card). */
+export const HOOK_STILL_ASKS_TEXT = 'Allowed by hook · still asks'
+
+/** + Phase 12: the details line (and the badge's tooltip) of such a record. */
+export const HOOK_STILL_ASKS_DETAIL = 'harness-forge still asks for this call (plan mode, a tool that runs commands, or an Always ask policy).'
+
+/** + Phase 12: the details of a prompt hook that failed without an error text of its own (an unreadable answer). */
+export const PROMPT_HOOK_UNREADABLE_TEXT = 'The model\'s answer could not be read.'
+
 /**
  * The note's line (docs/UI.md 7.31, the table by `outcome`; the reason on one line): "Hook added context · {event}",
  * "Blocked by a {event} hook: {reason}", "A hook asked you to confirm this call: {reason}", "Allowed by a {event} hook"
@@ -85,12 +99,19 @@ export function hookOutcomeText(data: HookData): string {
   const withReason = (text: string): string => (reason ? `${text}: ${reason}` : text)
   switch (data.outcome) {
     case 'context':
-      return `Hook added context · ${event}`
+      // + Phase 12: a record without a context: a prompt hook's reason (an answer with no effect), else only system
+      // messages (`PostCompact` and the other observe-only events).
+      if (hasContext(data))
+        return `Hook added context · ${event}`
+      return reason ? `A ${event} hook answered: ${reason}` : `A ${event} hook sent a message`
     case 'denied':
       return withReason(`Blocked by a ${event} hook`)
     case 'asked':
       return withReason('A hook asked you to confirm this call')
     case 'allowed':
+      // + Phase 12 (ADR-057): the hook allowed it, harness-forge still showed the card.
+      if (hookStillAsks(data))
+        return HOOK_STILL_ASKS_TEXT
       return withReason(`Allowed by a ${event} hook`)
     case 'rewritten':
       return `Input changed by a ${event} hook`
@@ -115,17 +136,82 @@ export function hookOutcomeText(data: HookData): string {
 
 /**
  * The source line of one hook of a record: "Personal hook" · "Project hook" · "From {plugin}" (the plugin's name, else
- * its id).
+ * its id). + Phase 12: a prompt hook reads "Personal prompt hook" · "Project prompt hook" · "Prompt hook from {plugin}".
  */
 export function hookSourceText(hook: HookData['hooks'][number], pluginName: string | null): string {
+  const prompt = hook.kind === 'prompt'
   switch (hook.source) {
     case 'personal':
-      return 'Personal hook'
+      return prompt ? 'Personal prompt hook' : 'Personal hook'
     case 'project':
-      return 'Project hook'
-    case 'plugin':
-      return `From ${pluginName ?? hook.pluginId ?? 'a plugin'}`
+      return prompt ? 'Project prompt hook' : 'Project hook'
+    case 'plugin': {
+      const plugin = pluginName ?? hook.pluginId ?? 'a plugin'
+      return prompt ? `Prompt hook from ${plugin}` : `From ${plugin}`
+    }
   }
+}
+
+// ---------- Phase 12 (ADR-057; docs/UI.md 7.34) ----------
+
+/** The record has a model-visible context (not only system messages or a reason). */
+function hasContext(data: HookData): boolean {
+  return (data.context?.trim() ?? '') !== ''
+}
+
+/** A hook allowed the call but harness-forge still asked (`harnessAsked`; `data-state="still-asks"`). */
+export function hookStillAsks(data: Pick<HookData, 'outcome' | 'harnessAsked'>): boolean {
+  return data.outcome === 'allowed' && data.harnessAsked === true
+}
+
+/**
+ * The source of one hook with a prompt hook's model: "{source} · {model}" (the model's display name, else the model id
+ * of its ref); a command hook or a prompt hook without a model reads `hookSourceText` alone.
+ */
+export function hookSourceLine(hook: HookData['hooks'][number], pluginName: string | null, modelName: string | null = null): string {
+  const source = hookSourceText(hook, pluginName)
+  if (hook.kind !== 'prompt' || !hook.model)
+    return source
+  const model = modelName?.trim() || (safeParseModelRef(hook.model)?.modelId ?? hook.model)
+  return `${source} · ${model}`
+}
+
+/** The label of one hook as a note shows it: a prompt hook's first line (its prompt), else the label as it is. */
+export function hookRunLabel(hook: HookData['hooks'][number]): string {
+  return hook.kind === 'prompt' ? firstLine(hook.label) : hook.label
+}
+
+/**
+ * The error texts of a record's hooks (the `error` details): each hook's own text; a prompt hook of an `error` record
+ * without one reads "The model's answer could not be read."
+ */
+export function hookErrorTexts(data: HookData): string[] {
+  return data.hooks.flatMap((hook) => {
+    const text = hook.error?.trim()
+    if (text)
+      return [text]
+    return data.outcome === 'error' && hook.kind === 'prompt' ? [PROMPT_HOOK_UNREADABLE_TEXT] : []
+  })
+}
+
+/** What a tool row's badge shows: the outcome, whether harness-forge still asked, and the record's event. */
+export interface ToolHookDecision {
+  outcome: 'denied' | 'allowed' | 'rewritten'
+  stillAsks: boolean
+  event: HookData['event']
+}
+
+/**
+ * The decision a tool row's badge shows (docs/UI.md 7.31, 7.34): a `PermissionRequest` record's `allowed` / `denied`
+ * (it decided the card), else the `PreToolUse` record's `denied` / `allowed` (with `harnessAsked`: still asks) /
+ * `rewritten`; null without one of them.
+ */
+export function toolHookDecision(hooks: readonly HookData[]): ToolHookDecision | null {
+  const permission = hooks.find(data => data.event === 'PermissionRequest' && (data.outcome === 'allowed' || data.outcome === 'denied'))
+  const record = permission ?? hooks.find(data => data.event === 'PreToolUse' && (data.outcome === 'denied' || data.outcome === 'allowed' || data.outcome === 'rewritten'))
+  if (!record)
+    return null
+  return { outcome: record.outcome as ToolHookDecision['outcome'], stillAsks: hookStillAsks(record), event: record.event }
 }
 
 /**
@@ -143,7 +229,7 @@ export function hookAnnouncement(data: HookData, toolTitle: string | null): stri
 
 /** What a note's details toggle names: the context, the hooks' output (errors) or the details (the source lines). */
 export function hookDetailsKind(data: HookData): 'context' | 'output' | 'details' {
-  if (data.outcome === 'context')
+  if (data.outcome === 'context' && hasContext(data))
     return 'context'
   return data.outcome === 'error' ? 'output' : 'details'
 }

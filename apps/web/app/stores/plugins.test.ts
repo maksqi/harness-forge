@@ -2,7 +2,7 @@ import type { MockApi } from '~/utils/testing/mock-api'
 import { HarnessError } from '@harness-forge/shared'
 import { createPinia, disposePinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { logEntry, pluginDetail, pluginSummary, toolSummary } from '~/utils/testing/fixtures'
+import { claudePluginInfo, logEntry, pluginDetail, pluginOrigin, pluginSummary, toolSummary } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { parsePluginFilter, PLUGIN_LOG_LIMIT, pluginMatchesFilter, usePluginsStore } from './plugins'
 
@@ -236,5 +236,31 @@ describe('plugins store: events', () => {
     expect(api.plugins.list).toHaveBeenCalledTimes(2)
     expect(api.mcp.list).toHaveBeenCalledTimes(2)
     expect(api.tools.list).not.toHaveBeenCalled()
+  })
+})
+
+describe('plugins store: Claude Code plugins (Phase 12, W12.9)', () => {
+  it('keeps the format in the row and the origin and Claude Code info in the detail across a plugin.changed event', async () => {
+    vi.useFakeTimers()
+    const plugins = await loadPlugins()
+    const detail = pluginDetail({ id: 'review-kit', name: 'review-kit', kind: 'declarative', format: 'claude', source: 'marketplace', sourceRef: 'review-kit@claude-plugins-official', editable: false, origin: pluginOrigin(), claude: claudePluginInfo() })
+    api.plugins.get.mockResolvedValue(detail)
+    await plugins.fetchOne('review-kit')
+    const row = plugins.byId('review-kit')!
+    expect(row.format).toBe('claude')
+    expect(row.sourceRef).toBe('review-kit@claude-plugins-official')
+    // A row is a summary: the detail-only fields stay in the detail.
+    expect('origin' in row).toBe(false)
+    expect('claude' in row).toBe(false)
+
+    const { manifest: _manifest, trust: _trust, editable: _editable, hasSettings: _hasSettings, origin: _origin, claude: _claude, ...summary } = detail
+    plugins.applyEvent({ type: 'plugin.changed', data: { id: 'review-kit', plugin: { ...summary, state: 'untrusted' } }, at: 1 })
+    expect(plugins.byId('review-kit')?.state).toBe('untrusted')
+    expect(plugins.details['review-kit']?.state).toBe('untrusted')
+    expect(plugins.details['review-kit']?.origin).toEqual(pluginOrigin())
+    expect(plugins.details['review-kit']?.claude?.namespace).toBe('review-kit')
+    // The opened detail is fetched again (a changed file tree changes its executables and trust).
+    await vi.advanceTimersByTimeAsync(500)
+    expect(api.plugins.get).toHaveBeenCalledTimes(2)
   })
 })

@@ -106,3 +106,53 @@ describe('toolHookBadge', () => {
     expect(rewritten.get(`[data-testid="${testIds.toolRowHook}"]`).attributes('data-value')).toBe('rewritten')
   })
 })
+
+describe('toolHookBadge: Phase 12 (W12.13-T3)', () => {
+  it('reads "Allowed by hook · still asks" for an allow harness-forge did not follow', async () => {
+    const { row } = await badgeInRow([hookData({ outcome: 'allowed', reason: undefined, harnessAsked: true })])
+    const root = document.querySelector<HTMLElement>(`[data-testid="${testIds.toolRowHook}"]`)!
+    expect(root.dataset).toMatchObject({ value: 'allowed', state: 'still-asks' })
+    expect(root.querySelector('.sr-only')!.textContent).toBe(', allowed by hook, still asks')
+    row.focus()
+    await flushPromises()
+    const tooltip = document.body.querySelector('[role="tooltip"]')!
+    expect(tooltip.textContent).toContain('Allowed by hook · still asks')
+    expect(tooltip.textContent).toContain('harness-forge still asks for this call (plan mode, a tool that runs commands, or an Always ask policy).')
+  })
+
+  it('has no still-asks state for a plain allow', () => {
+    const root = badge([hookData({ outcome: 'allowed', reason: undefined })]).get(`[data-testid="${testIds.toolRowHook}"]`)
+    expect(root.attributes('data-state')).toBeUndefined()
+  })
+
+  it('shows a PermissionRequest decision like a PreToolUse one, before it', () => {
+    const pre = hookData({ id: hookRecordId(1), outcome: 'allowed', harnessAsked: true, reason: undefined })
+    const denied = badge([pre, hookData({ id: hookRecordId(2), event: 'PermissionRequest', outcome: 'denied' })]).get(`[data-testid="${testIds.toolRowHook}"]`)
+    expect(denied.attributes('data-value')).toBe('denied')
+    expect(denied.text()).toContain('Blocked by hook')
+    const allowed = badge([pre, hookData({ id: hookRecordId(3), event: 'PermissionRequest', outcome: 'allowed', reason: undefined })]).get(`[data-testid="${testIds.toolRowHook}"]`)
+    expect(allowed.attributes('data-value')).toBe('allowed')
+    expect(allowed.attributes('data-state')).toBeUndefined()
+    // A PostToolUseFailure record alone marks nothing.
+    expect(badge([hookData({ event: 'PostToolUseFailure', outcome: 'blocked' })]).find(`[data-testid="${testIds.toolRowHook}"]`).exists()).toBe(false)
+  })
+
+  it('marks no decision for a PermissionRequest prompt hook\'s "no" that changed nothing (W12.17-T2)', () => {
+    // W12.5 stores it as outcome `context` with the answer in `reason`: the card still asked, so nothing was blocked;
+    // the reason shows in the row's HookNote ("A PermissionRequest hook answered: {reason}").
+    const answered = hookData({
+      id: hookRecordId(5),
+      event: 'PermissionRequest',
+      outcome: 'context',
+      context: undefined,
+      reason: 'Deleting files needs a person.',
+      hooks: [{ source: 'personal', label: 'Should this run without asking?', exitCode: null, durationMs: 800, kind: 'prompt', model: 'mock:prompt-hook' }],
+    })
+    expect(badge([answered]).find(`[data-testid="${testIds.toolRowHook}"]`).exists()).toBe(false)
+    // The PreToolUse decision still shows.
+    const pre = hookData({ id: hookRecordId(1), outcome: 'allowed', harnessAsked: true, reason: undefined })
+    const root = badge([pre, answered]).get(`[data-testid="${testIds.toolRowHook}"]`)
+    expect(root.attributes()).toMatchObject({ 'data-value': 'allowed', 'data-state': 'still-asks' })
+    expect(root.text()).not.toContain('Deleting files')
+  })
+})

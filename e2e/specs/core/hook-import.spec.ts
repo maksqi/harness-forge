@@ -2,9 +2,10 @@
 // hooks"; text that is not JSON reads "This isn't valid JSON.", an object without hooks "No hooks found."; a pasted
 // Claude Code settings file (with `permissions`, which is ignored) previews "Found 3 hooks": two ready items (checked;
 // the timeout shown) and one with a regular-expression matcher (unchecked, disabled, "Use tool names, | and * only."),
-// and the notes say a "prompt" hook was left out. "Add 2 hooks" creates them as personal hooks ("Added 2 hooks"), which
-// show as rows. The imported hooks never run in another spec's chats: a PreToolUse matcher that names no tool and a
-// Notification hook (never shown in a chat); both are removed through `cleanup` by a unique marker in their commands.
+// and the notes say an "http" hook was left out (Phase 12 imports prompt hooks; http hooks stay unsupported). "Add 2
+// hooks" creates them as personal hooks ("Added 2 hooks"), which show as rows. The imported hooks never run in another
+// spec's chats: a PreToolUse matcher that names no tool and a Notification hook (never shown in a chat); both are
+// removed through `cleanup` by a unique marker in their commands.
 import {
   byTestId,
   expect,
@@ -30,7 +31,7 @@ test.describe('hook import', () => {
           { matcher: '^Bash.*$', hooks: [{ type: 'command', command: `sh ${marker}-regex.sh` }] },
         ],
         Notification: [{ hooks: [{ type: 'command', command: `sh ${marker}-notify.sh` }] }],
-        Stop: [{ hooks: [{ type: 'prompt', prompt: 'Check the work.' }] }],
+        Stop: [{ hooks: [{ type: 'http', url: 'https://example.invalid/hook' }] }],
       },
     }
 
@@ -54,7 +55,7 @@ test.describe('hook import', () => {
     await expect(error).toHaveText('No hooks found.')
     await expect(submit).toBeDisabled()
 
-    // The preview: two ready items, one invalid matcher, a note for the prompt hook.
+    // The preview: two ready items, one invalid matcher, a note for the http hook.
     await input.fill(JSON.stringify(settings, null, 2))
     await expect(error).toHaveCount(0)
     const preview = dialog.getByTestId(testIds.hookImportPreview)
@@ -74,7 +75,7 @@ test.describe('hook import', () => {
     const notify = byTestId(preview, testIds.hookImportItem, { 'data-event': 'Notification', 'data-state': 'ready' })
     await expect(notify).toContainText(`${marker}-notify.sh`)
     await expect(notify).toContainText('60s')
-    await expect(dialog.locator('[data-slot="hook-import-notes"]')).toContainText('Ignored: "prompt" hooks aren\'t supported.')
+    await expect(dialog.locator('[data-slot="hook-import-notes"]')).toContainText('Ignored: http hooks aren\'t supported.')
 
     // Unchecking a ready item counts down; checking it again counts up.
     await notify.getByRole('checkbox').click()

@@ -165,6 +165,16 @@ describe('renderCommandExpansion', () => {
     expect(renderCommandExpansion(named, { shell: [ok('ok')], files: [] }, 'prod web', { names: ['env'], base: 1 }).text).toBe('Deploy prod ok as prod')
   })
 
+  it('applies variables and escapes in parts without placeholders when options are given (Phase 12)', () => {
+    // eslint-disable-next-line no-template-curly-in-string -- a literal plugin variable reference
+    const plan = planCommandExpansion('Root ${CLAUDE_PLUGIN_ROOT} costs \\$5 !`echo hi` then $ARGUMENTS')
+    const rendered = renderCommandExpansion(plan, { shell: [ok('hi')], files: [] }, 'go', { vars: { CLAUDE_PLUGIN_ROOT: '/p' } })
+    expect(rendered).toEqual({ text: 'Root /p costs $5 hi then go', usedPlaceholder: true })
+    // eslint-disable-next-line no-template-curly-in-string -- a literal plugin variable reference
+    const noPlaceholder = renderCommandExpansion(planCommandExpansion('At ${CLAUDE_PLUGIN_ROOT} !`echo hi`'), { shell: [ok('hi')], files: [] }, 'x', { vars: { CLAUDE_PLUGIN_ROOT: '/p' } })
+    expect(noPlaceholder).toEqual({ text: 'At /p hi\n\nx', usedPlaceholder: false })
+  })
+
   it('appends the input when no text part used a placeholder', () => {
     const plan = planCommandExpansion('Branch: !`git branch --show-current $ARGUMENTS`')
     expect(renderCommandExpansion(plan, { shell: [ok('main')], files: [] }, ' release ')).toEqual({ text: 'Branch: main\n\nrelease', usedPlaceholder: false })

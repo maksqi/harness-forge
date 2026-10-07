@@ -28,6 +28,9 @@
 // Prompts, contexts and reasons are never logged (the event and the outcome only, at `debug`).
 // W11.19: the accepted response of a request whose new user message got records says how many
 // (`PROMPT_HOOKS_HEADER`, set by the runner through `withPromptHooksHeader`), so the client reloads that message once.
+// Phase 12 (W12.6, ADR-057): prompt hooks run inside the snapshot (W12.5), so nothing changes here: a prompt hook's
+// `ok: false` is a block (the same 409 `hook-blocked` with its record; nothing stored or queued), `ok: true` decides
+// nothing, an unreadable answer is a non-blocking error record on the message.
 import type { ChatRequestBody, HarnessUIMessage, HookData, HookEvent, QueueAddBody, RunOrigin, UserMessagePart } from '@harness-forge/shared'
 import type { Logger } from '../logger.ts'
 import type { ChatRecord } from '../services/chats/types.ts'

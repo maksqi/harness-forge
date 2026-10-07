@@ -345,11 +345,11 @@ const CASES: FreshCase[] = [
   },
   {
     // ADR-055: the scan reads the server user's Claude Code folder (the test app's `HF_CLAUDE_HOME` decides whether it
-    // plans or answers `409` `disabled`).
+    // plans, answers `404` for a missing folder (the test app's default, never created) or `409` `disabled`).
     name: 'scanning the server\'s Claude Code folder',
     key: 'claudeImport.scan',
     attempt: { method: 'POST', path: '/api/claude-import/scan' },
-    ok: [200, 409],
+    ok: [200, 404, 409],
     unchanged: async () => {},
   },
   {

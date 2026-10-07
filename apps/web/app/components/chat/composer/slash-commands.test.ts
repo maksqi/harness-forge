@@ -1,4 +1,5 @@
 import type { ClientCommandContext } from './slash-commands'
+import { CATALOG_NAME_PATTERN } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
 import { projectTrustList, styleEntry, trustCommandItem, trustHookItem } from '~/utils/testing/fixtures'
 import { styleOptions } from './output-style'
@@ -8,6 +9,7 @@ import {
   clientSlashItems,
   filterSlashItems,
   isTypedCommand,
+  middleEllipsis,
   parseClientCommand,
   parseSlashCommand,
   parseToolMode,
@@ -18,6 +20,8 @@ import {
   slashGroupOf,
   slashItemDetail,
   slashItemLabel,
+  slashNameDisplay,
+  slashNameMatches,
   slashQueryAt,
   withPendingCommands,
 } from './slash-commands'
@@ -407,5 +411,77 @@ describe('the Skills group and Needs approval (Phase 11)', () => {
     expect(withPendingCommands(skillItems, new Set())).toBe(skillItems)
     // Only project commands carry the badge (a personal command or a skill with the name never does).
     expect(withPendingCommands(skillItems, new Set(['standup', 'tidy']))).toBe(skillItems)
+  })
+})
+
+describe('qualified slash names (Phase 12, W12.13-T4)', () => {
+  const longName = `review-kit:${'a'.repeat(60)}:${'b'.repeat(56)}`
+
+  it('accepts exactly the catalog names in the hint and command patterns (at most 128 characters)', () => {
+    const names = ['review', 'review-kit:review', 'review-kit:db:migrate', 'a:b:c:d', '2fa:check', longName]
+    for (const name of names) {
+      expect(CATALOG_NAME_PATTERN.test(name), name).toBe(true)
+      expect(isTypedCommand(`/${name} `), name).toBe(true)
+      expect(parseSlashCommand(`/${name} now`), name).toEqual({ name, args: 'now' })
+    }
+    expect(longName).toHaveLength(128)
+    for (const name of [`${longName}b`, 'a:b:c:d:e', 'review-kit:', 'review-kit::db', '-kit:review', 'kit:9lives', 'note:']) {
+      expect(CATALOG_NAME_PATTERN.test(name), name).toBe(false)
+      expect(isTypedCommand(`/${name} `), name).toBe(false)
+      expect(parseSlashCommand(`/${name}`), name).toBeNull()
+    }
+    expect(parseSlashCommand('/Review-Kit:DB:Migrate  up ')).toEqual({ name: 'review-kit:db:migrate', args: 'up' })
+    expect(parseSlashCommand('/note: hello')).toBeNull()
+  })
+
+  it('keeps the menu open while a qualified name is typed', () => {
+    for (const text of ['/review-kit', '/review-kit:', '/review-kit:db:', '/review-kit:db:migrate'])
+      expect(slashQueryAt(text, text.length), text).toBe(text.slice(1))
+    expect(slashQueryAt('/a:b:c:d:e', 10)).toBeNull()
+    expect(slashQueryAt(`/${'a'.repeat(129)}`, 130)).toBeNull()
+    expect(slashQueryAt('/usr/bin', 8)).toBeNull()
+  })
+
+  it('shows the argument hint of a qualified command, never of an unlisted bare alias', () => {
+    const items = serverSlashItems([
+      { name: 'review-kit:db:migrate', description: 'Migrate', source: 'plugin', pluginId: 'review-kit', argumentHint: '<target>' },
+    ])
+    expect(argumentHintAt('/review-kit:db:migrate ', items)).toBe('<target>')
+    expect(argumentHintAt('/migrate ', items)).toBeNull()
+  })
+
+  it('filters on every segment of a name', () => {
+    expect(slashNameMatches('review-kit:db:migrate', 'migrate')).toBe(true)
+    expect(slashNameMatches('review-kit:db:migrate', 'db:mi')).toBe(true)
+    expect(slashNameMatches('review-kit:db:migrate', 'REV')).toBe(true)
+    expect(slashNameMatches('review-kit:db:migrate', '')).toBe(true)
+    expect(slashNameMatches('review-kit:db:migrate', 'kit')).toBe(false)
+    expect(slashNameMatches('review', 'view')).toBe(false)
+    const items = serverSlashItems([
+      { name: 'review-kit:db:migrate', description: 'Migrate', source: 'plugin', pluginId: 'review-kit' },
+      { name: 'migrate-notes', description: 'Notes', source: 'user' },
+      { name: 'review-kit:review', description: 'Review', source: 'plugin', pluginId: 'review-kit' },
+    ])
+    expect(filterSlashItems(items, 'migrate').map(item => item.name)).toEqual(['migrate-notes', 'review-kit:db:migrate'])
+    expect(filterSlashItems(items, 'review').map(item => item.name)).toEqual(['review-kit:db:migrate', 'review-kit:review'])
+    // The menu lists only what the server lists: no bare alias is added.
+    expect(items.map(item => item.name)).not.toContain('review')
+  })
+
+  it('mutes the plugin namespace and cuts a long qualified name in the middle', () => {
+    expect(slashNameDisplay('review')).toEqual({ namespace: '', rest: 'review', title: null })
+    expect(slashNameDisplay(`a${'b'.repeat(63)}`)).toEqual({ namespace: '', rest: `a${'b'.repeat(63)}`, title: null })
+    expect(slashNameDisplay('review-kit:db:migrate')).toEqual({ namespace: 'review-kit:', rest: 'db:migrate', title: '/review-kit:db:migrate' })
+    const cut = slashNameDisplay(longName)
+    expect(cut.namespace).toBe('review-kit:')
+    expect(`${cut.namespace}${cut.rest}`).toHaveLength(40)
+    expect(cut.rest).toContain('…')
+    expect(cut.rest.endsWith('b'.repeat(19))).toBe(true)
+    expect(cut.title).toBe(`/${longName}`)
+    // A long plugin id: the cut runs through it, so nothing is muted.
+    const id = `${'p'.repeat(39)}`
+    expect(slashNameDisplay(`${id}:x`, 10)).toEqual({ namespace: '', rest: middleEllipsis(`${id}:x`, 10), title: `/${id}:x` })
+    expect(middleEllipsis('abcdefghij', 5)).toBe('ab…ij')
+    expect(middleEllipsis('abc', 5)).toBe('abc')
   })
 })

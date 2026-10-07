@@ -7,6 +7,10 @@
 //   is not configured is a warning (`invalid-model`; the run resolves the model again and falls back);
 // - `shadowDiagnostic`: the `shadowed` info of an entry another source wins, `duplicate-name` within one folder.
 // Diagnostics never quote file contents: only names that passed the name or tool-name patterns, paths and sources.
+// Phase 12 (ADR-058; W12.7): the entry lists Claude Code's newer keys when the definition sets them (`newKeyFields`):
+// agents `disallowedTools`, `maxTurns`, `color`, `skills`, `modelAlias`; commands and skills `whenToUse`, `arguments`,
+// `disallowedTools`, `context`, `agent`, `modelAlias`; skills also `allowed-tools` (`tools`) and `model` (`modelRef`).
+// An entry without them is exactly the v1.7 entry; the `ignored-key` infos of the parse stay in `diagnostics`.
 import type {
   CustomizationEntry,
   CustomizationKind,
@@ -15,7 +19,7 @@ import type {
   DefinitionDiagnostic,
   ParseDefinitionResult,
 } from '@harness-forge/shared'
-import { DEFINITION_LIMITS, MCP_TOOL_PREFIX, safeParseModelRef } from '@harness-forge/shared'
+import { AGENT_COLORS, DEFINITION_LIMITS, LIMITS, MCP_TOOL_PREFIX, safeParseModelRef } from '@harness-forge/shared'
 
 /** Diagnostics kept per entry and per catalog (`definitionDiagnosticSchema` lists are capped at 100). */
 export const DIAGNOSTICS_MAX = 100
@@ -52,6 +56,61 @@ function cut(text: string, max: number): string {
   return text.length <= max ? text : text.slice(0, max)
 }
 
+/** Longest `skills` entry, fork `agent` and `modelAlias` of an entry (`customizationEntrySchema`). */
+const ENTRY_REF_MAX = 128
+/** Longest name of an `arguments` list (`customizationEntrySchema`). */
+const ARGUMENT_NAME_MAX = 32
+const COLORS: ReadonlySet<string> = new Set(AGENT_COLORS)
+
+/** The strings of `list` of 1..`max` characters, at most `count` of them; undefined when none is left. */
+function stringList(list: unknown, max: number, count: number): string[] | undefined {
+  if (!Array.isArray(list))
+    return undefined
+  const kept = list.filter((item): item is string => typeof item === 'string' && item.length > 0 && item.length <= max).slice(0, count)
+  return kept.length === 0 ? undefined : kept
+}
+
+/** A non-empty string of at most `max` characters, else undefined. */
+function shortText(value: unknown, max: number): string | undefined {
+  return typeof value === 'string' && value.length > 0 && value.length <= max ? value : undefined
+}
+
+/**
+ * The Phase 12 keys of parsed fields as entry fields (ADR-058), each only when set and valid for the entry schema (the
+ * parser already checked them; this keeps a stray value from making the whole catalog answer invalid).
+ */
+export function newKeyFields(parsed: object): Partial<CustomizationEntry> {
+  const fields = parsed as Readonly<Record<string, unknown>>
+  const extra: Record<string, unknown> = {}
+  const disallowed = stringList(fields.disallowedTools, 256, DEFINITION_LIMITS.toolsMax)
+  if (disallowed !== undefined)
+    extra.disallowedTools = disallowed
+  const maxTurns = fields.maxTurns
+  if (typeof maxTurns === 'number' && Number.isInteger(maxTurns) && maxTurns >= 1 && maxTurns <= LIMITS.agentMaxTurnsMax)
+    extra.maxTurns = maxTurns
+  if (typeof fields.color === 'string' && COLORS.has(fields.color))
+    extra.color = fields.color
+  const skills = stringList(fields.skills, ENTRY_REF_MAX, LIMITS.agentSkillsPreloadMax)
+  if (skills !== undefined)
+    extra.skills = skills
+  const modelAlias = shortText(fields.modelAlias, ENTRY_REF_MAX)
+  if (modelAlias !== undefined)
+    extra.modelAlias = modelAlias
+  const whenToUse = typeof fields.whenToUse === 'string' && fields.whenToUse.trim() !== '' ? cut(fields.whenToUse, DEFINITION_LIMITS.whenToUseMaxChars) : undefined
+  if (whenToUse !== undefined)
+    extra.whenToUse = whenToUse
+  const names = stringList(fields.arguments, ARGUMENT_NAME_MAX, LIMITS.definitionArgumentsMax)
+  if (names !== undefined)
+    extra.arguments = names
+  if (fields.context === 'fork') {
+    extra.context = 'fork'
+    const agent = shortText(fields.agent, ENTRY_REF_MAX)
+    if (agent !== undefined)
+      extra.agent = agent
+  }
+  return extra as Partial<CustomizationEntry>
+}
+
 /**
  * The catalog entry of a parsed definition. Project entries get their path stamped on every diagnostic. The state is
  * `off` for a turned-off personal row, else `invalid` when the parse has an `error`, else `active` (the precedence of
@@ -84,7 +143,15 @@ export function entryFromParse(kind: CustomizationKind, source: CustomizationSou
     case 'agent': {
       const { name, tools, model } = definition.fields
       const modelRef = validModelRef(model)
-      return { ...base, name, description, ...(modelRef === undefined ? {} : { modelRef }), ...(tools === null ? {} : { tools: [...tools] }), state }
+      return {
+        ...base,
+        name,
+        description,
+        ...(modelRef === undefined ? {} : { modelRef }),
+        ...(tools === null ? {} : { tools: [...tools] }),
+        ...newKeyFields(definition.fields),
+        state,
+      }
     }
     case 'command': {
       const { name, argumentHint, allowedTools, model } = definition.fields
@@ -96,11 +163,13 @@ export function entryFromParse(kind: CustomizationKind, source: CustomizationSou
         ...(argumentHint === null ? {} : { argumentHint }),
         ...(modelRef === undefined || modelRef === 'inherit' ? {} : { modelRef }),
         ...(allowedTools === null ? {} : { tools: [...allowedTools] }),
+        ...newKeyFields(definition.fields),
         state,
       }
     }
     case 'skill': {
-      const { name, userInvocable, modelInvocable, argumentHint } = definition.fields
+      const { name, userInvocable, modelInvocable, argumentHint, allowedTools, model } = definition.fields
+      const modelRef = validModelRef(model ?? null)
       return {
         ...base,
         name,
@@ -108,6 +177,10 @@ export function entryFromParse(kind: CustomizationKind, source: CustomizationSou
         ...(argumentHint === undefined ? {} : { argumentHint }),
         ...(userInvocable === undefined ? {} : { userInvocable }),
         ...(modelInvocable === undefined ? {} : { modelInvocable }),
+        // Phase 12: a skill's `model` and `allowed-tools` (applied on `/name` like a command's).
+        ...(modelRef === undefined || modelRef === 'inherit' ? {} : { modelRef }),
+        ...(allowedTools === undefined ? {} : { tools: [...allowedTools] }),
+        ...newKeyFields(definition.fields),
         state,
       }
     }
@@ -134,7 +207,8 @@ export interface CatalogCheckContext {
  */
 export function checkEntry(entry: CustomizationEntry, context: CatalogCheckContext): CustomizationEntry {
   const added: DefinitionDiagnostic[] = []
-  const unknown = (entry.tools ?? []).filter(tool => !tool.startsWith(MCP_TOOL_PREFIX) && !context.tools.has(tool))
+  const listed = [...new Set([...(entry.tools ?? []), ...(entry.disallowedTools ?? [])])]
+  const unknown = listed.filter(tool => !tool.startsWith(MCP_TOOL_PREFIX) && !context.tools.has(tool))
   for (const tool of unknown.slice(0, UNKNOWN_TOOLS_SHOWN_MAX))
     added.push({ level: 'warning', code: 'unknown-tool', message: `Unknown tool: ${tool}; it matches nothing.` })
   if (unknown.length > UNKNOWN_TOOLS_SHOWN_MAX) {

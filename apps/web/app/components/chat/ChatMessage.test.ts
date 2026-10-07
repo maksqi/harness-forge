@@ -673,6 +673,26 @@ describe('chatMessage: hook records (Phase 11)', () => {
     expect(reply.get(`[data-testid="${testIds.toolRowHook}"]`).attributes('data-value')).toBe('denied')
   })
 
+  it('shows the answer of a prompt hook\'s "no" that changed nothing: a Stop note and a note in the tool row, no badge (W12.17)', async () => {
+    const judge = { source: 'project' as const, label: 'Did the agent finish?\n$ARGUMENTS', exitCode: null, durationMs: 700, kind: 'prompt' as const, model: 'mock:prompt-hook' }
+    const tool = { type: 'tool-shell', toolCallId: 'call_shell_1', state: 'output-available', input: { command: 'rm -rf build' }, output: 'ok' } as unknown as HarnessUIMessage['parts'][number]
+    const permission = hookData({ id: hookRecordId(3), event: 'PermissionRequest', outcome: 'context', toolCallId: 'call_shell_1', toolName: 'shell', context: undefined, reason: 'Deleting files needs a person.', hooks: [judge] })
+    const stop = hookData({ id: hookRecordId(4), event: 'Stop', outcome: 'context', toolCallId: undefined, toolName: undefined, context: undefined, reason: 'The deploy needs credentials the agent does not have.', hooks: [judge] })
+    const message = assistant({ parts: [tool, { type: 'data-hook', id: permission.id, data: permission }, { type: 'text', text: 'Done.', state: 'done' }, { type: 'data-hook', id: stop.id, data: stop }] })
+    const { wrapper } = mountMessage({ message, isLast: true, streaming: false, showThinking: false })
+    const reply = wrapper.get(`[data-testid="${testIds.messageAssistant}"]`)
+    const inline = reply.get(`[data-testid="${testIds.hookNote}"][data-variant="inline"]`)
+    expect(inline.attributes()).toMatchObject({ 'data-event': 'Stop', 'data-outcome': 'context' })
+    expect(inline.get('[data-slot="hook-note-line"]').text()).toBe('A Stop hook answered: The deploy needs credentials the agent does not have.')
+    expect(inline.get('[data-slot="hook-note-source"]').text()).toBe('· Project prompt hook · prompt-hook')
+    // The PermissionRequest "no" decided nothing: no badge on the row; its answer is the row's note.
+    expect(wrapper.getComponent(ToolPart).props('hooks')).toEqual([permission])
+    expect(reply.find(`[data-testid="${testIds.toolRowHook}"]`).exists()).toBe(false)
+    await reply.get(`[data-testid="${testIds.toolRow}"] button`).trigger('click')
+    const row = reply.get(`[data-testid="${testIds.hookNote}"][data-variant="tool"]`)
+    expect(row.get('[data-slot="hook-note-line"]').text()).toBe('A PermissionRequest hook answered: Deleting files needs a person.')
+  })
+
   it('renders the records of a task call right after its block', () => {
     const record = hookData({ toolCallId: 'call_task_1', toolName: 'task', outcome: 'context', context: 'Use the fixtures.' })
     const message = assistant({ parts: [taskPart(), { type: 'data-hook', id: record.id, data: record }] })
@@ -711,7 +731,7 @@ describe('chatMessage: hook records (Phase 11)', () => {
     expect(wrapper.get('[data-slot="running-hook"]').text()).toBe('Running hooks…')
   })
 
-  function mountWithActivity(message: HarnessUIMessage, activity: 'compacting' | 'hooks' | null, hookActivity: { event: 'Stop' | 'PreToolUse', toolCallId: string | null } | null) {
+  function mountWithActivity(message: HarnessUIMessage, activity: 'compacting' | 'hooks' | null, hookActivity: { event: 'Stop' | 'PreToolUse', toolCallId: string | null, label?: string | null } | null) {
     const current = ref(hookActivity)
     const live = ref(activity)
     const wrapper = mount(defineComponent({
@@ -748,6 +768,26 @@ describe('chatMessage: hook records (Phase 11)', () => {
     expect(unknown.wrapper.get(`[data-testid="${testIds.submittedPlaceholder}"]`).text()).toBe('Running hooks…')
     const task = mountWithActivity(assistant({ parts: [taskPart({ toolCallId: 'call_task_1' })] }), 'hooks', { event: 'PreToolUse', toolCallId: 'call_task_1' })
     expect(task.wrapper.findAll('[data-slot="running-hook"]').map(line => line.text())).toEqual(['Running hooks…'])
+  })
+
+  it('shows the running hook\'s status message instead of "Running hooks…", never a tool row\'s (W12.17)', async () => {
+    const message = assistant({ parts: [{ type: 'text', text: 'All done.', state: 'done' }] })
+    const { wrapper, current } = mountWithActivity(message, 'hooks', { event: 'Stop', toolCallId: null, label: 'Running the test suite…' })
+    const reply = wrapper.get(`[data-testid="${testIds.messageAssistant}"]`)
+    expect(reply.findAll('[data-slot="running-hook"]').map(line => line.text())).toEqual(['Running the test suite…'])
+    expect(reply.text().indexOf('All done.')).toBeLessThan(reply.text().indexOf('Running the test suite…'))
+    // A hook without a status message: the plain line.
+    current.value = { event: 'Stop', toolCallId: null, label: null }
+    await nextTick()
+    expect(reply.get('[data-slot="running-hook"]').text()).toBe('Running hooks…')
+    // A task call's hooks run at the message level: its label shows there.
+    const task = mountWithActivity(assistant({ parts: [taskPart({ toolCallId: 'call_task_2' })] }), 'hooks', { event: 'PreToolUse', toolCallId: 'call_task_2', label: 'Checking the agent…' })
+    expect(task.wrapper.findAll('[data-slot="running-hook"]').map(line => line.text())).toEqual(['Checking the agent…'])
+    // The label of a tool row's hooks stays in that row: no message-level line.
+    const tool = { type: 'tool-write_file', toolCallId: 'call_write_2', state: 'input-available', input: { path: 'a.ts' } } as unknown as HarnessUIMessage['parts'][number]
+    const row = mountWithActivity(assistant({ parts: [{ type: 'text', text: 'Writing.', state: 'done' }, tool] }), 'hooks', { event: 'PreToolUse', toolCallId: 'call_write_2', label: 'Formatting files…' })
+    expect(row.wrapper.find(`[data-testid="${testIds.submittedPlaceholder}"]`).exists()).toBe(false)
+    expect(row.wrapper.findAll('[data-slot="running-hook"]').map(line => line.text())).toEqual(['Formatting files…'])
   })
 
   it('names a plugin hook\'s plugin from the plugins store in its note', () => {

@@ -3,11 +3,23 @@
 import type { Settings } from '@harness-forge/shared'
 import { DEFAULT_SETTINGS } from '@harness-forge/shared'
 import { defineStore } from 'pinia'
-import { computed, ref } from 'vue'
+import { computed, ref, toRaw } from 'vue'
 import { useApi } from '~/composables/useApi'
 import { APPEARANCE_KEYS, pickAppearance } from '~/utils/appearance'
 import { withHarnessErrors } from '~/utils/errors'
 import { useUiStore } from './ui'
+
+/**
+ * Whether a stored value is still the optimistic one of a patch: identical, or (Phase 12: the object setting
+ * `modelAliases`, which the store hands back as a reactive proxy) the same JSON.
+ */
+function isPatchedValue(current: unknown, patched: unknown): boolean {
+  const raw = toRaw(current)
+  if (Object.is(raw, patched))
+    return true
+  return typeof raw === 'object' && raw !== null && typeof patched === 'object' && patched !== null
+    && JSON.stringify(raw) === JSON.stringify(patched)
+}
 
 export const useSettingsStore = defineStore('settings', () => {
   const api = useApi()
@@ -86,7 +98,7 @@ export const useSettingsStore = defineStore('settings', () => {
     catch (error) {
       const current: Record<keyof Settings, unknown> = { ...resolved.value }
       for (const key of keys) {
-        if (current[key] === patch[key])
+        if (isPatchedValue(current[key], patch[key]))
           current[key] = before[key]
       }
       settings.value = current as Settings

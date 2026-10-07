@@ -10,6 +10,7 @@ import {
   approveLabel,
   canReconnect,
   changedCount,
+  isPromptHookItem,
   keepSelection,
   mcpServerCommand,
   mcpStatusDot,
@@ -30,6 +31,7 @@ import {
   trustItemState,
   trustItemTitle,
   trustStateText,
+  trustTextLabel,
   trustWarningText,
   variablePlaceholder,
   variableState,
@@ -177,5 +179,30 @@ describe('selectAllState (Phase 12, C46)', () => {
     expect(selectAllState(items, new Set())).toBe(false)
     expect(selectAllState(items, new Set([trustSha(1)]))).toBe('indeterminate')
     expect(selectAllState(items, new Set([trustSha(1), trustSha(2)]))).toBe(true)
+  })
+})
+
+describe('prompt hooks and handler fields in trust items (Phase 12, W12.13-T1)', () => {
+  const prompt = trustHookItem({ refs: [], detail: { event: 'Stop', matcher: null, command: '', timeout: null, type: 'prompt', prompt: 'Check it.', model: 'mock:prompt-hook' } })
+
+  it('reads a prompt hook: its prompt, "Prompt" and the model line', () => {
+    expect(isPromptHookItem(prompt)).toBe(true)
+    expect(isPromptHookItem(trustHookItem())).toBe(false)
+    expect(isPromptHookItem(trustMcpItem())).toBe(false)
+    expect(trustTextLabel(prompt)).toBe('Prompt')
+    expect(trustTextLabel(trustHookItem())).toBe('Command')
+    expect(trustTextLabel(trustCommandItem())).toBe('Command')
+    expect(trustCommandText(prompt)).toBe('Check it.')
+    expect(trustItemDetails(prompt)).toEqual(['Model: mock:prompt-hook'])
+    expect(trustItemDetails(trustHookItem({ refs: [], detail: { event: 'Stop', matcher: null, command: '', timeout: 5, type: 'prompt', prompt: 'x', model: '  ' } }))).toEqual(['Model: Hook model', 'timeout 5s'])
+  })
+
+  it('quotes every word of an exec-form hook and lists if / async after the timeout', () => {
+    const exec = trustHookItem({ refs: [], detail: { event: 'PostToolUse', matcher: null, command: 'sh', args: ['x.sh', 'it\'s'], timeout: 9, if: ' Write ', async: true } })
+    expect(trustCommandText(exec)).toBe('\'sh\' \'x.sh\' \'it\'\\\'\'s\'')
+    expect(trustItemDetails(exec)).toEqual(['timeout 9s', 'Only when Write', 'In the background'])
+    // A v1.7 item keeps its text and details.
+    expect(trustCommandText(trustHookItem())).toBe('sh .claude/hooks/guard.sh')
+    expect(trustItemDetails(trustHookItem())).toEqual(['Runs .claude/hooks/guard.sh'])
   })
 })

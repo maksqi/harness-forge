@@ -1,5 +1,7 @@
-// Plugin management routes (API.md 5.15). Owner: W1.3 (W1.3-T9). Thin: validate with the shared schemas, call the
-// plugin host, map DTOs. `plugins.reload` of a code plugin requires fresh auth (ADR-017).
+// Plugin management routes (API.md 5.15). Owner: W1.3 (W1.3-T9); Phase 12: W12.2. Thin: validate with the shared
+// schemas, call the plugin host, map DTOs. `plugins.reload` of a code plugin requires fresh auth (ADR-017). Phase 12
+// (ADR-053 / ADR-054): every detail carries the row's `format`, its `origin` (without the entry overlay), the `claude`
+// info of a Claude Code plugin and `editable: false` for one (`plugins-detail.ts`); the list carries the formats.
 import type { AppDeps } from '../../types.ts'
 import type { AppEnv } from '../types.ts'
 import {
@@ -12,6 +14,7 @@ import {
 import { Hono } from 'hono'
 import { requireFreshAuth } from '../middleware/fresh-auth.ts'
 import { validate } from '../validate.ts'
+import { completeDetail, completeSummaries } from './plugins-detail.ts'
 
 /** Headers of a plugin file icon (API.md 5.15 `plugins.icon`). */
 export const PLUGIN_ICON_HEADERS = {
@@ -23,11 +26,11 @@ export const PLUGIN_ICON_HEADERS = {
 export function createPluginsRoutes(deps: AppDeps): Hono<AppEnv> {
   const app = new Hono<AppEnv>()
 
-  app.get(apiRoutes['plugins.list'].path, async c => c.json({ items: await deps.plugins.list() }))
+  app.get(apiRoutes['plugins.list'].path, async c => c.json({ items: await completeSummaries(deps, await deps.plugins.list()) }))
 
   app.get(apiRoutes['plugins.get'].path, validate('param', pluginParamsSchema), async (c) => {
     const { id } = c.req.valid('param')
-    return c.json(await deps.plugins.get(id))
+    return c.json(await completeDetail(deps, await deps.plugins.get(id)))
   })
 
   app.delete(apiRoutes['plugins.remove'].path, validate('param', pluginParamsSchema), validate('query', pluginRemoveQuerySchema), async (c) => {
@@ -39,12 +42,12 @@ export function createPluginsRoutes(deps: AppDeps): Hono<AppEnv> {
 
   app.post(apiRoutes['plugins.enable'].path, validate('param', pluginParamsSchema), async (c) => {
     const { id } = c.req.valid('param')
-    return c.json(await deps.plugins.enable(id))
+    return c.json(await completeDetail(deps, await deps.plugins.enable(id)))
   })
 
   app.post(apiRoutes['plugins.disable'].path, validate('param', pluginParamsSchema), async (c) => {
     const { id } = c.req.valid('param')
-    return c.json(await deps.plugins.disable(id))
+    return c.json(await completeDetail(deps, await deps.plugins.disable(id)))
   })
 
   app.post(apiRoutes['plugins.reload'].path, validate('param', pluginParamsSchema), async (c) => {
@@ -53,7 +56,7 @@ export function createPluginsRoutes(deps: AppDeps): Hono<AppEnv> {
     const plugin = await deps.plugins.summary(id)
     if (plugin.kind === 'code' && !plugin.builtin)
       requireFreshAuth(c)
-    return c.json(await deps.plugins.reload(id))
+    return c.json(await completeDetail(deps, await deps.plugins.reload(id)))
   })
 
   app.get(apiRoutes['plugins.getSettings'].path, validate('param', pluginParamsSchema), async (c) => {

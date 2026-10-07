@@ -313,19 +313,20 @@ describe('helpers', () => {
   })
 })
 
-describe('phase 12 stubs (C44-T6): the loadSkill options and the body seam', () => {
-  it('loadSkill takes the options (file, toolCallId) and answers as before until W12.7', async () => {
+describe('phase 12 (W12.7): the loadSkill options and the body', () => {
+  it('loadSkill without a call scope answers the body; a toolCallId alone never forks', async () => {
     await put('.harness/skills/pdf/SKILL.md', SKILL_MD)
     await put('.harness/skills/pdf/ref.md', '# Fields')
     projectSkill('pdf')
     const plain = await loadSkill(await context(), 'pdf', signal())
-    expect(await loadSkill(await context(), 'pdf', signal(), { file: 'ref.md', toolCallId: 'call_1' })).toEqual(plain)
+    expect(await loadSkill(await context(), 'pdf', signal(), { toolCallId: 'call_1' })).toEqual(plain)
     expect(await loadSkill(await context(), 'pdf', signal(), {})).toEqual(plain)
   })
 
-  it('skillBody leaves the body as it is (the argumentOptions stub answers no options)', () => {
+  it('skillBody expands with no input: placeholders empty, known variables substituted, unknown ones kept', () => {
     const body = `Use $ARGUMENTS, $0, $ARGUMENTS[1], \\$HOME and \${CLAUDE_SKILL_DIR}/ref.md.`
-    expect(skillBody(body, ['first'], { CLAUDE_SKILL_DIR: '/srv/skills/pdf' })).toBe(body)
-    expect(skillBody(body, null, {})).toBe(body)
+    expect(skillBody(body, ['first'], { CLAUDE_SKILL_DIR: '/srv/skills/pdf' })).toBe('Use , , , $HOME and /srv/skills/pdf/ref.md.')
+    expect(skillBody(body, null, {})).toBe(`Use , , , $HOME and \${CLAUDE_SKILL_DIR}/ref.md.`)
+    expect(skillBody('No placeholders.', null, {})).toBe('No placeholders.')
   })
 })

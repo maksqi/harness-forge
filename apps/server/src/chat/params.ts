@@ -15,6 +15,9 @@
 // false` drops the workspace tool rules (the head line stays) and the coding hints (`agentBlocks(…, { codingHints })`:
 // the todo and `task` hints; the plan block and the agent-type and skill listings stay, they are the format contract of
 // the mocks). The skills block lists only model-invocable skills (`disable-model-invocation: true` leaves a skill out).
+// Phase 12 (ADR-053 / ADR-058; W12.7): the listings take catalog names (`CATALOG_NAME_PATTERN`: a Claude Code plugin's
+// qualified `review-kit:pdf` is listed as it is) and append an entry's `when_to_use` to its description
+// (`describedWithWhenToUse`: `<description> - <when_to_use>`, then cut to one line like before).
 import type { ProviderOptions, ReasoningLevel, ReasoningParams } from '@harness-forge/plugin-sdk'
 import type { AgentToolName, CustomizationEntry, ImageAspectRatio, ReasoningEffort, Settings, ToolMode } from '@harness-forge/shared'
 import type { Logger } from '../logger.ts'
@@ -23,8 +26,9 @@ import type { Registry } from '../registry/types.ts'
 import type { OpenWorkspace } from '../services/projects/types.ts'
 import type { RunOutputStyle } from './output-style.ts'
 import process from 'node:process'
-import { AGENT_NAME_PATTERN, AGENT_TOOL_NAMES, BUILTIN_AGENT_TYPES, HTTP_HEADER_NAME_PATTERN, LIMITS, outputStyleBlock } from '@harness-forge/shared'
+import { AGENT_TOOL_NAMES, BUILTIN_AGENT_TYPES, CATALOG_NAME_PATTERN, HTTP_HEADER_NAME_PATTERN, LIMITS, outputStyleBlock } from '@harness-forge/shared'
 import { CORE_AGENT_PLUGIN_ID } from '../builtin-plugins/core-agent/index.ts'
+import { describedWithWhenToUse } from './commands.ts'
 
 export interface RunParams {
   /** Undefined when empty. */
@@ -144,9 +148,10 @@ export const TASK_HINT = 'Delegate with task: a sub-agent works in its own conte
 
 /**
  * A catalog entry as the listings of the instructions read it (`CustomizationEntry` fits); `modelInvocable: false` (a
- * skill with `disable-model-invocation: true`, Phase 11) keeps a skill out of the skills block.
+ * skill with `disable-model-invocation: true`, Phase 11) keeps a skill out of the skills block; `whenToUse` (Phase 12)
+ * is appended to the description.
  */
-export type ListedEntry = Pick<CustomizationEntry, 'name' | 'description' | 'modelInvocable'>
+export type ListedEntry = Pick<CustomizationEntry, 'name' | 'description' | 'modelInvocable' | 'whenToUse'>
 
 /**
  * The header line of the agent-types block (Phase 10, ADR-045). The block format is a contract with the mocks
@@ -178,13 +183,13 @@ function builtinRank(name: string): number {
 }
 
 /**
- * The entries a listing shows: valid names only (`AGENT_NAME_PATTERN`; anything else could break the one-line format),
- * the first entry of a name, in `compare` order, at most `max`.
+ * The entries a listing shows: valid names only (`CATALOG_NAME_PATTERN`, Phase 12: qualified names too; anything else
+ * could break the one-line format), the first entry of a name, in `compare` order, at most `max`.
  */
 function listed(entries: readonly ListedEntry[], max: number, compare: (a: ListedEntry, b: ListedEntry) => number): ListedEntry[] {
   const seen = new Set<string>()
   const valid = entries.filter((entry) => {
-    if (typeof entry.name !== 'string' || !AGENT_NAME_PATTERN.test(entry.name) || seen.has(entry.name))
+    if (typeof entry.name !== 'string' || !CATALOG_NAME_PATTERN.test(entry.name) || seen.has(entry.name))
       return false
     seen.add(entry.name)
     return true
@@ -200,12 +205,15 @@ export function orderAgentTypes<T extends ListedEntry>(entries: readonly T[], ma
   return listed(entries, max, (a, b) => builtinRank(a.name) - builtinRank(b.name) || compareNames(a.name, b.name)) as T[]
 }
 
-/** The lines of a block: the header, then `- name: description` (the description on one line, cut). */
+/**
+ * The lines of a block: the header, then `- name: description` (the description with its `when_to_use` appended, on one
+ * line, cut).
+ */
 function listBlock(header: string, entries: readonly ListedEntry[]): string {
   if (entries.length === 0)
     return ''
   const lines = entries.map((entry) => {
-    const description = listedDescription(typeof entry.description === 'string' ? entry.description : '')
+    const description = listedDescription(describedWithWhenToUse(typeof entry.description === 'string' ? entry.description : '', entry.whenToUse))
     return description === '' ? `- ${entry.name}` : `- ${entry.name}: ${description}`
   })
   return [header, ...lines].join('\n')
@@ -427,7 +435,7 @@ export interface RunParamsInput {
    * after the `task` hint, only when `task` is offered (`agentTypesBlock`: builtins first, then by name; at most
    * `LIMITS.agentTypesListedMax`, descriptions cut to `LIMITS.listedDescriptionMaxChars`). Default none.
    */
-  agentTypes?: readonly Pick<CustomizationEntry, 'name' | 'description'>[]
+  agentTypes?: readonly Pick<CustomizationEntry, 'name' | 'description' | 'whenToUse'>[]
   /**
    * The active skills of the run's catalog (Phase 10, ADR-045; `PreparedRun.catalog.skills()`): the skills block, only
    * when `skill` is offered (`skillsBlock`: by name, at most `LIMITS.skillsListedMax`; Phase 11: a skill with

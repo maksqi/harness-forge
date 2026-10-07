@@ -1,5 +1,6 @@
-// HookSection (docs/UI.md 9.13, 10.8; W11.8-T3): the heading and count, the project's files and "Review {n}…", the rows
-// in event order with their actions, the empty states, the unavailable folder and the slots.
+// HookSection (docs/UI.md 9.13, 9.14, 10.8; W11.8-T3, W12.12-T2): the heading and count, the project's files and "Review
+// {n}…", the rows in event order with their actions, the empty states, the unavailable folder and the slots; Phase 12:
+// prompt rows among command rows (sorted by their prompt) and the pending rows of an untrusted plugin.
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -76,5 +77,27 @@ describe('hookSection', () => {
     const wrapper = mount(HookSection, { props: { source: 'plugin', entries: [hookEntry({ source: 'plugin', pluginId: 'hook-pack', id: undefined })] } })
     expect(wrapper.get('h2').text()).toBe('From plugins · 1')
     expect(wrapper.find(`[data-testid="${testIds.hooksEmpty}"]`).exists()).toBe(false)
+  })
+})
+
+describe('hookSection: Phase 12 (W12.12-T2)', () => {
+  it('lists prompt rows in event order among the command rows and re-emits their actions', () => {
+    const later = hookEntry({ key: 'p2', source: 'project', id: undefined, event: 'Stop', matcher: null, type: 'prompt', command: '', prompt: 'Zebra: is the work done?', path: '.claude/settings.json', position: [0, 1] })
+    const earlier = hookEntry({ key: 'p1', source: 'project', id: undefined, event: 'Stop', matcher: null, type: 'prompt', command: '', prompt: 'Apple: did the tests pass?', path: '.claude/settings.json', position: [0, 0] })
+    const guard = hookEntry({ key: 'c1', source: 'project', id: undefined, event: 'PreToolUse', matcher: 'Bash', path: '.harness/settings.json', position: [0, 0] })
+    const wrapper = mount(HookSection, { props: { source: 'project', entries: [later, guard, earlier], projectName: 'website', files: ['.claude/settings.json', '.harness/settings.json'], pending: 3 } })
+    const rows = wrapper.findAll(`[data-testid="${testIds.hookRow}"]`)
+    expect(rows.map(row => [row.attributes('data-event'), row.attributes('data-kind')])).toEqual([['PreToolUse', 'command'], ['Stop', 'prompt'], ['Stop', 'prompt']])
+    expect(rows[1]!.get('[data-slot="hook-row-prompt"]').text()).toBe('Apple: did the tests pass?')
+    wrapper.findAllComponents({ name: 'HookRow' })[2]!.vm.$emit('action', 'review')
+    expect(wrapper.emitted('action')).toEqual([['review', later]])
+  })
+
+  it('lists the pending hooks of an untrusted plugin with "Plugin not trusted"', () => {
+    const pending = hookEntry({ key: 'plugin:hook-pack:0', source: 'plugin', id: undefined, pluginId: 'hook-pack', state: 'pending' })
+    const wrapper = mount(HookSection, { props: { source: 'plugin', entries: [pending] } })
+    const row = wrapper.get(`[data-testid="${testIds.hookRow}"]`)
+    expect(row.attributes()).toMatchObject({ 'data-source': 'plugin', 'data-state': 'pending' })
+    expect(row.get('[data-slot="hook-row-state"]').text()).toBe('Plugin not trusted')
   })
 })

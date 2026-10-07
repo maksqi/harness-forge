@@ -162,5 +162,42 @@ describe('customizationViewer: Edit (Phase 12, C46-T6)', () => {
 
     await mountViewer(customizationEntry({ source: 'plugin', pluginId: 'db-tools', path: undefined }))
     expect(viewer().querySelector('[data-action="edit"]')).toBeNull()
+    wrapper!.unmount()
+    wrapper = null
+    document.body.replaceChildren()
+
+    // A project path that is not an editable definition file has no Edit either.
+    await mountViewer(customizationEntry({ kind: 'command', name: 'deep', path: '.claude/commands/a/b/c/d/deep.md' }))
+    expect(viewer().querySelector('[data-action="edit"]')).toBeNull()
+  })
+
+  it('lists the Claude Code keys of an agent and of a fork skill (W12.11-T3)', async () => {
+    api.customizations.source.mockResolvedValue({ content: AGENT_MARKDOWN, path: '.harness/agents/reviewer.md' })
+    await mountViewer(customizationEntry({ disallowedTools: ['shell'], maxTurns: 12, color: 'purple', skills: ['pdf'], modelAlias: 'sonnet' }))
+    const text = viewer().textContent ?? ''
+    expect(text).toContain('Tools not allowed')
+    expect(text).toContain('shell')
+    expect(text).toContain('Max turns')
+    expect(text).toContain('12')
+    expect(text).toContain('Purple')
+    expect(text).toContain('pdf')
+    expect(text).toContain('sonnet (Claude model name)')
+    wrapper!.unmount()
+    wrapper = null
+    document.body.replaceChildren()
+
+    api.customizations.source.mockResolvedValue({ content: '---\nname: pdf\ndescription: Fill PDFs\n---\nFill.\n' })
+    await mountViewer(customizationEntry({ kind: 'skill', name: 'pdf', source: 'user', id: 'cus_sample0000000009', path: undefined, tools: ['read_file'], whenToUse: 'When a form must be filled', context: 'fork', agent: 'explore' }))
+    const skill = viewer().textContent ?? ''
+    expect(skill).toContain('Allowed tools')
+    expect(skill).toContain('When a form must be filled')
+    expect(skill).toContain('A sub-agent (explore)')
+  })
+
+  it('exports a qualified plugin entry as {bare name}.md', async () => {
+    api.customizations.source.mockResolvedValue({ content: '---\ndescription: Migrate\n---\nMigrate.\n' })
+    await mountViewer(customizationEntry({ kind: 'command', name: 'review-kit:db:migrate', source: 'plugin', pluginId: 'review-kit', path: undefined, tools: undefined }))
+    button('Export .md').click()
+    expect(mocks.downloadText).toHaveBeenCalledWith('---\ndescription: Migrate\n---\nMigrate.\n', 'migrate.md', 'text/markdown')
   })
 })

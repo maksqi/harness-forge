@@ -291,8 +291,9 @@ describe('resolveCommand: command files and personal commands (W10.2-T1)', () =>
       kind: 'prompt',
       invocation: { name: 'audit', input: 'src', type: 'prompt', expansion: 'Audit src', source: 'project', modelRef: 'mock:agents', allowedTools: ['read_file', 'search_files', 'mcp__github__*'] },
     })
-    // A model alias without a provider is not a model reference: the chat's model runs (the catalog shows the info).
-    expect(await resolveIn(fake, PROJECT, '/plain x')).toEqual({ kind: 'prompt', invocation: { name: 'plain', input: 'x', type: 'prompt', expansion: 'Plain x', source: 'project' } })
+    // A Claude model name is not a model reference: without providers (or a `modelAliases` entry) it does not resolve,
+    // the chat's model runs and `prepare.ts` shows the `command-model-unavailable` notice (Phase 12, ADR-058).
+    expect(await resolveIn(fake, PROJECT, '/plain x')).toEqual({ kind: 'prompt', invocation: { name: 'plain', input: 'x', type: 'prompt', expansion: 'Plain x', source: 'project' }, modelUnavailable: 'sonnet' })
     // An empty list narrows to nothing (exit_plan_mode excepted, `restrictTools`).
     expect((await resolveIn(fake, PROJECT, '/none'))?.invocation).toMatchObject({ allowedTools: [] })
   })
@@ -467,23 +468,24 @@ describe('the queue marks queued command files turnOnly (W10.2-T4 through create
   })
 })
 
-describe('phase 12 stubs (C44-T6): the expandArguments options at the call sites', () => {
-  it('argumentOptions answers no options (the Phase 10 expansion: no names, base 1, no variables)', () => {
-    expect(argumentOptions({ body: 'Fix $0 in $ARGUMENTS[1]', names: ['file'], vars: { CLAUDE_SESSION_ID: 'chat' } })).toBeUndefined()
-    expect(argumentOptions({ body: 'x' })).toBeUndefined()
+describe('phase 12 (W12.7): the expandArguments options at the call sites', () => {
+  it('argumentOptions answers the names, the argument base and the variables', () => {
+    expect(argumentOptions({ body: 'Fix $0 in $ARGUMENTS[1]', names: ['file'], vars: { CLAUDE_SESSION_ID: 'chat' } })).toEqual({ names: ['file'], base: 0, vars: { CLAUDE_SESSION_ID: 'chat' } })
+    expect(argumentOptions({ body: 'x' })).toEqual({ names: [], base: 1, vars: {} })
+    expect(argumentOptions({ body: 'Use $1', names: null })).toEqual({ names: [], base: 1, vars: {} })
   })
 
-  it('a command file with Claude placeholders and named arguments still expands like v1.7', async () => {
+  it('a command file with Claude placeholders and named arguments expands 0-based with its variables', async () => {
     const fake = createFakeCustomizationService()
     const session = `\${CLAUDE_SESSION_ID}`
     commandFile(fake, PROJECT, '.harness', 'fix', `---\ndescription: Fix.\narguments: [file, line]\n---\nFix $1 ($0) at $ARGUMENTS[1], line $line, session ${session}.`)
     const resolution = await resolveCommand(fileServices(fake), '/fix a.ts 12', { ...context, catalog: await fake.catalog(PROJECT), argumentVars: { CLAUDE_SESSION_ID: 'chat' } })
-    expect(expansionOf(resolution)).toBe(`Fix a.ts ($0) at a.ts 12[1], line $line, session ${session}.`)
+    expect(expansionOf(resolution)).toBe('Fix 12 (a.ts) at 12, line 12, session chat.')
   })
 
-  it('qualified names pass through unchanged (their resolution is W12.7\'s)', async () => {
+  it('qualified names parse; one no command has resolves to nothing', async () => {
     const fake = createFakeCustomizationService()
     expect(await resolveIn(fake, PROJECT, '/review-kit:review x')).toBeNull()
-    expect(parseSlashCommand('/review-kit:review x')).toBeNull()
+    expect(parseSlashCommand('/review-kit:review x')).toEqual({ name: 'review-kit:review', input: 'x' })
   })
 })

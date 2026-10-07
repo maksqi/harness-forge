@@ -1,28 +1,41 @@
 <script setup lang="ts">
-// The hook editor of the Customize Hooks tab (Phase 11, ADR-048; docs/UI.md 2.18, 9.13, 10.8, 14): a right Sheet
-// (`w-full sm:max-w-2xl`, full width on phones) whose body scrolls under a sticky footer, titled "New hook" / "Edit hook"
-// / "Copy hook". The warning (`hook-warning`), Event (`hook-event`, a Select of the eight events with their descriptions
-// from `HOOK_EVENT_INFO`), Tools (`hook-matcher`, PreToolUse and PostToolUse only, mono, checked with the shared
+// The hook editor of the Customize Hooks tab (Phase 11, ADR-048; docs/UI.md 2.18, 2.19, 9.13, 9.14, 10.8, 10.9, 14): a
+// right Sheet (`w-full sm:max-w-2xl`, full width on phones) whose body scrolls under a sticky footer, titled "New hook" /
+// "Edit hook" / "Copy hook" / "Edit project hook" / "New project hook". The warning (`hook-warning`; the prompt hook's
+// own text for the Prompt type), Where (new hooks while a project is selected: Personal or one of the project's four
+// settings files, `data-field="hook-where"`), Type (`hook-type`, Command | Prompt), Event (`hook-event`, a Select of the
+// 13 events with their descriptions from `HOOK_EVENT_INFO`; a prompt hook on an event that takes none shows "Prompt hooks
+// work only for {events}." and cannot be saved), Tools (`hook-matcher`, tool events only, mono, checked with the shared
 // `compileMatcher`; the preview `hook-matcher-preview` "Matches {list}" / "No tool is named {name} now." through
-// `matcherPreview` over the tools store, debounced 300 ms, `aria-live="polite"`), Command (`hook-command`, a mono
-// textarea), Timeout (`hook-timeout`, 1 – 600 seconds, empty = 60) and On (`hook-editor-enabled`). TanStack Form holds
-// the fields; the inline errors show once a field was left or a save was tried.
-// Save hook (`hook-save`, also Mod+Enter in any field) → `useFreshAuth().run(() => hooks.create(body) | hooks.update(id,
-// patch), { required })` ("Saving a hook needs your password."; an edit that only turns the hook off needs none) →
-// toast "Hook saved", `saved`, close. A 400 on the matcher shows on the field; any other error shows in the form-level
-// alert (`hook-error`, `data-code`). Closing with changes (Esc, ×, Cancel, a click outside) asks "Discard changes?"
-// (`hook-discard-confirm`). Opens with focus on Event (new, copy) or Command (edit); reka returns focus to the element
-// that had it when the sheet opened. Tab is never captured.
-// Props, emits and the root test id are frozen from Gate P11-0b (C39 stub); implementation W11.8.
-// Phase 12 (ADR-056, ADR-057; C46 CCR, W12.12 owns it in P12-A): `mode: 'project'` with `target` edits a hook of a
-// project's settings file (`hook-editor[data-mode=project]`): Save writes through `hooks.saveProjectHook(projectId, target,
-// draft)` (no password: saving never approves) and closes without `saved` (no personal hook); the Type toggle
-// (`hook-type`), the Prompt field (`hook-prompt`) and the five new events are W12.12's.
-import type { HookCreate, HookEvent, HookUpdate, PersonalHook } from '@harness-forge/shared'
+// `matcherPreview` over the tools store, debounced 300 ms, `aria-live="polite"`) or Agent types (`hook-matcher` on
+// SubagentStart / SubagentStop); a command hook's Command (`hook-command`, a mono textarea), Arguments (one per line,
+// `data-field="hook-args"`) and Run in the background (`data-field="hook-async"`); a prompt hook's Prompt (`hook-prompt`,
+// mono), Model (SettingsModelSelect, none = "Hook model", `data-field="hook-model"`) with the line "Runs with {model}
+// (Settings → General → Hook model). It answers ok, or not ok with a reason." and Continue on block (PreToolUse and
+// PostToolUse, `data-field="hook-continue-on-block"`); Only when (`if`, tool events, `data-field="hook-if"`), Status
+// message (`data-field="hook-status-message"`), Timeout (`hook-timeout`, 1 – 600 seconds, empty = 60, 30 for a prompt
+// hook) and On (`hook-editor-enabled`; personal hooks only: settings files have no on / off). TanStack Form holds the
+// fields; the inline errors show once a field was left or a save was tried.
+// Save hook (`hook-save`, also Mod+Enter in any field): a personal hook → `useFreshAuth().run(() => hooks.create(body) |
+// hooks.update(id, patch), { required })` ("Saving a hook needs your password."; an edit that only turns the hook off
+// needs none; the bodies from `hookCreateBody` / `hookPatch`) → toast "Hook saved", `saved`, close. A project hook
+// (mode `project` with `target`, or Where = a settings file) → `hooks.saveProjectHook(projectId, target, draft)` (no
+// password: saving never approves) → toast "Saved {path}." or "Saved {path}. {n} items need your approval." with Review
+// (opens ProjectTrustDialog for the project) → close, without `saved` (no personal hook). A 409 `stale` (the file
+// changed after the editor opened: the server's answer, the store's check, or the listing refetched meanwhile shows
+// another handler at the target) shows "{file} changed on disk after you opened it." (`data-field="hook-stale"`,
+// `role="alert"`) with Load from disk (`data-action="reload"`: the listed handler replaces the edits) and Overwrite
+// (`data-action="overwrite"`: refetches the listing and saves again). A 400 on the matcher shows on the field; any other
+// error shows in the form-level alert (`hook-error`, `data-code`). Closing with changes (Esc, ×, Cancel, a click
+// outside) asks "Discard changes?" (`hook-discard-confirm`). Opens with focus on Event (new, copy) or Command / Prompt
+// (edit, project); reka returns focus to the element that had it when the sheet opened. Tab is never captured.
+// Props, emits and the root test id are frozen from Gate P11-0b (C39 stub, + the Phase 12 `mode: 'project'` / `target`
+// of C46); implementation W11.8, Phase 12 W12.12.
+import type { HookEvent, ModelAliasName, PersonalHook } from '@harness-forge/shared'
 import type { AcceptableValue } from 'reka-ui'
 import type { HookDraft, ProjectHookTarget } from './hooks'
-import { HOOK_EVENTS, HOOK_LIMITS, isHookTurnOff } from '@harness-forge/shared'
-import { CircleAlertIcon, TriangleAlertIcon } from '@lucide/vue'
+import { HOOK_EVENTS, HOOK_LIMITS, isHookTurnOff, MODEL_ALIAS_NAMES } from '@harness-forge/shared'
+import { CircleAlertIcon, MessageSquareTextIcon, SquareTerminalIcon, TriangleAlertIcon } from '@lucide/vue'
 import { useForm } from '@tanstack/vue-form'
 import { refDebounced } from '@vueuse/core'
 import { computed, nextTick, ref, shallowRef, useId, watch } from 'vue'
@@ -36,14 +49,44 @@ import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetT
 import { Spinner } from '@/components/ui/spinner'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import ConfirmDialog from '~/components/common/ConfirmDialog.vue'
 import ConfirmPasswordDialog from '~/components/common/ConfirmPasswordDialog.vue'
+import ProjectTrustDialog from '~/components/projects/trust/ProjectTrustDialog.vue'
+import { loadModelCatalog } from '~/composables/useComposerModel'
 import { isFreshAuthCancelled, useFreshAuth } from '~/composables/useFreshAuth'
 import { useHooksStore } from '~/stores/hooks'
+import { useModelsStore } from '~/stores/models'
 import { usePluginsStore } from '~/stores/plugins'
+import { useSettingsStore } from '~/stores/settings'
 import { toHarnessError } from '~/utils/errors'
 import { testIds } from '~/utils/testids'
-import { commandError, HOOK_COPY, HOOK_EVENT_INFO, matcherError, matcherPreview, parseHookTimeout } from './hooks'
+import SettingsModelSelect from '../SettingsModelSelect.vue'
+import {
+  argsError,
+  commandError,
+  draftFromHook,
+  draftFromPersonal,
+  fullDraft,
+  HOOK_COPY,
+  HOOK_EVENT_INFO,
+  hookCreateBody,
+  hookPatch,
+  ifError,
+  matcherError,
+  matcherPreview,
+  parseHookArgs,
+  parseHookTimeout,
+  PROJECT_HOOK_FILES,
+  projectEntryAt,
+  projectSavedText,
+  promptError,
+  promptEventError,
+  promptModelLine,
+  sameHandler,
+  staleFileText,
+  statusMessageError,
+} from './hooks'
 
 const props = defineProps<{
   open: boolean
@@ -53,29 +96,52 @@ const props = defineProps<{
   hook: PersonalHook | null
   /** New (Duplicate, Copy to personal), copy and project mode: the prefilled fields. */
   draft?: HookDraft | null
-  /** + Phase 12, project mode: where the hook is written (null indexes = a new handler). */
+  /**
+   * + Phase 12, project mode: where the hook is written (null indexes = a new handler). New mode: the selected project,
+   * whose settings files the Where select offers (its path and indexes are not used).
+   */
   target?: ProjectHookTarget | null
 }>()
 
 const emit = defineEmits<{ 'update:open': [open: boolean], 'saved': [hook: PersonalHook] }>()
 
+type HookType = 'command' | 'prompt'
+
 interface FormValues {
+  /** 'personal' or a project settings file (new mode with a project). */
+  where: string
+  type: HookType
   event: HookEvent
   matcher: string
   command: string
+  /** One argument per line. */
+  args: string
+  async: boolean
+  prompt: string
+  model: string | null
+  continueOnBlock: boolean
+  if: string
+  statusMessage: string
   timeout: string
   enabled: boolean
 }
 
-type Field = 'matcher' | 'command' | 'timeout'
+type Field = 'event' | 'matcher' | 'command' | 'args' | 'prompt' | 'if' | 'statusMessage' | 'timeout'
 
 /** How long the matcher preview waits after the last keystroke. */
 const PREVIEW_DELAY_MS = 300
+const PERSONAL = 'personal'
+/** Events whose prompt hooks read Continue on block. */
+const CONTINUE_EVENTS: ReadonlySet<HookEvent> = new Set(['PreToolUse', 'PostToolUse'])
 
 const hooks = useHooksStore()
 const plugins = usePluginsStore()
+const models = useModelsStore()
+const settings = useSettingsStore()
 const freshAuth = useFreshAuth()
 const ids = {
+  where: useId(),
+  type: useId(),
   event: useId(),
   eventHelp: useId(),
   matcher: useId(),
@@ -83,30 +149,60 @@ const ids = {
   matcherPreview: useId(),
   command: useId(),
   commandHelp: useId(),
+  args: useId(),
+  argsHelp: useId(),
+  async: useId(),
+  asyncHelp: useId(),
+  prompt: useId(),
+  promptHelp: useId(),
+  model: useId(),
+  modelLine: useId(),
+  continueOnBlock: useId(),
+  continueOnBlockHelp: useId(),
+  if: useId(),
+  ifHelp: useId(),
+  statusMessage: useId(),
+  statusMessageHelp: useId(),
   timeout: useId(),
   timeoutHelp: useId(),
   enabled: useId(),
+  stale: useId(),
 }
-
-const title = computed(() => ({ new: 'New hook', edit: 'Edit hook', copy: 'Copy hook', project: 'Edit project hook' })[props.mode])
 
 const EMPTY_DRAFT: HookDraft = { event: 'PreToolUse', matcher: '', command: '', timeout: null, enabled: true }
 
-/** The draft the sheet opened with (its values decide "changed"). */
+/** The draft the sheet opened with (its values decide "changed"; Load from disk replaces it). */
 const initial = shallowRef<HookDraft>(EMPTY_DRAFT)
+/** Project mode: where the save writes (Overwrite and Load from disk may turn it into a new handler). */
+const projectTarget = shallowRef<ProjectHookTarget | null>(null)
 const submitError = ref<{ code: string, message: string } | null>(null)
 /** A matcher the server refused (400 on `matcher`), until the matcher changes. */
 const serverMatcher = ref<{ value: string, message: string } | null>(null)
+/** The settings file changed after the editor opened (409 `stale`). */
+const stale = ref(false)
 const discardOpen = ref(false)
 const saving = ref(false)
+/** The project whose trust review the toast's Review opens. */
+const reviewProjectId = ref<string | null>(null)
+const reviewOpen = ref(false)
 
 function valuesOf(draft: HookDraft): FormValues {
+  const full = fullDraft(draft)
   return {
-    event: draft.event,
-    matcher: draft.matcher,
-    command: draft.command,
-    timeout: draft.timeout === null ? '' : String(draft.timeout),
-    enabled: draft.enabled,
+    where: PERSONAL,
+    type: full.type,
+    event: full.event,
+    matcher: full.matcher,
+    command: full.command,
+    args: full.args.join('\n'),
+    async: full.async,
+    prompt: full.prompt,
+    model: full.model,
+    continueOnBlock: full.continueOnBlock,
+    if: full.if,
+    statusMessage: full.statusMessage,
+    timeout: full.timeout === null ? '' : String(full.timeout),
+    enabled: full.enabled,
   }
 }
 
@@ -120,21 +216,63 @@ const form = useForm({
 const values = form.useSelector(state => state.values)
 const attempted = form.useSelector(state => state.submissionAttempts > 0)
 
-const toolEvent = computed(() => HOOK_EVENT_INFO[values.value.event].toolMatcher)
+const whereOffered = computed(() => props.mode === 'new' && !!props.target)
+/** Where the shown hook is written: a project target (project mode, or Where = a settings file), else null (personal). */
+const writeTarget = computed<ProjectHookTarget | null>(() => {
+  if (props.mode === 'project')
+    return projectTarget.value
+  if (whereOffered.value && values.value.where !== PERSONAL && props.target)
+    return { projectId: props.target.projectId, path: values.value.where, event: values.value.event, groupIndex: null, handlerIndex: null }
+  return null
+})
+const isProject = computed(() => writeTarget.value !== null)
+
+const title = computed(() => {
+  if (props.mode === 'project')
+    return projectTarget.value?.groupIndex === null ? 'New project hook' : 'Edit project hook'
+  return ({ new: 'New hook', edit: 'Edit hook', copy: 'Copy hook' } as const)[props.mode]
+})
+
+const isPrompt = computed(() => values.value.type === 'prompt')
+const eventInfo = computed(() => HOOK_EVENT_INFO[values.value.event])
+const toolEvent = computed(() => eventInfo.value.toolMatcher)
+const agentEvent = computed(() => eventInfo.value.matcher === 'agent')
+const continueShown = computed(() => isPrompt.value && CONTINUE_EVENTS.has(values.value.event))
 const dirty = computed(() => JSON.stringify(values.value) !== JSON.stringify(valuesOf(initial.value)))
 
 const errors = computed<Partial<Record<Field, string>>>(() => {
   const found: Partial<Record<Field, string>> = {}
   const current = values.value
-  if (toolEvent.value) {
+  if (toolEvent.value || agentEvent.value) {
     const matcher = matcherError(current.matcher)
       ?? (serverMatcher.value && serverMatcher.value.value === current.matcher ? serverMatcher.value.message : null)
     if (matcher)
       found.matcher = matcher
   }
-  const command = commandError(current.command)
-  if (command)
-    found.command = command
+  if (current.type === 'prompt') {
+    const event = promptEventError(current.type, current.event)
+    if (event)
+      found.event = event
+    const prompt = promptError(current.prompt)
+    if (prompt)
+      found.prompt = prompt
+  }
+  else {
+    const command = commandError(current.command)
+    if (command)
+      found.command = command
+    const args = argsError(parseHookArgs(current.args), current.command)
+    if (args)
+      found.args = args
+  }
+  if (toolEvent.value) {
+    const rule = ifError(current.if)
+    if (rule)
+      found.if = rule
+  }
+  const status = statusMessageError(current.statusMessage)
+  if (status)
+    found.statusMessage = status
   const timeout = parseHookTimeout(current.timeout)
   if ('error' in timeout)
     found.timeout = timeout.error
@@ -149,24 +287,51 @@ const debouncedMatcher = refDebounced(matcherText, PREVIEW_DELAY_MS)
 const toolNames = computed(() => plugins.tools.map(tool => tool.name))
 const preview = computed(() => matcherPreview(debouncedMatcher.value, toolNames.value))
 
-/** The inline error of a field once it was left or a save was tried; a server refusal shows at once. */
+/** The inline error of a field once it was left or a save was tried; a server refusal and the event rule show at once. */
 function shownError(field: Field, meta?: { isBlurred: boolean }): string | null {
   const error = errors.value[field]
   if (!error)
     return null
-  if (field === 'matcher' && serverMatcher.value)
+  if ((field === 'matcher' && serverMatcher.value) || field === 'event')
     return error
   return attempted.value || meta?.isBlurred ? error : null
 }
 
+// ---------- the prompt's model ----------
+
+function modelName(ref: string): string {
+  if (!ref.includes(':')) {
+    const alias = (MODEL_ALIAS_NAMES as readonly string[]).includes(ref) ? settings.resolved.modelAliases[ref as ModelAliasName] : null
+    return alias ? models.byRef(alias)?.name ?? alias : ref
+  }
+  return models.byRef(ref)?.name ?? ref
+}
+
+const modelLine = computed(() => {
+  const own = values.value.model
+  if (own)
+    return promptModelLine(modelName(own), false)
+  const setting = settings.resolved.hookModelRef
+  return promptModelLine(setting ? modelName(setting) : HOOK_COPY.automaticModel!, true)
+})
+
+/** The model selects and the line read the catalog and the settings: load them once the Prompt type shows. */
+function loadPromptData(): void {
+  loadModelCatalog()
+  if (!settings.loaded)
+    settings.fetch().catch(() => {})
+}
+
+watch(isPrompt, (prompt) => {
+  if (prompt && props.open)
+    loadPromptData()
+})
+
 // ---------- opening ----------
 
 function openingDraft(): HookDraft {
-  if (props.mode === 'edit' && props.hook) {
-    const hook = props.hook
-    // Phase 12 (C40 compile fix): prompt hooks (ADR-057) open with an empty command until W12.12 adds the Prompt type.
-    return { event: hook.event, matcher: hook.matcher ?? '', command: hook.type === 'command' ? hook.command : '', timeout: hook.timeout, enabled: hook.enabled }
-  }
+  if (props.mode === 'edit' && props.hook)
+    return draftFromPersonal(props.hook)
   return props.draft ? { ...props.draft } : { ...EMPTY_DRAFT }
 }
 
@@ -174,13 +339,17 @@ watch(() => props.open, (open) => {
   if (!open)
     return
   initial.value = openingDraft()
+  projectTarget.value = props.mode === 'project' && props.target ? { ...props.target } : null
   form.reset(valuesOf(initial.value))
   submitError.value = null
   serverMatcher.value = null
+  stale.value = false
   discardOpen.value = false
   saving.value = false
   if (!plugins.toolsLoaded)
     plugins.fetchTools().catch(() => {})
+  if (isPrompt.value)
+    loadPromptData()
 }, { immediate: true })
 
 function focusField(id: string): void {
@@ -189,7 +358,10 @@ function focusField(id: string): void {
 
 function onOpenAutoFocus(event: Event): void {
   event.preventDefault()
-  focusField(props.mode === 'edit' || props.mode === 'project' ? ids.command : ids.event)
+  if (props.mode === 'edit' || props.mode === 'project')
+    focusField(isPrompt.value ? ids.prompt : ids.command)
+  else
+    focusField(ids.event)
 }
 
 // ---------- closing ----------
@@ -218,14 +390,15 @@ function discard(): void {
 
 // ---------- saving ----------
 
-/** The matcher to save: tool events send theirs (null for every tool); other events keep only an unchanged one. */
-function matcherOf(current: FormValues): string | null {
-  if (HOOK_EVENT_INFO[current.event].toolMatcher)
-    return current.matcher.trim() || null
-  return current.event === initial.value.event ? initial.value.matcher.trim() || null : null
+/** The matcher to save: tool and agent events send theirs ('' = every target); other events keep only an unchanged one. */
+function matcherOf(current: FormValues): string {
+  const subject = HOOK_EVENT_INFO[current.event].matcher
+  if (subject === 'tool' || subject === 'agent')
+    return current.matcher.trim()
+  return current.event === initial.value.event ? initial.value.matcher.trim() : ''
 }
 
-function bodyOf(current: FormValues): Extract<HookCreate, { command: string }> & { matcher: string | null, timeout: number | null, enabled: boolean } {
+function draftOf(current: FormValues): HookDraft {
   const timeout = parseHookTimeout(current.timeout)
   return {
     event: current.event,
@@ -233,23 +406,15 @@ function bodyOf(current: FormValues): Extract<HookCreate, { command: string }> &
     command: current.command.trim(),
     timeout: 'value' in timeout ? timeout.value : null,
     enabled: current.enabled,
+    type: current.type,
+    prompt: current.prompt,
+    model: current.model,
+    continueOnBlock: current.continueOnBlock,
+    args: parseHookArgs(current.args),
+    async: current.async,
+    if: current.if,
+    statusMessage: current.statusMessage,
   }
-}
-
-/** The changed fields of an edit. */
-function patchOf(hook: PersonalHook, body: ReturnType<typeof bodyOf>): HookUpdate {
-  const patch: HookUpdate = {}
-  if (body.event !== hook.event)
-    patch.event = body.event
-  if (body.matcher !== (hook.matcher?.trim() || null))
-    patch.matcher = body.matcher
-  if (body.command !== (hook.type === 'command' ? hook.command : ''))
-    patch.command = body.command
-  if (body.timeout !== hook.timeout)
-    patch.timeout = body.timeout
-  if (body.enabled !== hook.enabled)
-    patch.enabled = body.enabled
-  return patch
 }
 
 function submit(): void {
@@ -264,13 +429,17 @@ function onKeydown(event: KeyboardEvent): void {
 }
 
 function firstInvalidField(): string | null {
-  if (errors.value.matcher)
-    return ids.matcher
-  if (errors.value.command)
-    return ids.command
-  if (errors.value.timeout)
-    return ids.timeout
-  return null
+  const order: [Field, string][] = [
+    ['event', ids.event],
+    ['matcher', ids.matcher],
+    ['command', ids.command],
+    ['args', ids.args],
+    ['prompt', ids.prompt],
+    ['if', ids.if],
+    ['statusMessage', ids.statusMessage],
+    ['timeout', ids.timeout],
+  ]
+  return order.find(([field]) => errors.value[field])?.[1] ?? null
 }
 
 /** The message of a 400 on `matcher`, else null. */
@@ -284,7 +453,83 @@ function matcherIssue(error: ReturnType<typeof toHarnessError>): string | null {
   return issue ? HOOK_COPY.matcherInvalid! : null
 }
 
-async function save(): Promise<void> {
+/** The first error diagnostic of a refused settings file (400 with `details.diagnostics`), else the message. */
+function projectErrorMessage(error: ReturnType<typeof toHarnessError>): string {
+  const diagnostics = (error.details as { diagnostics?: unknown } | undefined)?.diagnostics
+  if (Array.isArray(diagnostics)) {
+    const first = diagnostics.find(item => (item as { level?: unknown })?.level === 'error') as { message?: unknown } | undefined
+    if (typeof first?.message === 'string' && first.message.trim() !== '')
+      return first.message
+  }
+  return error.message
+}
+
+function isStale(error: ReturnType<typeof toHarnessError>): boolean {
+  return error.code === 'conflict' && (error.details as { reason?: unknown } | undefined)?.reason === 'stale'
+}
+
+function showStale(): void {
+  stale.value = true
+  void nextTick(() => document.getElementById(ids.stale)?.focus())
+}
+
+/** The listing refetched meanwhile shows another handler at the target than the one the editor opened. */
+function listingChanged(target: ProjectHookTarget): boolean {
+  if (target.groupIndex === null || target.handlerIndex === null)
+    return false
+  const list = hooks.list(target.projectId)
+  if (!list)
+    return false
+  const entry = projectEntryAt(list.items, target)
+  return entry === null || !sameHandler(draftFromHook(entry), initial.value)
+}
+
+function closeSaved(current: FormValues, draft: HookDraft): void {
+  form.reset({ ...current })
+  initial.value = { ...draft, matcher: current.matcher }
+  emit('update:open', false)
+}
+
+async function saveProject(target: ProjectHookTarget, current: FormValues, draft: HookDraft, overwrite: boolean): Promise<void> {
+  if (!overwrite && listingChanged(target)) {
+    showStale()
+    return
+  }
+  const result = await hooks.saveProjectHook(target.projectId, target, draft)
+  const pending = result.trust.pending
+  const message = projectSavedText(target.path, pending)
+  if (pending > 0) {
+    const projectId = target.projectId
+    toast.success(message, { action: { label: 'Review', onClick: () => openReview(projectId) } })
+  }
+  else {
+    toast.success(message)
+  }
+  closeSaved(current, draft)
+}
+
+async function savePersonal(current: FormValues, draft: HookDraft): Promise<void> {
+  let saved: PersonalHook
+  if (props.mode === 'edit' && props.hook) {
+    const hook = props.hook
+    const patch = hookPatch(hook, draft)
+    if (Object.keys(patch).length === 0) {
+      initial.value = openingDraft()
+      emit('update:open', false)
+      return
+    }
+    saved = await freshAuth.run(() => hooks.update(hook.id, patch), { required: !isHookTurnOff(patch) })
+  }
+  else {
+    const body = hookCreateBody(draft)
+    saved = await freshAuth.run(() => hooks.create(body), { required: true })
+  }
+  toast.success(HOOK_COPY.saved!)
+  closeSaved(current, draft)
+  emit('saved', saved)
+}
+
+async function save(options: { overwrite?: boolean } = {}): Promise<void> {
   if (saving.value)
     return
   if (invalid.value) {
@@ -294,53 +539,33 @@ async function save(): Promise<void> {
     return
   }
   const current = values.value
-  const body = bodyOf(current)
+  const draft = draftOf(current)
+  const target = writeTarget.value
   saving.value = true
   submitError.value = null
   try {
-    if (props.mode === 'project') {
-      // Phase 12: a project's settings file; no password (saving never approves), no personal hook to emit.
-      const target = props.target
-      if (!target)
-        return
-      await hooks.saveProjectHook(target.projectId, target, { ...initial.value, event: current.event, matcher: body.matcher ?? '', command: body.command, timeout: body.timeout, enabled: current.enabled })
-      toast.success(HOOK_COPY.saved!)
-      form.reset({ ...current })
-      initial.value = { ...initial.value, event: current.event, matcher: current.matcher, command: current.command, timeout: body.timeout, enabled: current.enabled }
-      emit('update:open', false)
-      return
-    }
-    let saved: PersonalHook
-    if (props.mode === 'edit' && props.hook) {
-      const hook = props.hook
-      const patch = patchOf(hook, body)
-      if (Object.keys(patch).length === 0) {
-        initial.value = openingDraft()
-        emit('update:open', false)
-        return
-      }
-      saved = await freshAuth.run(() => hooks.update(hook.id, patch), { required: !isHookTurnOff(patch) })
+    if (target) {
+      stale.value = false
+      await saveProject(target, current, draft, options.overwrite === true)
     }
     else {
-      saved = await freshAuth.run(() => hooks.create(body), { required: true })
+      await savePersonal(current, draft)
     }
-    toast.success(HOOK_COPY.saved!)
-    form.reset({ ...current })
-    initial.value = { event: current.event, matcher: current.matcher, command: current.command, timeout: body.timeout, enabled: current.enabled }
-    emit('saved', saved)
-    emit('update:open', false)
   }
   catch (error) {
     if (isFreshAuthCancelled(error))
       return
     const failure = toHarnessError(error)
     const matcher = matcherIssue(failure)
-    if (matcher) {
+    if (target && isStale(failure)) {
+      showStale()
+    }
+    else if (matcher) {
       serverMatcher.value = { value: current.matcher, message: matcher }
       focusField(ids.matcher)
     }
     else {
-      submitError.value = { code: failure.code, message: failure.message }
+      submitError.value = { code: failure.code, message: target ? projectErrorMessage(failure) : failure.message }
     }
   }
   finally {
@@ -348,9 +573,86 @@ async function save(): Promise<void> {
   }
 }
 
+// ---------- a changed settings file ----------
+
+/** Turns the target into a new handler (the one it pointed at is gone). */
+function detachTarget(): void {
+  const target = projectTarget.value
+  if (target)
+    projectTarget.value = { ...target, groupIndex: null, handlerIndex: null }
+}
+
+/** Load from disk: the listing's handler at the target replaces the edits (gone: "This hook no longer exists."). */
+async function reload(): Promise<void> {
+  const target = writeTarget.value
+  if (!target || saving.value)
+    return
+  saving.value = true
+  try {
+    await hooks.fetch(target.projectId).catch(() => {})
+  }
+  finally {
+    saving.value = false
+  }
+  stale.value = false
+  if (target.groupIndex === null)
+    return
+  const entry = projectEntryAt(hooks.list(target.projectId)?.items ?? [], target)
+  if (!entry) {
+    detachTarget()
+    submitError.value = { code: 'not_found', message: HOOK_COPY.noLongerExists! }
+    return
+  }
+  initial.value = draftFromHook(entry)
+  form.reset(valuesOf(initial.value))
+  submitError.value = null
+}
+
+/** Overwrite: the listing is refetched (so the store's check sees the file as it is now) and the edits are saved again. */
+async function overwrite(): Promise<void> {
+  const target = writeTarget.value
+  if (!target || saving.value)
+    return
+  saving.value = true
+  try {
+    await hooks.fetch(target.projectId).catch(() => {})
+  }
+  finally {
+    saving.value = false
+  }
+  if (target.groupIndex !== null && !projectEntryAt(hooks.list(target.projectId)?.items ?? [], target))
+    detachTarget()
+  stale.value = false
+  await save({ overwrite: true })
+}
+
+function openReview(projectId: string): void {
+  reviewProjectId.value = projectId
+  reviewOpen.value = true
+}
+
+function onReviewOpenChange(value: boolean): void {
+  reviewOpen.value = value
+  if (!value && reviewProjectId.value)
+    hooks.fetch(reviewProjectId.value).catch(() => {})
+}
+
+// ---------- field changes ----------
+
 function onEvent(value: AcceptableValue, handleChange: (value: HookEvent) => void): void {
   if (typeof value === 'string' && (HOOK_EVENTS as readonly string[]).includes(value))
     handleChange(value as HookEvent)
+}
+
+function onType(value: AcceptableValue, handleChange: (value: HookType) => void): void {
+  // A single ToggleGroup emits an empty value when the active item is clicked again: keep the type.
+  if (value === 'command' || value === 'prompt')
+    handleChange(value)
+}
+
+function onWhere(value: AcceptableValue, handleChange: (value: string) => void): void {
+  if (value === PERSONAL || (typeof value === 'string' && (PROJECT_HOOK_FILES as readonly string[]).includes(value)))
+    handleChange(value)
 }
 </script>
 
@@ -367,8 +669,11 @@ function onEvent(value: AcceptableValue, handleChange: (value: HookEvent) => voi
         <SheetTitle class="truncate">
           {{ title }}
         </SheetTitle>
+        <p v-if="writeTarget" data-field="hook-path" class="font-mono text-xs break-all text-muted-foreground">
+          {{ writeTarget.path }}
+        </p>
         <SheetDescription class="sr-only">
-          {{ HOOK_COPY.warning }}
+          {{ isPrompt ? HOOK_COPY.promptWarning : HOOK_COPY.warning }}
         </SheetDescription>
       </SheetHeader>
 
@@ -379,12 +684,91 @@ function onEvent(value: AcceptableValue, handleChange: (value: HookEvent) => voi
         @keydown="onKeydown"
       >
         <div class="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto overscroll-contain p-4">
+          <Alert
+            v-if="stale && writeTarget"
+            :id="ids.stale"
+            role="alert"
+            tabindex="-1"
+            data-field="hook-stale"
+            class="border-warning/40 bg-warning/5 outline-none dark:bg-warning/10 *:[svg]:text-warning"
+          >
+            <TriangleAlertIcon aria-hidden="true" />
+            <AlertTitle>{{ staleFileText(writeTarget.path) }}</AlertTitle>
+            <AlertDescription class="flex flex-wrap gap-2 pt-1">
+              <Button type="button" size="sm" variant="outline" data-action="reload" :disabled="saving" class="pointer-coarse:h-10" @click="reload">
+                {{ HOOK_COPY.reload }}
+              </Button>
+              <Button type="button" size="sm" variant="outline" data-action="overwrite" :disabled="saving" class="pointer-coarse:h-10" @click="overwrite">
+                {{ HOOK_COPY.overwrite }}
+              </Button>
+            </AlertDescription>
+          </Alert>
+
           <Alert :data-testid="testIds.hookWarning" class="border-warning/40 bg-warning/5 dark:bg-warning/10 *:[svg]:text-warning">
             <TriangleAlertIcon aria-hidden="true" />
             <AlertDescription class="text-foreground">
-              {{ HOOK_COPY.warning }}
+              {{ isPrompt ? HOOK_COPY.promptWarning : HOOK_COPY.warning }}
             </AlertDescription>
           </Alert>
+
+          <form.Field v-if="whereOffered" name="where">
+            <template #default="{ field, state }">
+              <div class="grid gap-2">
+                <Label :for="ids.where">{{ HOOK_COPY.where }}</Label>
+                <Select :model-value="state.value" @update:model-value="value => onWhere(value, field.handleChange)">
+                  <SelectTrigger
+                    :id="ids.where"
+                    data-field="hook-where"
+                    :data-value="state.value"
+                    class="w-full sm:w-80 pointer-coarse:h-10"
+                  >
+                    <span :class="state.value === 'personal' ? undefined : 'font-mono text-[13px]'">{{ state.value === 'personal' ? HOOK_COPY.personal : state.value }}</span>
+                  </SelectTrigger>
+                  <SelectContent position="popper" align="start" class="w-(--reka-select-trigger-width) min-w-64">
+                    <SelectItem value="personal" data-value="personal" class="pointer-coarse:min-h-10">
+                      {{ HOOK_COPY.personal }}
+                    </SelectItem>
+                    <SelectItem
+                      v-for="path in PROJECT_HOOK_FILES"
+                      :key="path"
+                      :value="path"
+                      :data-value="path"
+                      class="font-mono text-[13px] pointer-coarse:min-h-10"
+                    >
+                      {{ path }}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </template>
+          </form.Field>
+
+          <form.Field name="type">
+            <template #default="{ field, state }">
+              <div class="grid gap-2">
+                <Label :id="ids.type">Type</Label>
+                <ToggleGroup
+                  type="single"
+                  variant="outline"
+                  :model-value="state.value"
+                  :aria-labelledby="ids.type"
+                  :data-testid="testIds.hookType"
+                  :data-value="state.value"
+                  class="w-fit"
+                  @update:model-value="value => onType(value, field.handleChange)"
+                >
+                  <ToggleGroupItem value="command" data-value="command" class="gap-1.5 px-3 pointer-coarse:h-10">
+                    <SquareTerminalIcon aria-hidden="true" />
+                    {{ HOOK_COPY.typeCommand }}
+                  </ToggleGroupItem>
+                  <ToggleGroupItem value="prompt" data-value="prompt" class="gap-1.5 px-3 pointer-coarse:h-10">
+                    <MessageSquareTextIcon aria-hidden="true" />
+                    {{ HOOK_COPY.typePrompt }}
+                  </ToggleGroupItem>
+                </ToggleGroup>
+              </div>
+            </template>
+          </form.Field>
 
           <form.Field name="event">
             <template #default="{ field, state }">
@@ -396,6 +780,7 @@ function onEvent(value: AcceptableValue, handleChange: (value: HookEvent) => voi
                     :data-testid="testIds.hookEvent"
                     :data-value="state.value"
                     :aria-describedby="ids.eventHelp"
+                    :aria-invalid="shownError('event') ? true : undefined"
                     class="w-full sm:w-64 pointer-coarse:h-10"
                   >
                     <span>{{ HOOK_EVENT_INFO[state.value].label }}</span>
@@ -418,22 +803,25 @@ function onEvent(value: AcceptableValue, handleChange: (value: HookEvent) => voi
                 <p :id="ids.eventHelp" class="text-xs text-muted-foreground">
                   {{ HOOK_EVENT_INFO[state.value].description }}
                 </p>
+                <p v-if="shownError('event')" data-field="hook-event-error" class="text-xs text-destructive">
+                  {{ shownError('event') }}
+                </p>
               </div>
             </template>
           </form.Field>
 
-          <form.Field v-if="toolEvent" name="matcher">
+          <form.Field v-if="toolEvent || agentEvent" name="matcher">
             <template #default="{ field, state }">
               <div class="grid gap-2">
-                <Label :for="ids.matcher">Tools</Label>
+                <Label :for="ids.matcher">{{ toolEvent ? 'Tools' : HOOK_COPY.agentMatcher }}</Label>
                 <Input
                   :id="ids.matcher"
                   :model-value="state.value"
                   :data-testid="testIds.hookMatcher"
                   :aria-invalid="shownError('matcher', state.meta) ? true : undefined"
-                  :aria-describedby="`${ids.matcherHelp} ${ids.matcherPreview}`"
+                  :aria-describedby="toolEvent ? `${ids.matcherHelp} ${ids.matcherPreview}` : ids.matcherHelp"
                   :maxlength="HOOK_LIMITS.matcherMaxChars + 8"
-                  placeholder="Bash|Edit"
+                  :placeholder="toolEvent ? 'Bash|Edit' : 'explore|general'"
                   autocomplete="off"
                   autocapitalize="off"
                   spellcheck="false"
@@ -442,9 +830,10 @@ function onEvent(value: AcceptableValue, handleChange: (value: HookEvent) => voi
                   @blur="field.handleBlur"
                 />
                 <p :id="ids.matcherHelp" class="text-xs text-muted-foreground">
-                  {{ HOOK_COPY.matcherHelp }}
+                  {{ toolEvent ? HOOK_COPY.matcherHelp : HOOK_COPY.agentMatcherHelp }}
                 </p>
                 <p
+                  v-if="toolEvent"
                   :id="ids.matcherPreview"
                   :data-testid="testIds.hookMatcherPreview"
                   :data-count="preview.matches.length"
@@ -454,31 +843,201 @@ function onEvent(value: AcceptableValue, handleChange: (value: HookEvent) => voi
                 >
                   {{ shownError('matcher', state.meta) ?? preview.text }}
                 </p>
+                <p v-else-if="shownError('matcher', state.meta)" class="text-xs text-destructive">
+                  {{ shownError('matcher', state.meta) }}
+                </p>
               </div>
             </template>
           </form.Field>
 
-          <form.Field name="command">
+          <template v-if="isPrompt">
+            <form.Field name="prompt">
+              <template #default="{ field, state }">
+                <div class="grid gap-2">
+                  <Label :for="ids.prompt">{{ HOOK_COPY.typePrompt }}</Label>
+                  <Textarea
+                    :id="ids.prompt"
+                    :model-value="state.value"
+                    :data-testid="testIds.hookPrompt"
+                    :aria-invalid="shownError('prompt', state.meta) ? true : undefined"
+                    :aria-describedby="`${ids.promptHelp} ${ids.modelLine}`"
+                    :maxlength="HOOK_LIMITS.promptMaxChars"
+                    rows="2"
+                    autocomplete="off"
+                    spellcheck="false"
+                    class="field-sizing-content max-h-[12.5rem] min-h-14 resize-none font-mono text-[13px]"
+                    @update:model-value="value => field.handleChange(String(value))"
+                    @blur="field.handleBlur"
+                  />
+                  <p :id="ids.promptHelp" class="text-xs" :class="shownError('prompt', state.meta) ? 'text-destructive' : 'text-muted-foreground'">
+                    {{ shownError('prompt', state.meta) ?? HOOK_COPY.promptHelp }}
+                  </p>
+                </div>
+              </template>
+            </form.Field>
+
+            <form.Field name="model">
+              <template #default="{ field, state }">
+                <div class="grid gap-2">
+                  <Label :for="ids.model">Model</Label>
+                  <SettingsModelSelect
+                    :id="ids.model"
+                    :model-value="state.value"
+                    kind="chat"
+                    allow-none
+                    :none-label="HOOK_COPY.hookModel"
+                    label="Model"
+                    data-field="hook-model"
+                    class="sm:w-96"
+                    @update:model-value="value => field.handleChange(value)"
+                  />
+                  <p :id="ids.modelLine" data-field="hook-model-line" class="text-xs text-muted-foreground">
+                    {{ modelLine }}
+                  </p>
+                </div>
+              </template>
+            </form.Field>
+
+            <form.Field v-if="continueShown" name="continueOnBlock">
+              <template #default="{ field, state }">
+                <div class="flex items-start justify-between gap-3">
+                  <div class="grid gap-1">
+                    <Label :for="ids.continueOnBlock">{{ HOOK_COPY.continueOnBlock }}</Label>
+                    <p :id="ids.continueOnBlockHelp" class="text-xs text-muted-foreground">
+                      {{ HOOK_COPY.continueOnBlockHelp }}
+                    </p>
+                  </div>
+                  <Switch
+                    :id="ids.continueOnBlock"
+                    :model-value="state.value"
+                    :aria-describedby="ids.continueOnBlockHelp"
+                    data-field="hook-continue-on-block"
+                    class="mt-0.5 pointer-coarse:after:-inset-y-[11px]"
+                    @update:model-value="value => field.handleChange(value === true)"
+                  />
+                </div>
+              </template>
+            </form.Field>
+          </template>
+
+          <template v-else>
+            <form.Field name="command">
+              <template #default="{ field, state }">
+                <div class="grid gap-2">
+                  <Label :for="ids.command">Command</Label>
+                  <Textarea
+                    :id="ids.command"
+                    :model-value="state.value"
+                    :data-testid="testIds.hookCommand"
+                    :aria-invalid="shownError('command', state.meta) ? true : undefined"
+                    :aria-describedby="ids.commandHelp"
+                    :maxlength="HOOK_LIMITS.commandMaxChars"
+                    rows="1"
+                    autocomplete="off"
+                    autocapitalize="off"
+                    spellcheck="false"
+                    class="field-sizing-content max-h-[9.5rem] min-h-9 resize-none font-mono text-[13px]"
+                    @update:model-value="value => field.handleChange(String(value))"
+                    @blur="field.handleBlur"
+                  />
+                  <p :id="ids.commandHelp" class="text-xs" :class="shownError('command', state.meta) ? 'text-destructive' : 'text-muted-foreground'">
+                    {{ shownError('command', state.meta) ?? HOOK_COPY.commandHelp }}
+                  </p>
+                </div>
+              </template>
+            </form.Field>
+
+            <form.Field name="args">
+              <template #default="{ field, state }">
+                <div class="grid gap-2">
+                  <Label :for="ids.args">{{ HOOK_COPY.args }}</Label>
+                  <Textarea
+                    :id="ids.args"
+                    :model-value="state.value"
+                    data-field="hook-args"
+                    :aria-invalid="shownError('args', state.meta) ? true : undefined"
+                    :aria-describedby="ids.argsHelp"
+                    rows="1"
+                    autocomplete="off"
+                    autocapitalize="off"
+                    spellcheck="false"
+                    class="field-sizing-content max-h-[9.5rem] min-h-9 resize-none font-mono text-[13px]"
+                    @update:model-value="value => field.handleChange(String(value))"
+                    @blur="field.handleBlur"
+                  />
+                  <p :id="ids.argsHelp" class="text-xs" :class="shownError('args', state.meta) ? 'text-destructive' : 'text-muted-foreground'">
+                    {{ shownError('args', state.meta) ?? HOOK_COPY.argsHelp }}
+                  </p>
+                </div>
+              </template>
+            </form.Field>
+
+            <form.Field name="async">
+              <template #default="{ field, state }">
+                <div class="flex items-start justify-between gap-3">
+                  <div class="grid gap-1">
+                    <Label :for="ids.async">{{ HOOK_COPY.async }}</Label>
+                    <p :id="ids.asyncHelp" class="text-xs text-muted-foreground">
+                      {{ HOOK_COPY.asyncHelp }}
+                    </p>
+                  </div>
+                  <Switch
+                    :id="ids.async"
+                    :model-value="state.value"
+                    :aria-describedby="ids.asyncHelp"
+                    data-field="hook-async"
+                    class="mt-0.5 pointer-coarse:after:-inset-y-[11px]"
+                    @update:model-value="value => field.handleChange(value === true)"
+                  />
+                </div>
+              </template>
+            </form.Field>
+          </template>
+
+          <form.Field v-if="toolEvent" name="if">
             <template #default="{ field, state }">
               <div class="grid gap-2">
-                <Label :for="ids.command">Command</Label>
-                <Textarea
-                  :id="ids.command"
+                <Label :for="ids.if">{{ HOOK_COPY.ifLabel }}</Label>
+                <Input
+                  :id="ids.if"
                   :model-value="state.value"
-                  :data-testid="testIds.hookCommand"
-                  :aria-invalid="shownError('command', state.meta) ? true : undefined"
-                  :aria-describedby="ids.commandHelp"
-                  :maxlength="HOOK_LIMITS.commandMaxChars"
-                  rows="1"
+                  data-field="hook-if"
+                  :aria-invalid="shownError('if', state.meta) ? true : undefined"
+                  :aria-describedby="ids.ifHelp"
+                  :maxlength="HOOK_LIMITS.ifMaxChars + 8"
+                  placeholder="Bash(npm run *)"
                   autocomplete="off"
                   autocapitalize="off"
                   spellcheck="false"
-                  class="field-sizing-content max-h-[9.5rem] min-h-9 resize-none font-mono text-[13px]"
+                  class="font-mono text-[13px] placeholder:font-mono pointer-coarse:h-10"
                   @update:model-value="value => field.handleChange(String(value))"
                   @blur="field.handleBlur"
                 />
-                <p :id="ids.commandHelp" class="text-xs" :class="shownError('command', state.meta) ? 'text-destructive' : 'text-muted-foreground'">
-                  {{ shownError('command', state.meta) ?? HOOK_COPY.commandHelp }}
+                <p :id="ids.ifHelp" class="text-xs" :class="shownError('if', state.meta) ? 'text-destructive' : 'text-muted-foreground'">
+                  {{ shownError('if', state.meta) ?? HOOK_COPY.ifHelp }}
+                </p>
+              </div>
+            </template>
+          </form.Field>
+
+          <form.Field name="statusMessage">
+            <template #default="{ field, state }">
+              <div class="grid gap-2">
+                <Label :for="ids.statusMessage">{{ HOOK_COPY.statusMessage }}</Label>
+                <Input
+                  :id="ids.statusMessage"
+                  :model-value="state.value"
+                  data-field="hook-status-message"
+                  :aria-invalid="shownError('statusMessage', state.meta) ? true : undefined"
+                  :aria-describedby="ids.statusMessageHelp"
+                  :maxlength="HOOK_LIMITS.statusMessageMaxChars + 8"
+                  autocomplete="off"
+                  class="pointer-coarse:h-10"
+                  @update:model-value="value => field.handleChange(String(value))"
+                  @blur="field.handleBlur"
+                />
+                <p :id="ids.statusMessageHelp" class="text-xs" :class="shownError('statusMessage', state.meta) ? 'text-destructive' : 'text-muted-foreground'">
+                  {{ shownError('statusMessage', state.meta) ?? HOOK_COPY.statusMessageHelp }}
                 </p>
               </div>
             </template>
@@ -497,7 +1056,7 @@ function onEvent(value: AcceptableValue, handleChange: (value: HookEvent) => voi
                     :aria-describedby="ids.timeoutHelp"
                     inputmode="numeric"
                     maxlength="3"
-                    placeholder="60"
+                    :placeholder="isPrompt ? String(HOOK_LIMITS.promptTimeoutDefaultSec) : String(HOOK_LIMITS.timeoutDefaultSec)"
                     autocomplete="off"
                     class="w-20 tabular-nums pointer-coarse:h-10"
                     @update:model-value="value => field.handleChange(String(value))"
@@ -512,7 +1071,7 @@ function onEvent(value: AcceptableValue, handleChange: (value: HookEvent) => voi
             </template>
           </form.Field>
 
-          <form.Field name="enabled">
+          <form.Field v-if="!isProject" name="enabled">
             <template #default="{ field, state }">
               <div class="flex items-center justify-between gap-3">
                 <Label :for="ids.enabled">On</Label>
@@ -576,5 +1135,12 @@ function onEvent(value: AcceptableValue, handleChange: (value: HookEvent) => voi
     :error="freshAuth.error.value"
     @update:open="freshAuth.setOpen"
     @submit="freshAuth.submit"
+  />
+  <ProjectTrustDialog
+    v-if="reviewProjectId"
+    :open="reviewOpen"
+    :project-id="reviewProjectId"
+    :focus-key="null"
+    @update:open="onReviewOpenChange"
   />
 </template>

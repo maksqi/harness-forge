@@ -1,14 +1,17 @@
-// Hooks store (docs/UI.md 9.13, 11.8; W11.8-T1): per-scope caches with single flight and `maxAgeMs`, an answer that an
-// event or a mutation overtook is never cached, events mark the affected scopes stale and refetch the recent ones,
-// `{ enabled: false }` is optimistic with a rollback, and the fresh-auth 403 is thrown for the component.
+// Hooks store (docs/UI.md 9.13, 11.8, 11.9; W11.8-T1, W12.12-T5): per-scope caches with single flight and `maxAgeMs`, an
+// answer that an event or a mutation overtook is never cached, events mark the affected scopes stale and refetch the
+// recent ones, `{ enabled: false }` is optimistic with a rollback, and the fresh-auth 403 is thrown for the component.
+// Phase 12: `saveProjectHook` reads a settings file, splices the handler into its `hooks` key and writes it with the
+// sha256 it read (a changed file is a 409 `stale`, before or by the server); `workspace.changed` for a settings file marks
+// the project stale.
 import type { HookList } from '@harness-forge/shared'
 import type { MockApi } from '~/utils/testing/mock-api'
-import { createServerEvent, HarnessError } from '@harness-forge/shared'
+import { createServerEvent, HarnessError, LIMITS } from '@harness-forge/shared'
 import { createPinia, disposePinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { codeHookEntry, hookEntry, hookId, hookList, personalHook, projectId, projectSummary } from '~/utils/testing/fixtures'
+import { codeHookEntry, hookEntry, hookId, hookList, personalHook, projectDefinitionFile, projectDefinitionWriteResult, projectId, projectSummary, trustSha } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
-import { HOOKS_RECENT_MS, hookScopeKey, useHooksStore } from './hooks'
+import { HOOKS_RECENT_MS, hookScopeKey, PROJECT_HOOK_STALE_MESSAGE, useHooksStore } from './hooks'
 
 const mock = vi.hoisted(() => ({ api: null as unknown }))
 vi.mock('~/composables/useApi', () => ({ useApi: () => mock.api }))
@@ -208,11 +211,113 @@ describe('hooks store', () => {
   })
 })
 
-describe('hooks store: project hooks (Phase 12, C46)', () => {
-  it('declares saveProjectHook (W12.12 implements it; P12-0b answers not_implemented)', async () => {
+describe('hooks store: project hooks (Phase 12, W12.12-T5)', () => {
+  const settingsPath = '.claude/settings.json'
+  const fileText = (hooks: unknown, extra: Record<string, unknown> = { permissions: { allow: ['Bash(ls:*)'] } }) => JSON.stringify({ ...extra, hooks }, null, 2)
+  const FILE_HOOKS = { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'sh .claude/hooks/guard.sh' }] }] }
+  const target = (overrides: Partial<{ groupIndex: number | null, handlerIndex: number | null, event: 'PreToolUse' | 'Stop' }> = {}) => ({
+    projectId: projectId(1),
+    path: settingsPath,
+    event: 'PreToolUse' as const,
+    groupIndex: null,
+    handlerIndex: null,
+    ...overrides,
+  })
+  /** The listing of project 1 with the guard hook at [0, 0] of `.claude/settings.json`. */
+  const listed = hookList({ items: [hookEntry({ key: `project:${trustSha(1)}`, source: 'project', id: undefined, event: 'PreToolUse', matcher: 'Bash', command: 'sh .claude/hooks/guard.sh', state: 'pending', path: settingsPath, sha256: trustSha(1), position: [0, 0] })] })
+
+  it('adds a new handler to the file\'s hooks key with the sha256 it read, and never asks for a password', async () => {
     const store = useHooksStore()
-    const target = { projectId: projectId(1), path: '.claude/settings.json', event: 'PreToolUse' as const, groupIndex: null, handlerIndex: null }
-    await expect(store.saveProjectHook(projectId(1), target, null)).rejects.toMatchObject({ code: 'not_implemented' })
+    api.hooks.list.mockResolvedValue(listed)
+    await store.fetch(projectId(1))
+    api.projectDefinitions.read.mockResolvedValueOnce(projectDefinitionFile({ path: settingsPath, kind: 'settings', content: fileText(FILE_HOOKS), sha256: trustSha(4) }))
+    api.projectDefinitions.write.mockResolvedValueOnce(projectDefinitionWriteResult({ trust: { pending: 2 } }))
+    const result = await store.saveProjectHook(projectId(1), target(), { event: 'Stop', matcher: '', command: '', timeout: null, enabled: true, type: 'prompt', prompt: 'Did the tests pass?' })
+    expect(result.trust.pending).toBe(2)
+    expect(api.projectDefinitions.read).toHaveBeenCalledWith({ params: { id: projectId(1) }, query: { path: settingsPath } })
+    expect(api.projectDefinitions.write).toHaveBeenCalledWith({
+      params: { id: projectId(1) },
+      body: { path: settingsPath, expectedSha256: trustSha(4), hooks: { ...FILE_HOOKS, Stop: [{ hooks: [{ type: 'prompt', prompt: 'Did the tests pass?' }] }] } },
+    })
+    expect(store.stale[projectId(1)]).toBe(true)
+    expect(api.auth.login).not.toHaveBeenCalled()
+  })
+
+  it('creates the key of a missing file (expectedSha256 null)', async () => {
+    const store = useHooksStore()
+    api.projectDefinitions.read.mockResolvedValueOnce(projectDefinitionFile({ path: '.harness/settings.local.json', kind: 'settings', exists: false, content: null, sha256: null }))
+    api.projectDefinitions.write.mockResolvedValueOnce(projectDefinitionWriteResult({ path: '.harness/settings.local.json', created: true }))
+    await store.saveProjectHook(projectId(1), { ...target(), path: '.harness/settings.local.json' }, { event: 'PreToolUse', matcher: 'Write', command: 'sh fmt.sh', timeout: 10, enabled: true })
+    expect(api.projectDefinitions.write).toHaveBeenCalledWith({
+      params: { id: projectId(1) },
+      body: { path: '.harness/settings.local.json', expectedSha256: null, hooks: { PreToolUse: [{ matcher: 'Write', hooks: [{ type: 'command', command: 'sh fmt.sh', timeout: 10 }] }] } },
+    })
+  })
+
+  it('replaces the listed handler in place and removes it with a null draft', async () => {
+    const store = useHooksStore()
+    api.hooks.list.mockResolvedValue(listed)
+    await store.fetch(projectId(1))
+    api.projectDefinitions.read.mockResolvedValue(projectDefinitionFile({ path: settingsPath, kind: 'settings', content: fileText(FILE_HOOKS), sha256: trustSha(4) }))
+    api.projectDefinitions.write.mockResolvedValue(projectDefinitionWriteResult())
+    await store.saveProjectHook(projectId(1), target({ groupIndex: 0, handlerIndex: 0 }), { event: 'PreToolUse', matcher: 'Bash', command: 'sh .claude/hooks/guard.sh --strict', timeout: null, enabled: true, if: 'Bash(git *)' })
+    expect(api.projectDefinitions.write).toHaveBeenLastCalledWith({
+      params: { id: projectId(1) },
+      body: { path: settingsPath, expectedSha256: trustSha(4), hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'sh .claude/hooks/guard.sh --strict', if: 'Bash(git *)' }] }] } },
+    })
+    await store.fetch(projectId(1))
+    await store.saveProjectHook(projectId(1), target({ groupIndex: 0, handlerIndex: 0 }), null)
+    expect(api.projectDefinitions.write).toHaveBeenLastCalledWith({ params: { id: projectId(1) }, body: { path: settingsPath, expectedSha256: trustSha(4), hooks: null } })
+  })
+
+  it('refuses with 409 stale when the file no longer holds the listed handler, before writing', async () => {
+    const store = useHooksStore()
+    api.hooks.list.mockResolvedValue(listed)
+    await store.fetch(projectId(1))
+    api.projectDefinitions.read.mockResolvedValueOnce(projectDefinitionFile({ path: settingsPath, kind: 'settings', content: fileText({ PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'sh other.sh' }] }] }), sha256: trustSha(5) }))
+    await expect(store.saveProjectHook(projectId(1), target({ groupIndex: 0, handlerIndex: 0 }), null))
+      .rejects
+      .toMatchObject({ code: 'conflict', message: PROJECT_HOOK_STALE_MESSAGE, details: { reason: 'stale' } })
+    // A handler that is gone (no listing to compare with) is stale too.
+    disposePinia(pinia)
+    pinia = createPinia()
+    setActivePinia(pinia)
+    const fresh = useHooksStore()
+    api.projectDefinitions.read.mockResolvedValueOnce(projectDefinitionFile({ path: settingsPath, kind: 'settings', content: fileText({}), sha256: trustSha(5) }))
+    await expect(fresh.saveProjectHook(projectId(1), target({ groupIndex: 0, handlerIndex: 0 }), null)).rejects.toMatchObject({ details: { reason: 'stale' } })
     expect(api.projectDefinitions.write).not.toHaveBeenCalled()
+  })
+
+  it('passes the server\'s stale answer through and refuses a file it can\'t read', async () => {
+    const store = useHooksStore()
+    api.projectDefinitions.read.mockResolvedValueOnce(projectDefinitionFile({ path: settingsPath, kind: 'settings', content: fileText(FILE_HOOKS), sha256: trustSha(4) }))
+    api.projectDefinitions.write.mockRejectedValueOnce(new HarnessError({ code: 'conflict', message: PROJECT_HOOK_STALE_MESSAGE, details: { reason: 'stale' } }))
+    await expect(store.saveProjectHook(projectId(1), target(), { event: 'Stop', matcher: '', command: 'pnpm lint', timeout: null, enabled: true }))
+      .rejects
+      .toMatchObject({ code: 'conflict', details: { reason: 'stale' } })
+    api.projectDefinitions.read.mockResolvedValueOnce(projectDefinitionFile({ path: settingsPath, kind: 'settings', content: '{ "hooks": ', sha256: trustSha(4) }))
+    await expect(store.saveProjectHook(projectId(1), target(), { event: 'Stop', matcher: '', command: 'pnpm lint', timeout: null, enabled: true }))
+      .rejects
+      .toMatchObject({ code: 'validation_error', message: `${settingsPath} can't be changed here: it isn't valid JSON. Fix it in the project folder.` })
+    api.projectDefinitions.read.mockResolvedValueOnce(projectDefinitionFile({ path: settingsPath, kind: 'settings', content: fileText([1]), sha256: trustSha(4) }))
+    await expect(store.saveProjectHook(projectId(1), target(), { event: 'Stop', matcher: '', command: 'pnpm lint', timeout: null, enabled: true }))
+      .rejects
+      .toMatchObject({ code: 'validation_error' })
+    expect(api.projectDefinitions.write).toHaveBeenCalledTimes(1)
+  })
+
+  it('marks a project stale on workspace.changed for its settings files only', async () => {
+    const store = useHooksStore()
+    api.hooks.list.mockResolvedValue(listed)
+    await store.fetch(projectId(1))
+    const changed = (paths: string[]) => createServerEvent('workspace.changed', { projectId: projectId(1), chatId: null, batchId: null, source: 'user', paths }, 1)
+    store.applyEvent(changed(['src/app.ts', '.claude/agents/reviewer.md']))
+    expect(store.stale).toEqual({})
+    store.applyEvent(changed(['.harness/settings.local.json']))
+    expect(store.stale).toEqual({ [projectId(1)]: true })
+    await store.fetch(projectId(1))
+    // A path list cut at the event's cap may hold a settings file.
+    store.applyEvent(changed(Array.from({ length: LIMITS.workspaceEventPathsMax }, (_, index) => `src/${index}.ts`)))
+    expect(store.stale[projectId(1)]).toBe(true)
   })
 })

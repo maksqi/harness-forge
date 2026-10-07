@@ -16,7 +16,9 @@
 // like ProjectTrustDialog. Props, emits and the root test id are frozen from Gate P11-0b (C39); W11.9.
 // Phase 12 (ADR-056; C46, W12.13 owns it in P12-A): Edit .mcp.json… (`data-action="edit-mcp-json"`, in the footer and
 // in the empty state, where it creates the file) opens the project file editor (ProjectFileEditor, mounted here) with
-// kind `mcp`; its `review` opens ProjectTrustDialog. A saved server stays pending until it is approved here.
+// kind `mcp`; its `review` opens ProjectTrustDialog. A saved server stays pending until it is approved here: after a
+// save (`saved`) the dialog refetches its rows and their trust items quietly (W12.13), so a new or changed server shows
+// "Needs approval" with Review… at once (`project-mcp.changed` / `project-trust.changed` update them too).
 import type { ProjectMcpList, ProjectMcpServer, TrustItem } from '@harness-forge/shared'
 import type { ProjectFileTarget } from '~/components/settings/customize/customize'
 import { LIMITS, PROJECT_MCP_JSON_PATH } from '@harness-forge/shared'
@@ -235,6 +237,15 @@ function editMcpJson(): void {
 
 function onFileReview(sha256?: string): void {
   review.value = { open: true, focusKey: sha256 ?? null }
+}
+
+/** + Phase 12: the saved file's servers (a new or changed one is pending until it is approved here). */
+function onFileSaved(): void {
+  const projectId = props.projectId
+  if (!projectId)
+    return
+  void mcp.fetch(projectId).catch(() => {})
+  void trust.fetch(projectId).catch(() => {})
 }
 
 async function saveVariables(): Promise<void> {
@@ -482,6 +493,7 @@ function onOpenChange(value: boolean): void {
     v-model:open="fileOpen"
     :project-id="projectId"
     :entry="fileTarget"
+    @saved="onFileSaved"
     @review="onFileReview"
   />
 

@@ -28,6 +28,10 @@
 //   body holds `` !`cmd` `` spans is restored turned off (`enabled: false`, the customization store's rule), so a
 //   backup cannot plant a shell line that runs on the next `/name`. Personal hooks, project approvals and project MCP
 //   variables are never part of a backup, and nothing here writes them; `data-hook` parts come back with their chats.
+// - Phase 12 (ADR-052 / ADR-055, W12.3-T6): `customizations.turnedOff` counts the restored commands with `!` spans that
+//   the backup had turned on and that came back turned off (`CustomizationRestoreResult.turnedOff`). Marketplaces,
+//   Claude Code plugins, hook transcripts and home-folder import plans are never part of a backup (./backup.ts), so
+//   nothing here restores them.
 import type {
   BackupCustomization,
   BackupFileEntry,
@@ -573,7 +577,8 @@ async function restoreCustomizations(deps: AppDeps, run: ImportRun, zip: OpenedZ
   }
   for (const warning of restored.warnings)
     run.warn(warning)
-  run.customizations = { imported: restored.imported, skipped: restored.skipped, failed: restored.failed + failed }
+  // Phase 12 (ADR-052 / W12.3-T6): commands with `!` spans that came back turned off although the backup had them on.
+  run.customizations = { imported: restored.imported, skipped: restored.skipped, failed: restored.failed + failed, turnedOff: restored.turnedOff }
 }
 
 async function importBackup(deps: AppDeps, upload: Blob, form: DataImportForm, limits: DataLimits): Promise<DataImportResult> {

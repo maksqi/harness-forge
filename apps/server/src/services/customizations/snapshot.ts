@@ -2,6 +2,10 @@
 // `CustomizationList` of a snapshot. Pure helpers shared by the service (C30 stub, W10.1) and the test double
 // (`testing/fake-customizations.ts`): the merge, the precedence and the states are decided before (`catalog.ts`,
 // `resolvePrecedence`); a snapshot only indexes the active entries.
+// Phase 12 (ADR-053, open point 8; W12.7): the getters `agent` / `command` / `skill` / `style(name)` accept a qualified
+// name exactly, a bare name by the alias rule of `qualified.ts` (exactly one active entry of the kind ends in `:<bare>`
+// and none has the exact name) and a harness plugin's `<pluginId>:<name>` (its bare entry); `agent` also maps the agent
+// type aliases (`general-purpose`, Claude Code's `Explore`).
 import type {
   CustomizationEntry,
   CustomizationKind,
@@ -10,7 +14,8 @@ import type {
   DefinitionDiagnostic,
 } from '@harness-forge/shared'
 import type { CustomizationCatalog } from './types.ts'
-import { AGENT_TYPE_ALIASES, CUSTOMIZATION_KINDS, resolvePrecedence } from '@harness-forge/shared'
+import { AGENT_TYPE_ALIASES, CLAUDE_AGENT_TYPE_ALIASES, CUSTOMIZATION_KINDS, resolvePrecedence } from '@harness-forge/shared'
+import { findCatalogEntry } from './qualified.ts'
 
 /** What a snapshot is built from. */
 export interface CatalogSnapshotInput {
@@ -66,10 +71,18 @@ export function applyPrecedence(candidates: readonly CustomizationEntry[]): Cust
   return sortCatalogEntries([...winners, ...losers, ...kept])
 }
 
-/** An agent type with its alias resolved (`general-purpose` → `general`); other names unchanged. */
+/** Claude Code's agent type names (`CLAUDE_AGENT_TYPE_ALIASES`), keyed lowercase (`Explore` and `explore`). */
+const CLAUDE_AGENT_TYPES: ReadonlyMap<string, string> = new Map(Object.entries(CLAUDE_AGENT_TYPE_ALIASES).map(([claude, harness]) => [claude.toLowerCase(), harness]))
+
+/**
+ * An agent type with its alias resolved (`general-purpose` → `general`; Phase 12: Claude Code's agent type names of
+ * `CLAUDE_AGENT_TYPE_ALIASES`, any case, `Explore` → `explore`); other names unchanged.
+ */
 export function resolveAgentAlias(name: string): string {
   const target = Object.hasOwn(AGENT_TYPE_ALIASES, name) ? AGENT_TYPE_ALIASES[name] : undefined
-  return target ?? name
+  if (target !== undefined)
+    return target
+  return typeof name === 'string' ? CLAUDE_AGENT_TYPES.get(name.toLowerCase()) ?? name : name
 }
 
 /** Builds an immutable snapshot; the getters index the `active` entries only (the first active entry of a name wins). */
@@ -86,6 +99,12 @@ export function createCatalogSnapshot(input: CatalogSnapshotInput): Customizatio
     skill: Object.freeze([...active.skill.values()]),
     style: Object.freeze([...active.style.values()]),
   }
+  /** The exact name, else the qualified alias of `qualified.ts` (Phase 12). */
+  const lookup = (kind: CustomizationKind, name: string): CustomizationEntry | null => {
+    if (typeof name !== 'string')
+      return null
+    return active[kind].get(name) ?? findCatalogEntry(lists[kind], name)
+  }
   return Object.freeze({
     projectId: input.projectId,
     entries,
@@ -96,10 +115,10 @@ export function createCatalogSnapshot(input: CatalogSnapshotInput): Customizatio
     commands: () => lists.command,
     skills: () => lists.skill,
     styles: () => lists.style,
-    agent: (name: string) => active.agent.get(resolveAgentAlias(name)) ?? null,
-    command: (name: string) => active.command.get(name.startsWith('/') ? name.slice(1) : name) ?? null,
-    skill: (name: string) => active.skill.get(name) ?? null,
-    style: (name: string) => active.style.get(name) ?? null,
+    agent: (name: string) => lookup('agent', resolveAgentAlias(name)),
+    command: (name: string) => lookup('command', typeof name === 'string' && name.startsWith('/') ? name.slice(1) : name),
+    skill: (name: string) => lookup('skill', name),
+    style: (name: string) => lookup('style', name),
   })
 }
 

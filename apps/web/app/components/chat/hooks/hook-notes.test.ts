@@ -1,7 +1,24 @@
 import type { HarnessUIMessage } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
 import { hookCarrier, hookData, hookPart, hookRecordId, taskResultPart, userMessage } from '~/utils/testing/fixtures'
-import { hookAnnouncement, hookDataOf, hookDetailsKind, hookOutcomeText, hookPluginId, hookSourceText, isHookCarrierMessage, toolHooksOf } from './hook-notes'
+import {
+  HOOK_STILL_ASKS_DETAIL,
+  HOOK_STILL_ASKS_TEXT,
+  hookAnnouncement,
+  hookDataOf,
+  hookDetailsKind,
+  hookErrorTexts,
+  hookOutcomeText,
+  hookPluginId,
+  hookRunLabel,
+  hookSourceLine,
+  hookSourceText,
+  hookStillAsks,
+  isHookCarrierMessage,
+  PROMPT_HOOK_UNREADABLE_TEXT,
+  toolHookDecision,
+  toolHooksOf,
+} from './hook-notes'
 
 describe('hookDataOf', () => {
   it('returns the data of a valid data-hook part', () => {
@@ -143,5 +160,74 @@ describe('note helpers', () => {
       { source: 'plugin', pluginId: 'hook-pack', label: 'y', exitCode: 0, durationMs: 1 },
       { source: 'plugin', pluginId: 'other', label: 'z', exitCode: 0, durationMs: 1 },
     ] }))).toBe('hook-pack')
+  })
+})
+
+describe('phase 12 records (W12.13-T3)', () => {
+  const promptHook = { source: 'personal' as const, label: 'Did the tests run?\nThe event: $ARGUMENTS', exitCode: null, durationMs: 800, kind: 'prompt' as const, model: 'anthropic:claude-haiku-4-5' }
+
+  it('reads an allow harness-forge did not follow as "Allowed by hook · still asks"', () => {
+    const data = hookData({ outcome: 'allowed', harnessAsked: true, reason: 'Looks safe.' })
+    expect(hookStillAsks(data)).toBe(true)
+    expect(hookOutcomeText(data)).toBe(HOOK_STILL_ASKS_TEXT)
+    expect(HOOK_STILL_ASKS_TEXT).toBe('Allowed by hook · still asks')
+    expect(HOOK_STILL_ASKS_DETAIL).toBe('harness-forge still asks for this call (plan mode, a tool that runs commands, or an Always ask policy).')
+    expect(hookStillAsks(hookData({ outcome: 'allowed' }))).toBe(false)
+    expect(hookStillAsks(hookData({ outcome: 'denied', harnessAsked: true }))).toBe(false)
+    expect(hookOutcomeText(hookData({ outcome: 'allowed', reason: undefined }))).toBe('Allowed by a PreToolUse hook')
+  })
+
+  it('words the new events with the outcome texts', () => {
+    expect(hookOutcomeText(hookData({ event: 'PostToolUseFailure', outcome: 'blocked', reason: 'Check the path first.' }))).toBe('A PostToolUseFailure hook told the agent: Check the path first.')
+    expect(hookOutcomeText(hookData({ event: 'PermissionRequest', outcome: 'allowed', reason: undefined }))).toBe('Allowed by a PermissionRequest hook')
+    expect(hookOutcomeText(hookData({ event: 'PermissionRequest', outcome: 'denied', reason: 'Not on main.' }))).toBe('Blocked by a PermissionRequest hook: Not on main.')
+    expect(hookOutcomeText(hookData({ event: 'SubagentStart', outcome: 'context', context: 'Use pnpm.' }))).toBe('Hook added context · SubagentStart')
+    expect(hookOutcomeText(hookData({ event: 'Stop', outcome: 'continued', hooks: [promptHook] }))).toBe('A Stop hook asked the agent to continue')
+  })
+
+  it('reads a context record without a context: a prompt hook\'s reason, else only system messages (PostCompact)', () => {
+    const answered = hookData({ event: 'Stop', outcome: 'context', context: undefined, reason: 'Nothing left to do.', hooks: [promptHook] })
+    expect(hookOutcomeText(answered)).toBe('A Stop hook answered: Nothing left to do.')
+    expect(hookDetailsKind(answered)).toBe('details')
+    const message = hookData({ event: 'PostCompact', outcome: 'context', toolCallId: undefined, context: '  ', reason: undefined, hooks: [{ source: 'project', label: 'sh notify.sh', exitCode: 0, durationMs: 5, systemMessage: 'Compacted.' }] })
+    expect(hookOutcomeText(message)).toBe('A PostCompact hook sent a message')
+    expect(hookDetailsKind(message)).toBe('details')
+    expect(hookDetailsKind(hookData({ outcome: 'context', context: 'More.' }))).toBe('context')
+  })
+
+  it('names prompt hooks by their source, with the model\'s name (else its id) and the prompt\'s first line', () => {
+    expect(hookSourceText(promptHook, null)).toBe('Personal prompt hook')
+    expect(hookSourceText({ ...promptHook, source: 'project' }, null)).toBe('Project prompt hook')
+    expect(hookSourceText({ ...promptHook, source: 'plugin', pluginId: 'review-kit' }, 'Review kit')).toBe('Prompt hook from Review kit')
+    expect(hookSourceText({ ...promptHook, source: 'plugin', pluginId: 'review-kit' }, null)).toBe('Prompt hook from review-kit')
+    expect(hookSourceLine(promptHook, null, 'Claude Haiku 4.5')).toBe('Personal prompt hook · Claude Haiku 4.5')
+    expect(hookSourceLine(promptHook, null)).toBe('Personal prompt hook · claude-haiku-4-5')
+    expect(hookSourceLine({ ...promptHook, model: undefined }, null, 'Ignored')).toBe('Personal prompt hook')
+    // A command hook never adds a model.
+    expect(hookSourceLine({ source: 'project', label: 'sh x.sh', exitCode: 0, durationMs: 1 }, null, 'Claude')).toBe('Project hook')
+    expect(hookRunLabel(promptHook)).toBe('Did the tests run?')
+    expect(hookRunLabel({ source: 'project', label: 'sh a.sh\nb', exitCode: 0, durationMs: 1 })).toBe('sh a.sh\nb')
+  })
+
+  it('explains an unreadable answer of a failed prompt hook', () => {
+    const failed = hookData({ event: 'PreToolUse', outcome: 'error', reason: undefined, hooks: [promptHook, { source: 'project', label: 'sh a.sh', exitCode: 1, durationMs: 3, error: 'exit 1' }] })
+    expect(hookOutcomeText(failed)).toBe('A PreToolUse hook failed: exit 1')
+    expect(hookErrorTexts(failed)).toEqual([PROMPT_HOOK_UNREADABLE_TEXT, 'exit 1'])
+    expect(PROMPT_HOOK_UNREADABLE_TEXT).toBe('The model\'s answer could not be read.')
+    expect(hookErrorTexts(hookData({ outcome: 'error', hooks: [{ ...promptHook, error: 'The hook model timed out.' }] }))).toEqual(['The hook model timed out.'])
+    // Outside an error record a prompt hook has no output.
+    expect(hookErrorTexts(hookData({ outcome: 'blocked', hooks: [promptHook] }))).toEqual([])
+  })
+
+  it('lets a PermissionRequest decision mark the tool row before the PreToolUse one', () => {
+    const pre = hookData({ id: hookRecordId(1), event: 'PreToolUse', outcome: 'allowed', harnessAsked: true })
+    const permission = hookData({ id: hookRecordId(2), event: 'PermissionRequest', outcome: 'denied' })
+    const post = hookData({ id: hookRecordId(3), event: 'PostToolUseFailure', outcome: 'blocked' })
+    expect(toolHookDecision([pre])).toEqual({ outcome: 'allowed', stillAsks: true, event: 'PreToolUse' })
+    expect(toolHookDecision([pre, permission, post])).toEqual({ outcome: 'denied', stillAsks: false, event: 'PermissionRequest' })
+    expect(toolHookDecision([pre, { ...permission, outcome: 'allowed' }])).toEqual({ outcome: 'allowed', stillAsks: false, event: 'PermissionRequest' })
+    expect(toolHookDecision([{ ...pre, outcome: 'rewritten', harnessAsked: undefined }])).toEqual({ outcome: 'rewritten', stillAsks: false, event: 'PreToolUse' })
+    expect(toolHookDecision([{ ...pre, outcome: 'asked' }, post])).toBeNull()
+    expect(toolHookDecision([])).toBeNull()
   })
 })

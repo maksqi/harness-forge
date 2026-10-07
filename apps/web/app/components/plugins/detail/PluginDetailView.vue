@@ -6,6 +6,8 @@
 // its own scroll area with a stable scrollbar gutter.
 // Phase 12 (ADR-054; C46 mounts, W12.9 owns it in P12-A): PluginUpdateBanner above the tabs while a marketplace offers
 // another version (`useMarketplacesStore().updateOf(pluginId)`); Update… opens MarketplaceInstallDialog in update mode.
+// W12.9: a plugin installed from a marketplace loads the marketplace list (at most 15 s old: the stored catalogs, no
+// network) so its banner shows even when the sidebar is closed; after the update the list is fetched again.
 import type { PluginTab } from './plugin-detail'
 import { BlocksIcon, CircleAlertIcon } from '@lucide/vue'
 import { computed, onMounted, ref, watch } from 'vue'
@@ -106,6 +108,18 @@ const update = computed(() => marketplaces.updateOf(props.pluginId))
 const updateMarketplace = computed(() => (update.value ? marketplaces.byId(update.value.marketplaceId)?.name ?? null : null))
 const updateOpen = ref(false)
 const sourceReadonly = computed(() => !detail.value?.editable)
+
+/** A marketplace plugin: the list holds its update (answered from the stored catalogs; failures stay quiet). */
+const LIST_MAX_AGE_MS = 15_000
+watch(() => detail.value?.source === 'marketplace', (fromMarketplace) => {
+  if (fromMarketplace)
+    marketplaces.fetchAll({ maxAgeMs: LIST_MAX_AGE_MS }).catch(() => {})
+}, { immediate: true })
+
+function onUpdated() {
+  updateOpen.value = false
+  marketplaces.fetchAll().catch(() => {})
+}
 </script>
 
 <template>
@@ -124,7 +138,7 @@ const sourceReadonly = computed(() => !detail.value?.editable)
           :marketplace-id="update?.marketplaceId ?? null"
           :entry-name="update?.plugin ?? null"
           mode="update"
-          @installed="updateOpen = false"
+          @installed="onUpdated"
         />
 
         <Tabs :model-value="activeTab" class="gap-6" @update:model-value="setTab">

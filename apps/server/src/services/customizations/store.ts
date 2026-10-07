@@ -16,6 +16,9 @@
 //   ADR-052, open point 9; W11.6): personal output styles (kind `style`) travel like the other kinds, and a personal
 //   command whose body holds `` !`cmd` `` spans (`planCommandExpansion(body).shellCommands`) is restored turned off
 //   (`enabled: false`, whatever the backup says), so a crafted backup never plants a command that runs shell lines.
+// - Phase 12 (ADR-055; W12.7): `importDefinitions` applies the items of a home-folder import in ONE pass of the write
+//   queue (`import.ts`: create, overwrite keeping `enabled`, rename through `setDefinitionName`; span commands off unless
+//   enabled; the per-kind cap; one result per item, never a throw); `restoreBackup` reports `turnedOff`.
 // - Logging: ids, kinds and counts at `info`; never the content or the description.
 import type {
   BackupCustomization,
@@ -32,12 +35,13 @@ import type {
 import type { CustomizationRow } from '../../db/schema.ts'
 import type { Logger } from '../../logger.ts'
 import type { AppDeps } from '../../types.ts'
-import type { CustomizationRestoreResult, LoadedDefinition } from './types.ts'
+import type { CustomizationImportItem, CustomizationImportResult, CustomizationRestoreResult, LoadedDefinition } from './types.ts'
 import { createCustomizationId, CUSTOMIZATION_KINDS, HarnessError, LIMITS, parseDefinition, planCommandExpansion } from '@harness-forge/shared'
 import { and, count, eq, inArray, ne } from 'drizzle-orm'
 import { customizations } from '../../db/schema.ts'
 import { databaseError, guardDb, sqliteErrorCodes } from '../chats/db-errors.ts'
 import { DIAGNOSTICS_MAX, entryFromParse } from './entries.ts'
+import { importedEnabled, importFailure, ImportItemError, prepareImportItem } from './import.ts'
 
 /** Characters of one restore warning. */
 const RESTORE_WARNING_MAX_CHARS = 300
@@ -127,6 +131,8 @@ export interface CustomizationStore {
   readonly load: (entry: CustomizationEntry) => Promise<LoadedDefinition>
   readonly exportBackup: () => Promise<BackupCustomizations>
   readonly restoreBackup: (items: readonly BackupCustomization[]) => Promise<CustomizationRestoreResult>
+  /** Phase 12 (`import.ts`): the items of a home-folder import in one pass of the write queue; never throws. */
+  readonly importDefinitions: (items: readonly CustomizationImportItem[]) => Promise<CustomizationImportResult[]>
 }
 
 interface Memo {
@@ -220,6 +226,80 @@ export function createCustomizationStore(deps: Pick<AppDeps, 'db'>, options: Cus
 
   async function allRows(): Promise<CustomizationRow[]> {
     return guardDb(async () => db.select().from(customizations))
+  }
+
+  /** Writes a patch of one row (inside the write queue); the unique index maps a race to `409 exists`. */
+  async function patchRow(current: CustomizationRow, patch: Partial<CustomizationRow>): Promise<CustomizationRow> {
+    let updated: CustomizationRow | undefined
+    try {
+      [updated] = await db.update(customizations).set(patch).where(eq(customizations.id, current.id)).returning()
+    }
+    catch (error) {
+      if (isUniqueViolation(error))
+        throw customizationExists(current.kind, patch.name ?? current.name)
+      throw databaseError(error)
+    }
+    if (updated === undefined)
+      throw customizationNotFound(current.id)
+    return updated
+  }
+
+  /** `importDefinitions` inside the write queue (see the module comment of `import.ts`). */
+  async function importItems(items: readonly CustomizationImportItem[]): Promise<CustomizationImportResult[]> {
+    const rows = await allRows()
+    const byKey = new Map(rows.map(row => [`${row.kind}\u0000${row.name}`, row]))
+    const counts = new Map<CustomizationKind, number>()
+    for (const row of rows)
+      counts.set(row.kind, (counts.get(row.kind) ?? 0) + 1)
+    const results: CustomizationImportResult[] = []
+    let created = 0
+    let updated = 0
+    for (const item of items) {
+      let name: string | null = null
+      try {
+        const prepared = prepareImportItem(item)
+        name = prepared.name
+        const key = `${prepared.kind}\u0000${prepared.name}`
+        const spans = runsShellSpans(prepared.definition)
+        const existing = byKey.get(key)
+        if (item.action === 'overwrite' && existing !== undefined) {
+          const row = await patchRow(existing, {
+            content: prepared.content,
+            name: prepared.name,
+            description: prepared.description,
+            enabled: importedEnabled(item, spans, existing.enabled),
+            updatedAt: Math.max(options.now(), existing.updatedAt + 1),
+          })
+          memo.delete(row.id)
+          byKey.set(key, row)
+          updated += 1
+          results.push({ ok: true, outcome: 'updated', customization: toCustomization(row) })
+          continue
+        }
+        if (existing !== undefined)
+          throw new ImportItemError(importFailure(prepared.kind, prepared.name, `a personal ${prepared.kind} with this name already exists.`))
+        if ((counts.get(prepared.kind) ?? 0) >= LIMITS.customizationsPerKindMax)
+          throw new ImportItemError(importFailure(prepared.kind, prepared.name, `the limit of ${LIMITS.customizationsPerKindMax} personal ${prepared.kind}s is reached.`))
+        const row = await insert(prepared.kind, prepared.content, importedEnabled(item, spans, null), prepared.name, prepared.description)
+        memo.delete(row.id)
+        byKey.set(key, row)
+        counts.set(prepared.kind, (counts.get(prepared.kind) ?? 0) + 1)
+        created += 1
+        results.push({ ok: true, outcome: 'created', customization: toCustomization(row) })
+      }
+      catch (error) {
+        if (error instanceof ImportItemError) {
+          results.push({ ok: false, message: error.message })
+          continue
+        }
+        const reason = error instanceof HarnessError && error.code === 'conflict' ? 'the name is taken.' : 'it could not be stored.'
+        if (!(error instanceof HarnessError))
+          options.logger().warn('customization not imported', { kind: item?.kind, err: error })
+        results.push({ ok: false, message: importFailure(String(item?.kind ?? ''), name, reason) })
+      }
+    }
+    options.logger().info('customizations imported', { items: items.length, created, updated, failed: items.length - created - updated })
+    return results
   }
 
   return {
@@ -412,8 +492,20 @@ export function createCustomizationStore(deps: Pick<AppDeps, 'db'>, options: Cus
           turnedOff += 1
       }
       options.logger().info('customizations restored', { imported, skipped, failed, turnedOff })
-      // Phase 12 (C43 compile fix): the count of commands turned off reaches the result (`CustomizationRestoreResult`).
+      // Phase 12: the count of commands turned off reaches the result (`CustomizationRestoreResult.turnedOff`).
       return { imported, skipped, failed, warnings, turnedOff }
     }),
+
+    importDefinitions: async (items) => {
+      const list = Array.isArray(items) ? items : []
+      try {
+        return await serialized(async () => importItems(list))
+      }
+      catch (error) {
+        // The table could not be read: every item fails (never a throw for an item).
+        options.logger().warn('customizations not imported', { items: list.length, err: error })
+        return list.map((item): CustomizationImportResult => ({ ok: false, message: importFailure(String(item?.kind ?? ''), null, 'it could not be stored.') }))
+      }
+    },
   }
 }

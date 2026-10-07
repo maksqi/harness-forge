@@ -6,6 +6,13 @@
 // inside a single top-level folder; `writeEntries` creates the files below a fresh staging directory with exclusive
 // creation (mode 0644, directories 0755, archive permissions ignored); `verifyTree` then checks with `lstat` and
 // `realpath` that the staging tree holds only regular files and directories inside the staging directory.
+//
+// Phase 12 (ADR-053 / ADR-054, W12.2): a reader records the owner exec bit of each file (`ArchiveEntry.executable`: the
+// Unix mode of a zip entry, the tar header mode, `lstat` of a copied file); `writeEntries` / `verifyTree` keep it only
+// with `{ preserveExec: true }` (the Claude Code format: files 0755 or 0644), harness plugins stay 0644. An
+// `EntryCollector` with a `select` (a GitHub repository zip, where only the plugin's folder is installed) tells the
+// readers to skip every entry outside the chosen subtree before any check: such entries are never admitted, never
+// written and never counted, and a link there is ignored.
 import type { InstallLimits } from './errors.ts'
 import { chmod, lstat, mkdir, readdir, realpath, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
@@ -19,6 +26,34 @@ export interface ArchiveEntry {
   type: 'file' | 'dir'
   /** File contents (null for directories). */
   data: Uint8Array | null
+  /**
+   * Phase 12: the owner exec bit of the file in its source (a zip entry's Unix mode, the tar header mode, `lstat` of a
+   * copied file); written as 0755 only with `{ preserveExec: true }` (the Claude Code format). Absent = not executable.
+   */
+  executable?: boolean
+}
+
+/**
+ * Chooses the entries of an archive to read (Phase 12: the plugin's folder inside a repository zip). Called with the raw
+ * entry name before any other check; false = the entry is outside the subtree and skipped (never admitted, written or
+ * counted; a link there is ignored). May throw to refuse the whole archive (a GitHub zip with another top folder).
+ */
+export type EntrySelector = (rawName: string) => boolean
+
+/** Options of `EntryCollector`. */
+export interface EntryCollectorOptions {
+  /** Default: every entry is read. */
+  select?: EntrySelector
+}
+
+/** Options of `writeEntries` and `verifyTree` (Phase 12). */
+export interface TreeModeOptions {
+  /**
+   * Keep the owner exec bit (files 0755 or 0644): the Claude Code format only, where hooks and MCP servers run scripts
+   * of the plugin (an exec bit alone runs nothing: they run only when the plugin is trusted). Default false: every file
+   * 0644, as for harness plugins.
+   */
+  preserveExec?: boolean
 }
 
 /** Top-level folders and file names of archive metadata that are never extracted (macOS Finder zips). */
@@ -37,6 +72,7 @@ export type EntryLimits = Pick<InstallLimits, 'entries' | 'expandedBytes'>
 export class EntryCollector {
   readonly #limits: EntryLimits
   readonly #issuePath: Array<string | number>
+  readonly #select: EntrySelector | undefined
   /** Key -> type of every entry listed by the archive (junk excluded). */
   readonly #types = new Map<string, 'file' | 'dir'>()
   /** Keys of the folders that contain admitted entries. */
@@ -44,9 +80,19 @@ export class EntryCollector {
   #count = 0
   #bytes = 0
 
-  constructor(limits: EntryLimits, issuePath: Array<string | number> = []) {
+  constructor(limits: EntryLimits, issuePath: Array<string | number> = [], options: EntryCollectorOptions = {}) {
     this.#limits = limits
     this.#issuePath = issuePath
+    this.#select = options.select
+  }
+
+  /**
+   * False when the entry `rawName` lies outside the chosen subtree (`EntryCollectorOptions.select`): the reader skips it
+   * before any other check (not admitted, not counted). True without a selector. May throw (the selector refuses the
+   * archive).
+   */
+  selects(rawName: string): boolean {
+    return this.#select === undefined || this.#select(rawName)
   }
 
   /** Bytes admitted so far (declared sizes). */
@@ -121,10 +167,25 @@ export function pluginRootPrefix(entries: readonly ArchiveEntry[], issuePath: Ar
 }
 
 /**
- * Writes the entries below `prefix` into `root` (an empty staging directory): folders 0755, files 0644 created
- * exclusively (never through an existing path). Entries outside `prefix` are refused.
+ * A selector of the entries below `prefix` (`<top>/<folder>/`, with the trailing slash): the folder itself and
+ * everything inside it; every other name (its parent folders included) is skipped.
  */
-export async function writeEntries(root: string, entries: readonly ArchiveEntry[], prefix: string): Promise<void> {
+export function subtreeSelector(prefix: string): EntrySelector {
+  const folder = prefix.endsWith('/') ? prefix : `${prefix}/`
+  return rawName => rawName === folder || rawName === folder.slice(0, -1) || rawName.startsWith(folder)
+}
+
+/** File mode of an entry: 0755 for an executable file when exec bits are kept, else 0644. */
+function fileMode(executable: boolean, options: TreeModeOptions): number {
+  return options.preserveExec === true && executable ? 0o755 : 0o644
+}
+
+/**
+ * Writes the entries below `prefix` into `root` (an empty staging directory): folders 0755, files 0644 created
+ * exclusively (never through an existing path). Entries outside `prefix` are refused. Phase 12: with `preserveExec`
+ * an executable file is created 0755.
+ */
+export async function writeEntries(root: string, entries: readonly ArchiveEntry[], prefix: string, options: TreeModeOptions = {}): Promise<void> {
   for (const entry of entries) {
     if (!entry.path.startsWith(prefix) && `${entry.path}/` !== prefix)
       throw invalid(`The entry ${quoteName(entry.path)} is outside the plugin folder.`)
@@ -139,15 +200,16 @@ export async function writeEntries(root: string, entries: readonly ArchiveEntry[
       continue
     }
     await mkdir(dirname(target), { recursive: true, mode: 0o755 })
-    await writeFile(target, entry.data ?? new Uint8Array(0), { flag: 'wx', mode: 0o644 })
+    await writeFile(target, entry.data ?? new Uint8Array(0), { flag: 'wx', mode: fileMode(entry.executable === true, options) })
   }
 }
 
 /**
  * Walks a staging tree without following links: every entry must be a regular file or a folder whose realpath is
- * inside `root`; sets the modes (files 0644, folders 0755). Returns the number of files and their total size.
+ * inside `root`; sets the modes (files 0644, folders 0755; Phase 12: with `preserveExec` a file whose owner exec bit is
+ * set becomes 0755). Returns the number of files and their total size.
  */
-export async function verifyTree(root: string, limits: EntryLimits): Promise<{ count: number, bytes: number }> {
+export async function verifyTree(root: string, limits: EntryLimits, options: TreeModeOptions = {}): Promise<{ count: number, bytes: number }> {
   const realRoot = await realpath(root)
   let count = 0
   let bytes = 0
@@ -172,7 +234,7 @@ export async function verifyTree(root: string, limits: EntryLimits): Promise<{ c
         await walk(path, shown)
         continue
       }
-      await chmod(path, 0o644)
+      await chmod(path, fileMode((info.mode & 0o100) !== 0, options))
       count += 1
       bytes += info.size
       if (bytes > limits.expandedBytes)

@@ -1,11 +1,16 @@
-import { parseDefinition } from '@harness-forge/shared'
+import type { ParsedDefinition } from '@harness-forge/shared'
+import { formatDefinition, parseDefinition } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
 import { AGENT_MARKDOWN, agentCustomization, commandCustomization, commandSummary, customizationEntry, customizationList, definitionDiagnostic, projectTrustList, styleCustomization, styleEntry, trustCommandItem, trustSha } from '~/utils/testing/fixtures'
 import {
+  AGENT_COLOR_LABELS,
   argumentHintError,
+  ARGUMENTS_HELP,
+  bareName,
   bodyDiagnostics,
   bodyError,
   builtinCommandEntries,
+  checkProjectFile,
   CUSTOMIZE_TAB_ORDER,
   CUSTOMIZE_TAB_VALUES,
   deleteCopy,
@@ -18,6 +23,7 @@ import {
   draftFromEntry,
   draftFromUser,
   EDITOR_COPY,
+  EDITOR_FIELD_COPY,
   emptyDraft,
   existsError,
   freeName,
@@ -25,26 +31,38 @@ import {
   importDraft,
   importNotes,
   importTooLarge,
+  isEditableProjectEntry,
   isScopeDefault,
   kindFolders,
   kindOfTab,
+  maxTurnsError,
+  maxTurnsValue,
+  mcpServersOf,
+  mcpServersText,
   middleTruncate,
   nameError,
+  newProjectFileContent,
   newProjectFilePath,
   pendingCommandTrust,
   PERSONAL_EMPTY,
+  projectDeleteCopy,
   projectEmpty,
+  projectFileName,
+  projectFileTitle,
+  projectSavedText,
   rowDiagnostics,
   rowMeta,
   rowMetaItems,
   sectionsOf,
   shadowedTooltip,
   sizeLabel,
+  skillsError,
   stateBadge,
   styleDefaultBadges,
   TAB_REVEAL_INSET,
   tabOf,
   tabRevealOffset,
+  whenToUseError,
 } from './customize'
 
 const pluginName = (id: string) => (id === 'db-tools' ? 'DB tools' : id)
@@ -408,5 +426,150 @@ describe('newProjectFilePath (Phase 12, C46)', () => {
     expect(newProjectFilePath('skill', '.claude', 'pdf')).toBe('.claude/skills/pdf/SKILL.md')
     expect(newProjectFilePath('style', '.harness', 'terse')).toBe('.harness/output-styles/terse.md')
     expect(newProjectFilePath('mcp', '.claude', '')).toBe('.mcp.json')
+  })
+})
+
+describe('customize Claude Code keys (Phase 12, W12.11-T3)', () => {
+  function parsed(kind: 'agent' | 'command' | 'skill', text: string, fileName = 'x.md', folderName?: string): ParsedDefinition {
+    const result = parseDefinition(kind, text, { fileName, ...(folderName ? { folderName } : {}) })
+    expect(result.diagnostics.filter(diagnostic => diagnostic.level === 'error')).toEqual([])
+    return result.definition!
+  }
+
+  it('round-trips an agent\'s new keys through the draft (formatDefinition writes them only when set)', () => {
+    const definition = parsed('agent', '---\nname: reviewer\ndescription: Reviews\ndisallowedTools: Bash, Write\nmaxTurns: 12\ncolor: purple\nskills: [pdf, docs]\nmodel: sonnet\n---\nReview.\n')
+    const draft = draftFromDefinition(definition)
+    expect(draft).toMatchObject({ kind: 'agent', maxTurns: 12, color: 'purple', skills: ['pdf', 'docs'], modelAlias: 'sonnet', model: null })
+    expect(draft.disallowedTools?.length).toBe(2)
+    expect(draftContent(draft)).toBe(formatDefinition(definition))
+    // Without the keys the draft has none of them (a Phase 10 agent stays as it was).
+    expect(Object.keys(draftFromDefinition(parsed('agent', '---\nname: a\ndescription: b\n---\nc\n')))).toEqual(['kind', 'name', 'description', 'tools', 'model', 'argumentHint', 'body'])
+    // A chosen model replaces the Claude model name.
+    expect(draftContent({ ...draft, model: 'mock:echo' })).toContain('model: mock:echo')
+    expect(draftContent({ ...draft, model: 'mock:echo' })).not.toContain('sonnet')
+  })
+
+  it('round-trips a command and a skill with when_to_use, arguments, disallowed tools and a fork', () => {
+    const command = parsed('command', '---\ndescription: Deploy\nwhen_to_use: After a merge\narguments: [env]\ndisallowed-tools: [Write]\ncontext: fork\nagent: explore\n---\nDeploy $env.\n', 'deploy.md')
+    const commandDraft = draftFromDefinition(command)
+    expect(commandDraft).toMatchObject({ whenToUse: 'After a merge', arguments: ['env'], fork: true, forkAgent: 'explore' })
+    expect(draftContent(commandDraft)).toBe(formatDefinition(command))
+
+    const skill = parsed('skill', '---\nname: pdf\ndescription: Fill PDFs\nallowed-tools: [Read]\nmodel: mock:echo\ncontext: fork\n---\nFill it.\n', 'SKILL.md', 'pdf')
+    const skillDraft = draftFromDefinition(skill)
+    expect(skillDraft).toMatchObject({ kind: 'skill', model: 'mock:echo', fork: true })
+    expect(skillDraft.tools?.length).toBe(1)
+    expect(skillDraft.forkAgent).toBeUndefined()
+    expect(draftContent(skillDraft)).toBe(formatDefinition(skill))
+    // Turning the fork off drops context and agent.
+    expect(draftContent({ ...commandDraft, fork: false })).not.toMatch(/context:|agent:/)
+  })
+
+  it('drafts a qualified plugin entry under its bare name', () => {
+    const entry = customizationEntry({ kind: 'command', name: 'review-kit:db:migrate', source: 'plugin', pluginId: 'review-kit', path: undefined, tools: undefined })
+    expect(bareName(entry)).toBe('migrate')
+    expect(bareName(customizationEntry())).toBe('reviewer')
+    const draft = draftFromEntry(entry, '---\nname: review-kit:db:migrate\ndescription: Run the migrations\n---\nMigrate.\n')
+    expect(draft).toMatchObject({ kind: 'command', name: 'migrate', description: 'Run the migrations' })
+    expect(draftFromEntry(entry, '---\ndescription: Run the migrations\n---\nMigrate.\n').name).toBe('migrate')
+  })
+
+  it('shows "Runs in a sub-agent" for fork skills and commands', () => {
+    const fork = customizationEntry({ kind: 'skill', name: 'pdf', source: 'user', path: undefined, tools: undefined, context: 'fork', agent: 'explore' })
+    expect(rowMeta(fork, pluginName)).toContain('Runs in a sub-agent')
+    expect(rowMeta({ ...fork, context: undefined }, pluginName)).not.toContain('Runs in a sub-agent')
+  })
+
+  it('checks Max turns, Skills and When to use with the editor copy', () => {
+    expect(maxTurnsValue('12')).toBe(12)
+    expect(maxTurnsValue(' 200 ')).toBe(200)
+    for (const bad of ['0', '201', '1.5', '-3', 'ten', ''])
+      expect(maxTurnsValue(bad)).toBeNull()
+    expect(maxTurnsError('')).toBeNull()
+    expect(maxTurnsError('201')).toBe('Enter a whole number from 1 to 200.')
+    expect(skillsError(['a', 'b', 'c', 'd', 'e'])).toBeNull()
+    expect(skillsError(['a', 'b', 'c', 'd', 'e', 'f'])).toBe('Choose at most 5 skills.')
+    expect(whenToUseError('x'.repeat(1024))).toBeNull()
+    expect(whenToUseError('x'.repeat(1025))).toBe('Use at most 1,024 characters.')
+    expect(AGENT_COLOR_LABELS.purple).toBe('Purple')
+  })
+
+  it('words the editor copy of skills like commands and names the Claude argument placeholders', () => {
+    expect(EDITOR_FIELD_COPY.skill).toMatchObject({ toolsLabel: 'Allowed tools', toolsAll: 'No restriction', modelNone: 'The chat\'s model' })
+    expect(ARGUMENTS_HELP).toBe('$ARGUMENTS[0] or $0 is the first argument when the file uses them or declares arguments; $name reads a named argument; ' + '$' + '{CLAUDE_SKILL_DIR} is the skill\'s folder.')
+    expect(EDITOR_COPY.command.bodyHelp.endsWith(ARGUMENTS_HELP)).toBe(true)
+    expect(EDITOR_COPY.skill.bodyHelp.endsWith(ARGUMENTS_HELP)).toBe(true)
+  })
+})
+
+describe('customize project files (Phase 12, W12.11-T1, T2)', () => {
+  it('tells which project rows can be edited and names their files', () => {
+    expect(isEditableProjectEntry(customizationEntry({ path: '.claude/agents/reviewer.md' }))).toBe(true)
+    expect(isEditableProjectEntry(customizationEntry({ kind: 'skill', path: '.harness/skills/pdf/SKILL.md' }))).toBe(true)
+    expect(isEditableProjectEntry(customizationEntry({ kind: 'command', path: '.claude/commands/a/b/c/d/deep.md' }))).toBe(false)
+    expect(isEditableProjectEntry(customizationEntry({ path: '.claude/commands/reviewer.md' }))).toBe(false)
+    expect(isEditableProjectEntry(customizationEntry({ source: 'plugin', pluginId: 'x', path: undefined }))).toBe(false)
+    expect(projectFileName('.claude/agents/reviewer.md')).toBe('reviewer.md')
+    expect(projectFileName('.claude/skills/pdf/SKILL.md')).toBe('pdf/SKILL.md')
+    expect(projectFileName('.mcp.json')).toBe('.mcp.json')
+    expect(projectFileTitle({ kind: 'agent', path: '.claude/agents/reviewer.md' }, 'edit', 'website')).toBe('Edit reviewer.md')
+    expect(projectFileTitle({ kind: 'style', path: '.harness/output-styles/x.md' }, 'new', 'website')).toBe('New output style in website')
+    expect(projectFileTitle({ kind: 'mcp', path: '.mcp.json' }, 'new', null)).toBe('New .mcp.json in this project')
+  })
+
+  it('words the save toast and the delete confirmation', () => {
+    expect(projectSavedText('.claude/agents/a.md', 0)).toBe('Saved .claude/agents/a.md.')
+    expect(projectSavedText('.mcp.json', 1)).toBe('Saved .mcp.json. 1 item needs your approval.')
+    expect(projectSavedText('.mcp.json', 3)).toBe('Saved .mcp.json. 3 items need your approval.')
+    expect(projectDeleteCopy('.claude/agents/a.md')).toEqual({
+      title: 'Delete .claude/agents/a.md?',
+      description: 'The file is removed from the project folder. It can\'t be undone here.',
+      confirm: 'Delete file',
+      toast: 'Deleted .claude/agents/a.md',
+    })
+  })
+
+  it('starts a new definition with a frontmatter that asks for its description', () => {
+    expect(newProjectFileContent('agent', 'reviewer')).toBe('---\nname: reviewer\ndescription: \n---\n\n')
+    expect(newProjectFileContent('command', 'deploy')).toBe('---\ndescription: \n---\n\n')
+    expect(newProjectFileContent('skill', '')).toBe('---\ndescription: \n---\n\n')
+    expect(checkProjectFile('agent', '.claude/agents/reviewer.md', newProjectFileContent('agent', 'reviewer')).blocked).toBe(true)
+  })
+
+  it('shows the mcpServers object of .mcp.json and reads it back with or without the wrapper', () => {
+    expect(mcpServersText(null)).toBe('{}\n')
+    expect(mcpServersText('{ "mcpServers": { "a": { "command": "x" } }, "other": 1 }')).toBe('{\n  "a": {\n    "command": "x"\n  }\n}\n')
+    expect(mcpServersText('not json')).toBe('not json')
+    expect(mcpServersOf('{ "a": { "command": "x" } }')).toEqual({ a: { command: 'x' } })
+    expect(mcpServersOf('{ "mcpServers": { "a": { "command": "x" } } }')).toEqual({ a: { command: 'x' } })
+    expect(mcpServersOf('  ')).toBeNull()
+    expect(() => mcpServersOf('[1]')).toThrow(SyntaxError)
+    expect(() => mcpServersOf('{')).toThrow(SyntaxError)
+  })
+
+  it('checks a project file with the shared parsers: summary, color, problems and markers', () => {
+    const agent = checkProjectFile('agent', '.claude/agents/reviewer.md', '---\nname: reviewer\ndescription: Reviews\ndisallowedTools: Bash\nmaxTurns: 12\ncolor: purple\npermissionMode: plan\n---\nReview.\n')
+    expect(agent.summary[0]).toBe('Agent reviewer')
+    expect(agent.summary).toContain('Max turns 12')
+    expect(agent.summary.some(item => item.startsWith('Not allowed: '))).toBe(true)
+    expect(agent.color).toBe('purple')
+    expect(agent.blocked).toBe(false)
+    expect(agent.problems.some(problem => problem.level === 'info' && problem.message.includes('permissionMode'))).toBe(true)
+    expect(agent.markers.every(marker => marker.line !== undefined)).toBe(true)
+
+    const broken = checkProjectFile('command', '.claude/commands/deploy.md', '---\ndescription: [\n---\n')
+    expect(broken.blocked).toBe(true)
+    expect(broken.problems[0]?.level).toBe('error')
+
+    const skill = checkProjectFile('skill', '.claude/skills/pdf/SKILL.md', '---\ndescription: Fill PDFs\ncontext: fork\n---\nFill.\n')
+    expect(skill.summary).toEqual(['Skill pdf', 'Runs in a sub-agent (general)'])
+
+    expect(checkProjectFile('mcp', '.mcp.json', '{ "a": { "command": "x" }, "b": { "type": "http", "url": "https://mcp.example.test/mcp" } }').summary).toEqual(['2 servers'])
+    expect(checkProjectFile('mcp', '.mcp.json', '{}').summary).toEqual(['0 servers'])
+    const invalid = checkProjectFile('mcp', '.mcp.json', '{ "a": ')
+    expect(invalid).toMatchObject({ blocked: true, problems: [{ level: 'error', message: 'This isn\'t valid JSON.' }] })
+    const bad = checkProjectFile('mcp', '.mcp.json', '{ "a": { "type": "http", "url": "ftp://example.test" } }')
+    expect(bad.blocked).toBe(true)
+    expect(bad.problems[0]?.message.startsWith('a: ')).toBe(true)
   })
 })

@@ -24,11 +24,16 @@
 // expansion cap by the caller and frozen in `metadata.command.expansion` with `inlined { shell, files }`, so a regenerate
 // or a continuation never runs a span again. The log gets counts and durations only (never a command, an output, a path
 // or a content).
-import type { CommandTemplatePlan, FileBlock, ShellSpanResult } from '@harness-forge/shared'
+// Phase 12 (ADR-053 / ADR-058; W12.7): `ExpandCommandPlanInput.arguments` are the `expandArguments` options of the body
+// (`argumentOptions` of `commands.ts`: named arguments, the argument base, the `${…}` variables), applied to every text
+// part, also to a part without an argument placeholder (its variables and `\$` escapes; `renderExpansion`); `spanEnv`
+// adds a plugin's variables to the spans' environment (`spanEnvironment(root, spanEnv)`: `CLAUDE_PLUGIN_ROOT`,
+// `CLAUDE_PLUGIN_DATA` of a markdown plugin command, a trusted plugin source).
+import type { CommandTemplatePlan, ExpandArgumentsOptions, FileBlock, ShellSpanResult } from '@harness-forge/shared'
 import type { Logger } from '../../logger.ts'
 import type { OpenWorkspace } from '../../services/projects/types.ts'
 import type { CommandExpansionHost } from '../commands.ts'
-import { HarnessError, renderCommandExpansion } from '@harness-forge/shared'
+import { argumentBase, expandArguments, formatShellSpanOutput, HarnessError, renderCommandExpansion } from '@harness-forge/shared'
 import { commandTrustSubject } from '../../services/project-config/index.ts'
 import { readCommandFiles } from './files.ts'
 import { runCommandSpans } from './shell.ts'
@@ -61,6 +66,10 @@ export interface ExpandCommandPlanInput {
   readonly host: CommandExpansionHost
   readonly signal: AbortSignal
   readonly logger?: Logger
+  /** Phase 12: the `expandArguments` options of the body (`argumentOptions`); absent = the Phase 10 expansion. */
+  readonly arguments?: ExpandArgumentsOptions
+  /** Phase 12: extra variables of the spans' environment (a plugin's `CLAUDE_PLUGIN_ROOT` / `CLAUDE_PLUGIN_DATA`). */
+  readonly spanEnv?: Readonly<Record<string, string>>
 }
 
 function issue(message: string): HarnessError {
@@ -160,7 +169,7 @@ async function runCommandPlan(request: ExpandCommandPlanInput, checked: OpenWork
   if (checked !== null && plan.shellCommands.length > 0) {
     if (verify && host.projectId !== null)
       await assertTrusted(request, checked, host.projectId)
-    const spans = await runCommandSpans(plan.shellCommands, { root: checked.root, signal })
+    const spans = await runCommandSpans(plan.shellCommands, { root: checked.root, signal, ...(request.spanEnv === undefined ? {} : { env: request.spanEnv }) })
     shell = spans.results
     ran = spans.ran
     request.logger?.info('command shell lines ran', { spans: plan.shellCommands.length, ran: spans.ran, failed: spans.failed, durationMs: spans.durationMs })
@@ -173,8 +182,53 @@ async function runCommandPlan(request: ExpandCommandPlanInput, checked: OpenWork
       files = await readCommandFiles(workspace.root, plan.filePaths, signal)
   }
   const read = plan.filePaths.filter((_path, index) => files[index] !== null && files[index] !== undefined)
-  const text = renderCommandExpansion(plan, { shell, files }, request.input).text
+  const text = renderExpansion(plan, { shell, files }, request.input, request.arguments)
   return ran === 0 && read.length === 0 ? { text } : { text, inlined: { shell: ran, files: read } }
+}
+
+/**
+ * The rendered expansion (Phase 12): `renderCommandExpansion` without options (the Phase 10 / 11 rendering); with
+ * options, the same rendering with every text part expanded, also one without an argument placeholder (only its
+ * variables and escapes apply then: `expandArguments` with no input), so `${CLAUDE_…}` and `\$` work next to spans.
+ */
+export function renderExpansion(
+  plan: CommandTemplatePlan,
+  results: { readonly shell: readonly ShellSpanResult[], readonly files: readonly (FileBlock | null)[] },
+  input: string,
+  options?: ExpandArgumentsOptions,
+): string {
+  if (options === undefined)
+    return renderCommandExpansion(plan, results, input).text
+  const parts = plan.parts
+  const base = options.base ?? argumentBase(parts.filter(part => part.kind === 'text').map(part => part.text).join(''), options.names)
+  const partOptions: ExpandArgumentsOptions = { ...options, base }
+  const trimmed = input.trim()
+  let usedPlaceholder = false
+  let text = ''
+  for (const part of parts) {
+    if (part.kind === 'text') {
+      const expanded = expandArguments(part.text, trimmed, partOptions)
+      if (expanded.usedPlaceholder) {
+        usedPlaceholder = true
+        text += expanded.text
+      }
+      else {
+        text += expandArguments(part.text, '', partOptions).text
+      }
+    }
+    else if (part.kind === 'shell') {
+      const result = results.shell[part.index]
+      text += result === undefined ? '[skipped]' : formatShellSpanOutput(result)
+    }
+    else {
+      text += part.raw
+    }
+  }
+  if (!usedPlaceholder && trimmed !== '')
+    text = `${text}\n\n${trimmed}`
+  // The file blocks exactly as the shared renderer writes them (a plan of the files alone renders "\n\n" + the blocks).
+  const blocks = renderCommandExpansion({ parts: [], shellCommands: [], filePaths: plan.filePaths, diagnostics: [] }, { shell: [], files: results.files }, '').text
+  return blocks === '' ? text : `${text}${blocks}`
 }
 
 /** The spans and file reads of a checked plan (`prepareCommandPlan`); rejects like `expandCommandPlan`. */

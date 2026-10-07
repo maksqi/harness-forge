@@ -6,13 +6,17 @@ import { createPinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent, h, provide, ref } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
+import { useCustomizationsStore } from '~/stores/customizations'
 import { usePluginsStore } from '~/stores/plugins'
 import { testIds } from '~/utils/testids'
 import {
   backgroundLaunchOutput,
   backgroundTask,
   backgroundTaskId,
+  customizationEntry,
+  customizationList,
   pluginSummary,
+  projectId,
   taskInput,
   taskOutput,
   taskPart,
@@ -21,6 +25,7 @@ import {
 } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { AGENT_TASK_CONTEXT } from '../chat-context'
+import { TOOL_APPROVAL_CONTEXT } from '../parts/tool-approval-context'
 import TaskBlock from './TaskBlock.vue'
 
 const mock = vi.hoisted(() => ({ api: null as unknown }))
@@ -394,5 +399,63 @@ describe('taskBlock: background calls (Phase 10)', () => {
     const refused = block(taskPart({ input: taskInput({ background: true }), output: taskOutput({ status: 'failed', report: '', error: 'At most 3 background agents can run in a chat at a time.' }) }) as ToolPartLike, false)
     expect(root(refused).attributes()).toMatchObject({ 'data-state': 'failed', 'data-background': 'true' })
     expect(live(refused).text()).toBe('At most 3 background agents can run in a chat at a time.')
+  })
+})
+
+describe('taskBlock: agent colors (Phase 12, W12.13-T2)', () => {
+  /** The chat's scope: project 1, whose catalog lists `reviewer` (purple), `review-kit:code-reviewer` (green) and `plain`. */
+  function colored(part: ToolPartLike, scope: string | null = projectId(1)) {
+    useCustomizationsStore().catalogs = {
+      [projectId(1)]: customizationList({
+        items: [
+          customizationEntry({ name: 'reviewer', color: 'purple' }),
+          customizationEntry({ name: 'review-kit:code-reviewer', source: 'plugin', path: undefined, color: 'green' }),
+          customizationEntry({ name: 'plain' }),
+          customizationEntry({ name: 'explore', source: 'builtin', path: undefined, color: 'red' }),
+        ],
+      }),
+    }
+    const Host = defineComponent({
+      setup() {
+        provide(TOOL_APPROVAL_CONTEXT, { toolMode: () => 'ask', projectName: () => 'Website', projectId: () => scope, shellCwd: () => null })
+        return () => h(TooltipProvider, null, { default: () => h(TaskBlock, { part, streaming: false }) })
+      },
+    })
+    // The same wrapper shape as `block` (the helpers above take it).
+    return mount(Host, { attachTo: document.body }) as unknown as ReturnType<typeof block>
+  }
+
+  function customPart(type: string) {
+    return taskPart({ input: taskInput({ type, description: 'Review the diff' }), output: taskOutput({ type, report: 'All good.' }) }) as ToolPartLike
+  }
+
+  it('shows an 8px dot before a colored custom agent\'s name and a 2px rule on the open block', async () => {
+    const wrapper = colored(customPart('reviewer'))
+    const dot = trigger(wrapper).get('[data-slot="task-agent-color"]')
+    expect(dot.attributes()).toMatchObject({ 'data-value': 'purple', 'aria-hidden': 'true' })
+    expect(dot.classes()).toEqual(expect.arrayContaining(['size-2', 'rounded-full', 'bg-chart-5']))
+    // The type stays text: the name is still read, the dot is not.
+    expect(trigger(wrapper).get('[data-slot="task-agent-label"]').text()).toBe('reviewer')
+    await trigger(wrapper).trigger('click')
+    await flushPromises()
+    const body = wrapper.get('[data-slot="collapsible-content"]')
+    expect(body.classes()).toEqual(expect.arrayContaining(['border-l-2', 'border-chart-5']))
+  })
+
+  it('keeps a qualified plugin agent\'s name and maps its color to an existing token', () => {
+    const wrapper = colored(customPart('review-kit:code-reviewer'))
+    expect(root(wrapper).attributes('data-agent-type')).toBe('review-kit:code-reviewer')
+    expect(trigger(wrapper).get('[data-slot="task-agent-label"]').text()).toBe('review-kit:code-reviewer')
+    expect(trigger(wrapper).get('[data-slot="task-agent-color"]').classes()).toContain('bg-success')
+  })
+
+  it('shows no color for an agent without one, a built-in type or another scope', async () => {
+    for (const wrapper of [colored(customPart('plain')), colored(customPart('explore')), colored(customPart('reviewer'), null)]) {
+      expect(trigger(wrapper).find('[data-slot="task-agent-color"]').exists()).toBe(false)
+      await trigger(wrapper).trigger('click')
+      await flushPromises()
+      expect(wrapper.get('[data-slot="collapsible-content"]').classes()).not.toContain('border-l-2')
+      wrapper.unmount()
+    }
   })
 })

@@ -27,14 +27,18 @@
 // W11.19: the Project select wraps below the tabs when both do not fit on one line (always below `sm`; at 1280 px the
 // five tabs keep the whole width), and a tab row that still does not fit scrolls sideways with the active tab scrolled
 // into view (`tabRevealOffset`) on load, on a tab change and when the counts arrive.
-// Phase 12 (ADR-056; C46 mounts, W12.11 owns it in P12-A): Edit… of a project row and Edit in the viewer open the project
-// file editor (ProjectFileEditor, mounted here, with `customizations.projectSource(projectId, entry)`); its `review`
-// opens the project trust dialog; a save refreshes the catalog of the project.
-import type { Customization, CustomizationEntry, CustomizationKind } from '@harness-forge/shared'
+// Phase 12 (ADR-056; C46 mounts, W12.11 implements): Edit… of a project row and Edit in the viewer open the project
+// file editor (ProjectFileEditor, mounted here, with `customizations.projectSource(projectId, entry)`); New file… in the
+// heading of a project section (`data-action="new-project-file"`, only while the folder is available) opens it on a new
+// file of the tab's kind (the folder that already holds that kind, else `.harness`); Delete… of a project row asks
+// "Delete {path}?" (reading the file's sha256 when it opens) and deletes the file (`customizations.removeProjectFile`;
+// a 409 `stale` shows the conflict as a toast; no Undo); the editor's `review` opens the project trust dialog; a save
+// or a delete refreshes the catalog of the project. Export .md of a qualified plugin entry uses its bare name.
+import type { Customization, CustomizationEntry, CustomizationKind, CustomizationSource } from '@harness-forge/shared'
 import type { AcceptableValue } from 'reka-ui'
 import type { CustomizationAction, CustomizationDraft, CustomizeTab, ProjectFileTarget } from './customize'
 import { CUSTOMIZATION_KINDS } from '@harness-forge/shared'
-import { FileUpIcon, PlusIcon, TriangleAlertIcon } from '@lucide/vue'
+import { FilePlusIcon, FileUpIcon, PlusIcon, TriangleAlertIcon } from '@lucide/vue'
 import { computed, markRaw, nextTick, onMounted, provide, ref, shallowRef, useId, useTemplateRef, watch } from 'vue'
 import { toast } from 'vue-sonner'
 import { Alert, AlertDescription } from '@/components/ui/alert'
@@ -55,7 +59,7 @@ import { useProjectsStore } from '~/stores/projects'
 import { useProvidersStore } from '~/stores/providers'
 import { useSettingsStore } from '~/stores/settings'
 import { downloadText } from '~/utils/download'
-import { hasErrorCode } from '~/utils/errors'
+import { hasErrorCode, toHarnessError } from '~/utils/errors'
 import { testIds } from '~/utils/testids'
 import { toastError } from '../notify'
 import { useRoute, useRouter } from '../nuxt-imports'
@@ -65,6 +69,7 @@ import CustomizationEditor from './CustomizationEditor.vue'
 import CustomizationSection from './CustomizationSection.vue'
 import CustomizationViewer from './CustomizationViewer.vue'
 import {
+  bareName,
   builtinCommandEntries,
   CUSTOMIZE_TAB_ORDER,
   CUSTOMIZE_TAB_VALUES,
@@ -77,7 +82,10 @@ import {
   importTooLarge,
   KIND_LABEL,
   kindFolders,
+  newProjectFilePath,
   pendingCommandTrust,
+  projectDeleteCopy,
+  projectFileName,
   sectionsOf,
   tabOf,
   tabRevealOffset,
@@ -372,8 +380,11 @@ function onViewerCopy(draft: CustomizationDraft): void {
 function onViewerEdit(): void {
   const entry = viewerEntry.value
   viewerOpen.value = false
-  if (entry)
-    openProjectFile(entry)
+  if (!entry)
+    return
+  // Like Copy to personal: the editor returns focus where the viewer would have, the row's menu trigger.
+  focusRowMenu(entry)
+  openProjectFile(entry)
 }
 
 // ---------- import ----------
@@ -457,7 +468,7 @@ async function duplicate(entry: CustomizationEntry): Promise<void> {
 
 async function exportEntry(entry: CustomizationEntry): Promise<void> {
   try {
-    downloadText(await contentOf(entry), `${entry.name}.md`, 'text/markdown')
+    downloadText(await contentOf(entry), `${bareName(entry)}.md`, 'text/markdown')
   }
   catch (error) {
     toastError(error)
@@ -488,13 +499,37 @@ const deleting = ref(false)
 /** The content of the definition being deleted, kept for Undo. */
 let deleteContent: Promise<Customization | null> = Promise.resolve(null)
 
-const deleteTexts = computed(() => (deleteTarget.value ? deleteCopy(deleteTarget.value.kind, deleteTarget.value.name) : null))
+/** + Phase 12: the project file being deleted (Delete… of a project row), else null. */
+const deleteFile = ref<string | null>(null)
+/** + Phase 12: the sha256 of that file, read when the confirmation opens (null = it is gone already). */
+let deleteFileSha: Promise<{ sha256: string | null } | { error: unknown }> = Promise.resolve({ sha256: null })
+
+const deleteTexts = computed(() => {
+  if (deleteFile.value !== null)
+    return projectDeleteCopy(deleteFile.value)
+  return deleteTarget.value ? deleteCopy(deleteTarget.value.kind, deleteTarget.value.name) : null
+})
 
 function askDelete(entry: CustomizationEntry): void {
   if (!entry.id)
     return
   deleteTarget.value = entry
+  deleteFile.value = null
   deleteContent = customizations.get(entry.id).catch(() => null)
+  deleteOpen.value = true
+}
+
+/** + Phase 12: Delete… of a project row: the confirmation for its file, whose sha256 is read now. */
+function askDeleteFile(entry: CustomizationEntry): void {
+  const target = customizations.projectSource(projectId.value, entry)
+  const scope = projectId.value
+  if (!target || !scope)
+    return
+  deleteTarget.value = entry
+  deleteFile.value = target.path
+  deleteFileSha = customizations.readProjectFile(scope, target.path)
+    .then(file => ({ sha256: file.exists ? file.sha256 : null }))
+    .catch((error: unknown) => (hasErrorCode(error, 'not_found') ? { sha256: null } : { error }))
   deleteOpen.value = true
 }
 
@@ -511,7 +546,70 @@ function neighborOf(entry: CustomizationEntry): string | null {
   return next instanceof HTMLElement ? next.dataset.customizationId ?? null : null
 }
 
+/** + Phase 12: the row (by its data attributes) whose menu takes focus after `entry` is gone, else null. */
+function neighborEntry(entry: CustomizationEntry): Parameters<typeof rowSelector>[0] | null {
+  const row = root.value?.querySelector(rowSelector(entry))
+  const next = row?.nextElementSibling ?? row?.previousElementSibling
+  if (!(next instanceof HTMLElement))
+    return null
+  const data = next.dataset
+  return {
+    kind: (data.kind ?? entry.kind) as CustomizationKind,
+    source: (data.source ?? entry.source) as CustomizationSource,
+    name: data.name ?? '',
+    ...(data.customizationId ? { id: data.customizationId } : {}),
+    ...(data.path ? { path: data.path } : {}),
+    ...(data.pluginId ? { pluginId: data.pluginId } : {}),
+  }
+}
+
+/** + Phase 12: deletes the project file of the confirmation (no Undo: "It can't be undone here."). */
+async function confirmDeleteFile(): Promise<void> {
+  const entry = deleteTarget.value
+  const path = deleteFile.value
+  const scope = projectId.value
+  if (!entry || path === null || !scope || deleting.value)
+    return
+  deleting.value = true
+  const neighbor = neighborEntry(entry)
+  const texts = projectDeleteCopy(path)
+  try {
+    const read = await deleteFileSha
+    if ('error' in read)
+      throw read.error
+    if (read.sha256 !== null)
+      await customizations.removeProjectFile(scope, path, read.sha256)
+    await refreshScope()
+    deleteOpen.value = false
+    await nextTick()
+    if (!(neighbor && focusRowMenu(neighbor)))
+      focusNew()
+    toast.success(texts.toast)
+  }
+  catch (error) {
+    deleteOpen.value = false
+    if (hasErrorCode(error, 'not_found')) {
+      await refreshScope()
+      toast.success(texts.toast)
+    }
+    else if (hasErrorCode(error, 'conflict') && (toHarnessError(error).details as { reason?: unknown } | undefined)?.reason === 'stale') {
+      toast.error(`${projectFileName(path)} changed on disk after you opened it.`)
+    }
+    else {
+      toastError(error)
+    }
+  }
+  finally {
+    deleting.value = false
+    deleteFile.value = null
+  }
+}
+
 async function confirmDelete(): Promise<void> {
+  if (deleteFile.value !== null) {
+    await confirmDeleteFile()
+    return
+  }
   const entry = deleteTarget.value
   if (!entry?.id || deleting.value)
     return
@@ -611,6 +709,22 @@ function onFileSaved(): void {
   void refreshScope()
 }
 
+/** The definition folder a new project file of `of` goes to: the one that already holds that kind, else `.harness`. */
+function newFileFolder(of: CustomizationKind): '.harness' | '.claude' {
+  const folders = kindFolders(list.value?.project?.folders, of)
+  if (folders.some(folder => folder.startsWith('.harness/')))
+    return '.harness'
+  return folders.some(folder => folder.startsWith('.claude/')) ? '.claude' : '.harness'
+}
+
+/** New file… of a project section: the project file editor on a new definition of the tab's kind. */
+function newProjectFile(of: CustomizationKind): void {
+  if (!projectId.value)
+    return
+  fileTarget.value = { path: newProjectFilePath(of, newFileFolder(of), ''), kind: of, name: null, create: true }
+  fileOpen.value = true
+}
+
 function onFileReview(sha256?: string): void {
   trustFocus.value = sha256 ?? null
   trustOpen.value = true
@@ -640,7 +754,10 @@ function onAction(action: CustomizationAction, entry: CustomizationEntry): void 
       void toggle(entry)
       break
     case 'delete':
-      askDelete(entry)
+      if (entry.source === 'project')
+        askDeleteFile(entry)
+      else
+        askDelete(entry)
       break
     case 'open-plugin':
       if (entry.pluginId)
@@ -758,6 +875,20 @@ defineExpose<{ create: () => void, import: () => void }>({ create, import: impor
                   </ul>
                 </AlertDescription>
               </Alert>
+            </template>
+            <template v-if="section.source === 'project' && projectId && !projectIssue" #heading-actions>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                data-action="new-project-file"
+                :data-kind="of"
+                class="h-7 pointer-coarse:h-10"
+                @click="newProjectFile(of)"
+              >
+                <FilePlusIcon aria-hidden="true" data-icon="inline-start" />
+                New file…
+              </Button>
             </template>
             <template v-if="section.source === 'user'" #empty-actions>
               <Button type="button" size="sm" data-action="new" class="pointer-coarse:h-10" @click="create">

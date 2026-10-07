@@ -43,6 +43,10 @@ import type { Disposable } from '@harness-forge/plugin-sdk'
 // was stopped meanwhile). W11.17 (ADR-050): the launching run's project MCP result (`input.projectTools`) goes to the
 // child's tool assembly (the shadowed global servers hidden, the project server tools under the child ceiling) and its
 // server names to the task's hook matchers.
+// Phase 12 (W12.6, ADR-057 / ADR-058): the detached child is the same child as a foreground one (`runDetachedChild`):
+// `SubagentStart` before its step 0 (the context in its first user message), `SubagentStop` with its agent, and the
+// agent keys of its definition (`maxTurns`, the `skills` preload from the launching run's catalog, `disallowedTools`, a
+// Claude model name through `modelAliases`).
 import type { BackgroundTask, BackgroundTaskStatus, ChatRequestBody, HarnessUIMessage, ReasoningEffort, TaskOutput, TaskResultData, ToolMode } from '@harness-forge/shared'
 import type { Logger } from '../../logger.ts'
 import type { AppDeps } from '../../types.ts'

@@ -625,3 +625,21 @@ describe('output styles and model-invocable skills (Phase 11, W11.6-T5 / T6)', (
     expect(agentBlocks('ask', ['skill'], { skills: [{ name: 'internal', description: 'Internal.', modelInvocable: false }] })).toEqual([])
   })
 })
+
+describe('the listings and Claude Code definitions (Phase 12, W12.7-T1 / T3)', () => {
+  it('qualified names are listed as they are; when_to_use is appended to the description, then cut like before', () => {
+    const skills = skillsBlock([
+      { name: 'review-kit:pdf', description: 'Fill in PDF forms.', whenToUse: 'When a PDF form is named.' },
+      { name: 'notes', description: 'Write notes.' },
+      { name: 'review-kit:Bad', description: 'x' },
+    ])
+    expect(skills).toBe(`${SKILLS_HEADER}\n- notes: Write notes.\n- review-kit:pdf: Fill in PDF forms. - When a PDF form is named.`)
+    // The frozen `mock:agents` parser reads bare names only (`[a-z][a-z0-9-]*`): a qualified entry reads as its plugin id.
+    expect(mockSkillNames(skills)).toEqual(['notes', 'review-kit'])
+    const types = agentTypesBlock([{ name: 'review-kit:code-reviewer', description: 'Reviews code.' }, { name: 'general', description: 'G.' }])
+    expect(types).toBe(`${AGENT_TYPES_HEADER}\n- general: G.\n- review-kit:code-reviewer: Reviews code.`)
+    const long = skillsBlock([{ name: 'wordy', description: 'd'.repeat(200), whenToUse: 'w'.repeat(200) }]).split('\n')[1]!
+    expect(long.length).toBeLessThanOrEqual('- wordy: '.length + LIMITS.listedDescriptionMaxChars)
+    expect(long.endsWith('…')).toBe(true)
+  })
+})

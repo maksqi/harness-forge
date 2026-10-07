@@ -2,8 +2,15 @@
 // (`PluginHost.inspectDirectory`) plus what the user needs to review before installing: the hosts the plugin talks
 // to, the secrets it asks for, its advisory permissions and warnings (code, programs it starts, plain HTTP, private
 // network addresses, updates / downgrades, source conflicts, incompatibility, linked folders).
+//
+// Phase 12 (ADR-053 / ADR-054, W12.2): the inspection carries the format and, for a Claude Code plugin, the host's
+// `claude` block (components, executables, hosts, `userConfig`, ignored parts, diagnostics: the web renders "Asks for:"
+// and "Ignored:" from it). The warnings add what a Claude Code plugin can run (every command hook, stdio MCP server and
+// `!` span, as written), the whole-tree pin sentence when it runs anything, the plain-HTTP and private hosts of its
+// `claude.hosts`, "This plugin installs turned off." (`defaultEnabled: false`) and the conflicts of another format or
+// origin holding the same id.
 import type { PluginManifest } from '@harness-forge/plugin-sdk'
-import type { PluginInspection, PluginSource } from '@harness-forge/shared'
+import type { ClaudePluginInfo, PluginInspection, PluginSource } from '@harness-forge/shared'
 import type { PluginDirectoryInspection } from '../types.ts'
 import { PLUGIN_API_VERSION } from '@harness-forge/plugin-sdk'
 import { applyDeclarativeProviderDefaults } from '@harness-forge/shared'
@@ -75,7 +82,7 @@ interface HostReport {
   local: string[]
 }
 
-function networkHosts(manifest: PluginManifest): HostReport {
+function networkHosts(manifest: PluginManifest, claude: ClaudePluginInfo | null = null): HostReport {
   const urls: string[] = []
   for (const provider of manifest.contributes?.providers ?? []) {
     urls.push(provider.baseURL)
@@ -90,6 +97,17 @@ function networkHosts(manifest: PluginManifest): HostReport {
   const hosts = new Set<string>()
   const plain = new Set<string>()
   const local = new Set<string>()
+  // Phase 12: the hosts a Claude Code plugin's reader found (http MCP servers, declared URLs): host names, or URLs.
+  for (const entry of claude?.hosts ?? []) {
+    const parsed = /^[a-z][\d+.a-z-]*:\/\//i.test(entry) ? hostOf(entry) : { host: entry, http: false }
+    if (parsed === null || parsed.host === '')
+      continue
+    hosts.add(parsed.host)
+    if (parsed.http)
+      plain.add(parsed.host)
+    if (isLocalHost(parsed.host))
+      local.add(parsed.host)
+  }
   for (const url of urls) {
     const parsed = hostOf(url)
     if (parsed === null)
@@ -152,24 +170,60 @@ function versionWarning(existing: ExistingPlugin, next: string): string {
 export interface InspectionInput {
   directory: PluginDirectoryInspection
   source: InstallSourceKind
-  /** Resolved source shown in "I trust <source>": npm `name@version`, the URL, the folder realpath, the zip name. */
+  /**
+   * Resolved source shown in "I trust <source>": npm `name@version`, the URL, the folder realpath, the zip name; Phase 12:
+   * `owner/repo@<sha12>[/path]` (GitHub and GitHub-backed marketplace entries).
+   */
   sourceRef?: string
   existing: ExistingPlugin | null
   /** Notes of the source (npm deprecation, install scripts). */
   notes?: string[]
+  /**
+   * Phase 12: why the installed plugin of the same id blocks this install (another source, format or origin); null or
+   * absent when an install would update it.
+   */
+  conflict?: string | null
+  /** Phase 12: a Claude Code plugin whose `defaultEnabled` is false (it installs turned off unless asked otherwise). */
+  installsDisabled?: boolean
+}
+
+/** The warning of a Claude Code plugin that runs anything (UI.md 8.13). */
+export const CLAUDE_TREE_PIN_WARNING = 'The files are pinned as a whole: editing any file of the plugin asks for your trust again.'
+/** The warning of a Claude Code plugin with `defaultEnabled: false` (UI.md 8.13). */
+export const INSTALLS_DISABLED_WARNING = 'This plugin installs turned off.'
+
+/** One warning per thing a Claude Code plugin can run (the trust consent lists the same items). */
+function claudeExecutableWarnings(claude: ClaudePluginInfo): string[] {
+  return claude.executables.map((executable) => {
+    const command = clip(executable.command)
+    switch (executable.kind) {
+      case 'mcp':
+        return `Starts a program on your server (MCP server ${clip(executable.label, 80)}): ${command}`
+      case 'span':
+        return `Runs a shell command when ${clip(executable.label, 80)} is used: ${command}`
+      default:
+        return `Runs a command on your server (${clip(executable.label, 80)} hook): ${command}`
+    }
+  })
 }
 
 /** Builds the preview of a staged (or linked) plugin. */
 export function buildInspection(input: InspectionInput): PluginInspection {
   const { directory, source, existing } = input
   const manifest = directory.manifest
-  const report = networkHosts(manifest)
+  const claude = directory.format === 'claude' ? directory.claude : null
+  const report = networkHosts(manifest, claude)
   const warnings: string[] = []
 
   if (directory.kind === 'code')
     warnings.push('Runs code with full server privileges.')
   for (const command of stdioCommands(manifest))
     warnings.push(`Starts a program on your server: ${command}`)
+  if (claude !== null) {
+    warnings.push(...claudeExecutableWarnings(claude))
+    if (directory.requiresTrust)
+      warnings.push(CLAUDE_TREE_PIN_WARNING)
+  }
   for (const host of report.plain)
     warnings.push(`Sends requests over unencrypted HTTP to ${host}.`)
   for (const host of report.local)
@@ -177,20 +231,23 @@ export function buildInspection(input: InspectionInput): PluginInspection {
   if (!directory.compatible)
     warnings.push(`Needs plugin API ${manifest.engines.harness}; this server provides ${PLUGIN_API_VERSION}. It cannot be installed.`)
   if (existing !== null) {
-    if (existing.source === source)
-      warnings.push(versionWarning(existing, manifest.version))
-    else
+    if (existing.source !== source)
       warnings.push(`A plugin with the id "${manifest.id}" is installed from ${sourceLabel(existing.source)}; uninstall it first.`)
+    else if (input.conflict !== undefined && input.conflict !== null)
+      warnings.push(input.conflict)
+    else
+      warnings.push(versionWarning(existing, manifest.version))
   }
   if (source === 'link')
     warnings.push('Linked folder: file changes reload the plugin without another trust review.')
+  if (claude !== null && input.installsDisabled === true && existing === null)
+    warnings.push(INSTALLS_DISABLED_WARNING)
   warnings.push(...(input.notes ?? []))
 
   return {
     manifest,
     kind: directory.kind,
-    // Phase 12 (C40 compile fix): harness plugins only until the Claude Code format lands (W12.1 / W12.2).
-    format: 'harness',
+    format: directory.format,
     source,
     ...(input.sourceRef === undefined || input.sourceRef === '' ? {} : { sourceRef: input.sourceRef }),
     sha256: directory.sha256,
@@ -203,6 +260,6 @@ export function buildInspection(input: InspectionInput): PluginInspection {
     existing,
     files: directory.files,
     warnings,
-    claude: null,
+    claude,
   }
 }

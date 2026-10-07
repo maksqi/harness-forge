@@ -1,18 +1,24 @@
-// HookEditor (docs/UI.md 9.13, 8.4, 10.8; W11.8-T4): the sheet per mode, the fields, the matcher preview, the inline
-// rules, create and edit through useFreshAuth (prompt first; an edit that only turns the hook off asks nothing), the
-// server's matcher refusal on the field, other errors in `hook-error`, Mod+Enter and the discard confirmation.
+// HookEditor (docs/UI.md 9.13, 9.14, 8.4, 10.8, 10.9; W11.8-T4, W12.12-T1): the sheet per mode, the fields, the matcher
+// preview, the inline rules, create and edit through useFreshAuth (prompt first; an edit that only turns the hook off asks
+// nothing), the server's matcher refusal on the field, other errors in `hook-error`, Mod+Enter and the discard
+// confirmation; Phase 12: the Prompt type, the 13 events, the handler fields, Where, and the project mode (save through
+// saveProjectHook without a password, the pending count with Review, the stale banner with Load from disk / Overwrite).
 import type { VueWrapper } from '@vue/test-utils'
 import type { HookDraft, ProjectHookTarget } from './hooks'
 import type { MockApi } from '~/utils/testing/mock-api'
-import { HarnessError } from '@harness-forge/shared'
+import { HarnessError, HOOK_EVENTS } from '@harness-forge/shared'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, disposePinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { nextTick } from 'vue'
 import { useAuthStore } from '~/stores/auth'
+import { useHooksStore } from '~/stores/hooks'
+import { useModelsStore } from '~/stores/models'
 import { usePluginsStore } from '~/stores/plugins'
+import { useProvidersStore } from '~/stores/providers'
+import { useSettingsStore } from '~/stores/settings'
 import { testIds } from '~/utils/testids'
-import { authStatus, hookId, personalHook, projectId, toolSummary } from '~/utils/testing/fixtures'
+import { authStatus, catalogModel, hookEntry, hookId, hookList, personalHook, projectDefinitionFile, projectDefinitionWriteResult, projectId, providerSummary, settings, toolSummary, trustSha } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import HookEditor from './HookEditor.vue'
 
@@ -38,6 +44,12 @@ beforeEach(() => {
   const plugins = usePluginsStore()
   plugins.tools = ['shell', 'read_file', 'write_file', 'edit_file'].map(name => toolSummary({ name, pluginId: 'core-workspace' }))
   plugins.toolsLoaded = true
+  useSettingsStore().settings = settings()
+  useSettingsStore().loaded = true
+  useProvidersStore().items = [providerSummary()]
+  useProvidersStore().loaded = true
+  useModelsStore().items = [catalogModel({ id: 'claude-haiku-5', name: 'Claude Haiku 5' })]
+  useModelsStore().loaded = true
   api.auth.login.mockImplementation(async ({ body }: { body: { password: string } }) => {
     if (body.password !== 'correct-horse')
       throw new HarnessError({ code: 'unauthorized', message: 'Invalid password' })
@@ -247,19 +259,270 @@ describe('hookEditor', () => {
   })
 })
 
-describe('hookEditor: project mode (Phase 12, C46-T6)', () => {
-  it('edits a project hook without a password through saveProjectHook', async () => {
+async function chooseIn(id: string, value: string, attribute: 'data-testid' | 'data-field' = 'data-testid'): Promise<void> {
+  document.body.querySelector<HTMLElement>(`[${attribute}="${id}"]`)!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+  await flushPromises()
+  const item = [...document.body.querySelectorAll<HTMLElement>('[data-slot="select-item"]')].find(option => option.dataset.value === value)!
+  item.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+  await flushPromises()
+}
+
+async function chooseType(type: 'command' | 'prompt'): Promise<void> {
+  document.body.querySelector<HTMLElement>(`[data-testid="${testIds.hookType}"] [data-value="${type}"]`)!.click()
+  await flushPromises()
+}
+
+function field<T extends HTMLElement = HTMLElement>(name: string): T | null {
+  return document.body.querySelector<T>(`[data-field="${name}"]`)
+}
+
+async function typeIn(element: HTMLInputElement | HTMLTextAreaElement | null, value: string): Promise<void> {
+  expect(element).not.toBeNull()
+  element!.value = value
+  element!.dispatchEvent(new Event('input', { bubbles: true }))
+  await nextTick()
+}
+
+async function enterPassword(): Promise<void> {
+  await type(testIds.confirmPasswordInput, 'correct-horse')
+  byTestId(testIds.confirmPasswordSubmit)!.click()
+  await flushPromises()
+}
+
+describe('hookEditor: the Prompt type and the 13 events (W12.12-T1)', () => {
+  it('lists the 13 events in order with their descriptions and the matcher of each', async () => {
+    await mountEditor({ mode: 'new' })
+    byTestId(testIds.hookEvent)!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await flushPromises()
+    const options = [...document.body.querySelectorAll<HTMLElement>('[data-slot="select-item"]')]
+    expect(options.map(option => option.dataset.value)).toEqual([...HOOK_EVENTS])
+    expect(options.find(option => option.dataset.value === 'PermissionRequest')?.textContent).toContain('When harness-forge is about to ask you to approve a tool call. It can allow or deny the call.')
+    document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await flushPromises()
+
+    await chooseEvent('PostToolUseFailure')
+    expect(byTestId(testIds.hookMatcher)).not.toBeNull()
+    expect(byTestId(testIds.hookMatcherPreview)).not.toBeNull()
+    expect(field('hook-if')).not.toBeNull()
+    expect(byTestId(testIds.hookEditor)?.textContent).toContain('After a tool call failed. It can give the agent feedback.')
+    await chooseEvent('SubagentStart')
+    expect(byTestId(testIds.hookEditor)?.textContent).toContain('Agent types')
+    expect(byTestId(testIds.hookEditor)?.textContent).toContain('Agent type names separated by |, like explore|general. Leave it empty for every sub-agent.')
+    expect(byTestId(testIds.hookMatcherPreview)).toBeNull()
+    expect(field('hook-if')).toBeNull()
+    await chooseEvent('SessionEnd')
+    expect(byTestId(testIds.hookMatcher)).toBeNull()
+    expect(byTestId(testIds.hookEditor)?.textContent).toContain('When you delete a chat.')
+  })
+
+  it('creates a prompt hook: the prompt, the model line, and no command', async () => {
     useAuthStore().status = passwordSet
-    const target: ProjectHookTarget = { projectId: projectId(1), path: '.claude/settings.json', event: 'PostToolUse', groupIndex: null, handlerIndex: null }
-    await mountEditor({ mode: 'project', target, draft: { event: 'PostToolUse', matcher: 'Write|Edit', command: 'sh format.sh', timeout: null, enabled: true } })
+    api.hooks.create.mockResolvedValue(personalHook())
+    await mountEditor({ mode: 'new' })
+    expect(byTestId(testIds.hookType)?.dataset.value).toBe('command')
+    await chooseType('prompt')
+    expect(byTestId(testIds.hookType)?.dataset.value).toBe('prompt')
+    expect(byTestId(testIds.hookCommand)).toBeNull()
+    expect(field('hook-args')).toBeNull()
+    expect(byTestId(testIds.hookWarning)?.textContent).toContain('A prompt hook asks a model about every matching event, using tokens each time. Its answer can block a call or make the agent continue, never allow one.')
+    expect(field('hook-model-line')?.textContent?.trim()).toBe('Runs with the provider\'s small model (Settings → General → Hook model). It answers ok, or not ok with a reason.')
+    expect(byTestId<HTMLInputElement>(testIds.hookTimeout)?.placeholder).toBe('30')
+    // PreToolUse offers Continue on block; Stop does not.
+    expect(field('hook-continue-on-block')).not.toBeNull()
+    await chooseEvent('Stop')
+    expect(field('hook-continue-on-block')).toBeNull()
+
+    // An empty prompt is refused inline.
+    await save()
+    expect(api.hooks.create).not.toHaveBeenCalled()
+    expect(byTestId(testIds.hookEditor)?.textContent).toContain('Add the prompt.')
+    expect(document.activeElement).toBe(byTestId(testIds.hookPrompt))
+
+    await type(testIds.hookPrompt, 'Did the tests run and pass? $ARGUMENTS')
+    await typeIn(field<HTMLInputElement>('hook-status-message'), 'Checking the tests')
+    await save()
+    expect(byTestId(testIds.confirmPasswordDialog)?.textContent).toContain('Saving a hook needs your password.')
+    await enterPassword()
+    expect(api.hooks.create).toHaveBeenCalledWith({ body: { type: 'prompt', event: 'Stop', matcher: null, prompt: 'Did the tests run and pass? $ARGUMENTS', timeout: null, enabled: true, statusMessage: 'Checking the tests' } })
+    expect(toasts.success).toHaveBeenCalledWith('Hook saved')
+  })
+
+  it('names the hook model of the settings and refuses a prompt hook on an event that takes none', async () => {
+    useSettingsStore().settings = settings({ hookModelRef: 'anthropic:claude-haiku-5' })
+    await mountEditor({ mode: 'new', draft: { event: 'Notification', matcher: '', command: '', timeout: null, enabled: true, type: 'prompt', prompt: 'Is it urgent?' } })
+    expect(field('hook-model-line')?.textContent?.trim()).toBe('Runs with Claude Haiku 5 (Settings → General → Hook model). It answers ok, or not ok with a reason.')
+    expect(field('hook-event-error')?.textContent?.trim()).toBe('Prompt hooks work only for PreToolUse, PostToolUse, PostToolUseFailure, UserPromptSubmit, Stop, SubagentStop and PermissionRequest.')
+    expect(byTestId(testIds.hookEvent)?.getAttribute('aria-invalid')).toBe('true')
+    await save()
+    expect(api.hooks.create).not.toHaveBeenCalled()
+    await chooseEvent('UserPromptSubmit')
+    expect(field('hook-event-error')).toBeNull()
+  })
+
+  it('sends the command handler fields: arguments, background, only when and the status message', async () => {
+    api.hooks.create.mockResolvedValue(personalHook())
+    useAuthStore().status = authStatus({ enabled: false, authenticated: true, source: null, freshUntil: null })
+    await mountEditor({ mode: 'new' })
+    await type(testIds.hookMatcher, 'Bash')
+    await type(testIds.hookCommand, 'node')
+    await typeIn(field<HTMLTextAreaElement>('hook-args'), 'scripts/guard.js\n\ntwo words')
+    field('hook-async')!.click()
+    await flushPromises()
+    await typeIn(field<HTMLInputElement>('hook-if'), 'Read(./x)')
+    await save()
+    expect(api.hooks.create).not.toHaveBeenCalled()
+    expect(byTestId(testIds.hookEditor)?.textContent).toContain('Only Bash rules may have a pattern in parentheses.')
+    await typeIn(field<HTMLInputElement>('hook-if'), 'Bash(git *)')
+    await save()
+    expect(api.hooks.create).toHaveBeenCalledWith({ body: { event: 'PreToolUse', matcher: 'Bash', command: 'node', timeout: null, enabled: true, args: ['scripts/guard.js', 'two words'], async: true, if: 'Bash(git *)' } })
+  })
+
+  it('opens a personal prompt hook on its prompt and patches only what changed', async () => {
+    useAuthStore().status = passwordSet
+    const hook = { ...personalHook({ event: 'Stop', matcher: null }), type: 'prompt', prompt: 'Done?', model: 'haiku', continueOnBlock: false } as unknown as ReturnType<typeof personalHook>
+    api.hooks.update.mockResolvedValue(hook)
+    await mountEditor({ mode: 'edit', hook })
+    expect(byTestId(testIds.hookType)?.dataset.value).toBe('prompt')
+    expect(byTestId<HTMLTextAreaElement>(testIds.hookPrompt)?.value).toBe('Done?')
+    expect(document.activeElement).toBe(byTestId(testIds.hookPrompt))
+    expect(field('hook-model-line')?.textContent?.trim()).toBe('Runs with haiku. It answers ok, or not ok with a reason.')
+    await type(testIds.hookPrompt, 'Is the work done?')
+    await save()
+    await enterPassword()
+    expect(api.hooks.update).toHaveBeenCalledWith({ params: { id: hook.id }, body: { prompt: 'Is the work done?' } })
+  })
+})
+
+describe('hookEditor: project mode (W12.12-T1)', () => {
+  const settingsPath = '.claude/settings.json'
+  const fileHooks = { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'sh guard.sh' }] }] }
+  const file = (hooks: unknown = fileHooks, sha = trustSha(4)) => projectDefinitionFile({ path: settingsPath, kind: 'settings', content: JSON.stringify({ permissions: {}, hooks }), sha256: sha })
+  const row = (overrides: Parameters<typeof hookEntry>[0] = {}) => hookEntry({ key: `project:${trustSha(1)}`, source: 'project', id: undefined, event: 'PreToolUse', matcher: 'Bash', command: 'sh guard.sh', state: 'pending', path: settingsPath, sha256: trustSha(1), position: [0, 0], ...overrides })
+  const target: ProjectHookTarget = { projectId: projectId(1), path: settingsPath, event: 'PreToolUse', groupIndex: 0, handlerIndex: 0 }
+  const draft: HookDraft = { event: 'PreToolUse', matcher: 'Bash', command: 'sh guard.sh', timeout: null, enabled: true }
+
+  async function loadListing(items = [row()]) {
+    api.hooks.list.mockResolvedValue(hookList({ items }))
+    await useHooksStore().fetch(projectId(1))
+  }
+
+  it('saves the handler into the settings file without a password and offers Review for the pending items', async () => {
+    useAuthStore().status = passwordSet
+    await loadListing()
+    api.projectDefinitions.read.mockResolvedValue(file())
+    api.projectDefinitions.write.mockResolvedValue(projectDefinitionWriteResult({ trust: { pending: 1 } }))
+    const wrapper = await mountEditor({ mode: 'project', target, draft })
     const sheet = byTestId(testIds.hookEditor)!
     expect(sheet.dataset.mode).toBe('project')
     expect(sheet.textContent).toContain('Edit project hook')
-    expect(byTestId<HTMLTextAreaElement>(testIds.hookCommand)!.value).toBe('sh format.sh')
+    expect(field('hook-path')?.textContent?.trim()).toBe(settingsPath)
+    expect(byTestId(testIds.hookEditorEnabled)).toBeNull()
+    await type(testIds.hookCommand, 'sh guard.sh --strict')
     await save()
-    // P12-0b: the store answers not_implemented (W12.12 writes the settings file); no password was asked.
-    expect(byTestId(testIds.hookError)?.dataset.code).toBe('not_implemented')
     expect(byTestId(testIds.confirmPasswordDialog)).toBeNull()
+    expect(api.projectDefinitions.write).toHaveBeenCalledWith({
+      params: { id: projectId(1) },
+      body: { path: settingsPath, expectedSha256: trustSha(4), hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'sh guard.sh --strict' }] }] } },
+    })
     expect(api.hooks.create).not.toHaveBeenCalled()
+    const [message, options] = toasts.success.mock.calls[0]!
+    expect(message).toBe('Saved .claude/settings.json. 1 item needs your approval.')
+    expect(options.action.label).toBe('Review')
+    expect(wrapper.emitted('saved')).toBeUndefined()
+    expect(byTestId(testIds.hookEditor)).toBeNull()
+    options.action.onClick()
+    await flushPromises()
+    expect(wrapper.findComponent({ name: 'ProjectTrustDialog' }).props()).toMatchObject({ open: true, projectId: projectId(1) })
+  })
+
+  it('shows the stale banner when the file changed and overwrites after refetching the listing', async () => {
+    await loadListing()
+    api.projectDefinitions.read.mockResolvedValue(file())
+    api.projectDefinitions.write
+      .mockRejectedValueOnce(new HarnessError({ code: 'conflict', message: 'The file changed on disk. Load it again or overwrite it.', details: { reason: 'stale' } }))
+      .mockResolvedValueOnce(projectDefinitionWriteResult({ trust: { pending: 0 } }))
+    await mountEditor({ mode: 'project', target, draft })
+    await type(testIds.hookCommand, 'sh guard.sh --strict')
+    await save()
+    const banner = field('hook-stale')!
+    expect(banner.getAttribute('role')).toBe('alert')
+    expect(banner.textContent).toContain('.claude/settings.json changed on disk after you opened it.')
+    expect(byTestId(testIds.hookError)).toBeNull()
+    api.hooks.list.mockClear()
+    banner.querySelector<HTMLElement>('[data-action="overwrite"]')!.click()
+    await flushPromises()
+    expect(api.hooks.list).toHaveBeenCalledWith({ query: { projectId: projectId(1) } })
+    expect(api.projectDefinitions.write).toHaveBeenCalledTimes(2)
+    expect(toasts.success).toHaveBeenCalledWith('Saved .claude/settings.json.')
+    expect(byTestId(testIds.hookEditor)).toBeNull()
+  })
+
+  it('shows the banner without writing when the listing shows another handler, and loads it from disk', async () => {
+    await loadListing()
+    await mountEditor({ mode: 'project', target, draft })
+    await type(testIds.hookCommand, 'sh mine.sh')
+    // The agent rewrote the file meanwhile: the refetched listing shows another command at the position.
+    await loadListing([row({ command: 'sh theirs.sh' })])
+    await save()
+    expect(field('hook-stale')).not.toBeNull()
+    expect(api.projectDefinitions.read).not.toHaveBeenCalled()
+    field('hook-stale')!.querySelector<HTMLElement>('[data-action="reload"]')!.click()
+    await flushPromises()
+    expect(field('hook-stale')).toBeNull()
+    expect(byTestId<HTMLTextAreaElement>(testIds.hookCommand)!.value).toBe('sh theirs.sh')
+  })
+
+  it('says a hook that is gone no longer exists and saves the edits as a new handler', async () => {
+    await loadListing()
+    await mountEditor({ mode: 'project', target, draft })
+    await loadListing([])
+    await save()
+    field('hook-stale')!.querySelector<HTMLElement>('[data-action="reload"]')!.click()
+    await flushPromises()
+    expect(byTestId(testIds.hookError)?.dataset.code).toBe('not_found')
+    expect(byTestId(testIds.hookError)?.textContent).toContain('This hook no longer exists.')
+    api.projectDefinitions.read.mockResolvedValue(file({}))
+    api.projectDefinitions.write.mockResolvedValue(projectDefinitionWriteResult({ trust: { pending: 1 } }))
+    await save()
+    expect(api.projectDefinitions.write).toHaveBeenCalledWith({
+      params: { id: projectId(1) },
+      body: { path: settingsPath, expectedSha256: trustSha(4), hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'sh guard.sh' }] }] } },
+    })
+  })
+
+  it('shows a refused settings file in the error alert', async () => {
+    api.projectDefinitions.read.mockResolvedValue(file())
+    api.projectDefinitions.write.mockRejectedValueOnce(new HarnessError({ code: 'validation_error', message: 'Invalid request.', details: { diagnostics: [{ level: 'error', code: 'invalid-if', message: 'The "if" rule must name one tool. This hook never runs.' }] } }))
+    await mountEditor({ mode: 'project', target: { ...target, groupIndex: null, handlerIndex: null }, draft })
+    expect(byTestId(testIds.hookEditor)?.textContent).toContain('New project hook')
+    await save()
+    expect(byTestId(testIds.hookError)?.dataset.code).toBe('validation_error')
+    expect(byTestId(testIds.hookError)?.textContent).toContain('The "if" rule must name one tool. This hook never runs.')
+  })
+
+  it('offers Where for a new hook while a project is selected and writes the chosen settings file', async () => {
+    useAuthStore().status = passwordSet
+    api.projectDefinitions.read.mockResolvedValue(projectDefinitionFile({ path: '.harness/settings.json', kind: 'settings', exists: false, content: null, sha256: null }))
+    api.projectDefinitions.write.mockResolvedValue(projectDefinitionWriteResult({ path: '.harness/settings.json', created: true, trust: { pending: 1 } }))
+    await mountEditor({ mode: 'new', target: { projectId: projectId(1), path: '', event: 'PreToolUse', groupIndex: null, handlerIndex: null } })
+    expect(field('hook-where')?.dataset.value).toBe('personal')
+    expect(byTestId(testIds.hookEditorEnabled)).not.toBeNull()
+    await chooseIn('hook-where', '.harness/settings.json', 'data-field')
+    expect(field('hook-where')?.dataset.value).toBe('.harness/settings.json')
+    expect(byTestId(testIds.hookEditorEnabled)).toBeNull()
+    await type(testIds.hookMatcher, 'Write')
+    await type(testIds.hookCommand, 'sh fmt.sh')
+    await save()
+    expect(byTestId(testIds.confirmPasswordDialog)).toBeNull()
+    expect(api.projectDefinitions.write).toHaveBeenCalledWith({
+      params: { id: projectId(1) },
+      body: { path: '.harness/settings.json', expectedSha256: null, hooks: { PreToolUse: [{ matcher: 'Write', hooks: [{ type: 'command', command: 'sh fmt.sh' }] }] } },
+    })
+    expect(toasts.success.mock.calls[0]![0]).toBe('Saved .harness/settings.json. 1 item needs your approval.')
+  })
+
+  it('offers no Where without a project', async () => {
+    await mountEditor({ mode: 'new' })
+    expect(field('hook-where')).toBeNull()
   })
 })

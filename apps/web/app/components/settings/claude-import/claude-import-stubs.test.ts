@@ -1,5 +1,6 @@
-// The P12-0b stubs of the Import from Claude Code dialog (Phase 12, ADR-055; docs/UI.md 9.14, 10.9; C46-T3): one mount per
-// component (root test id, props accepted, emits) and the wizard's happy path through the stubs.
+// The components of the Import from Claude Code dialog (Phase 12, ADR-055; docs/UI.md 9.14, 10.9; C46-T3, W12.10): one mount
+// per component (root test id, props accepted, emits) and the wizard's happy path. The behavior is covered by
+// ClaudeImportDialog.test.ts and ClaudeImportPreview.test.ts.
 import type { MockApi } from '~/utils/testing/mock-api'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, disposePinia, setActivePinia } from 'pinia'
@@ -27,6 +28,7 @@ import ClaudeImportSource from './ClaudeImportSource.vue'
 
 const mock = vi.hoisted(() => ({ api: null as unknown }))
 vi.mock('~/composables/useApi', () => ({ useApi: () => mock.api }))
+vi.mock('~/components/settings/nuxt-imports', () => ({ useRoute: () => ({ path: '/settings/customize', query: {} }), useRouter: () => ({ push: async () => {}, replace: async () => {} }) }))
 
 let api: MockApi
 let pinia: ReturnType<typeof createPinia>
@@ -75,7 +77,7 @@ function pickFolder(input: HTMLInputElement, paths: string[]) {
   input.dispatchEvent(new Event('change', { bubbles: true }))
 }
 
-describe('claude import stubs (P12-0b)', () => {
+describe('claude import components (mounts)', () => {
   it('claudeImportSource offers the three sources, filters a picked folder and states the server scan', async () => {
     const folder = vi.fn()
     render(ClaudeImportSource, { busy: false, serverHome: claudeImportHome({ available: false, reason: 'disabled', path: null }), onFolder: folder })

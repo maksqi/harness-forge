@@ -1,18 +1,29 @@
 // Pure helpers of the Import from Claude Code dialog (Phase 12, ADR-055; docs/UI.md 9.14, 11.9): `pickClaudeFiles` guards
-// the upload (complete from P12-0b, C46), the others have their P12-0b bodies.
-import { CLAUDE_HOME_LIMITS } from '@harness-forge/shared'
+// the upload (complete from P12-0b, C46); the preview, selection, result and error helpers (W12.10).
+import { CLAUDE_HOME_LIMITS, HarnessError } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
 import { claudeImportApplyResult, claudeImportItem, claudeImportPlan, importPlanId } from '~/utils/testing/fixtures'
 import {
   applyBody,
+  canEnable,
   claudeRelativePath,
   defaultSelection,
+  executableCount,
+  executablesText,
   groupsOf,
   groupState,
+  importedServers,
+  importErrorText,
+  isPromptHook,
   needsFreshAuth,
   pickClaudeFiles,
   resultLines,
+  resultTab,
   STATUS_TEXT,
+  submitText,
+  syncInstructions,
+  turnedOffLines,
+  turnedOffNote,
 } from './claude-import'
 
 /** A picked file of the folder `.claude` (`webkitRelativePath` starts with the picked folder's name). */
@@ -151,5 +162,97 @@ describe('the preview helpers', () => {
       warnings: ['1 command turned off (it runs shell lines)'],
     }))).toEqual(['Imported 1 item · 2 skipped · 1 failed', 'agent:x: The name is taken.', '1 command turned off (it runs shell lines)'])
     expect(STATUS_TEXT).toEqual({ new: 'New', update: 'Replaces yours', unchanged: 'Unchanged', conflict: 'Conflict', unsupported: 'Unsupported', invalid: 'Invalid' })
+  })
+})
+
+describe('the instructions mode', () => {
+  const md = claudeImportItem({ key: 'instructions:1', kind: 'instructions', name: 'CLAUDE.md', status: 'update', actions: ['append', 'replace', 'skip'], defaultAction: 'append' })
+
+  it('follows the instructions item', () => {
+    const plan = claudeImportPlan({ items: [md] })
+    expect(defaultSelection(plan).instructions).toBe('append')
+    expect(syncInstructions(plan, { items: { 'instructions:1': { action: 'replace' } }, instructions: 'append' }).instructions).toBe('replace')
+    expect(syncInstructions(plan, { items: {}, instructions: 'append' }).instructions).toBe('skip')
+    const tooLong = claudeImportPlan({ items: [{ ...md, actions: ['replace', 'skip'], defaultAction: 'skip' }] })
+    expect(defaultSelection(tooLong)).toEqual({ items: {}, instructions: 'skip' })
+  })
+
+  it('leaves the mode alone without a selectable instructions item', () => {
+    const plan = claudeImportPlan({ items: [{ ...md, status: 'unchanged', actions: [] }] })
+    const selection = { items: {}, instructions: 'replace' as const }
+    expect(syncInstructions(plan, selection)).toBe(selection)
+    expect(defaultSelection(claudeImportPlan()).instructions).toBe('append')
+  })
+})
+
+describe('the executable items', () => {
+  const command = claudeImportItem({ key: 'command:1', kind: 'command', name: 'deploy', warnings: ['runs-commands'], executable: true })
+  const stdio = claudeImportItem({ key: 'mcp:1', kind: 'mcp-server', name: 'github', warnings: ['runs-commands'], executable: true })
+  const project = claudeImportItem({ key: 'mcp:2', kind: 'mcp-server', name: 'docs', source: { file: '.claude.json', project: '/work/app' }, warnings: ['project-server'] })
+  const prompt = claudeImportItem({ key: 'hook:1', kind: 'hook', name: 'Stop' })
+
+  it('says why an item arrives turned off and whether it can be turned on', () => {
+    expect(turnedOffNote(command)).toBe('Imported turned off: it runs shell lines.')
+    expect(turnedOffNote(stdio)).toBe('Imported turned off: it starts a program.')
+    expect(turnedOffNote(project)).toBe('From the project /work/app: imported turned off.')
+    expect(turnedOffNote(prompt)).toBeNull()
+    expect([command, stdio, project, prompt].map(canEnable)).toEqual([true, true, false, false])
+    expect(isPromptHook(prompt)).toBe(true)
+    expect(isPromptHook({ ...prompt, executable: true })).toBe(false)
+  })
+
+  it('counts the picked items that run commands', () => {
+    const plan = claudeImportPlan({ items: [command, stdio, project, prompt] })
+    expect(executableCount(plan, { items: { 'command:1': { action: 'import' }, 'mcp:2': { action: 'import' } }, instructions: 'skip' })).toBe(1)
+    expect(executablesText(1)).toBe('Includes 1 item that runs commands on this server.')
+    expect(executablesText(3)).toBe('Includes 3 items that run commands on this server.')
+    expect(submitText(1)).toBe('Import 1 item')
+    expect(submitText(19)).toBe('Import 19 items')
+  })
+
+  it('writes the turned-off lines of the imported items left off', () => {
+    const hook = claudeImportItem({ key: 'hook:2', kind: 'hook', name: 'PreToolUse', warnings: ['runs-commands'], executable: true })
+    const plan = claudeImportPlan({ items: [command, hook, stdio, project, prompt] })
+    const created = (keys: string[]) => claudeImportApplyResult({
+      results: keys.map(key => ({ key, outcome: 'created' as const })),
+      counts: { created: keys.length, updated: 0, unchanged: 0, skipped: 0, failed: 0 },
+      warnings: [],
+    })
+    const all = { items: { 'command:1': { action: 'import' as const }, 'hook:2': { action: 'import' as const }, 'mcp:1': { action: 'import' as const }, 'mcp:2': { action: 'import' as const }, 'hook:1': { action: 'import' as const } }, instructions: 'skip' as const }
+    expect(turnedOffLines(plan, all, created(['command:1', 'hook:2', 'mcp:1', 'mcp:2', 'hook:1']))).toEqual(['2 commands turned off (they run shell lines)', '2 MCP servers turned off'])
+    const enabled = { ...all, items: { ...all.items, 'command:1': { action: 'import' as const, enable: true }, 'mcp:1': { action: 'import' as const, enable: true } } }
+    expect(turnedOffLines(plan, enabled, created(['command:1', 'hook:2', 'mcp:1', 'mcp:2']))).toEqual(['1 command turned off (it runs shell lines)', '1 MCP server turned off'])
+    expect(turnedOffLines(plan, all, created(['hook:1']))).toEqual([])
+  })
+})
+
+describe('the result actions', () => {
+  const plan = claudeImportPlan({
+    items: [
+      claudeImportItem({ key: 'mcp:1', kind: 'mcp-server', name: 'github' }),
+      claudeImportItem({ key: 'hook:1', kind: 'hook', name: 'Stop' }),
+      claudeImportItem({ key: 'command:1', kind: 'command', name: 'deploy' }),
+    ],
+  })
+  const result = (outcomes: Record<string, 'created' | 'updated' | 'skipped' | 'failed'>) => claudeImportApplyResult({
+    results: Object.entries(outcomes).map(([key, outcome]) => ({ key, outcome })),
+  })
+
+  it('opens the tab of the first imported kind and the MCP servers when any were imported', () => {
+    expect(resultTab(plan, result({ 'hook:1': 'created', 'command:1': 'updated' }))).toBe('commands')
+    expect(resultTab(plan, result({ 'hook:1': 'created', 'command:1': 'failed' }))).toBe('hooks')
+    expect(resultTab(plan, result({ 'mcp:1': 'created' }))).toBeNull()
+    expect(importedServers(plan, result({ 'mcp:1': 'created' }))).toBe(true)
+    expect(importedServers(plan, result({ 'mcp:1': 'skipped' }))).toBe(false)
+  })
+})
+
+describe('importErrorText', () => {
+  it('uses the fixed copy for 413, a turned-off scan and an expired preview', () => {
+    expect(importErrorText(new HarnessError({ code: 'payload_too_large', message: 'Too large.' }), 'source')).toBe('The upload is larger than 32 MiB.')
+    expect(importErrorText(new HarnessError({ code: 'conflict', message: 'Off.', details: { reason: 'disabled' } }), 'source')).toBe('Scanning is turned off on this server (HF_CLAUDE_HOME=0).')
+    expect(importErrorText(new HarnessError({ code: 'not_found', message: 'The import plan expired. Read the folder again.' }), 'preview')).toBe('This preview expired. Start again.')
+    expect(importErrorText(new HarnessError({ code: 'not_found', message: 'There is no .claude folder.' }), 'source')).toBe('There is no .claude folder.')
+    expect(importErrorText(new HarnessError({ code: 'validation_error', message: 'The zip could not be read.' }), 'source')).toBe('The zip could not be read.')
   })
 })

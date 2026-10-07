@@ -72,7 +72,8 @@ describe('agent registry', () => {
       expect(registry.agents.get(name)).toBeUndefined()
     }
     expect(() => registry.agents.register('acme', agent('Bad Name'))).toThrow(expect.objectContaining({ code: 'validation_error' }))
-    expect(() => registry.agents.register('acme', agent('ok', { model: 'sonnet' }))).toThrow(expect.objectContaining({ code: 'validation_error', message: expect.stringContaining('model') }))
+    // Plugin API 1.6.0: a Claude model name is a model (`sonnet`); a free text is not.
+    expect(() => registry.agents.register('acme', agent('ok', { model: 'my model' }))).toThrow(expect.objectContaining({ code: 'validation_error', message: expect.stringContaining('model') }))
     expect(() => registry.agents.register('acme', agent('ok', { tools: ['Bash(git:*)'] }))).toThrow(expect.objectContaining({ code: 'validation_error', message: expect.stringContaining('tools.0') }))
     expect(() => registry.agents.register('acme', agent('ok', { instructions: 'x'.repeat(65_537) }))).toThrow(expect.objectContaining({ code: 'validation_error', message: expect.stringContaining('instructions') }))
     expect(registry.agents.list()).toEqual([])

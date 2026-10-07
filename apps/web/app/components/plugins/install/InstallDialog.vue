@@ -7,6 +7,9 @@
 //    `conflict`, reason `stale`), the review emits `stale`: the dialog inspects again and the review shows what changed
 //    and asks for a new review. Success: toast, `installed(id)`, close.
 // "I trust {source}" names the source the server resolved (`sourceRef`, e.g. `name@1.2.3`) when it sent one.
+// Phase 12 (ADR-054, W12.9): the GitHub tab (Repository, "Branch, tag or commit (optional)", "Folder in the repository
+// (optional)"; `ui.openInstall('github')` opens on it); leaving the Repository field splits `owner/repo#ref` (or `@ref`,
+// a github.com URL) into the two fields (`splitGithubRepoField`). Every tab accepts both plugin formats.
 // "Back" returns to the source step keeping the inputs; closing discards everything.
 import type { PluginDetail, PluginInspection } from '@harness-forge/shared'
 import type { DraftField, FieldErrors, InstallDraft, InstallRequest, InstallTab } from './install'
@@ -44,6 +47,7 @@ import {
   inspectionSourceLabel,
   INSTALL_TABS,
   serverFieldErrors,
+  splitGithubRepoField,
   TAB_LABELS,
   zipForm,
 } from './install'
@@ -172,6 +176,15 @@ function onOpenChange(value: boolean) {
 function onTabChange(value: string | number) {
   if ((INSTALL_TABS as readonly string[]).includes(String(value)))
     tab.value = value as InstallTab
+}
+
+/** Leaving the Repository field: `owner/repo#ref` becomes `owner/repo` and fills the empty ref field. */
+function onGithubRepoBlur() {
+  const split = splitGithubRepoField(draft)
+  if (split) {
+    draft.githubRepo = split.githubRepo
+    draft.githubRef = split.githubRef
+  }
 }
 
 function onFolderMode(value: unknown) {
@@ -318,7 +331,7 @@ function onErrorAction(action: HarnessErrorUiAction) {
         <DialogTitle>Install plugin</DialogTitle>
         <DialogDescription>
           {{ step === 'source'
-            ? 'Install a plugin from a zip file, npm, a URL or a folder on this server.'
+            ? 'Install a plugin from a zip file, npm, a URL, GitHub or a folder on this server.'
             : 'Review what this plugin adds before you install it.' }}
         </DialogDescription>
       </DialogHeader>
@@ -467,6 +480,7 @@ function onErrorAction(action: HarnessErrorUiAction) {
                 :disabled="busy"
                 :aria-invalid="fieldErrors.githubRepo ? true : undefined"
                 :data-testid="testIds.installGithubRepo"
+                @blur="onGithubRepoBlur"
               />
               <p v-if="fieldErrors.githubRepo" role="alert" class="text-sm text-destructive">
                 {{ fieldErrors.githubRepo }}

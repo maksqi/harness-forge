@@ -38,11 +38,16 @@
 // this call run; a `task` call never shows it (ChatMessage shows "Running hooks…" for it). A tool of a project MCP server
 // reads the server's name from the project-mcp store (the chat's project from TOOL_APPROVAL_CONTEXT), else the global
 // server's name, else its id.
+// Phase 12 (ADR-053, ADR-057; W12.13): a `PermissionRequest` hook's decision marks the row like a `PreToolUse` one
+// (`toolHookDecision`: "Blocked by hook" replaces "Denied" for its denial); "Running hook…" shows the running hook's
+// `statusMessage` instead (the activity `label`, through HOOK_ACTIVITY); a plugin skill with a qualified name
+// (`review-kit:pdf`) reads its plugin's name from the name's plugin id; SKILL_FORK_CHECK (the catalog of the chat's
+// scope) lets SkillToolBody show a `context: fork` skill's content as its report.
 import type { HookData, TodoItem } from '@harness-forge/shared'
 import type { ToolPartLike } from '../chat-format'
 import type { WorkspaceRowSummary } from './tools/workspace-tools'
 import type { AllowRules } from '~/components/workspace/allowlist/allow-rule'
-import { shellToolOutputSchema, skillOutputSchema, WORKSPACE_TOOL_ACCESS } from '@harness-forge/shared'
+import { shellToolOutputSchema, skillOutputSchema, splitQualifiedName, WORKSPACE_TOOL_ACCESS } from '@harness-forge/shared'
 import {
   BanIcon,
   BookOpenIcon,
@@ -56,22 +61,25 @@ import {
   WrenchIcon,
   XIcon,
 } from '@lucide/vue'
-import { computed, inject, ref, watch } from 'vue'
+import { computed, inject, provide, ref, watch } from 'vue'
 import { Tool as AiTool, ToolContent as AiToolContent } from '@/components/ai-elements/tool'
 import { Badge } from '@/components/ui/badge'
 import { CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Spinner } from '@/components/ui/spinner'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
+import { useCustomizationsStore } from '~/stores/customizations'
 import { usePluginsStore } from '~/stores/plugins'
 import { useProjectMcpStore } from '~/stores/project-mcp'
 import { testIds } from '~/utils/testids'
 import {
   doneTodos,
+  isForkSkill,
   planApprovedText,
   planFileOf,
   planModeOf,
   planOf,
+  SKILL_FORK_CHECK,
   skillNameOf,
   skillSourceText,
   TODO_TOOL_NAME,
@@ -95,7 +103,7 @@ import {
   TASK_TOOL_NAME,
   toolNameOf,
 } from '../chat-format'
-import { hookPluginId } from '../hooks/hook-notes'
+import { hookPluginId, toolHookDecision } from '../hooks/hook-notes'
 import HookNote from '../hooks/HookNote.vue'
 import { TOOL_APPROVAL_CONTEXT } from './tool-approval-context'
 import { toolRowArgument } from './tool-row'
@@ -142,6 +150,7 @@ const emit = defineEmits<{
 
 const plugins = usePluginsStore()
 const projectMcp = useProjectMcpStore()
+const customizations = useCustomizationsStore()
 const open = ref(false)
 const scroll = inject(TRANSCRIPT_SCROLL, null)
 const approvalContext = inject(TOOL_APPROVAL_CONTEXT, null)
@@ -165,6 +174,8 @@ const serverName = computed(() => {
   return projectServer?.name ?? plugins.mcp.find(server => server.id === serverId.value)?.name ?? serverId.value
 })
 const displayName = computed(() => mcp.value?.tool ?? name.value)
+/** + Phase 12: SkillToolBody reads a fork skill's content as its report (the catalog of the chat's scope says which). */
+provide(SKILL_FORK_CHECK, skillName => isForkSkill(customizations.entriesOf(projectId.value, 'skill'), skillName))
 // The badge names the server; a transcript opened after a reload may be the first place that needs the MCP list.
 watch(serverId, (id) => {
   if (id && !plugins.mcpLoaded)
@@ -243,6 +254,15 @@ const awaitingDecision = computed(() => props.part.state === 'approval-requested
 const runningHook = computed(() => !!props.part.toolCallId
   && name.value !== TASK_TOOL_NAME
   && hookActivity?.value?.toolCallId === props.part.toolCallId)
+/**
+ * + Phase 12: what "Running hook…" reads: the running hook's `statusMessage` (the activity `label`; the injection's type
+ * predates it, so it is read defensively), else "Running hook…".
+ */
+const runningHookText = computed(() => {
+  const activity = hookActivity?.value as { label?: unknown } | null | undefined
+  const label = typeof activity?.label === 'string' ? activity.label.trim() : ''
+  return label || 'Running hook…'
+})
 /** + Phase 11: the call's PreToolUse record, if any. */
 const preToolUse = computed(() => props.hooks.find(data => data.event === 'PreToolUse') ?? null)
 /** + Phase 11: the reason of a PreToolUse hook that asked for the card ('' without one; null = no hook asked). */
@@ -257,7 +277,7 @@ function hookPluginName(data: HookData): string | null {
 const supersededDenial = computed(() => status.value === 'denied'
   && (isSupersededDenial(props.part) || props.part.state === 'approval-requested'))
 /** + Phase 11: a denial a PreToolUse hook made ("Blocked by hook" replaces "Denied"). */
-const hookDenied = computed(() => status.value === 'denied' && !supersededDenial.value && preToolUse.value?.outcome === 'denied')
+const hookDenied = computed(() => status.value === 'denied' && !supersededDenial.value && toolHookDecision(props.hooks)?.outcome === 'denied')
 const statusLabel = computed(() => ({
   running: 'Running',
   approval: 'Needs approval',
@@ -266,6 +286,17 @@ const statusLabel = computed(() => ({
   denied: 'Denied',
   stopped: 'Stopped',
 })[status.value])
+
+/**
+ * + Phase 12: the plugin of a plugin skill: the plugin id of a qualified name (`review-kit:pdf`), else the plugin that
+ * contributes the name; its name from the plugins store.
+ */
+function skillPluginName(skillName: string): string | null {
+  const qualified = splitQualifiedName(skillName)
+  if (qualified)
+    return plugins.byId(qualified.pluginId)?.name ?? qualified.pluginId
+  return plugins.items.find(plugin => plugin.contributions.skills.includes(skillName))?.name ?? null
+}
 
 /**
  * + Phase 10 (7.28): the skill row: the name (the output's, else the input's while it runs), the source of a loaded
@@ -279,7 +310,7 @@ const skillRow = computed(() => {
   const output = parsed?.success ? parsed.data : null
   const skillName = output?.name ?? skillNameOf(props.part.input) ?? ''
   const pluginName = output?.source === 'plugin'
-    ? plugins.items.find(plugin => plugin.contributions.skills.includes(output.name))?.name ?? null
+    ? skillPluginName(output.name)
     : null
   const source = output ? skillSourceText(output.source, pluginName) : null
   const label = status.value === 'running' ? 'Loading skill' : status.value === 'error' ? 'Couldn\'t load skill' : 'Loaded skill'
@@ -437,7 +468,7 @@ function onDecide(decision: { approved: boolean, alwaysAllow: boolean, acceptEdi
           </Badge>
           <span class="ml-auto flex shrink-0 items-center gap-1.5 pl-2 text-xs text-muted-foreground">
             <span v-if="skillRow?.source" data-slot="skill-row-source" class="max-w-[16ch] truncate">{{ skillRow.source }}</span>
-            <span v-if="runningHook" data-slot="running-hook" class="hf-shimmer-text">Running hook…</span>
+            <span v-if="runningHook" data-slot="running-hook" class="max-w-[24ch] truncate hf-shimmer-text">{{ runningHookText }}</span>
             <ToolHookBadge v-if="hooks.length > 0 && !hookDenied" :hooks="hooks" />
             <ToolRuleBadge v-if="allowedBy.length > 0" :prefixes="allowedBy" />
             <ToolRowSummary v-if="summary" :summary="summary" class="mr-0.5" />

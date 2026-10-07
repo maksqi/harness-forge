@@ -1,7 +1,8 @@
-// Settings -> General -> Agent (docs/UI.md 9.11): Automatic compaction, the compaction and sub-agent model selects
+// Settings -> General -> Agent (docs/UI.md 9.11, 9.14): Automatic compaction, the compaction and sub-agent model selects
 // ("Same model as the chat" = null, the warning of a sub-agent model without tools), Sub-agent max steps (1-200 with
-// the rules of Max steps) and (Phase 10) Save approved plans and Plan folder. Every field saves through settings.update
-// and rolls back with a toast on failure; the plan folder shows a server 400 inline.
+// the rules of Max steps), (Phase 10) Save approved plans and Plan folder, and (Phase 12, W12.12-T4) the Hook model
+// ("Automatic" = null) and the Claude model names (`modelAliases`, sent whole). Every field saves through
+// settings.update and rolls back with a toast on failure; the plan folder shows a server 400 inline.
 import type { Settings } from '@harness-forge/shared'
 import type { VueWrapper } from '@vue/test-utils'
 import type { MockApi } from '~/utils/testing/mock-api'
@@ -19,6 +20,9 @@ import { catalogModel, providerSummary } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { stubLocalStorage } from '~/utils/testing/storage'
 import {
+  AGENT_SECTION_DESCRIPTION,
+  HOOK_MODEL_AUTOMATIC_LABEL,
+  MODEL_ALIAS_NOT_SET_LABEL,
   PLAN_DIRECTORY_FOLDER_ERROR,
   PLAN_DIRECTORY_LENGTH_ERROR,
   PLAN_DIRECTORY_PLACEHOLDER,
@@ -114,7 +118,7 @@ describe('agentSettingsSection', () => {
     const host = await mountAgent()
     const section = host.get('[data-slot="settings-section"]')
     expect(section.get('h2').text()).toBe('Agent')
-    expect(section.text()).toContain('Long chats, sub-agents and plans.')
+    expect(section.text()).toContain('Long chats, sub-agents, plans and hooks.')
     expect(section.text()).toContain('Automatic compaction')
     expect(section.text()).toContain('Summarize older messages when a chat nears the model\'s context window. When off, older messages are left out instead.')
     expect(section.text()).toContain('Compaction model')
@@ -503,6 +507,76 @@ describe('agentSettingsSection: plan files (Phase 10)', () => {
       expect(byTestId(id).className, id).toContain('pointer-coarse:after:-inset-y-[11px]')
     for (const id of [testIds.settingsSubagentMaxSteps, testIds.settingsPlanDirectory])
       expect(byTestId(id).className, id).toContain('pointer-coarse:h-10')
+  })
+})
+
+describe('agentSettingsSection: hook model and Claude model names (Phase 12, W12.12-T4)', () => {
+  function aliasTrigger(name: string): HTMLElement {
+    const element = document.body.querySelector<HTMLElement>(`[data-testid="${testIds.settingsModelAlias}"][data-name="${name}"]`)
+    expect(element, name).not.toBeNull()
+    return element!
+  }
+
+  async function pickAlias(name: string, modelRef: string) {
+    aliasTrigger(name).click()
+    await flushPromises()
+    option(modelRef).click()
+    await flushPromises()
+  }
+
+  it('renders the Hook model and the four Claude model names after the plan folder', async () => {
+    preloadCatalog()
+    const host = await mountAgent()
+    const section = host.get('[data-slot="settings-section"]')
+    expect(section.text()).toContain('Hook model')
+    expect(section.text()).toContain('Answers prompt hooks that don\'t name a model. Automatic uses the small model of the chat\'s provider, else the chat\'s model.')
+    expect(section.text()).toContain('Claude model names')
+    expect(section.text()).toContain('Agents, skills and hooks from Claude Code can name a model as sonnet, opus, haiku or fable. Choose the model each name runs. A name that isn\'t set uses the default model, with a note in the chat.')
+    const hookModel = byTestId(testIds.settingsHookModel)
+    expect(hookModel.dataset.value).toBe('')
+    expect(hookModel.textContent).toContain(HOOK_MODEL_AUTOMATIC_LABEL)
+    expect(hookModel.getAttribute('aria-label')).toBe('Hook model, Automatic (the provider\'s small model)')
+    expect(section.find(`label[for="${hookModel.id}"]`).text()).toBe('Hook model')
+    const triggers = [...document.body.querySelectorAll<HTMLElement>(`[data-testid="${testIds.settingsModelAlias}"]`)]
+    expect(triggers.map(trigger => trigger.dataset.name)).toEqual(['sonnet', 'opus', 'haiku', 'fable'])
+    for (const trigger of triggers) {
+      expect(trigger.dataset.value).toBe('')
+      expect(trigger.textContent).toContain(MODEL_ALIAS_NOT_SET_LABEL)
+      expect(section.find(`label[for="${trigger.id}"]`).text()).toBe(trigger.dataset.name)
+    }
+    // The fields come after the plan folder.
+    const fields = [...document.body.querySelectorAll('[data-testid]')].map(element => element.getAttribute('data-testid'))
+    expect(fields.indexOf(testIds.settingsHookModel)).toBeGreaterThan(fields.indexOf(testIds.settingsPlanDirectory))
+    expect(section.find('[data-slot="settings-model-aliases"]').attributes('role')).toBe('group')
+    expect(AGENT_SECTION_DESCRIPTION).toBe('Long chats, sub-agents, plans and hooks.')
+  })
+
+  it('saves the hook model as hookModelRef, and "Automatic" as null', async () => {
+    preloadCatalog()
+    await mountAgent()
+    await pick(testIds.settingsHookModel, haiku.ref)
+    expect(api.settings.update).toHaveBeenCalledWith({ body: { hookModelRef: 'anthropic:claude-haiku-5' } })
+    expect(byTestId(testIds.settingsHookModel).dataset.value).toBe('anthropic:claude-haiku-5')
+    await pick(testIds.settingsHookModel, '')
+    expect(api.settings.update).toHaveBeenLastCalledWith({ body: { hookModelRef: null } })
+    expect(useSettingsStore().resolved.hookModelRef).toBeNull()
+  })
+
+  it('saves one Claude model name with the others unchanged and rolls a failure back with a toast', async () => {
+    preloadCatalog()
+    saved = { ...saved, modelAliases: { sonnet: null, opus: null, haiku: 'anthropic:claude-haiku-5', fable: null } }
+    useSettingsStore().settings = { ...saved }
+    await mountAgent()
+    expect(aliasTrigger('haiku').dataset.value).toBe('anthropic:claude-haiku-5')
+    await pickAlias('sonnet', sonnet.ref)
+    expect(api.settings.update).toHaveBeenCalledWith({ body: { modelAliases: { sonnet: 'anthropic:claude-sonnet-5', opus: null, haiku: 'anthropic:claude-haiku-5', fable: null } } })
+    expect(aliasTrigger('sonnet').dataset.value).toBe('anthropic:claude-sonnet-5')
+
+    api.settings.update.mockRejectedValueOnce(new HarnessError({ code: 'internal_error', message: 'Disk full.' }))
+    await pickAlias('haiku', '')
+    expect(api.settings.update).toHaveBeenLastCalledWith({ body: { modelAliases: { sonnet: 'anthropic:claude-sonnet-5', opus: null, haiku: null, fable: null } } })
+    expect(toasts.error).toHaveBeenCalledWith('Something went wrong', { description: 'Disk full.' })
+    expect(aliasTrigger('haiku').dataset.value).toBe('anthropic:claude-haiku-5')
   })
 })
 

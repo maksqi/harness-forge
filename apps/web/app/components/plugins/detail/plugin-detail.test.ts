@@ -23,6 +23,12 @@ describe('plugin detail rules', () => {
     expect(hasSourceTab(pluginDetail({ kind: 'code', source: 'builtin', builtin: true, editable: false }))).toBe(false)
   })
 
+  it('gives a Claude Code plugin no Source tab and no Edit in wizard, even if it were editable (Phase 12)', () => {
+    expect(pluginTabs(pluginDetail({ kind: 'declarative', format: 'claude', source: 'marketplace', editable: false, hasSettings: true }))).toEqual(['overview', 'configuration', 'logs'])
+    expect(hasSourceTab(pluginDetail({ kind: 'declarative', format: 'claude', source: 'copy', editable: true }))).toBe(false)
+    expect(canEditInWizard(pluginDetail({ kind: 'declarative', format: 'claude', source: 'created' }))).toBe(false)
+  })
+
   it('falls back to Overview for missing, unknown or hidden tabs', () => {
     const tabs = pluginTabs(pluginDetail({ kind: 'declarative', source: 'zip', editable: false }))
     expect(resolvePluginTab('logs', tabs)).toBe('logs')

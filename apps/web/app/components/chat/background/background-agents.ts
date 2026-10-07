@@ -17,6 +17,14 @@ export const BACKGROUND_GONE_MESSAGE = 'It already finished.'
 /** The error toast of a failed stop (docs/UI.md 7.29). */
 export const BACKGROUND_STOP_FAILED_MESSAGE = 'Could not stop the background agent'
 
+/**
+ * Phase 12 (W12.13, the P12-0a flake of `mobile/agent.spec.ts`): how long the open list keeps a row stopped from it
+ * after the row ended, even when its report was delivered at once (the next step of a running reply takes a stopped
+ * agent's result, so it would leave the list within milliseconds of its Stop): the Stop shows "Stopped" before the row
+ * leaves.
+ */
+export const BACKGROUND_STOPPED_LINGER_MS = 3000
+
 /** A task that still runs (the dock's Stop applies). */
 export function isRunningTask(task: Pick<BackgroundTask, 'status'>): boolean {
   return task.status === 'running'

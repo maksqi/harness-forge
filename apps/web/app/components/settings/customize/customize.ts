@@ -14,7 +14,12 @@
 // Phase 12 (ADR-056, ADR-058; C46 declares, W12.11 implements; frozen from Gate P12-0b): the project file editor's target
 // (`ProjectFileTarget`, `newProjectFilePath`), the draft's Claude Code keys (`disallowedTools`, `maxTurns`, `color`,
 // `skills`, `whenToUse`, `fork`, `forkAgent`; `formatDefinition` writes a key only when set) and `edit` / `delete` on
-// project rows (they open the project file editor and delete the file).
+// project rows (they open the project file editor and delete the file). W12.11 (P12-A): the draft maps those keys both
+// ways (skills also get `allowed-tools` and `model`), keeps `arguments` and a Claude model name it does not show (CCR:
+// `CustomizationDraft.arguments` / `modelAlias`), drafts a qualified plugin entry under its bare name (`bareName`), adds
+// "Runs in a sub-agent" to the row meta, the field rules (`maxTurnsError`, `skillsError`, `whenToUseError`), the color
+// names, and the project file helpers (`isEditableProjectEntry`, `checkProjectFile` with the shared parsers,
+// `mcpServersText` / `mcpServersOf`, `newProjectFileContent`, the title, toast and delete copy).
 import type {
   AgentColor,
   CommandSummary,
@@ -40,6 +45,11 @@ import {
   isHarnessCommand,
   isReservedAgentName,
   parseDefinition,
+  parseMcpJson,
+  projectDefinitionPathKind,
+  setDefinitionName,
+  skillInvocation,
+  splitQualifiedName,
   styleNameFromLabel,
 } from '@harness-forge/shared'
 import { CLIENT_COMMAND_DESCRIPTIONS } from '~/components/chat/composer/slash-commands'
@@ -89,6 +99,16 @@ export interface CustomizationDraft {
   fork?: boolean
   /** + Phase 12 (with `fork`): the sub-agent type (`agent`); null = `general`. */
   forkAgent?: string | null
+  /**
+   * + Phase 12 (W12.11 CCR, commands and skills): the `arguments` names (`$name`). Not edited by the form; kept so a save
+   * never drops them.
+   */
+  arguments?: string[] | null
+  /**
+   * + Phase 12 (W12.11 CCR): a Claude model name (`model: sonnet`), written as `model` while `model` is null; kept so a save
+   * never drops it.
+   */
+  modelAlias?: string | null
 }
 
 /**
@@ -343,6 +363,9 @@ export function rowMetaItems(
     items.push({ text: entry.argumentHint, mono: true })
   if (entry.kind === 'skill' && entry.modelInvocable === false)
     items.push({ text: 'Only when you run it' })
+  // + Phase 12 (ADR-058): a skill or command with `context: fork`.
+  if ((entry.kind === 'skill' || entry.kind === 'command') && entry.context === 'fork')
+    items.push({ text: 'Runs in a sub-agent' })
   // + Phase 11 (ADR-051): what a style does with the coding instructions.
   if (entry.kind === 'style')
     items.push({ text: entry.keepCodingInstructions ? 'Keeps coding instructions' : 'Replaces coding instructions' })
@@ -409,6 +432,34 @@ export function emptyDraft(kind: CustomizationKind): CustomizationDraft {
   return { kind, name: '', description: '', tools: null, model: null, argumentHint: null, body: '' }
 }
 
+/**
+ * + Phase 12 (ADR-058): the Claude Code keys of a parsed definition as draft fields, each present only when the file sets
+ * it (like the parser's fields): agents `disallowedTools`, `maxTurns`, `color`, `skills`; commands and skills
+ * `disallowedTools`, `whenToUse`, `arguments`, `fork` / `forkAgent`; every kind with a model its `modelAlias`.
+ */
+function claudeDraftFields(fields: {
+  readonly disallowedTools?: readonly string[]
+  readonly maxTurns?: number
+  readonly color?: AgentColor
+  readonly skills?: readonly string[]
+  readonly whenToUse?: string
+  readonly arguments?: readonly string[]
+  readonly context?: 'fork'
+  readonly agent?: string
+  readonly modelAlias?: string
+}): Partial<CustomizationDraft> {
+  return {
+    ...(fields.disallowedTools && fields.disallowedTools.length > 0 ? { disallowedTools: [...fields.disallowedTools] } : {}),
+    ...(typeof fields.maxTurns === 'number' ? { maxTurns: fields.maxTurns } : {}),
+    ...(fields.color ? { color: fields.color } : {}),
+    ...(fields.skills && fields.skills.length > 0 ? { skills: [...fields.skills] } : {}),
+    ...(fields.whenToUse ? { whenToUse: fields.whenToUse } : {}),
+    ...(fields.arguments && fields.arguments.length > 0 ? { arguments: [...fields.arguments] } : {}),
+    ...(fields.context === 'fork' ? { fork: true, ...(fields.agent ? { forkAgent: fields.agent } : {}) } : {}),
+    ...(fields.modelAlias ? { modelAlias: fields.modelAlias } : {}),
+  }
+}
+
 /** The structured draft of a parsed definition. */
 export function draftFromDefinition(definition: ParsedDefinition): CustomizationDraft {
   switch (definition.kind) {
@@ -422,6 +473,8 @@ export function draftFromDefinition(definition: ParsedDefinition): Customization
         model: fields.model,
         argumentHint: null,
         body: fields.instructions,
+        // + Phase 12: the Claude Code keys, only when set.
+        ...claudeDraftFields(fields),
       }
     }
     case 'command': {
@@ -434,6 +487,7 @@ export function draftFromDefinition(definition: ParsedDefinition): Customization
         model: fields.model,
         argumentHint: fields.argumentHint,
         body: fields.body,
+        ...claudeDraftFields(fields),
       }
     }
     case 'skill': {
@@ -442,13 +496,15 @@ export function draftFromDefinition(definition: ParsedDefinition): Customization
         kind: 'skill',
         name: fields.name,
         description: fields.description,
-        tools: null,
-        model: null,
+        // + Phase 12 (ADR-058): a skill's `allowed-tools` and `model` (like a command's).
+        tools: fields.allowedTools ? [...fields.allowedTools] : null,
+        model: fields.model ?? null,
         argumentHint: fields.argumentHint ?? null,
         body: fields.content,
         // + Phase 11: present only when not the default (like the parsed fields).
         ...(fields.userInvocable === undefined ? {} : { userInvocable: fields.userInvocable }),
         ...(fields.modelInvocable === undefined ? {} : { modelInvocable: fields.modelInvocable }),
+        ...claudeDraftFields(fields),
       }
     }
     case 'style': {
@@ -476,12 +532,26 @@ export function draftFromUser(customization: Customization): CustomizationDraft 
   return draftFromEntry({ kind: customization.kind, name: customization.name, description: customization.description } as CustomizationEntry, customization.content)
 }
 
-/** The draft of a catalog entry from its file (`parseDefinition` inside); unparsable content keeps the entry's fields. */
+/**
+ * + Phase 12: the name of an entry without its plugin namespace (`review-kit:db:migrate` → `migrate`): the name a copy
+ * to personal or an export starts from. Bare names are returned as they are.
+ */
+export function bareName(entry: Pick<CustomizationEntry, 'name'>): string {
+  return splitQualifiedName(entry.name)?.name ?? entry.name
+}
+
+/**
+ * The draft of a catalog entry from its file (`parseDefinition` inside); unparsable content keeps the entry's fields.
+ * + Phase 12: a qualified plugin entry (`review-kit:review`) is drafted under its bare name (a personal definition
+ * has no namespace).
+ */
 export function draftFromEntry(entry: CustomizationEntry, content: string): CustomizationDraft {
-  const parsed = parseDefinition(entry.kind, content, { fileName: `${entry.name}.md`, folderName: entry.name })
+  const bare = bareName(entry)
+  const text = bare === entry.name ? content : setDefinitionName(content, bare)
+  const parsed = parseDefinition(entry.kind, text, { fileName: `${bare}.md`, folderName: bare })
   if (parsed.definition)
     return draftFromDefinition(parsed.definition)
-  return { ...emptyDraft(entry.kind), name: entry.name, description: entry.description, body: content }
+  return { ...emptyDraft(entry.kind), name: bare, description: entry.description, body: content }
 }
 
 /** Files above this size are refused before they are read (docs/UI.md 9.12). */
@@ -547,28 +617,84 @@ export async function importDraft(file: File, kind: CustomizationKind): Promise<
   return { draft: { ...emptyDraft(kind), body: text }, notes }
 }
 
+/** A non-empty copy of a list, else undefined (the key is left out). */
+function listOrUndefined(value: readonly string[] | null | undefined): string[] | undefined {
+  return value && value.length > 0 ? [...value] : undefined
+}
+
+/**
+ * + Phase 12 (ADR-058): the Claude Code keys of a draft as definition fields, each only when set (`formatDefinition`
+ * writes a key only when it is set): commands and skills `whenToUse`, `arguments`, `disallowedTools`, `context: fork` +
+ * `agent`; the model alias while no model is chosen.
+ */
+function claudeCommandFields(draft: CustomizationDraft, model: string | null): {
+  whenToUse?: string
+  arguments?: string[]
+  disallowedTools?: string[]
+  context?: 'fork'
+  agent?: string
+  modelAlias?: string
+} {
+  const whenToUse = draft.whenToUse?.trim() ?? ''
+  const args = listOrUndefined(draft.arguments)
+  const disallowed = listOrUndefined(draft.disallowedTools)
+  const agent = draft.forkAgent?.trim() ?? ''
+  const alias = model === null ? draft.modelAlias?.trim() ?? '' : ''
+  return {
+    ...(whenToUse === '' ? {} : { whenToUse }),
+    ...(args ? { arguments: args } : {}),
+    ...(disallowed ? { disallowedTools: disallowed } : {}),
+    ...(draft.fork ? { context: 'fork' as const, ...(agent === '' ? {} : { agent }) } : {}),
+    ...(alias === '' ? {} : { modelAlias: alias }),
+  }
+}
+
 /** The definition the editor saves (`formatDefinition` turns it into the content). Names and texts are trimmed. */
 export function draftDefinition(draft: CustomizationDraft): ParsedDefinition {
   const name = draft.name.trim()
   const description = draft.description.trim()
   switch (draft.kind) {
-    case 'agent':
-      return { kind: 'agent', fields: { name, description, tools: draft.tools, model: draft.model, instructions: draft.body } }
-    case 'command':
+    case 'agent': {
+      // + Phase 12: the agent's Claude Code keys, only when set.
+      const disallowed = listOrUndefined(draft.disallowedTools)
+      const skills = listOrUndefined(draft.skills)
+      const alias = draft.model === null ? draft.modelAlias?.trim() ?? '' : ''
+      return {
+        kind: 'agent',
+        fields: {
+          name,
+          description,
+          tools: draft.tools,
+          model: draft.model,
+          instructions: draft.body,
+          ...(disallowed ? { disallowedTools: disallowed } : {}),
+          ...(typeof draft.maxTurns === 'number' ? { maxTurns: draft.maxTurns } : {}),
+          ...(skills ? { skills } : {}),
+          ...(draft.color ? { color: draft.color } : {}),
+          ...(alias === '' ? {} : { modelAlias: alias }),
+        },
+      }
+    }
+    case 'command': {
+      const model = draft.model === 'inherit' ? null : draft.model
       return {
         kind: 'command',
         fields: {
           name,
           description,
           argumentHint: draft.argumentHint?.trim() || null,
-          model: draft.model === 'inherit' ? null : draft.model,
+          model,
           allowedTools: draft.tools,
           body: draft.body,
+          ...claudeCommandFields(draft, model),
         },
       }
+    }
     case 'skill': {
       // + Phase 11: the skill keys only when they are not the default (like the parser's fields).
       const hint = draft.argumentHint?.trim() ?? ''
+      // + Phase 12 (ADR-058): a skill's `allowed-tools` and `model`, like a command's.
+      const model = draft.model && draft.model !== 'inherit' ? draft.model : null
       return {
         kind: 'skill',
         fields: {
@@ -578,6 +704,9 @@ export function draftDefinition(draft: CustomizationDraft): ParsedDefinition {
           ...(draft.userInvocable === false ? { userInvocable: false } : {}),
           ...(draft.modelInvocable === false ? { modelInvocable: false } : {}),
           ...(hint === '' ? {} : { argumentHint: hint }),
+          ...(draft.tools ? { allowedTools: [...draft.tools] } : {}),
+          ...(model ? { model } : {}),
+          ...claudeCommandFields(draft, model),
         },
       }
     }
@@ -740,6 +869,10 @@ export function deleteCopy(kind: CustomizationKind, name: string): { title: stri
   return { title: `Delete ${name}?`, description, confirm: `Delete ${KIND_LABEL[kind]}`, toast: `Deleted ${name}` }
 }
 
+/** + Phase 12 (docs/UI.md 9.14): the body help of commands and skills about Claude Code's argument placeholders. */
+// eslint-disable-next-line no-template-curly-in-string -- the placeholder is shown literally.
+export const ARGUMENTS_HELP = '$ARGUMENTS[0] or $0 is the first argument when the file uses them or declares arguments; $name reads a named argument; ${CLAUDE_SKILL_DIR} is the skill\'s folder.'
+
 /** The editor copy per kind (docs/UI.md 9.12): `title` is the kind word of "New {kind}" / "Import {kind}". */
 export const EDITOR_COPY: Readonly<Record<CustomizationKind, { title: string, body: string, bodyHelp: string, save: string }>> = {
   agent: {
@@ -751,13 +884,13 @@ export const EDITOR_COPY: Readonly<Record<CustomizationKind, { title: string, bo
   command: {
     title: 'command',
     body: 'Prompt',
-    bodyHelp: '$ARGUMENTS is the text after the command; $1 to $9 are single words (quotes group words); {{input}} works too. Without a placeholder the text is added at the end.',
+    bodyHelp: `$ARGUMENTS is the text after the command; $1 to $9 are single words (quotes group words); {{input}} works too. Without a placeholder the text is added at the end. ${ARGUMENTS_HELP}`,
     save: 'Save command',
   },
   skill: {
     title: 'skill',
     body: 'Instructions',
-    bodyHelp: 'A personal skill is one file. Put scripts and reference files in a project skill folder.',
+    bodyHelp: `A personal skill is one file. Put scripts and reference files in a project skill folder. ${ARGUMENTS_HELP}`,
     save: 'Save skill',
   },
   style: {
@@ -790,11 +923,12 @@ export const EDITOR_FIELD_COPY: Readonly<Record<CustomizationKind, {
     modelNone: 'The chat\'s model',
     saved: 'Command saved',
   },
+  // + Phase 12 (ADR-058): a skill's Allowed tools and Model work as a command's (9.14).
   skill: {
     descriptionHelp: 'When the agent should load it. It reads this to decide.',
-    toolsLabel: 'Tools',
-    toolsAll: 'All tools the chat allows',
-    modelNone: 'Default sub-agent model',
+    toolsLabel: 'Allowed tools',
+    toolsAll: 'No restriction',
+    modelNone: 'The chat\'s model',
     saved: 'Skill saved',
   },
   style: {
@@ -844,4 +978,258 @@ export function bodyDiagnostics(content: string, body: string, diagnostics: read
   return diagnostics
     .filter(diagnostic => diagnostic.line !== undefined && diagnostic.line >= firstBodyLine)
     .map(diagnostic => ({ ...diagnostic, line: diagnostic.line! - shift }))
+}
+
+// ---------- Phase 12: Claude Code frontmatter fields (ADR-058; docs/UI.md 9.14) ----------
+
+/** The color names of the agent Color select and the row meta, in `AGENT_COLORS` order. */
+export const AGENT_COLOR_LABELS: Readonly<Record<AgentColor, string>> = {
+  red: 'Red',
+  blue: 'Blue',
+  green: 'Green',
+  yellow: 'Yellow',
+  purple: 'Purple',
+  orange: 'Orange',
+  pink: 'Pink',
+  cyan: 'Cyan',
+}
+
+/** The Max turns input as a number: a whole number from 1 to 200, else null (empty or invalid). */
+export function maxTurnsValue(text: string): number | null {
+  const value = text.trim()
+  if (!/^\d{1,4}$/.test(value))
+    return null
+  const turns = Number(value)
+  return turns >= 1 && turns <= DEFINITION_LIMITS.maxTurnsMax ? turns : null
+}
+
+/** The Max turns problem (empty = no limit of its own), else null. */
+export function maxTurnsError(text: string): string | null {
+  if (text.trim() === '' || maxTurnsValue(text) !== null)
+    return null
+  return `Enter a whole number from 1 to ${DEFINITION_LIMITS.maxTurnsMax}.`
+}
+
+/** The Skills problem of an agent (at most 5 preloaded skills), else null. */
+export function skillsError(skills: readonly string[] | null | undefined): string | null {
+  return (skills?.length ?? 0) > DEFINITION_LIMITS.agentSkillsMax ? `Choose at most ${DEFINITION_LIMITS.agentSkillsMax} skills.` : null
+}
+
+/** The When to use problem (at most 1,024 characters), else null. */
+export function whenToUseError(text: string | null | undefined): string | null {
+  return (text?.trim().length ?? 0) > DEFINITION_LIMITS.whenToUseMaxChars ? atMost(DEFINITION_LIMITS.whenToUseMaxChars) : null
+}
+
+// ---------- Phase 12: project files (ADR-056; docs/UI.md 9.14) ----------
+
+/** The kind words of the project file editor's title ("New {kind} in {project}"). */
+export const PROJECT_FILE_KIND_LABEL: Readonly<Record<ProjectFileTarget['kind'], string>> = {
+  agent: 'agent',
+  command: 'command',
+  skill: 'skill',
+  style: 'output style',
+  mcp: '.mcp.json',
+}
+
+/** The note under the project file editor. */
+export const PROJECT_FILE_NOTE = 'Saving never approves hooks or shell lines.'
+
+/**
+ * True for a project row whose file can be edited and deleted from Customize: a project entry whose `path` is an
+ * editable definition file of the entry's kind (`projectDefinitionPathKind`).
+ */
+export function isEditableProjectEntry(entry: Pick<CustomizationEntry, 'kind' | 'source' | 'path'>): boolean {
+  return entry.source === 'project' && !!entry.path && projectDefinitionPathKind(entry.path) === entry.kind
+}
+
+/** The file a project path names in titles: its last segment (`reviewer.md`), a skill as `<folder>/SKILL.md`. */
+export function projectFileName(path: string): string {
+  const segments = path.split('/').filter(segment => segment !== '')
+  const file = segments.at(-1) ?? path
+  return file === 'SKILL.md' && segments.length > 1 ? `${segments.at(-2)}/${file}` : file
+}
+
+/** The editor's title: "Edit {file}", or "New {kind} in {project}" for a new file. */
+export function projectFileTitle(target: Pick<ProjectFileTarget, 'kind' | 'path'>, mode: 'edit' | 'new', projectName: string | null): string {
+  if (mode === 'new')
+    return `New ${PROJECT_FILE_KIND_LABEL[target.kind]} in ${projectName ?? 'this project'}`
+  return `Edit ${projectFileName(target.path)}`
+}
+
+/** The toast after a save: "Saved {path}." and, with pending approvals, "{n} items need your approval.". */
+export function projectSavedText(path: string, pending: number): string {
+  if (pending <= 0)
+    return `Saved ${path}.`
+  return `Saved ${path}. ${pending === 1 ? '1 item needs' : `${pending} items need`} your approval.`
+}
+
+/** The texts of the project file delete confirmation and its toast. */
+export function projectDeleteCopy(path: string): { title: string, description: string, confirm: string, toast: string } {
+  return {
+    title: `Delete ${path}?`,
+    description: 'The file is removed from the project folder. It can\'t be undone here.',
+    confirm: 'Delete file',
+    toast: `Deleted ${path}`,
+  }
+}
+
+/** The starting content of a new definition file of a kind (the parser asks for the missing description). */
+export function newProjectFileContent(kind: Exclude<ProjectFileTarget['kind'], 'mcp'>, name: string): string {
+  const stem = name.trim()
+  // A command's name is its file name; the other kinds name themselves.
+  const nameLine = kind === 'command' || stem === '' ? '' : `name: ${stem}\n`
+  return `---\n${nameLine}description: \n---\n\n`
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * The text the editor shows for `.mcp.json` (docs/UI.md 9.14: the `mcpServers` object as JSON): the object of the
+ * file's `mcpServers` key, pretty-printed; `{}` for a missing file; the raw text when the file is not a JSON object with
+ * an `mcpServers` object (so nothing is hidden).
+ */
+export function mcpServersText(content: string | null): string {
+  if (content === null)
+    return '{}\n'
+  try {
+    const parsed: unknown = JSON.parse(content.replace(/^\uFEFF/, ''))
+    if (isRecord(parsed) && isRecord(parsed.mcpServers))
+      return `${JSON.stringify(parsed.mcpServers, null, 2)}\n`
+  }
+  catch {
+    // Shown as written.
+  }
+  return content
+}
+
+/**
+ * The `mcpServers` object of the editor's `.mcp.json` text, with or without the `{ "mcpServers": … }` wrapper; null for
+ * an empty text (the key is removed). Throws a SyntaxError for text that is not a JSON object.
+ */
+export function mcpServersOf(text: string): Record<string, unknown> | null {
+  if (text.trim() === '')
+    return null
+  const parsed: unknown = JSON.parse(text.replace(/^\uFEFF/, ''))
+  if (!isRecord(parsed))
+    throw new SyntaxError('Expected a JSON object.')
+  return isRecord(parsed.mcpServers) ? parsed.mcpServers : parsed
+}
+
+/** One problem of a project file as the editor lists it. */
+export interface ProjectFileProblem {
+  level: 'error' | 'warning' | 'info'
+  message: string
+}
+
+/** What the project file editor shows beside the raw text: the parsed summary and the shared parsers' diagnostics. */
+export interface ProjectFileCheck {
+  /** "Agent reviewer", "Not allowed: shell", "Max turns 12", …; for `.mcp.json` "{n} servers". */
+  summary: string[]
+  /** An agent's color (shown as a dot and its name after the summary). */
+  color: AgentColor | null
+  /** Every diagnostic, errors first (they block saving). */
+  problems: ProjectFileProblem[]
+  /** The definition diagnostics with a line (lint markers of the raw editor). */
+  markers: DefinitionDiagnostic[]
+  /** True when an error diagnostic blocks saving. */
+  blocked: boolean
+}
+
+function toolsText(label: string, tools: readonly string[] | null | undefined): string | null {
+  if (!tools)
+    return null
+  return `${label}: ${tools.length > 0 ? tools.join(', ') : 'none'}`
+}
+
+function sortedProblems(problems: ProjectFileProblem[]): ProjectFileProblem[] {
+  const rank = { error: 0, warning: 1, info: 2 } as const
+  return [...problems].sort((a, b) => rank[a.level] - rank[b.level])
+}
+
+function definitionSummary(definition: ParsedDefinition): { summary: string[], color: AgentColor | null } {
+  const items: (string | null)[] = []
+  let color: AgentColor | null = null
+  switch (definition.kind) {
+    case 'agent': {
+      const fields = definition.fields
+      items.push(`Agent ${fields.name}`, toolsText('Tools', fields.tools), toolsText('Not allowed', fields.disallowedTools))
+      if (typeof fields.maxTurns === 'number')
+        items.push(`Max turns ${fields.maxTurns}`)
+      if (fields.skills && fields.skills.length > 0)
+        items.push(`Skills: ${fields.skills.join(', ')}`)
+      items.push(fields.model === 'inherit' ? 'Same model as the chat' : fields.model ?? fields.modelAlias ?? null)
+      color = fields.color ?? null
+      break
+    }
+    case 'command':
+    case 'skill': {
+      const fields = definition.fields
+      items.push(definition.kind === 'command' ? `Command /${fields.name}` : `Skill ${fields.name}`)
+      if (definition.kind === 'skill') {
+        const invocation = skillInvocation(definition.fields)
+        if (!invocation.userInvocable)
+          items.push('Not in the slash menu')
+        if (!invocation.modelInvocable)
+          items.push('Only when you run it')
+      }
+      items.push(toolsText('Allowed tools', fields.allowedTools), toolsText('Not allowed', fields.disallowedTools))
+      if (fields.arguments && fields.arguments.length > 0)
+        items.push(`Arguments: ${fields.arguments.join(', ')}`)
+      items.push(fields.model ?? fields.modelAlias ?? null)
+      if (fields.context === 'fork')
+        items.push(`Runs in a sub-agent (${fields.agent ?? 'general'})`)
+      break
+    }
+    case 'style': {
+      const fields = definition.fields
+      items.push(`Output style ${fields.label || fields.name}`, fields.keepCodingInstructions ? 'Keeps coding instructions' : 'Replaces coding instructions')
+      break
+    }
+  }
+  return { summary: items.filter((item): item is string => item !== null && item !== ''), color }
+}
+
+/**
+ * Checks the raw text of a project file with the shared parsers (`parseDefinition`, `parseMcpJson`): the parsed summary
+ * ("Agent reviewer · Not allowed: shell · Max turns 12" and the color; "{n} servers" for `.mcp.json`), every diagnostic
+ * (errors block saving; warnings and info do not) and the lint markers of the raw editor.
+ */
+export function checkProjectFile(kind: ProjectFileTarget['kind'], path: string, text: string): ProjectFileCheck {
+  if (kind === 'mcp') {
+    let servers: Record<string, unknown> | null
+    try {
+      servers = mcpServersOf(text)
+    }
+    catch {
+      return { summary: [], color: null, problems: [{ level: 'error', message: 'This isn\'t valid JSON.' }], markers: [], blocked: true }
+    }
+    const parsed = parseMcpJson(JSON.stringify({ mcpServers: servers ?? {} }))
+    const problems = sortedProblems(parsed.diagnostics.map(diagnostic => ({
+      level: diagnostic.level,
+      message: diagnostic.server ? `${diagnostic.server}: ${diagnostic.message}` : diagnostic.message,
+    })))
+    const count = parsed.servers.length
+    return {
+      summary: [count === 1 ? '1 server' : `${count} servers`],
+      color: null,
+      problems,
+      markers: [],
+      blocked: problems.some(problem => problem.level === 'error'),
+    }
+  }
+  const segments = path.split('/')
+  const fileName = segments.at(-1) ?? ''
+  const folderName = kind === 'skill' ? segments.at(-2) : undefined
+  const parsed = parseDefinition(kind, text, { fileName, ...(folderName ? { folderName } : {}) })
+  const { summary, color } = parsed.definition ? definitionSummary(parsed.definition) : { summary: [], color: null }
+  const problems = sortedProblems(parsed.diagnostics.map(diagnostic => ({ level: diagnostic.level, message: diagnostic.message })))
+  return {
+    summary,
+    color,
+    problems,
+    markers: parsed.diagnostics.filter(diagnostic => diagnostic.line !== undefined),
+    blocked: parsed.definition === null || problems.some(problem => problem.level === 'error'),
+  }
 }

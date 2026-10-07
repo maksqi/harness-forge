@@ -182,3 +182,20 @@ describe('share view helpers', () => {
     expect(sharePageErrorMessage(new HarnessError({ code: 'internal_error', message: 'Broken.' }))).toBe('Broken.')
   })
 })
+
+describe('share snapshots (Phase 12, W12.13-T5)', () => {
+  it('keeps qualified command and tool names and still drops Phase 12 hook records', () => {
+    const blocks = shareMessageBlocks([
+      { type: 'tool', toolName: 'skill', status: 'done', input: { name: 'review-kit:pdf' } },
+      { type: 'data-hook', id: 'hev_sample0000000002', data: { event: 'PreToolUse', outcome: 'allowed', harnessAsked: true, hooks: [{ source: 'project', label: 'Is it safe?', exitCode: null, durationMs: 1, kind: 'prompt', model: 'mock:prompt-hook' }] } } as never,
+      { type: 'data-hook', id: 'hev_sample0000000003', data: { event: 'PermissionRequest', outcome: 'denied' } } as never,
+      { type: 'text', text: 'Done.' },
+    ])
+    expect(blocks.map(block => block.kind)).toEqual(['tool', 'text'])
+    expect(blocks[0]!.kind === 'tool' && blocks[0]!.part.input).toEqual({ name: 'review-kit:pdf' })
+    const message = toUserMessage({ role: 'user', command: { name: 'review-kit:db:migrate' }, parts: [{ type: 'text', text: '/review-kit:db:migrate up' }] }, 'share-message-6')
+    expect(message.metadata?.command).toEqual({ name: 'review-kit:db:migrate' })
+    const bubble = mount(UserMessageBubble, { props: { message } })
+    expect(bubble.get('[data-slot="command-badge"]').text()).toContain('/review-kit:db:migrate')
+  })
+})

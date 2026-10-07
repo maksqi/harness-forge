@@ -47,9 +47,13 @@
 //   `PreparedRun` never holds the placeholder expansion;
 // - then `resolveRunOutputStyle` (`output-style.ts`, W11.6) gives `PreparedRun.outputStyle` for a chat-model run that
 //   calls the model (null for image turns and command replies) and its notices.
-// Phase 12 (C44 stub call sites, ADR-058; W12.7 implements behind them): the command resolutions pass
-// `CommandContext.argumentVars` (`commandArgumentVars`: `CLAUDE_SESSION_ID` = the chat id) for the `expandArguments`
-// options of definition bodies (`argumentOptions`, `commands.ts`; the stub keeps the Phase 10 expansion).
+// Phase 12 (ADR-053 / ADR-058; W12.7 behind the C44 call sites): the command resolutions pass
+// `CommandContext.argumentVars` (`commandArgumentVars`: `CLAUDE_SESSION_ID` = the chat id; `commands.ts` adds
+// `CLAUDE_PROJECT_DIR` from the turn's folder when a body names it) for the `expandArguments` options of definition bodies
+// (`argumentOptions`) and `modelAliases` (the setting) for Claude model names; a Claude model name that does not resolve
+// (`PromptCommandResolution.modelUnavailable`) runs the request's model with the `command-model-unavailable` notice. The
+// turn's tools narrow to the command's `allowed-tools` without its `disallowed-tools` (`turnToolRestrictionFor`: the
+// catalog entry of the invoked name, subtracted from the registered tools; restrict-only).
 import type {
   CatalogModel,
   ChatRequestBody,
@@ -87,7 +91,7 @@ import {
   validationError,
 } from '@harness-forge/shared'
 import { safeValidateUIMessages } from 'ai'
-import { compactNeedsChatModel, resolveCommand, turnToolRestriction } from './commands.ts'
+import { compactNeedsChatModel, resolveCommand, turnToolRestrictionFor } from './commands.ts'
 import { applyCommandExpansions } from './context.ts'
 import { normalizeUserParts } from './files.ts'
 import { isGeneratedImageType } from './generated-files.ts'
@@ -368,6 +372,8 @@ interface PrepareContext {
   serverMessage: boolean
   /** The chat's project folder of this turn, opened at most once (the command expansion host, then the run). */
   turnWorkspace: TurnWorkspace
+  /** Phase 12: the settings of the request (`modelAliases` of Claude model names in definitions). */
+  settings?: Pick<Settings, 'modelAliases'>
 }
 
 /** The part types a server-built carrier message may hold (one kind per carrier). */
@@ -438,7 +444,8 @@ export function commandExpansionHost(deps: Pick<AppDeps, 'env' | 'projects' | 'p
 
 /**
  * The `${NAME}` variables of definition bodies a command resolution of the chat knows (Phase 12, ADR-058;
- * `CommandContext.argumentVars`): `CLAUDE_SESSION_ID` = the chat id (W12.7 adds `CLAUDE_PROJECT_DIR`).
+ * `CommandContext.argumentVars`): `CLAUDE_SESSION_ID` = the chat id (`commands.ts` adds `CLAUDE_PROJECT_DIR` from the
+ * turn's folder, opened only when a body names it).
  */
 export function commandArgumentVars(chatId: string): Readonly<Record<string, string>> {
   return Object.freeze({ CLAUDE_SESSION_ID: chatId })
@@ -466,6 +473,7 @@ async function buildUserMessage(context: PrepareContext): Promise<{ message: Har
     logger: context.logger,
     deferExpansion: true,
     argumentVars: commandArgumentVars(body.chatId),
+    modelAliases: context.settings?.modelAliases ?? null,
   })
   let command = resolved
   let expand: PendingExpansion | null = null
@@ -501,6 +509,7 @@ async function regeneratedCommand(context: PrepareContext, userMessage: HarnessU
     signal: context.run.signal,
     catalog: context.catalog,
     argumentVars: commandArgumentVars(context.body.chatId),
+    modelAliases: context.settings?.modelAliases ?? null,
   })
   return resolution?.kind === 'prompt' ? null : resolution
 }
@@ -638,6 +647,18 @@ export async function resolveTurnModel(
 }
 
 /**
+ * The turn model of a new message plus the `command-model-unavailable` notice of a Claude model name that did not
+ * resolve (Phase 12, `PromptCommandResolution.modelUnavailable`: the request's model answers).
+ */
+export function withAliasNotice(model: TurnModel, command: CommandResolution | null): TurnModel {
+  if (command?.kind !== 'prompt' || command.modelUnavailable === undefined || command.invocation.modelRef !== undefined)
+    return model
+  if (model.notices.some(notice => notice.code === 'command-model-unavailable'))
+    return model
+  return { ...model, notices: [...model.notices, NOTICES.commandModelUnavailable(command.modelUnavailable)] }
+}
+
+/**
  * Validates and plans the request. Throws `validation_error`, `not_found`, `conflict`, `provider_not_configured` (and
  * the other resolution errors) before anything but the chat row is written.
  */
@@ -648,7 +669,7 @@ export async function prepareRun(deps: AppDeps, run: Run, body: ChatRequestBody,
     ...planned,
     workspace: opened.workspace,
     notices: [...planned.notices, ...opened.notices],
-    turnRestriction: turnToolRestriction(planned.history),
+    turnRestriction: turnToolRestrictionFor(planned.history, { catalog: planned.catalog, toolNames: () => registeredToolNames(deps, logger) }),
   }
   // Phase 11 (ADR-048): `SessionStart` / `UserPromptSubmit`; a block stores nothing (the chat row of this request goes).
   // W11.17: the command's spans and `@path` reads run only after them (a refusal of the spans removes the row too).
@@ -724,6 +745,17 @@ async function withCommandExpansion(prepared: PreparedRun, expand: PendingExpans
   return replaceUserMessage(prepared, message, await finishCommandExpansion(message, expand))
 }
 
+/** The names of the registered tools (the tool set a `disallowed-tools` list is subtracted from; Phase 12). */
+function registeredToolNames(deps: Pick<AppDeps, 'registry'>, logger: Logger): string[] {
+  try {
+    return deps.registry.tools.list().map(tool => tool.definition.name)
+  }
+  catch (error) {
+    logger.warn('cannot list the registered tools', { err: error })
+    return []
+  }
+}
+
 /** Removes the chat row a blocked request created (Phase 11, open point 14); a failure is logged. */
 async function removeCreatedChat(deps: Pick<AppDeps, 'chats'>, chatId: string, logger: Logger): Promise<void> {
   try {
@@ -760,7 +792,7 @@ async function planRun(deps: AppDeps, run: Run, body: ChatRequestBody, logger: L
     throw badRequest('An image model cannot continue a tool call. Pick a chat model to answer the pending tool call.', ['modelRef'])
   const settings = await deps.settings.get()
   const turn = turnWorkspace(deps, chat.projectId)
-  const context: PrepareContext = { deps, run, body, request, logger, catalog, serverMessage, turnWorkspace: turn }
+  const context: PrepareContext = { deps, run, body, request, logger, catalog, serverMessage, turnWorkspace: turn, settings }
   const turnModel = (override: string | undefined, continued: HarnessUIMessage | null = null): Promise<TurnModel> =>
     resolveTurnModel(deps, { target: request, imageOptions: body.imageOptions }, override, { signal: run.signal, logger, continued })
   let planned: PlannedHistory & { expand: PendingExpansion | null }
@@ -804,7 +836,7 @@ async function planHistory(
       // Only the approvals of this path: those of other versions stay pending.
       const superseded = supersedeApprovals(path)
       const decides = command?.kind === 'prompt' ? null : command
-      const model = await turnModel(command?.kind === 'prompt' ? command.invocation.modelRef : undefined)
+      const model = withAliasNotice(await turnModel(command?.kind === 'prompt' ? command.invocation.modelRef : undefined), command)
       checkCompactTarget(decides, model.target.kind)
       if (expand !== null && model.target.kind !== 'chat') {
         // An image turn runs no prompt hook and its prompt is the expansion: the spans and reads run now (W11.17).

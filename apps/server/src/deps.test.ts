@@ -1021,12 +1021,15 @@ describe('phase 12 skeleton (marketplaces, the home-folder import, project defin
     expect(list.items).toEqual([])
     expect(list.updates).toEqual([])
     expect(list.suggestions.map(suggestion => suggestion.name)).toEqual(['claude-plugins-official'])
-    await expect(t.deps.marketplaces.add({ source: { type: 'github', repo: 'acme/tools' } })).rejects.toMatchObject({ code: 'not_implemented' })
+    // W12.2: the marketplace service is real; a folder source is read without any network (a missing folder is 404).
+    await expect(t.deps.marketplaces.add({ source: { type: 'path', path: join(t.env.dataDir, 'no-marketplace') } })).rejects.toMatchObject({ code: 'not_found' })
     // createTestApp points HF_CLAUDE_HOME into its temp data directory (never the real ~/.claude): missing there.
     expect(t.env.claudeHome).toBe(join(t.env.dataDir, 'claude-home'))
     expect(await t.deps.claudeImport.home()).toEqual({ available: false, reason: 'missing', path: t.env.claudeHome })
-    await expect(t.deps.claudeImport.scan()).rejects.toMatchObject({ code: 'not_implemented' })
-    await expect(t.deps.projectDefinitions.read('prj_AAAAAAAAAAAAAAAA', '.claude/agents/a.md')).rejects.toMatchObject({ code: 'not_implemented' })
+    // W12.3: the scan is real (the folder is missing there: 404).
+    await expect(t.deps.claudeImport.scan()).rejects.toMatchObject({ code: 'not_found' })
+    // W12.4: the project definition editor is real (an unknown project is 404).
+    await expect(t.deps.projectDefinitions.read('prj_AAAAAAAAAAAAAAAA', '.claude/agents/a.md')).rejects.toMatchObject({ code: 'not_found' })
   })
 
   it('no boot step (BOOT_STEPS unchanged): startDeps never touches them; shutdown stops claudeImport and marketplaces only', async () => {

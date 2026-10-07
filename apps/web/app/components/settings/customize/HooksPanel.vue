@@ -11,9 +11,14 @@
 // hook), Review… (the trust dialog focused on the item) and Open plugin. CustomizeSettings renders it for `?tab=hooks`;
 // the page header's New hook / Import… reach it through the exposed `create()` / `import()`.
 // Props, exposes and the root test id are frozen from Gate P11-0b (C39 stub); implementation W11.8.
-// Phase 12 (ADR-056, ADR-057; C46, W12.12 owns it in P12-A): with a project selected, project command rows offer Edit…
-// (`HOOK_ROW_CONTEXT`), which opens HookEditor in project mode (`target`: the settings file and the event; the handler's
-// position is found by W12.12); Review plugin… of an untrusted plugin's hook opens the plugin's TrustDialog.
+// Phase 12 (ADR-056, ADR-057; C46, W12.12): with a project selected, project rows whose position is known offer Edit…
+// (`HOOK_ROW_CONTEXT`: HookEditor in project mode, `target` = the settings file, the event and the handler's position) and
+// Delete… ("Delete this hook?" / "It's removed from {path}." → `hooks.saveProjectHook(projectId, target, null)`, no
+// password; a 409 `stale` toasts "{file} changed on disk after you opened it." and refetches); New hook offers Where
+// (Personal or the project's settings files) while the project folder is available; Review plugin… of an untrusted
+// plugin's hook opens the plugin's TrustDialog; the project section's file problems list `unknown-event` and
+// `unsupported-type` too (`hookFileNotice`). `workspace.changed` (a settings file written by the agent or saved from
+// the UI) reaches the hooks store while the panel is shown (it marks the project's scope stale).
 import type { HookEntry, PersonalHook } from '@harness-forge/shared'
 import type { HookAction, HookDraft, ProjectHookTarget } from './hooks'
 import { FileUpIcon, InfoIcon, PlusIcon, TriangleAlertIcon } from '@lucide/vue'
@@ -30,10 +35,11 @@ import ConfirmPasswordDialog from '~/components/common/ConfirmPasswordDialog.vue
 import TrustDialog from '~/components/plugins/install/TrustDialog.vue'
 import ProjectTrustDialog from '~/components/projects/trust/ProjectTrustDialog.vue'
 import { isFreshAuthCancelled, useFreshAuth } from '~/composables/useFreshAuth'
+import { useServerEvents } from '~/composables/useServerEvents'
 import { hookScopeKey, useHooksStore } from '~/stores/hooks'
 import { usePluginsStore } from '~/stores/plugins'
 import { useSettingsStore } from '~/stores/settings'
-import { hasErrorCode } from '~/utils/errors'
+import { hasErrorCode, toHarnessError } from '~/utils/errors'
 import { testIds } from '~/utils/testids'
 import { toastError } from '../notify'
 import { useRouter } from '../nuxt-imports'
@@ -41,7 +47,7 @@ import SettingsLoadError from '../SettingsLoadError.vue'
 import { HOOK_ROW_CONTEXT } from './customize-context'
 import HookEditor from './HookEditor.vue'
 import HookImportDialog from './HookImportDialog.vue'
-import { draftFromHook, HOOK_COPY, hookDeleteCopy, hookJson } from './hooks'
+import { draftFromHook, HOOK_COPY, hookDeleteCopy, hookFileNotice, hookJson, staleFileText } from './hooks'
 import HookSection from './HookSection.vue'
 
 const props = defineProps<{ projectId: string | null, projectName: string | null }>()
@@ -87,10 +93,13 @@ const projectIssue = computed(() => {
   return `The project folder is unavailable: ${lead}`
 })
 
-/** Problems of the settings files ("{file}: {message}"); ignored fields stay quiet. */
+/**
+ * Problems of the settings files ("{file}: {message}"; + Phase 12: unknown events and unsupported handler types too);
+ * ignored fields stay quiet.
+ */
 const fileNotices = computed(() => (list.value?.diagnostics ?? [])
-  .filter(diagnostic => diagnostic.level !== 'info')
-  .map(diagnostic => (diagnostic.file ? `${diagnostic.file}: ${diagnostic.message}` : diagnostic.message)))
+  .map(diagnostic => hookFileNotice(diagnostic))
+  .filter((notice): notice is string => notice !== null))
 
 const loading = ref(false)
 const loadError = shallowRef<unknown>(null)
@@ -122,6 +131,10 @@ watch(() => hooks.stale[scope.value], (isStale) => {
   if (isStale)
     hooks.fetch(props.projectId).catch(() => {})
 })
+
+// + Phase 12: a settings file written on disk (by the agent, a project file editor or this tab) makes the project's rows
+// stale; the event stream sends `workspace.changed` only to the workspace store, so the panel forwards it.
+useServerEvents().on('workspace.changed', event => hooks.applyEvent(event))
 
 onMounted(() => {
   if (!settings.loaded)
@@ -190,7 +203,13 @@ provide(HOOK_ROW_CONTEXT, { editProjectHooks: computed(() => props.projectId !==
 const trustPluginId = ref<string | null>(null)
 
 function create(): void {
-  openEditor('new')
+  // + Phase 12: with an available project folder, Where offers the project's settings files (the editor reads only the
+  // project id of this target).
+  const scan = project.value
+  const target: ProjectHookTarget | null = props.projectId && scan?.available
+    ? { projectId: props.projectId, path: '', event: 'PreToolUse', groupIndex: null, handlerIndex: null }
+    : null
+  openEditor('new', { target })
 }
 
 function importHooks(): void {
@@ -201,11 +220,29 @@ function importHooks(): void {
 function hookOf(entry: HookEntry): PersonalHook | null {
   if (entry.kind !== 'command' || entry.source !== 'personal' || !entry.id)
     return null
-  const base = { id: entry.id, event: entry.event, matcher: entry.matcher, timeout: entry.timeout, enabled: entry.state !== 'off', createdAt: 0, updatedAt: 0 }
-  // Phase 12 (ADR-057; C40 compile fix): a prompt hook is listed with its prompt and model.
+  const base = {
+    id: entry.id,
+    event: entry.event,
+    matcher: entry.matcher,
+    timeout: entry.timeout,
+    enabled: entry.state !== 'off',
+    createdAt: 0,
+    updatedAt: 0,
+    ...(entry.statusMessage === undefined ? {} : { statusMessage: entry.statusMessage }),
+    ...(entry.if === undefined ? {} : { if: entry.if }),
+  }
+  // Phase 12 (ADR-057): a prompt hook is listed with its prompt, model and continueOnBlock; a command hook with its
+  // exec-form arguments and `async`.
   if (entry.type === 'prompt')
-    return { ...base, type: 'prompt', prompt: entry.prompt ?? '', model: entry.model ?? null }
-  return { ...base, type: 'command', command: entry.command }
+    return { ...base, type: 'prompt', prompt: entry.prompt ?? '', model: entry.model ?? null, ...(entry.continueOnBlock === undefined ? {} : { continueOnBlock: entry.continueOnBlock }) }
+  return { ...base, type: 'command', command: entry.command, ...(entry.args === undefined ? {} : { args: entry.args }), ...(entry.async === undefined ? {} : { async: entry.async }) }
+}
+
+/** + Phase 12: where a project row's handler is in its settings file (null without a known position). */
+function projectTargetOf(entry: HookEntry): ProjectHookTarget | null {
+  if (!props.projectId || entry.source !== 'project' || entry.kind !== 'command' || !entry.path || !entry.position)
+    return null
+  return { projectId: props.projectId, path: entry.path, event: entry.event, groupIndex: entry.position[0], handlerIndex: entry.position[1] }
 }
 
 // ---------- row actions ----------
@@ -252,9 +289,43 @@ function onDeleteOpenChange(value: boolean): void {
   deleteOpen.value = value
 }
 
+/** + Phase 12: removes a project row's handler from its settings file (no password; saving never approves). */
+async function deleteProjectHook(target: ProjectHookTarget): Promise<void> {
+  deleting.value = true
+  try {
+    await hooks.saveProjectHook(target.projectId, target, null)
+    deleteOpen.value = false
+    toast.success(HOOK_COPY.deleted!)
+    await hooks.fetch(props.projectId).catch(() => {})
+    await nextTick()
+    focusNew()
+  }
+  catch (error) {
+    deleteOpen.value = false
+    const failure = toHarnessError(error)
+    if (failure.code === 'conflict' && (failure.details as { reason?: unknown } | undefined)?.reason === 'stale') {
+      toast.error(staleFileText(target.path))
+      refresh()
+    }
+    else {
+      toastError(error)
+    }
+  }
+  finally {
+    deleting.value = false
+  }
+}
+
 async function confirmDelete(): Promise<void> {
   const entry = deleteTarget.value
-  if (!entry?.id || deleting.value)
+  if (!entry || deleting.value)
+    return
+  const projectTarget = entry.source === 'project' ? projectTargetOf(entry) : null
+  if (projectTarget) {
+    await deleteProjectHook(projectTarget)
+    return
+  }
+  if (!entry.id)
     return
   const id = entry.id
   deleting.value = true
@@ -304,8 +375,9 @@ function onAction(action: HookAction, entry: HookEntry): void {
   switch (action) {
     case 'edit': {
       if (entry.source === 'project') {
-        if (props.projectId && entry.kind === 'command' && entry.path)
-          openEditor('project', { draft: draftFromHook(entry), target: { projectId: props.projectId, path: entry.path, event: entry.event, groupIndex: null, handlerIndex: null } })
+        const target = projectTargetOf(entry)
+        if (target)
+          openEditor('project', { draft: draftFromHook(entry), target })
         break
       }
       const hook = hookOf(entry)
@@ -327,7 +399,7 @@ function onAction(action: HookAction, entry: HookEntry): void {
       void copyJson(entry)
       break
     case 'delete':
-      if (entry.id) {
+      if (entry.id || projectTargetOf(entry)) {
         deleteTarget.value = entry
         deleteOpen.value = true
       }

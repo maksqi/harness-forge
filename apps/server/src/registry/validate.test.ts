@@ -231,7 +231,7 @@ describe('validateAgentDefinition (plugin API 1.4.0, ADR-045)', () => {
     ['tools.0', { tools: ['mcp__*'] }],
     ['tools.0', { tools: ['*'] }],
     ['tools.0', { tools: [42] }],
-    ['model', { model: 'sonnet' }],
+    ['model', { model: 'my model' }],
     ['model', { model: '' }],
     ['model', { model: ':model' }],
     ['model', { model: 'provider:' }],
@@ -254,7 +254,7 @@ describe('validateAgentDefinition (plugin API 1.4.0, ADR-045)', () => {
   })
 
   it('refuses unknown keys and non-objects', () => {
-    expect(agentFailure(agent({ color: 'blue' }))).toMatchObject({ code: 'validation_error', message: expect.stringContaining('color') })
+    expect(agentFailure(agent({ colour: 'blue' }))).toMatchObject({ code: 'validation_error', message: expect.stringContaining('colour') })
     for (const value of [null, 'reviewer', 42, ['reviewer']])
       expect(agentFailure(value)).toMatchObject({ code: 'validation_error', message: 'An agent definition must be an object.' })
   })

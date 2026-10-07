@@ -22,8 +22,11 @@
 // Nothing else is ever read: no secrets, credentials, password, plugins, MCP servers, model or tool preferences, share
 // links, usage rows, projects, checkpoints, shell rules, (Phase 10) background tasks (a delivered result stays in its
 // message, so the chat exports carry it) or (Phase 11, ADR-048 … ADR-050) personal hooks (`hooks`), project approvals
-// (`project_trust`) and project MCP variables (secret scope `project:<projectId>`): a crafted backup must not make
-// anything run. `data-hook` parts are chat content and stay in their messages. A chat deleted during the export is left out; a blob that is missing or no
+// (`project_trust`) and project MCP variables (secret scope `project:<projectId>`), nor (Phase 12, ADR-053 … ADR-057)
+// marketplaces (`marketplaces`), Claude Code plugins (their rows, folders and trust pins), hook transcripts
+// (`<dataDir>/transcripts`) and home-folder import plans (in memory only): a crafted backup must not make anything
+// run. The list of what is written is explicit (above), so a new table or folder never joins a backup by accident.
+// `data-hook` parts are chat content and stay in their messages. A chat deleted during the export is left out; a blob that is missing or no
 // longer matches its sha256 is left out of the index (the import then reports it missing); the personal definitions
 // are read after the attachments, and when that read fails the backup goes on without them (`includes.customizations:
 // false`, a warning in the log). A cancel (HEAD, a client that went away) terminates the zip and releases the open

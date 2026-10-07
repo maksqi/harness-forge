@@ -61,9 +61,24 @@
 // a global MCP server its project shadows.
 // Phase 12 (C44 seams, ADR-057 / ADR-058; W12.6 implements behind them): before step 0 a child with hooks runs
 // `SubagentStart` (`hooks.subagentStart({ id: <parent task call id>, type }, signal)`) and its context joins the first
-// user message (`childFirstMessage`, `./host.ts`); the child spec (`ChildAgentSpec`; `childSpec`, the C44 stub answers
-// `DEFAULT_CHILD_SPEC`) sets the step limit (`childMaxSteps`), the preloaded skills text (after the agent's body) and the
-// `disallowedTools` of `childTools`. With the default spec and no hooks every child runs as in v1.7.
+// user message (`childFirstMessage`, `./host.ts`); the child spec (`ChildAgentSpec`, `childSpec`) sets the step limit
+// (`childMaxSteps`), the preloaded skills text (after the agent's body) and the `disallowedTools` of `childTools`. With
+// the default spec (every builtin, every v1.7 agent) and no hooks every child runs as in v1.7.
+// W12.6 (ADR-057 / ADR-058):
+// - `childSpec` reads the loaded agent definition: `maxTurns` (the child's steps are `min(subagentMaxSteps, maxTurns)`,
+//   `childMaxSteps`), `disallowedTools` (harness names, a Claude specifier already widened to its whole tool by the
+//   shared parser; removed before `tools` narrows the set: restrict-only) and the `skills` preload (at most
+//   `LIMITS.agentSkillsPreloadMax` names, each looked up in the run's catalog snapshot exactly like the `skill` tool
+//   does, its body read again through `customizations.load`, the whole text at most `LIMITS.agentSkillsPreloadBytes`
+//   UTF-8 bytes, appended to the child's instructions after the agent's body). A skill that is missing, turned off or
+//   unreadable is skipped (names and counts at debug; bodies never logged). Builtins keep `DEFAULT_CHILD_SPEC`.
+// - A custom agent whose `model` is a Claude model name (`modelAlias`: `sonnet`, `opus`, …; plugin agents included) runs
+//   on the model `resolveClaudeModel` names (the setting `modelAliases`); an unmapped name falls back to the default
+//   child model with a warning (the alias itself only at debug).
+// - `SubagentStop` carries the child's agent (`ChildHooks.agent`: `agent_id` = the parent's `task` call id, `agent_type`
+//   = the resolved type), so its matchers test the agent type and its Claude Code names; a prompt `SubagentStop` hook's
+//   `ok: false` continues the child for one more round unless `impossible` (the shared `promptHookOutcome` turns it
+//   into a block or not), within the Phase 11 cap of `LIMITS.subagentStopContinuationsMax` rounds.
 import type { AgentDefinitionFields, CustomizationEntry, RunOrigin, Settings, TaskAgent, TaskInput, TaskOutput, TaskStatus, TaskType, ToolMode } from '@harness-forge/shared'
 import type { ModelMessage, TextStreamPart, ToolSet } from 'ai'
 import type { Logger } from '../../logger.ts'
@@ -78,6 +93,7 @@ import type { ChildHooks } from '../hooks.ts'
 import type { StepPiece } from '../steps.ts'
 import type { ChildAgentSpec, ChildSession } from './host.ts'
 import type { ChildProjectTools } from './tools.ts'
+import { Buffer } from 'node:buffer'
 import { AGENT_TYPE_ALIASES, hookModelText, isHarnessError, LIMITS } from '@harness-forge/shared'
 import { isStepCount, streamText } from 'ai'
 import { BUILTIN_AGENT_DEFINITIONS, builtinAgentDefinition } from '../../builtin-plugins/core-agent/agents.ts'
@@ -87,7 +103,9 @@ import { createContextGuard } from '../compaction/guard.ts'
 import { abortReason, isAbortError, mapRunError } from '../errors.ts'
 import { hookModelMessage } from '../hooks.ts'
 import { SUBAGENT_INSTRUCTIONS_MARKER } from '../markers.ts'
+import { resolveClaudeModel } from '../model-aliases.ts'
 import { buildRunParams, joinInstructions, orderAgentTypes } from '../params.ts'
+import { capUtf8, skillBody } from '../skills.ts'
 import { createPrepareStep, noopStepPiece } from '../steps.ts'
 import { RunTracker, toMessageUsage } from '../usage.ts'
 import { childFirstMessage, childMaxSteps, DEFAULT_CHILD_SPEC } from './host.ts'
@@ -369,6 +387,34 @@ async function resolveAgentModel(session: ChildSession, parent: ResolvedModel, d
   return resolveChildModel(session, parent, signal)
 }
 
+/**
+ * The model a custom agent declares (W12.6, ADR-058): its `model` (`inherit` or a `provider:model` ref) as it is; else a
+ * Claude model name (`modelAlias`) through `resolveClaudeModel` (the setting `modelAliases`); null = the default child
+ * model (no model, or a Claude name without a model: a warning, the name itself only at debug). Rejects only on abort.
+ */
+export async function agentModelRef(session: ChildSession, definition: Pick<AgentDefinitionFields, 'model' | 'modelAlias'>, agentType: string, signal: AbortSignal): Promise<string | null> {
+  if (definition.model !== null)
+    return definition.model
+  const alias = typeof definition.modelAlias === 'string' ? definition.modelAlias.trim() : ''
+  if (alias === '')
+    return null
+  const { deps, logger, prepared } = session.ctx
+  let ref: string | null = null
+  try {
+    ref = await resolveClaudeModel(alias, { modelAliases: prepared.settings.modelAliases, providers: deps.providers, signal })
+  }
+  catch (error) {
+    if (signal.aborted)
+      throw error
+    logger.debug('a Claude model name could not be resolved', { agentType, alias, ...(isHarnessError(error) ? { code: error.code } : {}) })
+  }
+  if (typeof ref === 'string' && ref !== '')
+    return ref
+  logger.warn('the agent\'s Claude model name has no model; the default model runs the sub-agent', { agentType })
+  logger.debug('the unmapped Claude model name of an agent', { agentType, alias })
+  return null
+}
+
 /** The child's model: `subagentModelRef` when set and resolvable, else the run model (see the module comment). */
 async function resolveChildModel(session: ChildSession, parent: ResolvedModel, signal: AbortSignal): Promise<ResolvedModel> {
   const ref = session.ctx.prepared.settings.subagentModelRef
@@ -462,6 +508,8 @@ interface ChildHost {
   readonly toolCallId: string
   /** The parent run's project MCP tools (shadowed global servers, project server tools), or null. */
   readonly projectTools: ChildProjectTools | null
+  /** The run's catalog snapshot (W12.6: the skills an agent preloads). */
+  readonly catalog: CustomizationCatalog
 }
 
 /** The control of one child: its signal, its slot and how an interruption reads. */
@@ -541,15 +589,108 @@ async function loadAgent(session: ChildSession, choice: AgentChoice, signal: Abo
   }
 }
 
+/** The first line of the preloaded skills text (W12.6). */
+export const PRELOADED_SKILLS_HEADER = '# Preloaded skills'
+
+/** The line after the header: how the child reads the skills below it. */
+export const PRELOADED_SKILLS_INTRO = 'Your agent definition preloads these skills. Follow their instructions where they apply to your task.'
+
+/** The heading of one preloaded skill. */
+export function preloadedSkillHeading(name: string): string {
+  return `## Skill: ${name}`
+}
+
+/** The identity of a catalog entry (a bare and a qualified name may resolve to the same skill). */
+function entryIdentity(entry: Pick<CustomizationEntry, 'kind' | 'source' | 'name' | 'path' | 'pluginId'>): string {
+  return `${entry.kind}\u0000${entry.source}\u0000${entry.name}\u0000${entry.path ?? ''}\u0000${entry.pluginId ?? ''}`
+}
+
 /**
- * The child spec of an agent (Phase 12, ADR-058; C44 stub with its final signature): W12.6 computes `maxTurns`, the
- * preloaded `skills` text (bodies through `customizations.load`, ≤ `LIMITS.agentSkillsPreloadBytes`) and
- * `disallowedTools` from `definition` (null for a builtin). The stub answers `DEFAULT_CHILD_SPEC`. Rejects only when
+ * The preloaded skills text of an agent (W12.6, ADR-058): the first `LIMITS.agentSkillsPreloadMax` names of `names`,
+ * each the active skill of `catalog` (the run's snapshot, `catalog.skill(name)` as the `skill` tool reads it), its body
+ * read again (`customizations.load`) and expanded like a skill the model loads (`skillBody`, no arguments); the whole
+ * text at most `LIMITS.agentSkillsPreloadBytes` UTF-8 bytes (cut at a character boundary, later skills dropped). Missing,
+ * invalid or unreadable skills are skipped. null when no skill was preloaded. Bodies are never logged; rejects only when
  * `signal` aborts.
  */
-export async function childSpec(_session: ChildSession, _choice: AgentChoice, _definition: AgentDefinitionFields | null, signal: AbortSignal): Promise<ChildAgentSpec> {
+export async function preloadedSkillsText(session: ChildSession, names: readonly string[], catalog: CustomizationCatalog | null, signal: AbortSignal, agentType: string): Promise<string | null> {
   signal.throwIfAborted()
-  return DEFAULT_CHILD_SPEC
+  const wanted = names.filter(name => typeof name === 'string' && name.trim() !== '').slice(0, LIMITS.agentSkillsPreloadMax)
+  if (wanted.length === 0)
+    return null
+  const { deps, logger } = session.ctx
+  if (catalog === null) {
+    logger.debug('no catalog: the agent\'s skills are not preloaded', { agentType, skills: wanted.length })
+    return null
+  }
+  const budget = LIMITS.agentSkillsPreloadBytes
+  let text = `${PRELOADED_SKILLS_HEADER}\n\n${PRELOADED_SKILLS_INTRO}`
+  const seen = new Set<string>()
+  let preloaded = 0
+  let skipped = 0
+  let cut = false
+  for (const name of wanted) {
+    const entry = catalog.skill(name.trim().toLowerCase())
+    if (entry === null || entry.kind !== 'skill') {
+      skipped += 1
+      continue
+    }
+    // A bare and a qualified name of the same skill preload it once.
+    if (seen.has(entryIdentity(entry)))
+      continue
+    seen.add(entryIdentity(entry))
+    let body: string
+    try {
+      const loaded = await deps.customizations.load(entry, signal)
+      if (loaded.definition.kind !== 'skill') {
+        skipped += 1
+        continue
+      }
+      body = skillBody(loaded.definition.fields.content, loaded.definition.fields.arguments, {}).trim()
+    }
+    catch (error) {
+      if (signal.aborted)
+        throw error
+      skipped += 1
+      logger.debug('a preloaded skill could not be read; it is skipped', { agentType, skill: entry.name, ...(isHarnessError(error) ? { code: error.code } : {}) })
+      continue
+    }
+    const next = `${text}\n\n${preloadedSkillHeading(entry.name)}${body === '' ? '' : `\n\n${body}`}`
+    preloaded += 1
+    if (Buffer.byteLength(next, 'utf8') > budget) {
+      text = capUtf8(next, budget).text
+      cut = true
+      break
+    }
+    text = next
+  }
+  logger.debug('agent skills preloaded', { agentType, preloaded, skipped, cut })
+  return preloaded === 0 ? null : text
+}
+
+/** `disallowedTools` of a definition as the child's tool filter: the non-empty names, or null for none. */
+function disallowedOf(definition: AgentDefinitionFields): readonly string[] | null {
+  const list = Array.isArray(definition.disallowedTools) ? definition.disallowedTools.filter(name => typeof name === 'string' && name.trim() !== '') : []
+  return list.length === 0 ? null : [...list]
+}
+
+/**
+ * The child spec of an agent (Phase 12, ADR-058; C44 signature, W12.6 implementation; see the module comment):
+ * `maxTurns`, the preloaded `skills` text (`preloadedSkillsText` over `catalog`, the run's catalog snapshot; the
+ * optional trailing parameter is a W12.6 addition: without it no skill is preloaded) and `disallowedTools` from
+ * `definition`; `DEFAULT_CHILD_SPEC` for a builtin (null definition) and for a definition that sets none of them.
+ * Rejects only when `signal` aborts.
+ */
+export async function childSpec(session: ChildSession, choice: AgentChoice, definition: AgentDefinitionFields | null, signal: AbortSignal, catalog: CustomizationCatalog | null = null): Promise<ChildAgentSpec> {
+  signal.throwIfAborted()
+  if (definition === null)
+    return DEFAULT_CHILD_SPEC
+  const maxTurns = typeof definition.maxTurns === 'number' && Number.isInteger(definition.maxTurns) ? definition.maxTurns : null
+  const disallowedTools = disallowedOf(definition)
+  const skillsText = await preloadedSkillsText(session, definition.skills ?? [], catalog, signal, choice.name)
+  if (maxTurns === null && disallowedTools === null && skillsText === null)
+    return DEFAULT_CHILD_SPEC
+  return { maxTurns, skillsText, disallowedTools }
 }
 
 /** What `subagentStopFeedback` needs of the round that would complete. */
@@ -569,11 +710,18 @@ interface SubagentStopRound {
  * of a block (`hookModelText` of a `continued` record: `<hook-feedback event="SubagentStop">`), or null when the child
  * may end (no block, `continue: false`, a hook failure). Nothing is stored (`ChildHooks` only logs its records); the
  * reason is never logged. Rejects only on an abort of `signal`.
+ * W12.6 (ADR-057): the input carries the child's agent (`hooks.agent`, named by `subagentStart`: `agent_id` /
+ * `agent_type`, the matcher subject); a prompt hook's `ok: false` is a block (one more round) unless `impossible`.
  */
 export async function subagentStopFeedback(hooks: ChildHooks, input: SubagentStopRound, signal: AbortSignal, logger: Logger): Promise<ModelMessage | null> {
   let result: HookEventResult
   try {
-    result = await hooks.subagentStop({ stopHookActive: input.round > 0, task: { callId: input.callId, input: input.task, output: input.report } }, signal)
+    const agent = hooks.agent
+    result = await hooks.subagentStop({
+      stopHookActive: input.round > 0,
+      task: { callId: input.callId, input: input.task, output: input.report },
+      ...(agent === null ? {} : { agent }),
+    }, signal)
   }
   catch (error) {
     if (signal.aborted)
@@ -637,14 +785,14 @@ async function* executeChild(host: ChildHost, task: TaskInput, choice: AgentChoi
 
     model = definition === null
       ? await resolveChildModel(session, host.model, signal)
-      : await resolveAgentModel(session, host.model, definition.model, choice.name, signal)
+      : await resolveAgentModel(session, host.model, await agentModelRef(session, definition, choice.name, signal), choice.name, signal)
     progress.start(model.modelRef, now())
     yield progress.snapshot('running')
 
     const settings = session.ctx.prepared.settings
     const mode = childToolMode(choice.base, host.toolMode)
     // Phase 12 (ADR-058): what the agent definition adds (`maxTurns`, the skills preload, `disallowedTools`).
-    const spec = await childSpec(session, choice, definition, signal)
+    const spec = await childSpec(session, choice, definition, signal, host.catalog)
     const maxSteps = childMaxSteps(settings.subagentMaxSteps, spec)
     // Phase 11 (C37, ADR-048): the child's hooks (PreToolUse, PostToolUse; SubagentStop is W11.2's), none without a host
     // handle.
@@ -819,6 +967,7 @@ async function* runChild(run: ChildRun, task: TaskInput, options: RunSubagentOpt
     scope: input.scope,
     toolCallId: options.toolCallId,
     projectTools: input.projectTools ?? null,
+    catalog: input.catalog,
   }
   try {
     yield* executeChild(host, task, choice, {
@@ -969,6 +1118,7 @@ async function* detachedChild(input: DetachedChildInput): AsyncGenerator<TaskOut
     scope: input.scope,
     toolCallId: input.toolCallId,
     projectTools: input.projectTools ?? null,
+    catalog: input.catalog,
   }
   yield* executeChild(host, input.task, choice, {
     signal,

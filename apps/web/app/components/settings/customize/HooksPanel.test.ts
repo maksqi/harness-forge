@@ -1,19 +1,23 @@
-// HooksPanel (docs/UI.md 9.13, 8.4, 10.8; W11.8-T3): the listing per scope, the Run hooks switch, the server-switch
-// alerts, the sections, and the row actions: edit / duplicate / copy to personal (the editor modes), turn off (no
-// password) and on (fresh auth), copy as JSON, delete with the confirmation and focus, review (the trust dialog) and
-// open plugin; the exposes open the editor and the import.
+// HooksPanel (docs/UI.md 9.13, 9.14, 8.4, 10.8; W11.8-T3, W12.12-T2): the listing per scope, the Run hooks switch, the
+// server-switch alerts, the sections, and the row actions: edit / duplicate / copy to personal (the editor modes), turn
+// off (no password) and on (fresh auth), copy as JSON, delete with the confirmation and focus, review (the trust dialog)
+// and open plugin; the exposes open the editor and the import. Phase 12: project rows edited and deleted in their
+// settings file, Where for a new hook, Review plugin…, the unknown-event / unsupported-type notices and the
+// `workspace.changed` refetch.
+import type { HookEntry } from '@harness-forge/shared'
 import type { VueWrapper } from '@vue/test-utils'
 import type { MockApi } from '~/utils/testing/mock-api'
-import { HarnessError } from '@harness-forge/shared'
+import { createServerEvent, HarnessError } from '@harness-forge/shared'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, disposePinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { nextTick } from 'vue'
+import { dispatchServerEvent } from '~/composables/useServerEvents'
 import { useAuthStore } from '~/stores/auth'
 import { useHooksStore } from '~/stores/hooks'
 import { usePluginsStore } from '~/stores/plugins'
 import { testIds } from '~/utils/testids'
-import { authStatus, codeHookEntry, hookEntry, hookId, hookList, personalHook, pluginDetail, pluginSummary, projectId, projectSummary, settings, trustSha } from '~/utils/testing/fixtures'
+import { authStatus, codeHookEntry, hookEntry, hookId, hookList, personalHook, pluginDetail, pluginSummary, projectDefinitionFile, projectDefinitionWriteResult, projectId, projectSummary, settings, trustSha } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import HooksPanel from './HooksPanel.vue'
 
@@ -278,22 +282,99 @@ describe('hooksPanel', () => {
   })
 })
 
-describe('hooksPanel: Phase 12 (C46-T7)', () => {
-  it('edits a project hook in the editor\'s project mode', async () => {
+describe('hooksPanel: Phase 12 (W12.12-T2)', () => {
+  const positioned = { ...projectHook, position: [0, 0] } as HookEntry
+  const projectWithPosition = hookList({ items: [hookEntry(), positioned, pluginHook] })
+
+  it('edits a project hook in the editor\'s project mode at its position', async () => {
+    api.hooks.list.mockResolvedValue(projectWithPosition)
     await mountPanel(projectId(1), 'website')
     await chooseFromMenu(row(element => element.dataset.source === 'project'), testIds.hookEdit)
     const editor = byTestId(testIds.hookEditor)!
     expect(editor.dataset.mode).toBe('project')
-    expect(wrapper!.findComponent({ name: 'HookEditor' }).props('target')).toEqual({ projectId: projectId(1), path: '.claude/settings.json', event: 'PreToolUse', groupIndex: null, handlerIndex: null })
+    expect(wrapper!.findComponent({ name: 'HookEditor' }).props('target')).toEqual({ projectId: projectId(1), path: '.claude/settings.json', event: 'PreToolUse', groupIndex: 0, handlerIndex: 0 })
     expect(byTestId<HTMLTextAreaElement>(testIds.hookCommand)!.value).toBe('sh .claude/hooks/guard.sh')
+  })
+
+  it('deletes a project hook from its settings file after the confirmation, without a password', async () => {
+    useAuthStore().status = passwordSet
+    api.hooks.list.mockResolvedValue(projectWithPosition)
+    api.projectDefinitions.read.mockResolvedValue(projectDefinitionFile({ path: '.claude/settings.json', kind: 'settings', content: JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'sh .claude/hooks/guard.sh' }] }] } }), sha256: trustSha(4) }))
+    api.projectDefinitions.write.mockResolvedValue(projectDefinitionWriteResult({ trust: { pending: 0 } }))
+    await mountPanel(projectId(1), 'website')
+    await chooseFromMenu(row(element => element.dataset.source === 'project'), testIds.hookDelete)
+    const dialog = document.body.querySelector<HTMLElement>('[data-slot="confirm-dialog"]')!
+    expect(dialog.textContent).toContain('Delete this hook?')
+    expect(dialog.textContent).toContain('It\'s removed from .claude/settings.json.')
+    byTestId(testIds.hookDeleteConfirm)!.click()
+    await flushPromises()
+    expect(byTestId(testIds.confirmPasswordDialog)).toBeNull()
+    expect(api.hooks.remove).not.toHaveBeenCalled()
+    expect(api.projectDefinitions.write).toHaveBeenCalledWith({ params: { id: projectId(1) }, body: { path: '.claude/settings.json', expectedSha256: trustSha(4), hooks: null } })
+    expect(mocks.toast.success).toHaveBeenCalledWith('Deleted hook')
+  })
+
+  it('toasts a changed settings file when a project hook can\'t be deleted', async () => {
+    api.hooks.list.mockResolvedValue(projectWithPosition)
+    api.projectDefinitions.read.mockResolvedValue(projectDefinitionFile({ path: '.claude/settings.json', kind: 'settings', content: JSON.stringify({ hooks: {} }), sha256: trustSha(4) }))
+    await mountPanel(projectId(1), 'website')
+    await chooseFromMenu(row(element => element.dataset.source === 'project'), testIds.hookDelete)
+    byTestId(testIds.hookDeleteConfirm)!.click()
+    await flushPromises()
+    expect(api.projectDefinitions.write).not.toHaveBeenCalled()
+    expect(mocks.toast.error).toHaveBeenCalledWith('.claude/settings.json changed on disk after you opened it.')
+  })
+
+  it('offers Where for a new hook in an available project folder only', async () => {
+    const panel = await mountPanel(projectId(1), 'website')
+    panel.vm.create()
+    await flushPromises()
+    expect(wrapper!.findComponent({ name: 'HookEditor' }).props('target')).toMatchObject({ projectId: projectId(1), groupIndex: null, handlerIndex: null })
+    expect(document.body.querySelector('[data-field="hook-where"]')).not.toBeNull()
+    wrapper!.unmount()
+    document.body.replaceChildren()
+
+    const global = await mountPanel()
+    global.vm.create()
+    await flushPromises()
+    expect(wrapper!.findComponent({ name: 'HookEditor' }).props('target')).toBeNull()
+    expect(document.body.querySelector('[data-field="hook-where"]')).toBeNull()
+  })
+
+  it('lists unknown events and unsupported handler types among the file problems', async () => {
+    api.hooks.list.mockResolvedValue(hookList({
+      ...projectList,
+      diagnostics: [
+        { level: 'info', code: 'unknown-event', message: 'The event "PreModelSwitch" is not supported; its hooks are ignored.', file: '.claude/settings.json' },
+        { level: 'warning', code: 'unsupported-type', message: 'HTTP hooks are not supported; this hook never runs.', file: '.claude/settings.json', event: 'Stop', position: [0, 0] },
+        { level: 'info', code: 'ignored-field', message: 'The field "x" is ignored.', file: '.claude/settings.json' },
+      ],
+    }))
+    await mountPanel(projectId(1), 'website')
+    const project = sections()[1]!
+    expect(project.textContent).toContain('.claude/settings.json: The hook event PreModelSwitch isn\'t supported.')
+    expect(project.textContent).toContain('.claude/settings.json: http hooks aren\'t supported.')
+    expect(project.textContent).not.toContain('is ignored')
+  })
+
+  it('refetches the project\'s hooks when one of its settings files changes on disk', async () => {
+    await mountPanel(projectId(1), 'website')
+    api.hooks.list.mockClear()
+    dispatchServerEvent(createServerEvent('workspace.changed', { projectId: projectId(1), chatId: null, batchId: null, source: 'user', paths: ['.claude/settings.json'] }, 1))
+    await flushPromises()
+    expect(api.hooks.list).toHaveBeenCalledWith({ query: { projectId: projectId(1) } })
   })
 
   it('offers no project Edit… without a project and reviews the trust of a plugin that is not trusted', async () => {
     api.plugins.list.mockResolvedValue({ items: [pluginSummary({ id: 'hook-pack', name: 'Hook pack', state: 'untrusted' })] })
     api.plugins.get.mockResolvedValue(pluginDetail({ id: 'hook-pack', name: 'Hook pack', state: 'untrusted' }))
+    api.hooks.list.mockResolvedValue(hookList({ items: [{ ...pluginHook, state: 'pending' }], project: undefined }))
     await usePluginsStore().fetchAll()
     await mountPanel()
-    await chooseFromMenu(row(element => element.dataset.source === 'plugin' && element.dataset.kind === 'command'), '[data-action="trust-plugin"]')
+    const pending = row(element => element.dataset.source === 'plugin' && element.dataset.kind === 'command')
+    expect(pending.dataset.state).toBe('pending')
+    expect(pending.textContent).toContain('Plugin not trusted')
+    await chooseFromMenu(pending, '[data-action="trust-plugin"]')
     expect(wrapper!.findComponent({ name: 'TrustDialog' }).props('pluginId')).toBe('hook-pack')
   })
 })

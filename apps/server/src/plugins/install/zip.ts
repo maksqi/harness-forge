@@ -11,6 +11,11 @@
 // `readZip` reads a whole archive at once (plugin installs). `openZip` (bulk data imports, ADR-024) applies the same
 // guards lazily: it checks the central directory when the archive is opened and reads, inflates and CRC-checks one
 // entry at a time on demand, from bytes in memory or from a `Blob` (an upload, read in slices).
+//
+// Phase 12 (W12.2): `readZip` records the owner exec bit of each file from the Unix mode in the external attributes
+// (`ArchiveEntry.executable`; other hosts: none), and skips the entries the collector does not select (a GitHub
+// repository zip: only the plugin's folder) before any check, so they are never admitted, decompressed or counted and a
+// link there is ignored. `readZipComment` reads the archive comment (a GitHub zip's comment is its commit sha).
 import type { ArchiveEntry, EntryCollector } from './archive.ts'
 import { crc32 } from 'node:zlib'
 import { Inflate } from 'fflate'
@@ -39,6 +44,8 @@ const UNIX_HOSTS = new Set([3, 19])
 const S_IFMT = 0o170000
 const S_IFDIR = 0o040000
 const S_IFLNK = 0o120000
+/** The owner exec bit of a Unix mode. */
+const S_IXUSR = 0o100
 const SPECIAL_TYPES = new Set([0o010000, 0o020000, 0o060000, 0o140000])
 /** MS-DOS directory attribute. */
 const DOS_DIRECTORY = 0x10
@@ -57,6 +64,8 @@ interface CentralEntry {
   rawName: string
   nameBytes: Uint8Array
   dir: boolean
+  /** The owner exec bit of a Unix mode (Phase 12). */
+  executable: boolean
   method: number
   crc: number
   compressedSize: number
@@ -253,13 +262,18 @@ function readCentralDirectory(reader: Reader, directory: Directory, collector: E
     const rawName = decodeName(nameBytes)
     if (rawName === null)
       throw invalid('The zip contains a file name that is not valid UTF-8.', ['file'])
+    // Phase 12: an entry outside the chosen subtree is skipped before any other check (never admitted or read).
+    if (!collector.selects(rawName))
+      continue
     if ((flags & (FLAG_ENCRYPTED | FLAG_STRONG_ENCRYPTION)) !== 0)
       throw invalid(`The entry ${quoteName(rawName)} is encrypted; encrypted zips are not supported.`, ['file'])
     if (sizes.disk !== 0)
       throw invalid('Multi-part zip archives are not supported.', ['file'])
     let dir = rawName.endsWith('/')
+    let executable = false
     if (UNIX_HOSTS.has(versionMadeBy >>> 8)) {
       const fileType = (externalAttributes >>> 16) & S_IFMT
+      executable = ((externalAttributes >>> 16) & S_IXUSR) !== 0
       if (fileType === S_IFLNK)
         throw invalid(`The entry ${quoteName(rawName)} is a symbolic link; links are not allowed.`, ['file'])
       if (SPECIAL_TYPES.has(fileType))
@@ -277,7 +291,7 @@ function readCentralDirectory(reader: Reader, directory: Directory, collector: E
     const path = collector.admit(rawName, dir ? 'dir' : 'file', dir ? 0 : sizes.size)
     if (path === null)
       continue
-    entries.push({ path, rawName, nameBytes, dir, method, crc, compressedSize: sizes.compressedSize, size: sizes.size, localOffset: sizes.localOffset })
+    entries.push({ path, rawName, nameBytes, dir, executable: !dir && executable, method, crc, compressedSize: sizes.compressedSize, size: sizes.size, localOffset: sizes.localOffset })
   }
   return entries
 }
@@ -375,12 +389,32 @@ export async function readZip(data: Uint8Array, collector: EntryCollector): Prom
         throw invalid(`The entry ${quoteName(entry.rawName)} fails its CRC check (damaged zip).`, ['file'])
       files.set(entry, content)
     }
-    return central.map(entry => ({ path: entry.path, type: entry.dir ? 'dir' : 'file', data: entry.dir ? null : files.get(entry) ?? new Uint8Array(0) }))
+    return central.map(entry => ({
+      path: entry.path,
+      type: entry.dir ? 'dir' : 'file',
+      data: entry.dir ? null : files.get(entry) ?? new Uint8Array(0),
+      ...(entry.executable ? { executable: true } : {}),
+    }))
   }
   catch (error) {
     if (error instanceof ZipFormatError)
       throw invalid(error.message === 'not a zip' ? 'The file is not a zip archive.' : 'The zip archive is damaged or truncated.', ['file'])
     throw error
+  }
+}
+
+/**
+ * The archive comment of a zip (UTF-8; Phase 12: a GitHub repository zip carries its commit sha there); null when the
+ * bytes are not a zip or the comment is not valid UTF-8, `''` without a comment.
+ */
+export function readZipComment(data: Uint8Array): string | null {
+  try {
+    const reader = new Reader(data)
+    const eocd = findEndOfCentralDirectory(reader)
+    return utf8.decode(reader.bytes(eocd + EOCD_SIZE, reader.u16(eocd + 20)))
+  }
+  catch {
+    return null
   }
 }
 

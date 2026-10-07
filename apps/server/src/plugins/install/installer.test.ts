@@ -122,7 +122,8 @@ describe('inspect', () => {
     expect(reserved).toMatchObject({ code: 'validation_error' })
     expect(reserved.message).toContain('reserved')
     const missing = await rejection(a.t.deps.installer.inspect(zip({ 'readme.md': 'no manifest' })))
-    expect(missing.message).toContain('plugin.json must be at the root')
+    // Phase 12: neither a plugin.json nor a Claude Code layout (ADR-053).
+    expect(missing.message).toContain('No plugin found: expected a plugin.json')
     const invalid = await rejection(a.t.deps.installer.inspect(zip({ 'plugin.json': '{"manifestVersion":1,"id":"x"}' })))
     expect(invalid.code).toBe('validation_error')
     const outside = await rejection(a.t.deps.installer.inspect(zip({ 'plugin.json': manifestOf('entry-out', { main: 'index.mjs' }) })))

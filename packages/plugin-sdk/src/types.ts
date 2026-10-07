@@ -292,6 +292,16 @@ export interface CommandDefinition {
   model?: string
   /** Plugin API 1.6.0: tool names that narrow the turn (restrict-only: never a grant or a pre-approval). */
   allowedTools?: string[]
+  /** Plugin API 1.6.0 (ADR-058): tool names removed for the turn (restrict-only). */
+  disallowedTools?: string[]
+  /** Plugin API 1.6.0 (ADR-058): names of the positional arguments (`$name`; `markdown` syntax; at most 9). */
+  arguments?: string[]
+  /** Plugin API 1.6.0 (ADR-058): appended to the description in listings (`when_to_use`). */
+  whenToUse?: string
+  /** Plugin API 1.6.0 (ADR-058): `fork` asks the main agent to run the command as a sub-agent of type `agent`. */
+  context?: 'fork'
+  /** Plugin API 1.6.0 (ADR-058): the agent type of a `fork` command (default `general`). */
+  agent?: string
   /** Guarded (30 s). */
   run?(i: CommandRunInput): Promise<CommandRunResult>
 }
@@ -317,7 +327,10 @@ export interface AgentDefinition {
   instructions: string
   /** Tool names (or `mcp__<server>__*` prefixes) the child may use, at most 64; omitted = every tool the mode allows. */
   tools?: string[]
-  /** `provider:model`, or `inherit` (the parent run's model); omitted = the sub-agent model setting. */
+  /**
+   * `provider:model`, or `inherit` (the parent run's model), or (plugin API 1.6.0) a Claude model name (`sonnet`, `opus`,
+   * `haiku`, `fable`, a `claude-*` id) resolved through the `modelAliases` setting; omitted = the sub-agent model setting.
+   */
   model?: string
   /** Plugin API 1.6.0 (ADR-058): tool names removed from the child's tools (applied before `tools`; restrict-only). */
   disallowedTools?: string[]
@@ -352,6 +365,20 @@ export interface SkillDefinition {
   userInvocable?: boolean
   /** Plugin API 1.6.0: the model may load the skill (default true; false leaves it out of the skills listing). */
   modelInvocable?: boolean
+  /** Plugin API 1.6.0 (ADR-058): tool names that narrow a `/name` turn of the skill (restrict-only). */
+  allowedTools?: string[]
+  /** Plugin API 1.6.0 (ADR-058): tool names removed for a `/name` turn of the skill (restrict-only). */
+  disallowedTools?: string[]
+  /** Plugin API 1.6.0 (ADR-058): `provider:model` (or a Claude model name) a `/name` turn of the skill runs on. */
+  model?: string
+  /** Plugin API 1.6.0 (ADR-058): names of the positional arguments (`$name`; at most 9). */
+  arguments?: string[]
+  /** Plugin API 1.6.0 (ADR-058): appended to the description in listings (`when_to_use`). */
+  whenToUse?: string
+  /** Plugin API 1.6.0 (ADR-058): `fork` runs the skill as a sub-agent of type `agent` (the skill tool returns its report). */
+  context?: 'fork'
+  /** Plugin API 1.6.0 (ADR-058): the agent type of a `fork` skill (default `general`). */
+  agent?: string
 }
 
 // ---------- output styles and command hooks (plugin API 1.5.0) ----------

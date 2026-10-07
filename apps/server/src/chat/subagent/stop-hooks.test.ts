@@ -158,10 +158,13 @@ describe('subagentStop of a foreground child (W11.2-T5)', () => {
       { role: 'assistant', content: [{ type: 'text', text: 'Child done', providerOptions: undefined }], providerOptions: undefined },
       { role: 'user', content: [{ type: 'text', text: feedback(REASON_SECRET) }], providerOptions: undefined },
     ])
+    // W12.6: the child's agent (`agent_id` = the parent's task call id, `agent_type`) and the matcher target.
+    const agent = { id: 'call_parent', type: 'general' }
     expect(p.snapshot.calls.map(call => call.input)).toEqual([
-      { messageId: MESSAGE_ID, stopHookActive: false, tool: { name: 'task', callId: 'call_parent', input: TASK, output: 'Child done' } },
-      { messageId: MESSAGE_ID, stopHookActive: true, tool: { name: 'task', callId: 'call_parent', input: TASK, output: 'Fixed the build.' } },
+      { messageId: MESSAGE_ID, stopHookActive: false, tool: { name: 'task', callId: 'call_parent', input: TASK, output: 'Child done' }, agent },
+      { messageId: MESSAGE_ID, stopHookActive: true, tool: { name: 'task', callId: 'call_parent', input: TASK, output: 'Fixed the build.' }, agent },
     ])
+    expect(p.snapshot.calls.map(call => [call.options.target, call.options.aliases])).toEqual([['general', ['general', 'general-purpose']], ['general', ['general', 'general-purpose']]])
     expect(p.usage).toHaveLength(1)
     expect(p.usage[0]).toMatchObject({ purpose: 'subagent', inputTokens: 200, outputTokens: 20 })
     expect(p.logs.text()).not.toContain(REASON_SECRET)

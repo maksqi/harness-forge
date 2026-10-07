@@ -1,11 +1,24 @@
 // Rules of the Agent section of Settings -> General (docs/UI.md 9.11): the "none" label of its model selects, the
 // warning of a sub-agent model that can't call tools and (Phase 10, ADR-047) the check of the plan folder, which uses
-// the shared settings schema, so the inline errors are the server's rules.
+// the shared settings schema, so the inline errors are the server's rules. Phase 12 (ADR-057, ADR-058; docs/UI.md 9.14,
+// 15): the copy of the Hook model and the Claude model names.
 import type { CatalogModel } from '@harness-forge/shared'
 import { DEFAULT_SETTINGS, PLAN_DIRECTORY_MAX_CHARS, settingsSchema } from '@harness-forge/shared'
 
 /** The "none" choice of the compaction and sub-agent model selects (the setting is null). */
 export const SAME_MODEL_LABEL = 'Same model as the chat'
+
+/** The section's description (Phase 12 adds the hooks). */
+export const AGENT_SECTION_DESCRIPTION = 'Long chats, sub-agents, plans and hooks.'
+
+// ---------- prompt hooks and Claude model names (Phase 12) ----------
+
+/** The "none" choice of the Hook model select (`hookModelRef` null). */
+export const HOOK_MODEL_AUTOMATIC_LABEL = 'Automatic (the provider\'s small model)'
+export const HOOK_MODEL_HELP = 'Answers prompt hooks that don\'t name a model. Automatic uses the small model of the chat\'s provider, else the chat\'s model.'
+/** The "none" choice of a Claude model name select (`modelAliases[name]` null). */
+export const MODEL_ALIAS_NOT_SET_LABEL = 'Not set'
+export const MODEL_ALIASES_HELP = 'Agents, skills and hooks from Claude Code can name a model as sonnet, opus, haiku or fable. Choose the model each name runs. A name that isn\'t set uses the default model, with a note in the chat.'
 
 /**
  * The warning of the Sub-agent model field: a sub-agent works through tools, so a catalog model without

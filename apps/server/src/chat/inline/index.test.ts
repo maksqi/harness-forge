@@ -1,3 +1,4 @@
+/* eslint-disable no-template-curly-in-string -- the bodies hold `${CLAUDE_…}` variables on purpose */
 // `expandCommandPlan` (W11.5-T2 – T4): the checks of `!` spans in their order (a project chat, the shell, the folder, a
 // trusted source: a personal command, a plugin template, or a project command file whose trust hash is approved — the
 // hash the trust listing computes, re-read right before the spans run), the spans and `@path` files of a trusted body,
@@ -12,7 +13,7 @@ import { HarnessError, planCommandExpansion } from '@harness-forge/shared'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { commandTrustSubject } from '../../services/project-config/index.ts'
 import { killLiveShellGroups } from '../../workspace/shell.ts'
-import { expandCommandPlan, isSpanRefusal, minimalExpansion, needsInlining, spansFolderUnavailable, spansNeedProject, spansShellDisabled, spansUntrusted } from './index.ts'
+import { expandCommandPlan, isSpanRefusal, minimalExpansion, needsInlining, renderExpansion, spansFolderUnavailable, spansNeedProject, spansShellDisabled, spansUntrusted } from './index.ts'
 
 const posix = process.platform !== 'win32'
 const PROJECT = 'prj_0123456789abcdef'
@@ -140,5 +141,24 @@ describe.skipIf(!posix)('expandCommandPlan', () => {
     const plan = planCommandExpansion('A !`echo x` B @README.md $ARGUMENTS')
     expect(minimalExpansion(plan, 'in')).toBe('A  B @README.md in')
     expect(needsInlining(planCommandExpansion('```\n!`echo x`\n```'), hostOf(root))).toBe(false)
+  })
+})
+
+describe('renderExpansion (Phase 12, W12.7-T5)', () => {
+  const ran = { exitCode: 0, timedOut: false, output: 'OUT', truncated: false }
+
+  it('without options: the shared renderer (the Phase 10 / 11 expansion)', () => {
+    const plan = planCommandExpansion('A !`echo x` $1 ${CLAUDE_SESSION_ID}')
+    expect(renderExpansion(plan, { shell: [ran], files: [] }, 'one two')).toBe('A OUT one ${CLAUDE_SESSION_ID}')
+  })
+
+  it('with options: one argument base for the body, variables and escapes also in parts without a placeholder, file blocks as before', () => {
+    const plan = planCommandExpansion('Session ${CLAUDE_SESSION_ID} \\$5: !`echo x` then $0 and $ARGUMENTS[1] see @README.md')
+    const options = { names: [], vars: { CLAUDE_SESSION_ID: 'chat_1' } }
+    const files = [{ path: 'README.md', content: 'Hello\n', truncated: false }]
+    expect(renderExpansion(plan, { shell: [ran], files }, 'a b', options)).toBe('Session chat_1 $5: OUT then a and b see @README.md\n\n<file path="README.md">\nHello\n</file>')
+    // No placeholder anywhere: the input is appended once, the variables still apply.
+    const plain = planCommandExpansion('Run !`echo x` in ${CLAUDE_PROJECT_DIR}.')
+    expect(renderExpansion(plain, { shell: [ran], files: [] }, 'extra', { vars: { CLAUDE_PROJECT_DIR: '/w' } })).toBe('Run OUT in /w.\n\nextra')
   })
 })

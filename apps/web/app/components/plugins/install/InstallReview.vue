@@ -14,11 +14,19 @@
 // Root: `data-slot="install-review"` (`display: contents`: its form and footer are the dialog's body and footer rows); the
 // test ids of the preview, trust and install steps are unchanged. Exposes `installing` (the parent keeps its dialog open
 // meanwhile). Props, emits and the root slot are frozen from Gate P12-0b (C46); W12.9 owns the component in P12-A.
+// W12.9 (docs/UI.md 14.1): Install is never the default button (Enter on the review, in a field or on the focused button
+// does nothing; Space or a click installs); when the review opens, focus moves to the trust checkbox (when shown), else
+// to Install (else Back), so the dialogs land on the decision.
+// W12.17: the one exception is the inline password field (TrustConsent `confirm`): Enter there confirms the password and
+// goes on with the install, exactly like clicking Install (the login, then the install; nothing while Install is
+// disabled). A wrong password puts the focus back in the field, so Enter there retries. The password prompt
+// (ConfirmPasswordDialog, after the server asked for a fresh login) confirms on Enter too and continues the install the
+// user clicked.
 import type { PluginDetail, PluginInspection } from '@harness-forge/shared'
 import type { InstallRequest } from './install'
 import type { HarnessErrorUiAction } from '~/components/common/harness-error'
 import { RefreshCwIcon } from '@lucide/vue'
-import { computed, nextTick, onBeforeUnmount, ref, useId, useTemplateRef, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, useTemplateRef, watch } from 'vue'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { DialogFooter } from '@/components/ui/dialog'
@@ -43,8 +51,8 @@ const api = useApi()
 const auth = useAuthStore()
 const freshAuth = useFreshAuth()
 
-const formId = useId()
 const formElement = useTemplateRef<HTMLFormElement>('form')
+const rootElement = useTemplateRef<HTMLElement>('root')
 
 const phase = ref<'idle' | 'installing'>('idle')
 const error = ref<unknown>(null)
@@ -93,6 +101,35 @@ onBeforeUnmount(() => {
   session += 1
 })
 
+/** The decision of the review: the trust checkbox when shown, else Install, else Back (an incompatible plugin). */
+function focusDecision(): void {
+  const root = rootElement.value
+  if (!root)
+    return
+  const candidates = [testIds.trustCheckbox, testIds.installSubmit, testIds.installBack]
+    .map(id => root.querySelector<HTMLElement>(`[data-testid="${id}"]`))
+  // Without scrolling: the preview's top stays in view.
+  candidates.find(element => element && !(element as HTMLButtonElement).disabled)?.focus({ preventScroll: true })
+}
+
+onMounted(() => {
+  void nextTick(focusDecision)
+})
+
+/** The inline password field gets the focus back (its text selected) after a failed login. */
+function focusPassword(): void {
+  const field = rootElement.value?.querySelector<HTMLInputElement>(`[data-testid="${testIds.trustPassword}"]`)
+  if (!field || field.disabled)
+    return
+  field.focus()
+  field.select()
+}
+
+/** Enter in the inline password field (W12.17): the same as clicking Install (`install` checks `canInstall`). */
+function confirmPassword(): void {
+  void install()
+}
+
 function showError(failure: unknown): void {
   error.value = toHarnessError(failure)
 }
@@ -119,8 +156,11 @@ async function install(): Promise<void> {
     if (needsPassword.value) {
       const failed = await freshAuth.login(password.value)
       if (failed !== null) {
-        if (current === session)
+        if (current === session) {
           passwordError.value = failed
+          // After the field is enabled again (`finally`): the user fixes the password and presses Enter.
+          void nextTick(focusPassword)
+        }
         return
       }
     }
@@ -175,8 +215,10 @@ defineExpose({ installing: computed(() => phase.value === 'installing') })
 </script>
 
 <template>
-  <div data-slot="install-review" class="contents">
-    <form :id="formId" ref="form" class="-mx-1 grid min-h-0 gap-4 overflow-y-auto px-1" novalidate @submit.prevent="install">
+  <div ref="root" data-slot="install-review" class="contents">
+    <!-- Install is never the default button: submitting the form (Enter in a field) does nothing; Enter in the password
+         field goes on through TrustConsent's `confirm`. -->
+    <form ref="form" class="-mx-1 grid min-h-0 gap-4 overflow-y-auto px-1" novalidate @submit.prevent>
       <Alert
         v-if="staleReview"
         :data-testid="testIds.installStale"
@@ -198,6 +240,7 @@ defineExpose({ installing: computed(() => phase.value === 'installing') })
           :needs-password="needsPassword"
           :password-error="passwordError"
           :disabled="busy"
+          @confirm="confirmPassword"
         />
       </template>
 
@@ -214,11 +257,12 @@ defineExpose({ installing: computed(() => phase.value === 'installing') })
         Back
       </Button>
       <Button
-        type="submit"
-        :form="formId"
+        type="button"
         :disabled="!canInstall"
         :aria-busy="phase === 'installing' || undefined"
         :data-testid="testIds.installSubmit"
+        @keydown.enter.prevent
+        @click="install"
       >
         <Spinner v-if="phase === 'installing'" data-icon="inline-start" />
         Install

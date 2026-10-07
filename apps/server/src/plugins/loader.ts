@@ -221,7 +221,8 @@ export interface ReadPluginDirectoryOptions {
   rejectReserved?: boolean
 }
 
-function loadProblem(pluginId: string | undefined, message: string, extra: Record<string, unknown> = {}, state: LoadProblem['state'] = 'error'): LoadProblem {
+/** A load problem of the plugin `pluginId` (`plugin_error`, phase `load`). */
+export function loadProblem(pluginId: string | undefined, message: string, extra: Record<string, unknown> = {}, state: LoadProblem['state'] = 'error'): LoadProblem {
   return {
     state,
     error: { code: 'plugin_error', message, details: { pluginId: pluginId ?? 'unknown', phase: 'load', ...extra } },

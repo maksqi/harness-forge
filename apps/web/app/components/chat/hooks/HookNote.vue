@@ -13,14 +13,31 @@
 // renders it for block kind `hook` (variant inline), under a user message's bubble (inline), for a hook carrier (turn)
 // and ToolPart inside a tool row (tool); `pluginName` names the plugin of the record's first plugin hook. Props and the
 // root test id are frozen from Gate P11-0b (C39).
+// Phase 12 (ADR-057; docs/UI.md 7.34; W12.13): a record with `harnessAsked` (`data-state="still-asks"`) reads "Allowed by
+// hook · still asks" and its details start with "harness-forge still asks for this call (…)." (and the hook's reason);
+// a prompt hook's source reads "Personal prompt hook" / "Project prompt hook" / "Prompt hook from {plugin}" plus "·
+// {model}" (the name from the injected MODEL_LABEL_RESOLVER, else the model id), its label is the prompt's first line
+// and an unreadable answer's output reads "The model's answer could not be read."; a `context` record without a context
+// (a prompt hook's reason, a `PostCompact` system message) reads "A {event} hook answered: {reason}" / "A {event} hook
+// sent a message".
 import type { HookData } from '@harness-forge/shared'
 import type { Component } from 'vue'
 import { ChevronRightIcon, ShieldBanIcon, TriangleAlertIcon, WebhookIcon } from '@lucide/vue'
-import { computed, ref, useId } from 'vue'
+import { computed, inject, ref, useId } from 'vue'
 import { cn } from '@/lib/utils'
+import { MODEL_LABEL_RESOLVER } from '~/components/providers/model-label'
 import { testIds } from '~/utils/testids'
 import { formatDuration, formatToolValue } from '../chat-format'
-import { hookDetailsKind, hookOutcomeText, hookPluginId, hookSourceText } from './hook-notes'
+import {
+  HOOK_STILL_ASKS_DETAIL,
+  hookDetailsKind,
+  hookErrorTexts,
+  hookOutcomeText,
+  hookPluginId,
+  hookRunLabel,
+  hookSourceLine,
+  hookStillAsks,
+} from './hook-notes'
 
 const props = defineProps<{ data: HookData, variant: 'inline' | 'turn' | 'tool', pluginName?: string | null }>()
 
@@ -28,6 +45,8 @@ type HookResult = HookData['hooks'][number]
 
 const open = ref(false)
 const detailsId = useId()
+/** + Phase 12: the display names of prompt hook models (absent on share pages and in tests: the model id). */
+const resolveModel = inject(MODEL_LABEL_RESOLVER, null)
 
 const line = computed(() => hookOutcomeText(props.data))
 const icon = computed<Component>(() => {
@@ -44,8 +63,11 @@ const iconClass = computed(() => {
 /** The plugin named by `pluginName`: the record's first plugin hook (other plugins read as their ids). */
 const namedPlugin = computed(() => hookPluginId(props.data))
 function sourceOf(hook: HookResult): string {
-  return hookSourceText(hook, hook.pluginId && hook.pluginId === namedPlugin.value ? props.pluginName ?? null : null)
+  const plugin = hook.pluginId && hook.pluginId === namedPlugin.value ? props.pluginName ?? null : null
+  return hookSourceLine(hook, plugin, hook.model ? resolveModel?.(hook.model)?.name ?? null : null)
 }
+/** + Phase 12: a hook allowed the call, harness-forge still asked. */
+const stillAsks = computed(() => hookStillAsks(props.data))
 /** The source on the note's line: the only hook's, else how many hooks ran. */
 const lineSource = computed(() => {
   const hooks = props.data.hooks
@@ -69,10 +91,7 @@ const context = computed(() => {
   const text = props.data.context?.trim()
   return text && (outcome === 'context' || outcome === 'blocked') ? text : null
 })
-const errors = computed(() => props.data.hooks.flatMap((hook) => {
-  const text = hook.error?.trim()
-  return text ? [text] : []
-}))
+const errors = computed(() => hookErrorTexts(props.data))
 /** `rewritten`: the input the tool ran with (the tool part keeps the model's input). */
 const updatedInput = computed(() => (props.data.outcome === 'rewritten' && props.data.updatedInput !== undefined
   ? formatToolValue(props.data.updatedInput) || '{}'
@@ -80,8 +99,10 @@ const updatedInput = computed(() => (props.data.outcome === 'rewritten' && props
 /** The reason as the body of a turn note (a carrier: what the agent was asked to do). */
 const turnReason = computed(() => (props.variant === 'turn' ? props.data.reason?.trim() || null : null))
 
+/** + Phase 12: the reason of a still-asks record (its line does not carry it). */
+const stillAsksReason = computed(() => (stillAsks.value ? props.data.reason?.trim() || null : null))
 const hasDetails = computed(() => props.data.hooks.length > 0 || context.value !== null || updatedInput.value !== null
-  || (props.data.outcome === 'error' && errors.value.length > 0))
+  || (props.data.outcome === 'error' && errors.value.length > 0) || stillAsks.value)
 /** A turn note keeps its details open (it has no toggle). */
 const alwaysOpen = computed(() => props.variant === 'turn')
 const detailsOpen = computed(() => hasDetails.value && (alwaysOpen.value || open.value))
@@ -95,6 +116,7 @@ const toggleLabel = computed(() => `${open.value ? 'Hide' : 'Show'} ${hookDetail
     :data-outcome="data.outcome"
     :data-source="data.hooks[0]?.source"
     :data-variant="variant"
+    :data-state="stillAsks ? 'still-asks' : undefined"
     role="note"
     :aria-label="`Hook ${data.event}: ${line}`"
     :class="cn(
@@ -142,6 +164,14 @@ const toggleLabel = computed(() => `${open.value ? 'Hide' : 'Show'} ${hookDetail
       :data-testid="testIds.hookNoteDetails"
       class="mt-1 flex min-w-0 flex-col gap-2 pl-5.5 text-xs"
     >
+      <div v-if="stillAsks" data-slot="hook-still-asks" class="flex min-w-0 flex-col gap-0.5">
+        <p class="min-w-0 break-words">
+          {{ HOOK_STILL_ASKS_DETAIL }}
+        </p>
+        <p v-if="stillAsksReason" class="min-w-0 break-words whitespace-pre-wrap text-foreground">
+          {{ stillAsksReason }}
+        </p>
+      </div>
       <pre
         v-if="context"
         data-slot="hook-context"
@@ -173,9 +203,9 @@ const toggleLabel = computed(() => `${open.value ? 'Hide' : 'Show'} ${hookDetail
           class="min-w-0 break-words"
         >
           <span>{{ sourceOf(hook) }}</span>
-          <template v-if="hook.label">
+          <template v-if="hookRunLabel(hook)">
             <span aria-hidden="true"> · </span>
-            <span class="font-mono break-all text-foreground">{{ hook.label }}</span>
+            <span :class="cn('break-all text-foreground', hook.kind !== 'prompt' && 'font-mono')">{{ hookRunLabel(hook) }}</span>
           </template>
           <span aria-hidden="true"> · </span>
           <span class="tabular-nums">{{ runMeta(hook) }}</span>

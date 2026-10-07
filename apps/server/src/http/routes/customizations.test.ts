@@ -247,3 +247,40 @@ describe('personal definitions', () => {
     expect((await send(h.t, 'GET', `/api/customizations/${UNKNOWN_ID}`)).status).toBe(404)
   })
 })
+
+describe('gET /customizations: Claude Code frontmatter (W12.7-T1)', () => {
+  it('lists the new keys of project and personal definitions and the ignored keys as info diagnostics; v1.7 entries unchanged', async () => {
+    const h = await open()
+    await write(h.dir, {
+      '.claude/agents/planner.md': '---\ndescription: Plans.\ndisallowedTools: Bash\nmaxTurns: 5\ncolor: blue\nskills: pdf\nmodel: sonnet\npermissionMode: plan\nhooks: {}\n---\nPlan.',
+      '.claude/skills/pdf/SKILL.md': '---\nname: pdf\ndescription: PDF.\nwhen_to_use: A PDF is named.\nallowed-tools: Read\ncontext: fork\nagent: explore\n---\nFill $0.',
+      '.claude/commands/old.md': '---\ndescription: Old.\nargument-hint: <x>\n---\nOld $1',
+    })
+    const list = customizationListSchema.parse((await send(h.t, 'GET', `/api/customizations?projectId=${h.project.id}`)).body)
+    const planner = list.items.find(entry => entry.name === 'planner')
+    expect(planner).toMatchObject({ disallowedTools: ['shell'], maxTurns: 5, color: 'blue', skills: ['pdf'], modelAlias: 'sonnet' })
+    expect(planner?.diagnostics.filter(item => item.code === 'ignored-key').map(item => [item.level, item.path])).toEqual([
+      ['info', '.claude/agents/planner.md'],
+      ['info', '.claude/agents/planner.md'],
+    ])
+    expect(list.items.find(entry => entry.name === 'pdf')).toMatchObject({ whenToUse: 'A PDF is named.', tools: ['read_file'], context: 'fork', agent: 'explore' })
+    expect(list.items.find(entry => entry.name === 'old')).toEqual({
+      kind: 'command',
+      name: 'old',
+      description: 'Old.',
+      source: 'project',
+      path: '.claude/commands/old.md',
+      argumentHint: '<x>',
+      enabled: true,
+      state: 'active',
+      diagnostics: [],
+    })
+    const created = await send(h.t, 'POST', '/api/customizations', { kind: 'command', content: '---\nname: ship\ndescription: Ship.\narguments: [env]\ndisallowed-tools: Write\nmetadata: {}\n---\nShip $env.' })
+    expect(created.status).toBe(201)
+    const global = customizationListSchema.parse((await send(h.t, 'GET', '/api/customizations?kind=command')).body)
+    const ship = global.items.find(entry => entry.name === 'ship')
+    expect(ship).toMatchObject({ arguments: ['env'], disallowedTools: ['write_file'] })
+    // `builtins: []`: no workspace tool is registered, so `write_file` is also an `unknown-tool` warning here.
+    expect(ship?.diagnostics.map(item => [item.level, item.code])).toEqual([['info', 'ignored-key'], ['warning', 'unknown-tool']])
+  })
+})

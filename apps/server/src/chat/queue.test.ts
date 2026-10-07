@@ -55,7 +55,11 @@ function harness(): Harness {
       idFromUrl: (url: string) => (url.startsWith('/api/files/') ? url.slice('/api/files/'.length) : null),
       get: async (id: string) => (id === FILE_ID ? file : null),
     },
-    registry: { commands: { get: (name: string) => (name === 'plugin-cmd' ? { pluginId: 'x', definition: { name, description: 'd', template: 't' } } : undefined) } },
+    // W12.7's slash resolution also lists the registered commands (the bare-alias rule).
+    registry: { commands: {
+      get: (name: string) => (name === 'plugin-cmd' ? { pluginId: 'x', definition: { name, description: 'd', template: 't' } } : undefined),
+      list: () => [{ pluginId: 'x', definition: { name: 'plugin-cmd', description: 'd', template: 't' } }],
+    } },
     events,
     logger: logs.logger,
   } as unknown as ChatQueueDeps

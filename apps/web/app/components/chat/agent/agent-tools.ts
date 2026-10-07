@@ -8,6 +8,7 @@
 import type {
   AgentColor,
   BackgroundTask,
+  CustomizationEntry,
   CustomizationSource,
   TaskAgent,
   TaskInput,
@@ -18,6 +19,7 @@ import type {
   TaskType,
   TodoItem,
 } from '@harness-forge/shared'
+import type { InjectionKey } from 'vue'
 import type { ToolPartLike } from '../chat-format'
 import {
   exitPlanModeInputSchema,
@@ -439,4 +441,48 @@ export const AGENT_COLOR_TOKENS: Readonly<Record<AgentColor, string>> = {
   cyan: 'chart-2',
   purple: 'chart-5',
   pink: 'chart-5',
+}
+
+/**
+ * Phase 12 (W12.13): the literal classes of each agent color (Tailwind generates only class names it finds in the
+ * source): the 8px dot before the name (`bg-<token>`) and the 2px left rule of the open block (`border-<token>`), the
+ * tokens of `AGENT_COLOR_TOKENS`.
+ */
+export const AGENT_COLOR_CLASSES: Readonly<Record<AgentColor, { dot: string, rule: string }>> = {
+  red: { dot: 'bg-destructive', rule: 'border-destructive' },
+  orange: { dot: 'bg-chart-1', rule: 'border-chart-1' },
+  yellow: { dot: 'bg-warning', rule: 'border-warning' },
+  green: { dot: 'bg-success', rule: 'border-success' },
+  blue: { dot: 'bg-info', rule: 'border-info' },
+  cyan: { dot: 'bg-chart-2', rule: 'border-chart-2' },
+  purple: { dot: 'bg-chart-5', rule: 'border-chart-5' },
+  pink: { dot: 'bg-chart-5', rule: 'border-chart-5' },
+}
+
+/**
+ * Phase 12 (ADR-058; docs/UI.md 7.34): the `color` of an agent type in the catalog of the chat's scope (the entry that
+ * runs: `active`, else any entry of that name), or null (no such agent, no color, a built-in type).
+ */
+export function agentColorOf(entries: readonly CustomizationEntry[], type: string): AgentColor | null {
+  const name = type.trim().toLowerCase()
+  const named = entries.filter(entry => entry.kind === 'agent' && entry.name === name)
+  const entry = named.find(item => item.state === 'active') ?? named[0]
+  return entry?.color ?? null
+}
+
+/**
+ * Phase 12 (ADR-058; W12.13): whether a loaded skill runs as a sub-agent (`context: fork`), so its `content` is the
+ * child's report, not the skill's instructions. A `skill` output carries no such flag: ToolPart provides this from the
+ * catalog of the chat's scope; SkillToolBody injects it (absent on share pages: the content reads as instructions).
+ */
+export type SkillForkCheck = (skillName: string) => boolean
+
+export const SKILL_FORK_CHECK: InjectionKey<SkillForkCheck> = Symbol('hf-skill-fork-check')
+
+/** Phase 12: the catalog entry of a skill name runs as a sub-agent (the active entry first). */
+export function isForkSkill(entries: readonly CustomizationEntry[], skillName: string): boolean {
+  const name = skillName.trim().toLowerCase()
+  const named = entries.filter(entry => entry.kind === 'skill' && entry.name === name)
+  const entry = named.find(item => item.state === 'active') ?? named[0]
+  return entry?.context === 'fork'
 }

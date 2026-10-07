@@ -8,6 +8,9 @@
 // `hooksEnabled`, a personal output style, personal commands with and without `!` spans, a personal hook, a project
 // with an approval and a project MCP variable, and a chat of that project with hook records. Every value that must
 // never reach a backup carries a `*-SENTINEL` marker.
+// Phase 12 (W12.3-T7): `seedPhase12()` adds what a v1.8 server holds besides that: a marketplace row, a Claude Code
+// plugin row (format `claude`, a trust pin and an origin), a hook transcript of the chat and a home-folder import plan
+// kept in memory, each carrying a `*-SENTINEL` marker of `PHASE12_SENTINELS`.
 import type { CustomizationKind, HarnessUIMessage } from '@harness-forge/shared'
 import type { TestApp } from '../../testing/create-test-app.ts'
 import type { FakeCustomizationService } from '../../testing/fake-customizations.ts'
@@ -16,10 +19,10 @@ import type { AppDeps } from '../../types.ts'
 import type { CustomizationService } from '../customizations/types.ts'
 import type { DataServiceOptions } from './index.ts'
 import { Buffer } from 'node:buffer'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { createHookId } from '@harness-forge/shared'
-import { hooks, projectTrust, secrets } from '../../db/schema.ts'
+import { createHookId, createMarketplaceId } from '@harness-forge/shared'
+import { hooks, marketplaces, plugins, projectTrust, secrets } from '../../db/schema.ts'
 import { createTestApp } from '../../testing/create-test-app.ts'
 import { createFakeCheckpointService } from '../../testing/fake-checkpoints.ts'
 import { createFakeCustomizationService } from '../../testing/fake-customizations.ts'
@@ -148,4 +151,62 @@ export async function seedPhase11(t: TestApp): Promise<Phase11Seed> {
   await deps.db.insert(secrets).values({ scope: `project:${project.id}`, name: 'mcp.var.MCP_TOKEN', ciphertext: Buffer.from(PHASE11_SENTINELS.variable), hint: PHASE11_SENTINELS.variable, keyVersion: 1, updatedAt: at })
   const chat = await deps.chats.create({ title: 'Hooks', projectId: project.id, settings: { toolMode: 'ask', outputStyle: 'terse' }, messages: hookChatMessages() })
   return { projectId: project.id, chatId: chat.id }
+}
+
+// ---------- Phase 12 (W12.3-T7) ----------
+
+/** Values of the Phase 12 state that must never reach a backup. */
+export const PHASE12_SENTINELS = {
+  marketplace: 'MARKETPLACE-SENTINEL',
+  pluginTrust: 'b'.repeat(64),
+  pluginOrigin: 'PLUGIN-ORIGIN-SENTINEL',
+  transcript: 'TRANSCRIPT-SENTINEL',
+  importPlan: 'IMPORT-PLAN-SENTINEL',
+} as const
+
+/** The id of the seeded Claude Code plugin row. */
+export const PHASE12_PLUGIN_ID = 'review-kit'
+
+export interface Phase12Seed {
+  marketplaceId: string
+  /** The seeded transcript file (`<dataDir>/transcripts/<chatId>.jsonl`). */
+  transcript: string
+  /** The import plan kept by the home-folder import. */
+  planId: string
+}
+
+/** Writes the Phase 12 state of a v1.8 server (see the module comment) next to the chat `chatId`. */
+export async function seedPhase12(t: TestApp, chatId: string): Promise<Phase12Seed> {
+  const { deps } = t
+  const at = Date.now()
+  const marketplaceId = createMarketplaceId()
+  await deps.db.insert(marketplaces).values({
+    id: marketplaceId,
+    name: 'acme-tools',
+    source: { type: 'path', path: '/srv/marketplaces/acme-tools' },
+    resolvedRef: null,
+    catalog: { name: 'acme-tools', description: PHASE12_SENTINELS.marketplace, plugins: [] },
+    fetchedAt: at,
+    lastError: null,
+    createdAt: at,
+    updatedAt: at,
+  })
+  await deps.db.insert(plugins).values({
+    id: PHASE12_PLUGIN_ID,
+    source: 'marketplace',
+    sourceRef: `review-kit@acme-tools#${PHASE12_SENTINELS.pluginOrigin}`,
+    version: '1.0.0',
+    enabled: true,
+    trustedHash: PHASE12_SENTINELS.pluginTrust,
+    format: 'claude',
+    origin: { marketplace: 'acme-tools', note: PHASE12_SENTINELS.pluginOrigin },
+  })
+  mkdirSync(t.env.paths.transcripts, { recursive: true, mode: 0o700 })
+  const transcript = join(t.env.paths.transcripts, `${chatId}.jsonl`)
+  writeFileSync(transcript, `${JSON.stringify({ type: 'user', message: { role: 'user', content: PHASE12_SENTINELS.transcript } })}\n`, { mode: 0o600 })
+  const plan = await deps.claudeImport.upload({
+    label: '.claude',
+    files: [{ path: 'agents/sentinel.md', file: new Blob([`---\nname: sentinel\ndescription: Kept in the plan.\n---\n${PHASE12_SENTINELS.importPlan}\n`]) }],
+  })
+  return { marketplaceId, transcript, planId: plan.id }
 }

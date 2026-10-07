@@ -23,6 +23,11 @@
 // background block shows TaskBody with the live snapshot and `task-block-reveal`: "Show in background agents" while it
 // runs (`data-target="dock"`), "Go to the result" once its result is on the shown path (`data-target="result"`).
 // Without the context (outside a chat view) a background block stays static.
+// Phase 12 (ADR-058, docs/UI.md 7.34; W12.13): a custom agent with a `color` in the catalog of the chat's scope (the
+// customizations store; the chat's project from TOOL_APPROVAL_CONTEXT) shows an 8px dot before its name and a 2px left
+// rule on the open block, mapped to existing tokens (`AGENT_COLOR_CLASSES`): `data-slot="task-agent-color"` with
+// `data-value` = the color, `aria-hidden` (the type stays text). A qualified name of a Claude Code plugin agent shows as
+// it is ("review-kit:code-reviewer").
 import type { ToolPartLike } from '../chat-format'
 import {
   BanIcon,
@@ -43,13 +48,17 @@ import { HoverCard, HoverCardContent, HoverCardTrigger } from '@/components/ui/h
 import { Spinner } from '@/components/ui/spinner'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
+import { useCustomizationsStore } from '~/stores/customizations'
 import { usePluginsStore } from '~/stores/plugins'
 import { testIds } from '~/utils/testids'
 import { AGENT_TASK_CONTEXT, TRANSCRIPT_SCROLL } from '../chat-context'
 import { formatDuration, isSupersededDenial, toolNameOf } from '../chat-format'
+import { TOOL_APPROVAL_CONTEXT } from '../parts/tool-approval-context'
 import ToolApprovalCard from '../parts/ToolApprovalCard.vue'
 import ToolPart from '../parts/ToolPart.vue'
 import {
+  AGENT_COLOR_CLASSES,
+  agentColorOf,
   backgroundTaskState,
   firstSentence,
   taskAgentSourceText,
@@ -85,6 +94,9 @@ const emit = defineEmits<{
 }>()
 
 const plugins = usePluginsStore()
+const customizations = useCustomizationsStore()
+/** + Phase 12: the chat's project (the catalog scope of the agent colors). */
+const approvalContext = inject(TOOL_APPROVAL_CONTEXT, null)
 const open = ref(false)
 const scroll = inject(TRANSCRIPT_SCROLL, null)
 /** + Phase 10: the chat's background agents (absent outside a chat view: background blocks stay static). */
@@ -110,6 +122,12 @@ const kind = computed(() => (agentType.value === null ? undefined : taskKindOf(a
 const label = computed(() => (agentType.value === null ? 'Agent' : taskTypeLabelShort(agentType.value)))
 const fullLabel = computed(() => (agentType.value === null ? 'Agent' : taskTypeLabel(agentType.value)))
 const description = computed(() => input.value?.description ?? taskDescriptionOf(props.part.input))
+/** + Phase 12: the custom agent's color in the catalog of the chat's scope, or null. */
+const agentColor = computed(() => {
+  if (kind.value !== 'custom' || agentType.value === null)
+    return null
+  return agentColorOf(customizations.entriesOf(approvalContext?.projectId() ?? null, 'agent'), agentType.value)
+})
 
 // ---------- background calls (Phase 10, ADR-046) ----------
 
@@ -301,6 +319,13 @@ function onDecide(decision: { approved: boolean, alwaysAllow: boolean }) {
           <TelescopeIcon v-if="kind === 'explore'" aria-hidden="true" class="size-3.5 shrink-0 text-muted-foreground" />
           <BotMessageSquareIcon v-else-if="kind === 'custom'" aria-hidden="true" class="size-3.5 shrink-0 text-muted-foreground" />
           <BotIcon v-else aria-hidden="true" class="size-3.5 shrink-0 text-muted-foreground" />
+          <span
+            v-if="agentColor"
+            data-slot="task-agent-color"
+            :data-value="agentColor"
+            aria-hidden="true"
+            :class="cn('size-2 shrink-0 rounded-full', AGENT_COLOR_CLASSES[agentColor].dot)"
+          />
           <HoverCard v-if="agent" v-model:open="agentCardOpen" :open-delay="400" :close-delay="100">
             <HoverCardTrigger as-child>
               <span data-slot="task-agent-label" class="max-w-[24ch] shrink-0 truncate font-medium">{{ label }}</span>
@@ -382,7 +407,12 @@ function onDecide(decision: { approved: boolean, alwaysAllow: boolean }) {
         >
           {{ liveLine }}
         </p>
-        <CollapsibleContent class="min-w-0 pt-1 pl-5 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:animate-in data-[state=open]:fade-in-0">
+        <CollapsibleContent
+          :class="cn(
+            'min-w-0 pt-1 pl-5 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:animate-in data-[state=open]:fade-in-0',
+            agentColor && ['ml-1.5 border-l-2 pl-3', AGENT_COLOR_CLASSES[agentColor].rule],
+          )"
+        >
           <TaskBody :input="part.input" :output="shown ?? (hasOutput ? part.output : undefined)" :running="active" />
           <button
             v-if="revealTarget"

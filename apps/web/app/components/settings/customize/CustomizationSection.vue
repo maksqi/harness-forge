@@ -6,6 +6,8 @@
 // problems of the project (a linked folder, too many files) come through the `notices` slot under the heading. Built-in
 // command rows come in as entries with source 'builtin' (no menu).
 // Props, emits and the root test id are frozen from Gate P10-0b (C33).
+// Phase 12 (W12.11; docs/UI.md 9.14): the optional `heading-actions` slot puts actions after the heading (the project
+// section's New file…, `data-action="new-project-file"`).
 import type { CustomizationEntry, CustomizationKind, CustomizationSource } from '@harness-forge/shared'
 import type { CustomizationAction } from './customize'
 import { FolderXIcon } from '@lucide/vue'
@@ -36,6 +38,8 @@ defineSlots<{
   'notices'?: () => any
   /** Buttons after the personal empty state (New {kind}, Import…). */
   'empty-actions'?: () => any
+  /** + Phase 12: actions at the end of the heading (the project section's New file…). */
+  'heading-actions'?: () => any
 }>()
 
 const TITLES: Readonly<Record<CustomizationSource, string>> = {
@@ -71,6 +75,9 @@ function rowKey(entry: CustomizationEntry): string {
       <p v-if="source === 'project' && folders && folders.length > 0" class="min-w-0 font-mono text-xs break-all text-muted-foreground">
         {{ folders.join(' · ') }}
       </p>
+      <div v-if="$slots['heading-actions']" class="ml-auto flex shrink-0 items-center gap-2 self-center">
+        <slot name="heading-actions" />
+      </div>
     </div>
     <slot name="notices" />
 

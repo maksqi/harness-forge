@@ -232,9 +232,9 @@ describe('exports', () => {
 
   it('types the additions of plugin API 1.6.0 (ADR-053, ADR-057, ADR-058)', () => {
     // Command, skill and agent fields; names may be qualified with the plugin's own id (checked by the host).
-    expectTypeOf<keyof CommandDefinition>().toEqualTypeOf<'name' | 'description' | 'template' | 'syntax' | 'argumentHint' | 'model' | 'allowedTools' | 'run'>()
+    expectTypeOf<keyof CommandDefinition>().toEqualTypeOf<'name' | 'description' | 'template' | 'syntax' | 'argumentHint' | 'model' | 'allowedTools' | 'disallowedTools' | 'arguments' | 'whenToUse' | 'context' | 'agent' | 'run'>()
     expectTypeOf<CommandDefinition['syntax']>().toEqualTypeOf<'template' | 'markdown' | undefined>()
-    expectTypeOf<keyof SkillDefinition>().toEqualTypeOf<'name' | 'description' | 'content' | 'baseDir' | 'argumentHint' | 'userInvocable' | 'modelInvocable'>()
+    expectTypeOf<keyof SkillDefinition>().toEqualTypeOf<'name' | 'description' | 'content' | 'baseDir' | 'argumentHint' | 'userInvocable' | 'modelInvocable' | 'allowedTools' | 'disallowedTools' | 'model' | 'arguments' | 'whenToUse' | 'context' | 'agent'>()
     expectTypeOf<keyof AgentDefinition>().toEqualTypeOf<'name' | 'description' | 'instructions' | 'tools' | 'model' | 'disallowedTools' | 'maxTurns' | 'color' | 'skills'>()
     expectTypeOf<AgentColor>().toEqualTypeOf<shared.AgentColor>()
     expectTypeOf<AgentColor>().toEqualTypeOf<'red' | 'blue' | 'green' | 'yellow' | 'purple' | 'orange' | 'pink' | 'cyan'>()

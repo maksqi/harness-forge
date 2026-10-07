@@ -198,6 +198,37 @@ describe('background-tasks store: stop', () => {
     expect(store.stopping).toEqual({})
   })
 
+  it('stops a task while progress events arrive (W12.13, the P12-0a dock flake): the stop answer and the end win, the delivery hides it', async () => {
+    const store = useBackgroundTasksStore()
+    store.applyEvent(changed(progressed(1)))
+    let answer!: (task: BackgroundTask) => void
+    api.chatTasks.stop.mockReturnValueOnce(new Promise<BackgroundTask>((resolve) => {
+      answer = resolve
+    }))
+    const pending = store.stop(chatId(1), running.id)
+    expect(store.stopping[running.id]).toBe(true)
+    // Progress keeps coming while the stop is in flight (the child runs until its signal ends it).
+    store.applyEvent(changed(progressed(2), 2))
+    store.applyEvent(changed(progressed(3), 3))
+    expect(store.byId(chatId(1), running.id)?.output.steps).toHaveLength(3)
+    // The end (`task.changed` from the server's finalize), then a progress snapshot that was sent before it.
+    const aborted: BackgroundTask = { ...progressed(3), status: 'aborted', finishedAt: 1_759_000_030_000, output: { ...progressed(3).output, status: 'aborted', finishedAt: 1_759_000_030_000 } }
+    store.applyEvent(changed(aborted, 4))
+    store.applyEvent(changed(progressed(4), 5))
+    expect(store.byId(chatId(1), running.id)?.status).toBe('aborted')
+    // The stop answer: stopped, and the row is no longer in flight.
+    answer(aborted)
+    expect(await pending).toBe('stopped')
+    expect(store.stopping).toEqual({})
+    expect(store.visible(chatId(1)).map(task => task.status)).toEqual(['aborted'])
+    // A running reply took the result at its next step: delivered, no longer visible, and a late answer cannot undo it.
+    const delivered: BackgroundTask = { ...aborted, deliveredAt: 1_759_000_031_000, deliveredMessageId: 'msg_reply' }
+    store.applyEvent(changed(delivered, 6))
+    store.applyEvent(changed(aborted, 7))
+    expect(store.byId(chatId(1), running.id)?.deliveredAt).toBe(1_759_000_031_000)
+    expect(store.visible(chatId(1))).toEqual([])
+  })
+
   it('a second stop of the same task joins the one in flight', async () => {
     const store = useBackgroundTasksStore()
     store.applyEvent(changed(running))

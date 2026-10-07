@@ -2,7 +2,9 @@
 // duplicate name (409 `exists` on the name field), server diagnostics in the form-level alert, the discard
 // confirmation, Mod+Enter, the command and skill fields, and the import notes. The body editor is stubbed with a
 // textarea (MarkdownEditor has its own test). Phase 11 (W11.8-T6, T7): the output style editor (Keep coding
-// instructions, no Tools or Model, the label kept on save) and the skill switches and argument hint.
+// instructions, no Tools or Model, the label kept on save) and the skill switches and argument hint. Phase 12
+// (W12.11-T3): the agent's Tools not allowed, Max turns, Color and Skills; the skill's Allowed tools, Model, When to use
+// and Run in a sub-agent with its Agent; the body help for `$ARGUMENTS[N]`; keys the form does not show are kept.
 import type { VueWrapper } from '@vue/test-utils'
 import type { MockApi } from '~/utils/testing/mock-api'
 import { formatDefinition, HarnessError } from '@harness-forge/shared'
@@ -276,7 +278,7 @@ describe('customizationEditor', () => {
     expect(content).toContain('argument-hint: <name>')
   })
 
-  it('opens an import with its notes and the skill fields only', async () => {
+  it('opens an import with its notes and the skill fields (Phase 12: Allowed tools and Model too)', async () => {
     await mountEditor({
       kind: 'skill',
       mode: 'import',
@@ -289,8 +291,18 @@ describe('customizationEditor', () => {
     const notes = byTestId(testIds.customizationImportNotes)!
     expect(notes.dataset.count).toBe('2')
     expect(notes.textContent).toContain('Imported from SKILL.md. Check the fields, then save.')
-    expect(byTestId(testIds.customizationToolsMode)).toBeNull()
-    expect(byTestId(testIds.customizationModel)).toBeNull()
+    // Phase 12 (ADR-058): a skill's Allowed tools and Model work as a command's; no agent fields.
+    expect(byTestId(testIds.customizationToolsMode)?.dataset.value).toBe('all')
+    expect(editor.textContent).toContain('Allowed tools')
+    expect(editor.textContent).toContain('No restriction')
+    expect(byTestId(testIds.customizationModel)?.textContent).toContain('The chat\'s model')
+    expect(byTestId(testIds.customizationMaxTurns)).toBeNull()
+    expect(byTestId(testIds.customizationColor)).toBeNull()
+    expect(byTestId(testIds.customizationSkills)).toBeNull()
+    expect(byTestId(testIds.customizationWhenToUse)).not.toBeNull()
+    expect(byTestId(testIds.customizationFork)?.dataset.state).toBe('unchecked')
+    expect(byTestId(testIds.customizationForkAgent)).toBeNull()
+    expect(editor.textContent).toContain('$ARGUMENTS[0] or $0 is the first argument')
     // Import mode shows the field problems at once.
     const name = byTestId<HTMLInputElement>(testIds.customizationName)!
     expect(name.getAttribute('aria-invalid')).toBe('true')
@@ -362,5 +374,129 @@ describe('customizationEditor', () => {
     expect(content.content).toContain('argument-hint: <env>')
     expect(content.content).toContain('disable-model-invocation: true')
     expect(content.content).not.toContain('user-invocable')
+  })
+})
+
+describe('customizationEditor: Claude Code fields (Phase 12, W12.11-T3)', () => {
+  const AGENT_FILE = '---\nname: reviewer\ndescription: Reviews a diff\ntools:\n  - read_file\ndisallowedTools:\n  - shell\nmodel: sonnet\nmaxTurns: 12\nskills:\n  - pdf\ncolor: purple\n---\n\nReview it.\n'
+
+  function agentWithKeys() {
+    return agentCustomization({
+      content: AGENT_FILE,
+      fields: {
+        name: 'reviewer',
+        description: 'Reviews a diff',
+        tools: ['read_file'],
+        model: null,
+        instructions: 'Review it.',
+        disallowedTools: ['shell'],
+        maxTurns: 12,
+        color: 'purple',
+        skills: ['pdf'],
+        modelAlias: 'sonnet',
+      },
+    })
+  }
+
+  it('shows an agent\'s keys and saves them unchanged (the Claude model name kept)', async () => {
+    api.customizations.update.mockResolvedValue(agentWithKeys())
+    await mountEditor({ mode: 'edit', customization: agentWithKeys() })
+    const editor = byTestId(testIds.customizationEditor)!
+    expect(byTestId(testIds.customizationDisallowedTools)?.dataset.count).toBe('1')
+    expect(editor.textContent).toContain('Tools not allowed')
+    expect(editor.textContent).toContain('Removed after the allowed tools. A rule with arguments, like Bash(rm *), removes the whole tool.')
+    expect(byTestId<HTMLInputElement>(testIds.customizationMaxTurns)!.value).toBe('12')
+    expect(byTestId<HTMLInputElement>(testIds.customizationMaxTurns)!.getAttribute('inputmode')).toBe('numeric')
+    expect(editor.textContent).toContain('At most this many steps; the sub-agent step limit still applies.')
+    const color = byTestId(testIds.customizationColor)!
+    expect(color.dataset.value).toBe('purple')
+    expect(color.textContent).toContain('Purple')
+    expect(editor.textContent).toContain('Marks this agent\'s runs in the chat.')
+    expect(byTestId(testIds.customizationSkills)?.dataset.count).toBe('1')
+    expect(editor.textContent).toContain('Loaded into the sub-agent\'s instructions when it starts.')
+    expect(byTestId(testIds.customizationModel)?.textContent).toContain('sonnet (Claude model name)')
+    expect(byTestId(testIds.customizationWhenToUse)).toBeNull()
+    expect(byTestId(testIds.customizationFork)).toBeNull()
+
+    save().click()
+    await flushPromises()
+    expect(api.customizations.update).toHaveBeenCalledWith({ params: { id: customizationId(1) }, body: { content: AGENT_FILE } })
+  })
+
+  it('checks Max turns and writes the new agent keys with formatDefinition', async () => {
+    api.customizations.create.mockResolvedValue(agentCustomization())
+    await mountEditor()
+    await type(byTestId<HTMLInputElement>(testIds.customizationName), 'triager')
+    await type(byTestId<HTMLTextAreaElement>(testIds.customizationDescription), 'Triages issues')
+    await type(body(), 'Sort the issues.')
+    const turns = byTestId<HTMLInputElement>(testIds.customizationMaxTurns)!
+    await type(turns, '500')
+    expect(turns.getAttribute('aria-invalid')).toBe('true')
+    expect(byTestId(testIds.customizationEditor)?.textContent).toContain('Enter a whole number from 1 to 200.')
+    expect(save().disabled).toBe(true)
+    await type(turns, '8')
+    expect(save().disabled).toBe(false)
+
+    byTestId(testIds.customizationColor)!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await flushPromises()
+    const options = [...document.body.querySelectorAll<HTMLElement>('[role="option"]')]
+    expect(options.map(option => option.dataset.value)).toEqual(['', 'red', 'blue', 'green', 'yellow', 'purple', 'orange', 'pink', 'cyan'])
+    expect(options[1]!.querySelector('[data-slot="customization-color-dot"]')?.getAttribute('aria-hidden')).toBe('true')
+    options.find(option => option.dataset.value === 'cyan')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await flushPromises()
+    expect(byTestId(testIds.customizationColor)?.dataset.value).toBe('cyan')
+
+    save().click()
+    await flushPromises()
+    const content = (api.customizations.create.mock.calls[0]![0] as { body: { content: string } }).body.content
+    expect(content).toBe(formatDefinition({ kind: 'agent', fields: { name: 'triager', description: 'Triages issues', tools: null, model: null, instructions: 'Sort the issues.', maxTurns: 8, color: 'cyan' } }))
+  })
+
+  it('creates a skill that runs in a sub-agent with its agent, When to use, allowed tools and a model', async () => {
+    api.customizations.create.mockResolvedValue(commandCustomization())
+    await mountEditor({ kind: 'skill' })
+    await type(byTestId<HTMLInputElement>(testIds.customizationName), 'pdf')
+    await type(byTestId<HTMLTextAreaElement>(testIds.customizationDescription), 'Fill PDF forms')
+    await type(byTestId<HTMLTextAreaElement>(testIds.customizationWhenToUse), 'When a PDF form must be filled')
+    await type(body(), 'Fill $ARGUMENTS[0].')
+    expect(byTestId(testIds.customizationEditor)?.textContent).toContain('Added to the description the agent reads.')
+    const fork = byTestId(testIds.customizationFork)!
+    expect(byTestId(testIds.customizationEditor)?.textContent).toContain('The skill runs as a sub-agent and only its report comes back.')
+    fork.click()
+    await flushPromises()
+    expect(fork.dataset.state).toBe('checked')
+    const agent = byTestId(testIds.customizationForkAgent)!
+    expect(agent.dataset.value).toBe('general')
+    agent.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await flushPromises()
+    document.body.querySelector<HTMLElement>('[role="option"][data-value="explore"]')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await flushPromises()
+    expect(byTestId(testIds.customizationForkAgent)?.dataset.value).toBe('explore')
+
+    document.body.querySelector<HTMLElement>(`[data-testid="${testIds.customizationToolsMode}"] [role="radio"][value="some"]`)!.click()
+    await flushPromises()
+    save().click()
+    await flushPromises()
+    const content = (api.customizations.create.mock.calls[0]![0] as { body: { kind: string, content: string } }).body.content
+    expect(content).toContain('when_to_use: When a PDF form must be filled')
+    expect(content).toContain('allowed-tools: []')
+    expect(content).toContain('context: fork')
+    expect(content).toContain('agent: explore')
+  })
+
+  it('keeps the named arguments of a command it does not show', async () => {
+    const file = '---\ndescription: Greet someone\narguments:\n  - who\n---\n\nSay hello to $who.\n'
+    const greet = commandCustomization({
+      content: file,
+      fields: { name: 'greet', description: 'Greet someone', argumentHint: null, model: null, allowedTools: null, body: 'Say hello to $who.', arguments: ['who'] },
+    })
+    api.customizations.update.mockResolvedValue(greet)
+    await mountEditor({ kind: 'command', mode: 'edit', customization: greet })
+    await type(byTestId<HTMLTextAreaElement>(testIds.customizationWhenToUse), 'When you meet someone')
+    save().click()
+    await flushPromises()
+    const content = (api.customizations.update.mock.calls[0]![0] as { body: { content: string } }).body.content
+    expect(content).toContain('arguments:\n  - who')
+    expect(content).toContain('when_to_use: When you meet someone')
   })
 })

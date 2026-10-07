@@ -10,7 +10,8 @@
 // (`agent` / `skill` / `style`), so `Registry.onChange` sees them and `agents.onChange` / `skills.onChange` /
 // `styles.onChange` see only their own. A registry with `perPluginMax` refuses (`validation_error`) a registration that
 // would give one plugin more entries than that. Definitions are stored as the frozen copies the validators return;
-// lists are sorted by name.
+// lists are sorted by name. Plugin API 1.6.0 (ADR-053; W12.1): the validators get the owner, so a qualified name
+// `<pluginId>:<name>` is accepted only from that plugin.
 import type { Disposable } from '@harness-forge/plugin-sdk'
 import type { RegistryChange } from './types.ts'
 import { toDisposable } from './disposable.ts'
@@ -55,8 +56,11 @@ export interface DefinitionRegistrySpec<D extends { name: string }> {
   readonly kind: Extract<RegistryChange['kind'], 'agent' | 'skill' | 'style'>
   /** Shown in conflict messages ("The agent "x" is already registered ..."). */
   readonly label: string
-  /** Throws `validation_error`; returns the (frozen) definition to store. */
-  readonly validate: (definition: D) => D
+  /**
+   * Throws `validation_error`; returns the (frozen) definition to store. Plugin API 1.6.0: `pluginId` is the owner a
+   * qualified name must start with.
+   */
+  readonly validate: (definition: D, pluginId: string) => D
   /** At most this many entries per plugin (`validation_error` on `['name']` beyond it); default unlimited. */
   readonly perPluginMax?: number
 }
@@ -74,7 +78,7 @@ export function createDefinitionRegistry<D extends { name: string }>(core: Defin
 
   return {
     register: (pluginId, definition) => {
-      const validated = spec.validate(definition)
+      const validated = spec.validate(definition, pluginId)
       const name = validated.name
       const existing = entries.get(name)
       if (existing)

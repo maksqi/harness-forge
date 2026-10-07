@@ -94,12 +94,23 @@ describe('dataImportSection (Phase 10)', () => {
   })
 })
 
-describe('dataImportSection: Import from Claude Code (Phase 12, C46-T7)', () => {
-  it('links to the import dialog of Customize', () => {
-    const NuxtLink = { props: ['to'], template: '<a :data-to="JSON.stringify(to)"><slot /></a>' }
+describe('dataImportSection: Import from Claude Code (Phase 12, W12.10-T3)', () => {
+  it('links to the import dialog of Customize with its line', () => {
+    const NuxtLink = { props: ['to'], template: '<a :href="to"><slot /></a>' }
     wrapper = mount(DataImportSection, { attachTo: document.body, global: { plugins: [pinia], stubs: { NuxtLink } } })
     const link = byTestId(testIds.dataImportClaude)!
     expect(link.textContent?.trim()).toBe('Import from Claude Code…')
-    expect(JSON.parse(link.dataset.to!)).toEqual({ path: '/settings/customize', query: { import: 'claude' } })
+    expect(link.getAttribute('href')).toBe('/settings/customize?import=claude')
+    expect(document.getElementById(link.getAttribute('aria-describedby')!)?.textContent?.trim()).toBe('Agents, commands, skills, hooks and MCP servers from a Claude Code folder.')
+  })
+
+  it('shows how many commands a restore turned off', async () => {
+    api.data.import.mockResolvedValue(result({ customizations: { imported: 3, skipped: 0, failed: 0, turnedOff: 2 } }))
+    vi.spyOn(useCustomizationsStore(), 'refreshLoaded').mockResolvedValue()
+    wrapper = mount(DataImportSection, { attachTo: document.body, global: { plugins: [pinia] } })
+    await chooseBackup()
+    byTestId(testIds.dataImport)!.click()
+    await flushPromises()
+    expect(document.body.querySelector('[data-slot="data-import-turned-off"]')?.textContent?.trim()).toBe('2 commands turned off (they run shell lines)')
   })
 })

@@ -2,11 +2,17 @@
 // contributions summary, browse filters, the order of the installed list and (Phase 10) the rows of a plugin's agents
 // and skills (Phase 11: and output styles). Pure functions, shared by the sidebar (PluginsNav), the list page and the
 // detail page.
+// Phase 12 (ADR-053 / ADR-054, docs/UI.md 8.1, 8.13; W12.9): the source labels `github` -> "GitHub" and `marketplace` ->
+// the marketplace's name (`marketplaceNameOf`: the detail's `origin`, else the `<plugin>@<marketplace>` of `sourceRef`,
+// else "Marketplace"), the "Claude Code" format badge (`pluginFormatLabel`) and the origin line of the detail page
+// (`pluginOriginText`).
 import type {
   CustomizationEntry,
   CustomizationShadowedBy,
   PluginContributions,
+  PluginFormat,
   PluginKind,
+  PluginOrigin,
   PluginSource,
   PluginState,
   PluginSummary,
@@ -14,6 +20,7 @@ import type {
 import type { Component } from 'vue'
 import type { StatusDotStatus } from '~/components/common/status'
 import type { PluginFilter } from '~/stores/plugins'
+import { MARKETPLACE_NAME_PATTERN } from '@harness-forge/shared'
 import {
   BotIcon,
   BoxesIcon,
@@ -57,11 +64,39 @@ export function pluginFilterRoute(filter: PluginFilter): string | { path: string
 
 // ---------- source and state ----------
 
+/** What the source labels read of a plugin: a summary, or a detail with its `origin` (Phase 12). */
+export interface PluginSourceSubject {
+  source: PluginSource
+  kind: PluginKind
+  sourceRef?: string | null
+  origin?: PluginOrigin | null
+}
+
+/**
+ * The marketplace a `marketplace` plugin came from (Phase 12, ADR-054): the name in the detail's `origin` (the name at
+ * install time), else the `<marketplace>` of a `sourceRef` `<plugin>@<marketplace>` (a summary has no origin); null when
+ * neither names one (another source, or a `sourceRef` of another shape).
+ */
+export function marketplaceNameOf(plugin: Pick<PluginSourceSubject, 'source' | 'sourceRef' | 'origin'>): string | null {
+  if (plugin.source !== 'marketplace')
+    return null
+  if (plugin.origin?.kind === 'marketplace')
+    return plugin.origin.marketplace
+  const ref = plugin.sourceRef ?? ''
+  const at = ref.lastIndexOf('@')
+  if (at <= 0)
+    return null
+  const entry = ref.slice(0, at)
+  const name = ref.slice(at + 1)
+  // `owner/repo@<sha>[/path]` names a repository and a commit, not a marketplace.
+  return !entry.includes('/') && MARKETPLACE_NAME_PATTERN.test(name) ? name : null
+}
+
 /**
  * Source badge label: builtin -> Core, created -> Declarative / Code by kind, zip, npm, URL, and Local for linked or
- * copied folders.
+ * copied folders; Phase 12: github -> GitHub, marketplace -> the marketplace's name ("Marketplace" when unknown).
  */
-export function pluginSourceLabel(plugin: { source: PluginSource, kind: PluginKind }): string {
+export function pluginSourceLabel(plugin: PluginSourceSubject): string {
   switch (plugin.source) {
     case 'builtin':
       return 'Core'
@@ -80,12 +115,12 @@ export function pluginSourceLabel(plugin: { source: PluginSource, kind: PluginKi
     case 'github':
       return 'GitHub'
     case 'marketplace':
-      return 'Marketplace'
+      return marketplaceNameOf(plugin) ?? 'Marketplace'
   }
 }
 
 /** Longer wording of the source for tooltips and read-only notes ("Installed from npm"). */
-export function pluginSourceDescription(plugin: Pick<PluginSummary, 'source' | 'kind' | 'sourceRef'>): string {
+export function pluginSourceDescription(plugin: Pick<PluginSummary, 'source' | 'kind' | 'sourceRef'> & { origin?: PluginOrigin | null }): string {
   const ref = plugin.sourceRef ? ` (${plugin.sourceRef})` : ''
   switch (plugin.source) {
     case 'builtin':
@@ -105,8 +140,38 @@ export function pluginSourceDescription(plugin: Pick<PluginSummary, 'source' | '
     // Phase 12 (ADR-054).
     case 'github':
       return `Installed from GitHub${ref}`
-    case 'marketplace':
-      return `Installed from a marketplace${ref}`
+    case 'marketplace': {
+      const name = marketplaceNameOf(plugin)
+      return name ? `Installed from the marketplace ${name}${ref}` : `Installed from a marketplace${ref}`
+    }
+  }
+}
+
+/** The format badge of a plugin (Phase 12, ADR-053, docs/UI.md 8.1): "Claude Code" for a Claude Code plugin, else null. */
+export function pluginFormatLabel(format: PluginFormat | undefined): string | null {
+  return format === 'claude' ? 'Claude Code' : null
+}
+
+/** The first 7 characters of a commit. */
+export function shortCommit(commit: string): string {
+  return commit.slice(0, 7)
+}
+
+/**
+ * The origin line of the detail page (Phase 12, ADR-054, docs/UI.md 8.13): "From {marketplace}" (+ " · {sha7}" for an
+ * entry fetched at a commit) or "GitHub · {repo}@{sha7}" (+ " · {path}" for a folder of the repository), with the full
+ * commit for a title; null without an origin.
+ */
+export function pluginOriginText(origin: PluginOrigin | null | undefined): { text: string, commit: string | null } | null {
+  if (!origin)
+    return null
+  if (origin.kind === 'marketplace') {
+    const commit = origin.commit ?? null
+    return { text: `From ${origin.marketplace}${commit ? ` · ${shortCommit(commit)}` : ''}`, commit }
+  }
+  return {
+    text: `GitHub · ${origin.repo}@${shortCommit(origin.commit)}${origin.path ? ` · ${origin.path}` : ''}`,
+    commit: origin.commit,
   }
 }
 

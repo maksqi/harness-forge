@@ -5,10 +5,11 @@ import { createPinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { h, ref } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
+import { useCustomizationsStore } from '~/stores/customizations'
 import { usePluginsStore } from '~/stores/plugins'
 import { useProjectMcpStore } from '~/stores/project-mcp'
 import { testIds } from '~/utils/testids'
-import { hookData, hookRecordId, planApprovalPart, pluginSummary, projectMcpList, projectMcpServer, shellOutput, skillOutput, skillPart, taskPart, todoItem, todoWritePart, toolSummary } from '~/utils/testing/fixtures'
+import { customizationEntry, customizationList, hookData, hookRecordId, planApprovalPart, pluginSummary, projectMcpList, projectMcpServer, shellOutput, skillOutput, skillPart, taskPart, todoItem, todoWritePart, toolSummary } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import PlanApprovalCard from '../agent/PlanApprovalCard.vue'
 import { HOOK_ACTIVITY } from '../chat-context'
@@ -954,5 +955,73 @@ describe('toolPart: project MCP servers (Phase 11)', () => {
     }, { attachTo: document.body, global: { provide: projectContext('prj_1') } })
     await flushPromises()
     expect(row(inside).text()).toContain('memory')
+  })
+})
+
+describe('toolPart: Phase 12 (W12.13)', () => {
+  const deniedPart = () => part({ state: 'output-denied', approval: { id: 'appr_1', approved: false } } as Partial<ToolPartLike> & Pick<ToolPartLike, 'state'>)
+  function mountHooks(toolPart: ToolPartLike, hooks: Parameters<typeof hookData>[0][], provide: Record<symbol, unknown> = {}) {
+    return mount({
+      render: () => h(TooltipProvider, null, { default: () => h(ToolPart, { part: toolPart, streaming: false, hooks: hooks.map(overrides => hookData(overrides)) }) }),
+    }, { attachTo: document.body, global: { provide } })
+  }
+
+  it('reads "Blocked by hook" for a PermissionRequest denial and shows both notes', async () => {
+    const wrapper = mountHooks(deniedPart(), [
+      { id: hookRecordId(1), toolCallId: 'call_1', outcome: 'allowed', reason: undefined, harnessAsked: true },
+      { id: hookRecordId(2), toolCallId: 'call_1', event: 'PermissionRequest', outcome: 'denied', reason: 'Not on main.' },
+    ])
+    expect(row(wrapper).get(`[data-testid="${testIds.toolRowHook}"]`).attributes('data-value')).toBe('denied')
+    expect(row(wrapper).text()).toContain('Blocked by hook')
+    expect(row(wrapper).text()).not.toContain('Denied')
+    await row(wrapper).get('button').trigger('click')
+    await flushPromises()
+    const notes = wrapper.findAll(`[data-testid="${testIds.hookNote}"]`)
+    expect(notes.map(note => note.get('[data-slot="hook-note-line"]').text())).toEqual(['Allowed by hook · still asks', 'Blocked by a PermissionRequest hook: Not on main.'])
+    expect(notes[0]!.attributes('data-state')).toBe('still-asks')
+  })
+
+  it('marks a still-asking allow on the row and in its note', async () => {
+    const done = part({ state: 'output-available', output: { ok: true } })
+    const wrapper = mountHooks(done, [{ toolCallId: 'call_1', outcome: 'allowed', reason: undefined, harnessAsked: true }])
+    expect(row(wrapper).get(`[data-testid="${testIds.toolRowHook}"]`).attributes()).toMatchObject({ 'data-value': 'allowed', 'data-state': 'still-asks' })
+    expect(row(wrapper).get('button').text()).toContain(', allowed by hook, still asks')
+  })
+
+  it('puts a PostToolUseFailure note in the failed row\'s body', async () => {
+    const failed = part({ state: 'output-error', errorText: 'ENOENT' } as Partial<ToolPartLike> & Pick<ToolPartLike, 'state'>)
+    const wrapper = mountHooks(failed, [{ toolCallId: 'call_1', event: 'PostToolUseFailure', outcome: 'blocked', reason: 'Check the path first.' }])
+    expect(row(wrapper).find(`[data-testid="${testIds.toolRowHook}"]`).exists()).toBe(false)
+    await row(wrapper).get('button').trigger('click')
+    await flushPromises()
+    expect(wrapper.get(`[data-testid="${testIds.hookNote}"]`).text()).toContain('A PostToolUseFailure hook told the agent: Check the path first.')
+  })
+
+  it('shows the running hook\'s status message instead of "Running hook…"', async () => {
+    const activity = ref<{ event: 'PreToolUse', toolCallId: string | null, label: string | null } | null>({ event: 'PreToolUse', toolCallId: 'call_1', label: 'Checking the command…' })
+    const wrapper = mount({
+      render: () => h(TooltipProvider, null, { default: () => h(ToolPart, { part: part({ state: 'input-available' }), streaming: true }) }),
+    }, { attachTo: document.body, global: { provide: { [HOOK_ACTIVITY as symbol]: activity } } })
+    expect(row(wrapper).get('[data-slot="running-hook"]').text()).toBe('Checking the command…')
+    activity.value = { event: 'PreToolUse', toolCallId: 'call_1', label: null }
+    await flushPromises()
+    expect(row(wrapper).get('[data-slot="running-hook"]').text()).toBe('Running hook…')
+  })
+
+  it('shows a fork skill\'s content as its report (the catalog of the chat\'s scope)', async () => {
+    useCustomizationsStore().catalogs = { '': customizationList({ items: [customizationEntry({ kind: 'skill', name: 'audit', source: 'user', context: 'fork' })], project: null }) }
+    const wrapper = mountPart(skillPart(skillOutput({ name: 'audit', source: 'user', baseDir: undefined, files: undefined, content: 'Two issues.' })) as ToolPartLike, false)
+    await row(wrapper).get('button').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-slot="skill-body"]').attributes('data-mode')).toBe('report')
+    expect(wrapper.get('[data-slot="skill-caption"]').text()).toBe('The skill ran as a sub-agent. This is its report.')
+  })
+
+  it('names the plugin of a qualified plugin skill from the name\'s plugin id', () => {
+    usePluginsStore().items = [pluginSummary({ id: 'review-kit', name: 'Review kit' })]
+    const wrapper = mountPart(skillPart(skillOutput({ name: 'review-kit:pdf', source: 'plugin', baseDir: undefined, files: undefined })) as ToolPartLike, false)
+    expect(row(wrapper).get('[data-slot="skill-row-name"]').text()).toBe('review-kit:pdf')
+    expect(row(wrapper).get('[data-slot="skill-row-source"]').text()).toBe('Review kit')
+    expect(row(wrapper).get('button').attributes('aria-label')).toBe('Loaded skill review-kit:pdf, Review kit')
   })
 })

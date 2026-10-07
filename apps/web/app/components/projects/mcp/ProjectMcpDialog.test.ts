@@ -15,6 +15,7 @@ import { useProjectsStore } from '~/stores/projects'
 import { testIds } from '~/utils/testids'
 import { authStatus, projectDefinitionFile, projectId, projectMcpList, projectMcpServer, projectSummary, projectTrustList, trustMcpItem, trustSha } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
+import ProjectFileEditor from '../../settings/customize/ProjectFileEditor.vue'
 import ProjectMcpDialog from './ProjectMcpDialog.vue'
 
 const mocks = vi.hoisted(() => ({
@@ -278,5 +279,37 @@ describe('projectMcpDialog: Edit .mcp.json… (Phase 12, C46-T7)', () => {
     await flushPromises()
     await nextTick()
     expect(byTestId(testIds.projectFileEditor)?.dataset.mode).toBe('new')
+  })
+})
+
+describe('projectMcpDialog: a saved .mcp.json (Phase 12, W12.13-T6)', () => {
+  it('refetches its rows after a save: the new server stays pending until it is approved here', async () => {
+    api.projectDefinitions.read.mockResolvedValue(projectDefinitionFile({ path: '.mcp.json', kind: 'mcp', exists: false, content: null, sha256: null }))
+    await mountDialog(projectMcpList({ items: [], variables: [] }))
+    await click(byTestId(testIds.projectMcpDialog)!.querySelector<HTMLElement>('[data-action="edit-mcp-json"]'))
+    const editor = wrapper!.findComponent(ProjectFileEditor)
+    expect(editor.props('entry')).toMatchObject({ path: '.mcp.json', kind: 'mcp', create: true })
+
+    const pending = projectMcpServer({ id: 'docs', name: 'docs', transport: 'http', state: 'pending', sha256: trustSha(5), missingVariables: [], tools: [] })
+    api.projectMcp.list.mockResolvedValueOnce(projectMcpList({ items: [pending], variables: [] }))
+    api.projectTrust.list.mockResolvedValueOnce(projectTrustList({ items: [trustMcpItem({ sha256: trustSha(5), label: 'docs', detail: { name: 'docs', id: 'docs', transport: 'http', url: 'https://docs.example.com/mcp', envNames: [], headerNames: [], variables: [] } })] }))
+    const listCalls = api.projectMcp.list.mock.calls.length
+    const trustCalls = api.projectTrust.list.mock.calls.length
+    editor.vm.$emit('saved', { path: '.mcp.json', pending: 1 })
+    await flushPromises()
+    await nextTick()
+    expect(api.projectMcp.list.mock.calls.length).toBe(listCalls + 1)
+    expect(api.projectTrust.list.mock.calls.length).toBe(trustCalls + 1)
+    expect(byTestId(testIds.projectMcpEmpty)).toBeNull()
+    expect(row('docs').dataset.state).toBe('pending')
+    expect(row('docs').textContent).toContain('Needs approval')
+    // No approval happened: the save never approves.
+    expect(api.projectTrust.approve).not.toHaveBeenCalled()
+
+    // Its Review… (from the editor) opens the trust dialog on the saved item.
+    editor.vm.$emit('review', trustSha(5))
+    await flushPromises()
+    await nextTick()
+    expect(byTestId(testIds.projectTrustDialog)).not.toBeNull()
   })
 })

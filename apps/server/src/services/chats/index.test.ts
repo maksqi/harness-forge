@@ -19,7 +19,7 @@ import { SAMPLE_CHAT_EXPORT } from '../../testing/api-samples.ts'
 import { createTestApp } from '../../testing/create-test-app.ts'
 import { createRecordingEventBus } from '../../testing/fakes.ts'
 import { IMPORT_DENIAL_REASON } from './import.ts'
-import { createChatsService } from './index.ts'
+import { createChatsService, TOTALS_PURPOSES } from './index.ts'
 
 const META = { modelRef: 'mock:echo', startedAt: 1 }
 
@@ -215,7 +215,7 @@ describe('create and get', () => {
     expect((await service.get(chatId(2))).totals).toMatchObject({ inputTokens: 1000, outputTokens: 1000, costUsd: 9 })
   })
 
-  it('counts every purpose but title, transcription and speech: chat, image, compact and subagent (Phase 9)', async () => {
+  it('counts every purpose but title, transcription and speech: chat, image, compact, subagent (Phase 9) and hook (Phase 12)', async () => {
     const id = chatId(1)
     await service.create(treeInput())
     await service.create({ id: chatId(2) })
@@ -226,17 +226,21 @@ describe('create and get', () => {
     await service.addUsage({ ...base, purpose: 'compact', inputTokens: 300, outputTokens: 40, costUsd: 0.125 })
     await service.addUsage({ ...base, modelId: 'subagent', purpose: 'subagent', inputTokens: 50, outputTokens: 6, costUsd: 0.0625 })
     await service.addUsage({ ...base, modelId: 'subagent', purpose: 'subagent', inputTokens: 70, outputTokens: 8, costUsd: null })
+    // W12.6: two prompt-hook calls (one of a reply, one at submit before any reply): counted like the reply's own cost.
+    await service.addUsage({ ...base, modelId: 'prompt-hook', purpose: 'hook', inputTokens: 10, outputTokens: 5, costUsd: 0.03125 })
+    await service.addUsage({ ...base, messageId: null, modelId: 'prompt-hook', purpose: 'hook', inputTokens: 4, outputTokens: 2, costUsd: null })
     // Not counted: a title, a transcription, a speech row, and a compact row of another chat.
     await service.addUsage({ ...base, messageId: null, purpose: 'title', inputTokens: 100, outputTokens: 100, costUsd: 1 })
     await service.addUsage({ ...base, messageId: null, purpose: 'transcription', inputTokens: 0, outputTokens: 0, costUsd: null })
     await service.addUsage({ ...base, messageId: null, purpose: 'speech', inputTokens: 50, outputTokens: 0, costUsd: 2 })
     await service.addUsage({ ...base, chatId: chatId(2), purpose: 'compact', inputTokens: 900, outputTokens: 90, costUsd: 4 })
     const { totals } = await service.get(id)
-    expect(totals).toEqual({ inputTokens: 431, outputTokens: 76, reasoningTokens: 5, cacheReadTokens: 10, cacheWriteTokens: 15, costUsd: 0.9375 })
+    expect(totals).toEqual({ inputTokens: 445, outputTokens: 83, reasoningTokens: 7, cacheReadTokens: 14, cacheWriteTokens: 21, costUsd: 0.96875 })
     expect((await service.get(chatId(2))).totals).toEqual({ inputTokens: 900, outputTokens: 90, reasoningTokens: 1, cacheReadTokens: 2, cacheWriteTokens: 3, costUsd: 4 })
     // The rows are stored with their purpose (the totals filter is the only place that groups them).
     const rows = await t.db.select({ purpose: usage.purpose }).from(usage).where(eq(usage.chatId, id))
-    expect(rows.map(row => row.purpose).sort()).toEqual(['chat', 'compact', 'image', 'speech', 'subagent', 'subagent', 'title', 'transcription'])
+    expect(rows.map(row => row.purpose).sort()).toEqual(['chat', 'compact', 'hook', 'hook', 'image', 'speech', 'subagent', 'subagent', 'title', 'transcription'])
+    expect(TOTALS_PURPOSES).toEqual(['chat', 'image', 'compact', 'subagent', 'hook'])
   })
 
   it('reports running from the runs registry', async () => {

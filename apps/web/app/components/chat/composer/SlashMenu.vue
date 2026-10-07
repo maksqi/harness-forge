@@ -12,12 +12,15 @@
 // Phase 11 (ADR-049, ADR-052; W11.10): a fifth group Skills (`data-group="skill"`, last) whose rows show the source and
 // `BookOpen` on the right; a project command whose `!` lines wait for approval shows a muted `ShieldQuestionMark` "Needs
 // approval" on the right (`data-trust="pending"`, named ", needs approval"); picking it still inserts it.
+// Phase 12 (ADR-053; docs/UI.md 7.34; W12.13): qualified names of Claude Code plugin commands and skills
+// (`data-value="review-kit:db:migrate"`): typing filters on every segment, the row shows the plugin namespace muted
+// (`data-slot="slash-menu-namespace"`) and cuts a name over 40 characters in the middle, the full name in its title.
 import type { SlashGroup, SlashItem } from './slash-commands'
 import { BookOpenIcon, ShieldQuestionMarkIcon } from '@lucide/vue'
 import { computed, nextTick, ref, useId, watch } from 'vue'
 import { cn } from '@/lib/utils'
 import { testIds } from '~/utils/testids'
-import { filterSlashItems, SLASH_GROUPS, slashItemDetail, slashItemLabel } from './slash-commands'
+import { filterSlashItems, SLASH_GROUPS, slashItemDetail, slashItemLabel, slashNameDisplay } from './slash-commands'
 
 const props = defineProps<{
   open: boolean
@@ -44,6 +47,8 @@ watch([() => props.query, visible], () => {
 interface Row {
   item: SlashItem
   index: number
+  /** + Phase 12: the name as the row shows it (the muted namespace, the rest, the title of a qualified or cut name). */
+  shown: ReturnType<typeof slashNameDisplay>
 }
 
 interface Group {
@@ -54,7 +59,7 @@ interface Group {
 
 // `matches` is already in group order, so the option indexes run top to bottom.
 const groups = computed<Group[]>(() => {
-  const rows: Row[] = matches.value.map((item, index) => ({ item, index }))
+  const rows: Row[] = matches.value.map((item, index) => ({ item, index, shown: slashNameDisplay(item.name) }))
   return SLASH_GROUPS
     .map(group => ({ ...group, rows: rows.filter(row => row.item.group === group.value) }))
     .filter(group => group.rows.length > 0)
@@ -158,7 +163,11 @@ defineExpose({ handleKeydown, activeId, listId })
           @pointermove="active = row.index"
           @click="pick(row.index)"
         >
-          <span class="max-w-[60%] shrink-0 truncate font-mono text-[13px] font-medium">/{{ row.item.name }}</span>
+          <span
+            data-slot="slash-menu-name"
+            :title="row.shown.title ?? undefined"
+            class="max-w-[60%] shrink-0 truncate font-mono text-[13px] font-medium"
+          >/<span v-if="row.shown.namespace" data-slot="slash-menu-namespace" class="font-normal text-muted-foreground">{{ row.shown.namespace }}</span>{{ row.shown.rest }}</span>
           <span
             v-if="row.item.argumentHint"
             data-slot="slash-menu-hint"

@@ -1,12 +1,16 @@
 import type { ToolPartLike } from '../chat-format'
+import { AGENT_COLORS } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
-import { backgroundTask, taskInput, taskOutput, taskPart, taskResultData, taskStep, todoItem } from '~/utils/testing/fixtures'
+import { backgroundTask, customizationEntry, taskInput, taskOutput, taskPart, taskResultData, taskStep, todoItem } from '~/utils/testing/fixtures'
 import {
+  AGENT_COLOR_CLASSES,
   AGENT_COLOR_TOKENS,
+  agentColorOf,
   backgroundTaskState,
   currentTodo,
   doneTodos,
   firstSentence,
+  isForkSkill,
   planApprovedText,
   planFileOf,
   planModeOf,
@@ -259,5 +263,43 @@ describe('firstSentence keeps tool names (Gate P10-B fix)', () => {
 describe('aGENT_COLOR_TOKENS (Phase 12, C46)', () => {
   it('maps every agent color to an existing token', () => {
     expect(AGENT_COLOR_TOKENS).toEqual({ red: 'destructive', orange: 'chart-1', yellow: 'warning', green: 'success', blue: 'info', cyan: 'chart-2', purple: 'chart-5', pink: 'chart-5' })
+  })
+})
+
+describe('agent colors in task blocks (Phase 12, W12.13-T2)', () => {
+  it('spells the classes of every color with its token', () => {
+    for (const color of AGENT_COLORS)
+      expect(AGENT_COLOR_CLASSES[color]).toEqual({ dot: `bg-${AGENT_COLOR_TOKENS[color]}`, rule: `border-${AGENT_COLOR_TOKENS[color]}` })
+  })
+
+  it('reads the color of the agent that runs (active first), by its lowercased name', () => {
+    const entries = [
+      customizationEntry({ name: 'reviewer', state: 'shadowed', color: 'red' }),
+      customizationEntry({ name: 'reviewer', source: 'user', color: 'blue' }),
+      customizationEntry({ name: 'review-kit:code-reviewer', source: 'plugin', color: 'pink' }),
+      customizationEntry({ kind: 'skill', name: 'tester', color: 'green' }),
+      customizationEntry({ name: 'plain' }),
+    ]
+    expect(agentColorOf(entries, 'Reviewer')).toBe('blue')
+    expect(agentColorOf(entries, 'review-kit:code-reviewer')).toBe('pink')
+    expect(agentColorOf(entries, 'plain')).toBeNull()
+    expect(agentColorOf(entries, 'tester')).toBeNull()
+    expect(agentColorOf([customizationEntry({ name: 'solo', state: 'off', color: 'cyan' })], 'solo')).toBe('cyan')
+    expect(agentColorOf([], 'reviewer')).toBeNull()
+  })
+})
+
+describe('fork skills (Phase 12, W12.13-T5)', () => {
+  it('reads context: fork from the skill entry that runs', () => {
+    const entries = [
+      customizationEntry({ kind: 'skill', name: 'audit', state: 'shadowed', context: 'fork' }),
+      customizationEntry({ kind: 'skill', name: 'audit', source: 'user' }),
+      customizationEntry({ kind: 'skill', name: 'review-kit:pdf', source: 'plugin', context: 'fork' }),
+      customizationEntry({ kind: 'agent', name: 'helper', context: 'fork' }),
+    ]
+    expect(isForkSkill(entries, 'audit')).toBe(false)
+    expect(isForkSkill(entries, 'Review-Kit:PDF')).toBe(true)
+    expect(isForkSkill(entries, 'helper')).toBe(false)
+    expect(isForkSkill([], 'audit')).toBe(false)
   })
 })

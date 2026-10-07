@@ -60,8 +60,9 @@ export const BACKGROUND_TASK_INPUT: InjectionKey<BackgroundTaskInput> = Symbol('
 
 /**
  * The hooks running right now in the chat's stream (Phase 11, ADR-048; docs/UI.md 7.31, 11.8): the session's
- * `hookActivity` (`{ event, toolCallId }` from the transient `data-activity { kind: 'hooks' }`, null otherwise). ChatView
- * provides it; ToolPart injects it for its "Running hook…" status (the transcript rows are `v-memo`ed, so per-tool
+ * `hookActivity` (`{ event, toolCallId, label }` from the transient `data-activity { kind: 'hooks' }`, null otherwise;
+ * Phase 12: `label` = a handler's `statusMessage`). ChatView provides it; ToolPart injects it for its "Running hook…"
+ * status (the transcript rows are `v-memo`ed, so per-tool
  * activity cannot come through props). Absent on share pages (inject with a null default).
  */
-export const HOOK_ACTIVITY: InjectionKey<Readonly<Ref<{ event: HookEvent, toolCallId: string | null } | null>>> = Symbol('hf-hook-activity')
+export const HOOK_ACTIVITY: InjectionKey<Readonly<Ref<{ event: HookEvent, toolCallId: string | null, label?: string | null } | null>>> = Symbol('hf-hook-activity')

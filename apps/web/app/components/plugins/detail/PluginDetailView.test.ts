@@ -10,7 +10,7 @@ import { byTestId, hrefOf, mountInShell, openWithKeyboard, settle } from '~/comp
 import { useAuthStore } from '~/stores/auth'
 import { useMarketplacesStore } from '~/stores/marketplaces'
 import { testIds } from '~/utils/testids'
-import { authStatus, logEntry, marketplaceList, pluginDetail, pluginUpdate, toolSummary } from '~/utils/testing/fixtures'
+import { authStatus, claudePluginInfo, commitSha, logEntry, marketplaceList, pluginDetail, pluginOrigin, pluginUpdate, toolSummary } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import PluginDetailView from './PluginDetailView.vue'
 
@@ -55,6 +55,46 @@ const DETAILS: Record<string, PluginDetail> = {
   'core-mcp': pluginDetail({ id: 'core-mcp', name: 'MCP servers', kind: 'code', source: 'builtin', builtin: true, removable: false, runsCode: false, editable: false, trust: { required: false, trusted: true, hash: null, trustedHash: null }, contributions: none }),
   'broken': pluginDetail({ id: 'broken', name: 'Broken', state: 'error', lastError: { code: 'plugin_error', message: 'setup() threw: boom' }, contributions: none }),
   'shell': pluginDetail({ id: 'shell', name: 'Shell tools', state: 'untrusted', trust: { required: true, trusted: false, hash: 'c'.repeat(64), trustedHash: null }, contributions: none }),
+  // Phase 12: a Claude Code plugin installed from a marketplace (its userConfig is its settings).
+  'review-kit': pluginDetail({
+    id: 'review-kit',
+    name: 'review-kit',
+    version: '1.2.0',
+    kind: 'declarative',
+    format: 'claude',
+    source: 'marketplace',
+    sourceRef: 'review-kit@claude-plugins-official',
+    editable: false,
+    hasSettings: true,
+    contributions: { ...none, commands: ['review-kit:review'] },
+    manifest: {
+      manifestVersion: 1,
+      id: 'review-kit',
+      name: 'review-kit',
+      version: '1.2.0',
+      engines: { harness: '^1.6.0' },
+      settings: { type: 'object', required: ['API_TOKEN'], properties: { API_TOKEN: { type: 'string', format: 'secret', title: 'API token' } } },
+    },
+    origin: pluginOrigin({ commit: commitSha(2) }),
+    claude: claudePluginInfo({
+      version: '1.2.0-beta+claude',
+      diagnostics: [{ level: 'warning', code: 'unknown-field', message: 'plugin.json has a field that is not read: "lspServers".', path: '.claude-plugin/plugin.json' }],
+    }),
+  }),
+  'gh-tools': pluginDetail({
+    id: 'gh-tools',
+    name: 'gh-tools',
+    kind: 'declarative',
+    format: 'claude',
+    source: 'github',
+    sourceRef: 'acme/gh-tools@3f2a9c1d0e4b',
+    editable: false,
+    runsCode: false,
+    trust: { required: false, trusted: true, hash: 'd'.repeat(64), trustedHash: null },
+    contributions: none,
+    origin: { kind: 'github', repo: 'acme/gh-tools', ref: 'main', commit: `3f2a9c1${'0'.repeat(33)}`, path: null },
+    claude: claudePluginInfo({ executables: [], unsupported: [], userConfig: [] }),
+  }),
 }
 
 let api: MockApi
@@ -386,5 +426,73 @@ describe('pluginDetailView: marketplace update (Phase 12, C46-T7)', () => {
   it('shows no banner without an update', async () => {
     await mountDetail('dice-roller')
     expect(document.body.querySelector('[data-slot="plugin-update-banner"]')).toBeNull()
+  })
+})
+
+describe('pluginDetailView: Claude Code plugins (Phase 12, W12.9)', () => {
+  it('shows the marketplace name, the "Claude Code" badge and the origin, without a Source tab or Edit in wizard', async () => {
+    api.plugins.getSettings.mockResolvedValue({ schema: DETAILS['review-kit']!.manifest.settings!, values: {}, secrets: { API_TOKEN: { set: false, hint: null, source: null } } })
+    await mountDetail('review-kit')
+    const header = document.querySelector<HTMLElement>('[data-slot="plugin-header"]')!
+    expect(header.querySelector('[data-slot="plugin-source-badge"]')?.textContent?.trim()).toBe('claude-plugins-official')
+    expect(header.querySelector('[data-slot="plugin-format-badge"]')?.textContent?.trim()).toBe('Claude Code')
+    const origin = header.querySelector<HTMLElement>('[data-slot="plugin-origin"]')!
+    expect(origin.textContent?.trim()).toBe('From claude-plugins-official · 2222222')
+    expect(origin.title).toBe(commitSha(2))
+    expect(byTestId(testIds.pluginTabSource)).toBeNull()
+    expect(byTestId(testIds.pluginTabConfiguration)).not.toBeNull()
+    await openWithKeyboard(byTestId(testIds.pluginMenu)!)
+    expect(byTestId(testIds.pluginEdit)).toBeNull()
+    expect(byTestId(testIds.pluginExport)).not.toBeNull()
+  })
+
+  it('shows the Claude Code plugin section with the raw version, what it runs, the ignored parts and the diagnostics', async () => {
+    await mountDetail('review-kit')
+    const info = document.querySelector<HTMLElement>('[data-slot="plugin-claude-info"]')!
+    expect(info.textContent).toContain('Claude Code plugin')
+    expect(info.querySelector('[data-slot="plugin-claude-version"]')?.textContent?.trim()).toBe('1.2.0-beta+claude')
+    expect(info.textContent).toContain('review-kit:')
+    expect(info.textContent).toContain('3 commands · 1 agent · 1 skill · 1 output style · 1 hook · 1 MCP server')
+    const executables = info.querySelector<HTMLElement>('[data-slot="plugin-claude-executables"]')!
+    expect(Array.from(executables.querySelectorAll('li')).map(item => [item.querySelector('span')?.textContent, item.querySelector('code')?.textContent])).toEqual([
+      ['PostToolUse hook', 'sh "$CLAUDE_PLUGIN_ROOT/hooks/format.sh"'],
+      ['MCP server review-kit', 'node server.mjs'],
+    ])
+    expect(info.querySelector('[data-slot="plugin-claude-ignored"]')?.textContent).toContain('.lsp.json')
+    const diagnostic = info.querySelector<HTMLElement>('[data-slot="plugin-claude-diagnostics"] li')!
+    expect(diagnostic.dataset.level).toBe('warning')
+    expect(diagnostic.textContent).toContain('plugin.json has a field that is not read')
+    expect(diagnostic.textContent).toContain('.claude-plugin/plugin.json')
+  })
+
+  it('renders the userConfig options through the settings form (a sensitive option is a secret field)', async () => {
+    api.plugins.getSettings.mockResolvedValue({ schema: DETAILS['review-kit']!.manifest.settings!, values: {}, secrets: { API_TOKEN: { set: false, hint: null, source: null } } })
+    await mountDetail('review-kit', '?tab=configuration')
+    expect(activeTab()).toBe(testIds.pluginTabConfiguration)
+    const field = document.querySelector<HTMLElement>(`[data-testid="${testIds.schemaField}"][data-value="API_TOKEN"]`)!
+    expect(field.textContent).toContain('API token')
+    expect(field.querySelector('input[type="password"]')).not.toBeNull()
+  })
+
+  it('shows the GitHub origin with its short commit and no executables for a plugin that runs nothing', async () => {
+    await mountDetail('gh-tools')
+    const header = document.querySelector<HTMLElement>('[data-slot="plugin-header"]')!
+    expect(header.querySelector('[data-slot="plugin-source-badge"]')?.textContent?.trim()).toBe('GitHub')
+    expect(header.querySelector('[data-slot="plugin-origin"]')?.textContent?.trim()).toBe('GitHub · acme/gh-tools@3f2a9c1')
+    const info = document.querySelector<HTMLElement>('[data-slot="plugin-claude-info"]')!
+    expect(info.querySelector('[data-slot="plugin-claude-executables"]')).toBeNull()
+    expect(info.querySelector('[data-slot="plugin-claude-ignored"]')).toBeNull()
+  })
+
+  it('loads the marketplace list for a marketplace plugin, so its update banner shows', async () => {
+    api.marketplaces.list.mockResolvedValue(marketplaceList({ updates: [pluginUpdate({ pluginId: 'review-kit' })] }))
+    await mountDetail('review-kit')
+    expect(api.marketplaces.list).toHaveBeenCalledTimes(1)
+    expect(document.body.querySelector('[data-slot="plugin-update-banner"]')?.textContent).toContain('Version 1.2.0 is available from claude-plugins-official.')
+  })
+
+  it('sends no marketplace request for a plugin from another source', async () => {
+    await mountDetail('dice-roller')
+    expect(api.marketplaces.list).not.toHaveBeenCalled()
   })
 })

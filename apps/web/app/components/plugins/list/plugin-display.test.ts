@@ -1,17 +1,20 @@
 import { BUILTIN_PLUGIN_IDS, MOCK_PROVIDER_ID } from '@harness-forge/shared'
 import { BotIcon, FolderCodeIcon } from '@lucide/vue'
 import { describe, expect, it } from 'vitest'
-import { customizationEntry, pluginSummary } from '~/utils/testing/fixtures'
+import { commitSha, customizationEntry, pluginOrigin, pluginSummary } from '~/utils/testing/fixtures'
 import {
   BUILTIN_PLUGIN_GLYPHS,
   contributionsSummary,
   countLabel,
   customizationMeta,
   customizeRoute,
+  marketplaceNameOf,
   PLUGIN_FILTER_OPTIONS,
   pluginDetailRoute,
   pluginFilterLabel,
   pluginFilterRoute,
+  pluginFormatLabel,
+  pluginOriginText,
   pluginSourceDescription,
   pluginSourceLabel,
   pluginStateDot,
@@ -144,5 +147,37 @@ describe('plugin display rules', () => {
     expect(BUILTIN_PLUGIN_GLYPHS['core-workspace']).toBe(FolderCodeIcon)
     expect(BUILTIN_PLUGIN_GLYPHS['core-agent']).toBe(BotIcon)
     expect(new Set(Object.values(BUILTIN_PLUGIN_GLYPHS)).size).toBe(Object.keys(BUILTIN_PLUGIN_GLYPHS).length)
+  })
+
+  it('labels GitHub and marketplace sources: a marketplace plugin by its marketplace name (Phase 12)', () => {
+    expect(pluginSourceLabel({ source: 'github', kind: 'declarative', sourceRef: 'anthropics/review-kit@0123456789ab' })).toBe('GitHub')
+    // A detail names its marketplace through its origin, a summary through `sourceRef` `<plugin>@<marketplace>`.
+    expect(pluginSourceLabel({ source: 'marketplace', kind: 'declarative', sourceRef: null, origin: pluginOrigin({ marketplace: 'team-tools' }) })).toBe('team-tools')
+    expect(pluginSourceLabel({ source: 'marketplace', kind: 'declarative', sourceRef: 'review-kit@claude-plugins-official' })).toBe('claude-plugins-official')
+    expect(pluginSourceLabel({ source: 'marketplace', kind: 'declarative', sourceRef: 'acme/tools@0123456789ab/plugins/x' })).toBe('Marketplace')
+    expect(pluginSourceLabel({ source: 'marketplace', kind: 'declarative' })).toBe('Marketplace')
+    expect(marketplaceNameOf({ source: 'github', sourceRef: 'a@b' })).toBeNull()
+    expect(marketplaceNameOf({ source: 'marketplace', sourceRef: '@acme' })).toBeNull()
+    expect(marketplaceNameOf({ source: 'marketplace', sourceRef: 'x@bad name' })).toBeNull()
+    expect(pluginSourceDescription({ source: 'github', kind: 'declarative', sourceRef: 'anthropics/review-kit@0123456789ab' }))
+      .toBe('Installed from GitHub (anthropics/review-kit@0123456789ab)')
+    expect(pluginSourceDescription({ source: 'marketplace', kind: 'declarative', sourceRef: 'review-kit@acme' })).toBe('Installed from the marketplace acme (review-kit@acme)')
+    expect(pluginSourceDescription({ source: 'marketplace', kind: 'declarative', sourceRef: null })).toBe('Installed from a marketplace')
+  })
+
+  it('names the Claude Code format and the origin of GitHub and marketplace installs (Phase 12)', () => {
+    expect(pluginFormatLabel('claude')).toBe('Claude Code')
+    expect(pluginFormatLabel('harness')).toBeNull()
+    expect(pluginFormatLabel(undefined)).toBeNull()
+    expect(pluginOriginText(null)).toBeNull()
+    expect(pluginOriginText(pluginOrigin({ marketplace: 'claude-plugins-official', commit: commitSha(3) })))
+      .toEqual({ text: 'From claude-plugins-official · 3333333', commit: commitSha(3) })
+    expect(pluginOriginText(pluginOrigin({ sourceKind: 'npm', commit: undefined, npmVersion: '1.0.0' })))
+      .toEqual({ text: 'From claude-plugins-official', commit: null })
+    const commit = '3f2a9c1d0e4b5a6978877665544332211aabbccd'
+    expect(pluginOriginText({ kind: 'github', repo: 'anthropics/review-kit', ref: 'main', commit, path: null }))
+      .toEqual({ text: 'GitHub · anthropics/review-kit@3f2a9c1', commit })
+    expect(pluginOriginText({ kind: 'github', repo: 'anthropics/plugins', ref: null, commit, path: 'plugins/review-kit' })?.text)
+      .toBe('GitHub · anthropics/plugins@3f2a9c1 · plugins/review-kit')
   })
 })

@@ -18,17 +18,24 @@
 // previous row's, else the toggle (back to the row's own Stop when the stop failed); Stop all keeps it until it
 // disappears, then the toggle. A `reveal` request ("Show in background agents" of a task block) opens the list, expands
 // that row, scrolls to it and focuses its details toggle.
+// Phase 12 (W12.13): a row stopped from this list (its Stop, or Stop all) stays in the open list for
+// BACKGROUND_STOPPED_LINGER_MS after it ended, showing its final state from the store (`useBackgroundTasksStore().byId`),
+// even when its report was delivered meanwhile (a running reply takes a stopped agent's result at its next step, which
+// drops the row from `tasks` within milliseconds of the Stop); `data-total` counts the rows shown. A collapsed list
+// shows no lingering row.
 import type { BackgroundTask } from '@harness-forge/shared'
 import { ChevronUpIcon, CircleCheckIcon, Loader2Icon, SquareIcon } from '@lucide/vue'
 import { computed, nextTick, onBeforeUnmount, ref, useId, useTemplateRef, watch } from 'vue'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
+import { useBackgroundTasksStore } from '~/stores/background-tasks'
 import { testIds } from '~/utils/testids'
 import {
   announcedTasks,
   announcementFor,
   BACKGROUND_EXPANDED_KEY,
   BACKGROUND_FOOTNOTE,
+  BACKGROUND_STOPPED_LINGER_MS,
   focusAfterStop,
   headerLine,
   isRunningTask,
@@ -51,6 +58,7 @@ const props = withDefaults(defineProps<{
 
 const emit = defineEmits<{ 'stop': [taskId: string], 'stop-all': [] }>()
 
+const backgroundTasks = useBackgroundTasksStore()
 const root = useTemplateRef<HTMLElement>('root')
 const toggleButton = useTemplateRef<HTMLButtonElement>('toggleButton')
 const listId = useId()
@@ -111,6 +119,108 @@ function setRowOpen(taskId: string, value: boolean) {
   }
 }
 
+// ---------- rows stopped from this list (Phase 12) ----------
+
+/**
+ * The agents stopped from this list: their chat, whether their stop was seen in flight, and when the list first saw
+ * them ended (null while they run).
+ */
+const stoppedHere = new Map<string, { chatId: string, inFlight: boolean, endedAt: number | null }>()
+/** Stopped rows that left `tasks` (their report was delivered) and stay listed until `until`. */
+const lingering = ref<Record<string, { chatId: string, until: number }>>({})
+let lingerTimer: ReturnType<typeof setTimeout> | undefined
+
+function clearLingerTimer() {
+  if (lingerTimer !== undefined) {
+    clearTimeout(lingerTimer)
+    lingerTimer = undefined
+  }
+}
+
+/** Drops the expired lingering rows and waits for the next one to expire. */
+function expireLingering() {
+  clearLingerTimer()
+  const now = Date.now()
+  const kept = Object.fromEntries(Object.entries(lingering.value).filter(([, entry]) => entry.until > now))
+  if (Object.keys(kept).length !== Object.keys(lingering.value).length)
+    lingering.value = kept
+  const next = Math.min(...Object.values(kept).map(entry => entry.until))
+  if (Number.isFinite(next))
+    lingerTimer = setTimeout(expireLingering, Math.max(0, next - now))
+}
+onBeforeUnmount(clearLingerTimer)
+
+function markStopped(taskIds: readonly string[]) {
+  for (const taskId of taskIds) {
+    const task = props.tasks.find(item => item.id === taskId)
+    if (task && isRunningTask(task) && !stoppedHere.has(taskId))
+      stoppedHere.set(taskId, { chatId: task.chatId, inFlight: false, endedAt: null })
+  }
+}
+
+/** A stopped row left `tasks`: it stays listed until it ended `BACKGROUND_STOPPED_LINGER_MS` ago. */
+function onStoppedRowLeft(taskId: string) {
+  const stopped = stoppedHere.get(taskId)
+  stoppedHere.delete(taskId)
+  if (!stopped)
+    return
+  const until = (stopped.endedAt ?? Date.now()) + BACKGROUND_STOPPED_LINGER_MS
+  if (until <= Date.now())
+    return
+  lingering.value = { ...lingering.value, [taskId]: { chatId: stopped.chatId, until } }
+  expireLingering()
+}
+
+/**
+ * Follows the stopped rows: when they end, and a stop that failed (it settled while the row still runs). Rows of
+ * another chat (the list now shows a different chat's agents) are forgotten.
+ */
+function trackStopped(tasks: readonly BackgroundTask[]) {
+  const inFlight = new Set(props.stopping)
+  const chatId = tasks[0]?.chatId
+  if (chatId !== undefined) {
+    for (const [taskId, stopped] of stoppedHere) {
+      if (stopped.chatId !== chatId)
+        stoppedHere.delete(taskId)
+    }
+    if (Object.values(lingering.value).some(entry => entry.chatId !== chatId))
+      lingering.value = Object.fromEntries(Object.entries(lingering.value).filter(([, entry]) => entry.chatId === chatId))
+  }
+  for (const [taskId, stopped] of stoppedHere) {
+    const task = tasks.find(item => item.id === taskId)
+    if (!task)
+      continue
+    if (!isRunningTask(task)) {
+      stopped.endedAt ??= Date.now()
+    }
+    else if (inFlight.has(taskId)) {
+      stopped.inFlight = true
+    }
+    else if (stopped.inFlight) {
+      // The stop failed: the row keeps running and is no longer "stopped here".
+      stoppedHere.delete(taskId)
+    }
+  }
+  if (Object.keys(lingering.value).some(taskId => tasks.some(task => task.id === taskId))) {
+    lingering.value = Object.fromEntries(Object.entries(lingering.value).filter(([taskId]) => !tasks.some(task => task.id === taskId)))
+  }
+}
+
+/** The rows of the list: `tasks`, and while the list is open the lingering stopped rows (their store snapshot). */
+const rows = computed<readonly BackgroundTask[]>(() => {
+  if (!open.value)
+    return props.tasks
+  const extra: BackgroundTask[] = []
+  for (const [taskId, entry] of Object.entries(lingering.value)) {
+    if (props.tasks.some(task => task.id === taskId))
+      continue
+    const task = backgroundTasks.byId(entry.chatId, taskId)
+    if (task && !isRunningTask(task))
+      extra.push(task)
+  }
+  return extra.length === 0 ? props.tasks : [...props.tasks, ...extra].sort((a, b) => b.createdAt - a.createdAt)
+})
+
 // ---------- summary ----------
 
 const running = computed(() => props.tasks.filter(isRunningTask).length)
@@ -166,11 +276,15 @@ watch(() => props.tasks, (next) => {
     if (text && announcedTasks.add(task.id))
       void announce(text)
   }
+  trackStopped(next)
   for (const id of [...seen.keys()]) {
-    if (!ids.has(id))
+    if (!ids.has(id)) {
       seen.delete(id)
+      onStoppedRowLeft(id)
+    }
   }
 }, { immediate: true })
+watch(() => props.stopping, () => trackStopped(props.tasks))
 
 // ---------- focus after a stop ----------
 
@@ -199,6 +313,7 @@ function onStop(taskId: string) {
   if (stoppingSet.value.has(taskId))
     return
   focusAfter = { taskId, order: props.tasks.map(task => task.id) }
+  markStopped([taskId])
   emit('stop', taskId)
 }
 
@@ -206,6 +321,7 @@ function onStopAll() {
   if (props.stopping.length > 0)
     return
   focusAfterStopAll = true
+  markStopped(props.tasks.filter(isRunningTask).map(task => task.id))
   // eslint-disable-next-line vue/custom-event-name-casing -- contract name from docs/UI.md 10.7
   emit('stop-all')
 }
@@ -261,12 +377,12 @@ watch(() => props.reveal?.n, () => {
 
 <template>
   <section
-    v-if="tasks.length > 0"
+    v-if="rows.length > 0"
     ref="root"
     :data-testid="testIds.backgroundAgents"
     :data-state="open ? 'open' : 'closed'"
     :data-count="running"
-    :data-total="tasks.length"
+    :data-total="rows.length"
     aria-label="Background agents"
     class="flex min-w-0 flex-col overflow-hidden rounded-lg border bg-card text-card-foreground"
   >
@@ -291,7 +407,7 @@ watch(() => props.reveal?.n, () => {
       </div>
       <ul role="list" aria-label="Background agents" class="flex min-w-0 flex-col">
         <BackgroundAgentRow
-          v-for="task in tasks"
+          v-for="task in rows"
           :key="task.id"
           :task="task"
           :stopping="stoppingSet.has(task.id)"

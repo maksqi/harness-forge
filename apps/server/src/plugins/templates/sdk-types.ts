@@ -475,6 +475,16 @@ declare module '@harness-forge/plugin-sdk' {
     model?: string
     /** Plugin API 1.6.0: tool names that narrow the turn (never a grant). */
     allowedTools?: string[]
+    /** Plugin API 1.6.0: tool names removed for the turn. */
+    disallowedTools?: string[]
+    /** Plugin API 1.6.0: names of the positional arguments ("$name"; markdown syntax). */
+    arguments?: string[]
+    /** Plugin API 1.6.0: appended to the description in listings. */
+    whenToUse?: string
+    /** Plugin API 1.6.0: "fork" asks the main agent to run the command as a sub-agent. */
+    context?: 'fork'
+    /** Plugin API 1.6.0: the agent type of a fork command (default general). */
+    agent?: string
     /** Guarded (30 s). */
     run?(i: CommandRunInput): Promise<CommandRunResult>
   }
@@ -491,7 +501,7 @@ declare module '@harness-forge/plugin-sdk' {
     instructions: string
     /** Tool names (or "mcp__<server>__*") the sub-agent may use; omitted: every tool the mode allows. */
     tools?: string[]
-    /** "provider:model", or "inherit" (the parent's model); omitted: the sub-agent model setting. */
+    /** "provider:model", "inherit" (the parent's model) or (1.6.0) a Claude model name; omitted: the sub-agent model setting. */
     model?: string
     /** Plugin API 1.6.0: tool names removed from the sub-agent's tools (applied before tools). */
     disallowedTools?: string[]
@@ -519,6 +529,20 @@ declare module '@harness-forge/plugin-sdk' {
     userInvocable?: boolean
     /** Plugin API 1.6.0: the model may load it (default true). */
     modelInvocable?: boolean
+    /** Plugin API 1.6.0: tool names that narrow a "/name" turn (never a grant). */
+    allowedTools?: string[]
+    /** Plugin API 1.6.0: tool names removed for a "/name" turn. */
+    disallowedTools?: string[]
+    /** Plugin API 1.6.0: "provider:model" (or a Claude model name) a "/name" turn runs on. */
+    model?: string
+    /** Plugin API 1.6.0: names of the positional arguments ("$name"). */
+    arguments?: string[]
+    /** Plugin API 1.6.0: appended to the description in listings. */
+    whenToUse?: string
+    /** Plugin API 1.6.0: "fork" runs the skill as a sub-agent (the skill tool returns its report). */
+    context?: 'fork'
+    /** Plugin API 1.6.0: the agent type of a fork skill (default general). */
+    agent?: string
   }
 
   // ---------- output styles (plugin API 1.5.0) ----------

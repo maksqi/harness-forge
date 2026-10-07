@@ -22,6 +22,9 @@
 //   the top-level files of `.claude/output-styles` and `.harness/output-styles` (8 project folders); a registry change of
 //   styles drops every catalog like one of agents, skills or commands. Skill entries list `userInvocable` /
 //   `modelInvocable` (the run's skills block, `loadSkill` and the slash commands read them).
+// - Phase 12 (ADR-053 / ADR-055 / ADR-058; W12.7): the snapshot getters resolve qualified names and the bare alias
+//   (`qualified.ts`); entries list the new frontmatter keys (`entries.ts`); `importDefinitions` (`import.ts`, the store's
+//   write queue) drops every cached catalog and emits exactly one `customization.changed {}` when anything changed.
 // - Logging: ids, names, kinds, sources, counts and durations only; never a body, a file's content or a description.
 import type { Disposable } from '@harness-forge/plugin-sdk'
 import type {
@@ -51,7 +54,6 @@ import {
   safeParseModelRef,
   validationError,
 } from '@harness-forge/shared'
-import { rejectsNotImplemented } from '../../not-implemented.ts'
 import { builtinCatalogEntries, loadBuiltin } from './builtins.ts'
 import { createCatalogCache, CUSTOMIZATION_CACHE_PROJECTS_MAX } from './cache.ts'
 import { mergeCatalog, projectFingerprint } from './catalog.ts'
@@ -487,8 +489,14 @@ export function createCustomizationService(deps: AppDeps, options: Customization
 
     exportBackup: async () => store.exportBackup(),
 
-    // Phase 12 (C43 compile fix): the import of personal definitions lands with W12.7.
-    importDefinitions: rejectsNotImplemented('Importing personal definitions'),
+    importDefinitions: async (items) => {
+      const results = await store.importDefinitions(items)
+      if (results.some(result => result.ok)) {
+        invalidateAll()
+        emit({})
+      }
+      return results
+    },
 
     restoreBackup: async (items) => {
       const result = await store.restoreBackup(items)

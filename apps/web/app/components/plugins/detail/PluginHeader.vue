@@ -6,6 +6,9 @@
 // code plugins): a session that is not fresh gets the password prompt first, and a 403 + action `login` prompts and
 // runs the reload once more. Below the header: the untrusted / error / incompatible banner and the trust dialog
 // (TrustDialog, W3.2).
+// Phase 12 (ADR-053 / ADR-054, docs/UI.md 8.13; W12.9): a Claude Code plugin adds the "Claude Code" badge after the source
+// badge; a GitHub or marketplace install shows its origin under the badges ("From {marketplace} · {sha7}", "GitHub ·
+// {repo}@{sha7}", `data-slot="plugin-origin"`, the full commit as its title). Claude Code plugins have no Edit in wizard.
 import type { PluginDetail } from '@harness-forge/shared'
 import { ArrowLeftIcon, DownloadIcon, MoreHorizontalIcon, PencilIcon, RotateCwIcon, Trash2Icon } from '@lucide/vue'
 import { computed, ref } from 'vue'
@@ -36,7 +39,8 @@ import { toHarnessError } from '~/utils/errors'
 import { testIds } from '~/utils/testids'
 import { lastListRoute } from '../list/list-route'
 import { navigateTo } from '../list/nuxt-imports'
-import { PLUGIN_STATE_LABELS } from '../list/plugin-display'
+import { PLUGIN_STATE_LABELS, pluginOriginText } from '../list/plugin-display'
+import PluginFormatBadge from '../list/PluginFormatBadge.vue'
 import PluginIcon from '../list/PluginIcon.vue'
 import PluginRunsCodeBadge from '../list/PluginRunsCodeBadge.vue'
 import PluginSourceBadge from '../list/PluginSourceBadge.vue'
@@ -71,6 +75,8 @@ const removable = computed(() => canUninstall(props.plugin))
 const hasMenu = computed(() => editable.value || exportable.value || removable.value)
 const stateMessage = computed(() => (props.plugin.state === 'error' || props.plugin.state === 'incompatible' ? props.plugin.lastError?.message ?? null : null))
 const editRoute = computed(() => ({ path: '/plugins/new', query: { type: 'provider', edit: props.plugin.id } }))
+/** + Phase 12: where a GitHub or marketplace install came from. */
+const origin = computed(() => pluginOriginText(props.plugin.origin))
 
 function showError(error: unknown, title?: string) {
   const failure = toHarnessError(error)
@@ -202,9 +208,18 @@ defineExpose({ reload, openTrust })
           </div>
           <div class="mt-1.5 flex flex-wrap items-center gap-1.5">
             <PluginSourceBadge :plugin="plugin" />
+            <PluginFormatBadge :format="plugin.format" />
             <PluginRunsCodeBadge v-if="plugin.runsCode" />
             <PluginStateBadge :state="plugin.state" :message="stateMessage" :data-testid="testIds.pluginState" />
           </div>
+          <p
+            v-if="origin"
+            data-slot="plugin-origin"
+            :title="origin.commit ?? undefined"
+            class="mt-1.5 font-mono text-xs break-all text-muted-foreground"
+          >
+            {{ origin.text }}
+          </p>
         </div>
       </div>
 

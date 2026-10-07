@@ -575,4 +575,96 @@ describe('customize: Claude Code import and project files (Phase 12, C46-T7)', (
     expect(byTestId(testIds.customizationViewer)).toBeNull()
     expect(byTestId(testIds.projectFileEditor)?.dataset.path).toBe('.harness/agents/reviewer.md')
   })
+
+  it('opens the trust dialog from the saved toast\'s Review (W12.11-T1)', async () => {
+    mocks.route!.query = { project: projectId(1) }
+    api.projectDefinitions.read.mockResolvedValue(projectDefinitionFile({ path: '.harness/agents/reviewer.md' }))
+    api.projectDefinitions.write.mockResolvedValue(projectDefinitionWriteResult({ path: '.harness/agents/reviewer.md', trust: { pending: 1 } }))
+    const host = await mountIn(CustomizeSettings)
+    await chooseFromMenu('reviewer', testIds.customizationEdit)
+    byTestId(testIds.projectFileSave)!.click()
+    await settle()
+    const [message, options] = mocks.toast.success.mock.calls.at(-1) as [string, { action: { label: string, onClick: () => void } }]
+    expect(message).toBe('Saved .harness/agents/reviewer.md. 1 item needs your approval.')
+    expect(byTestId(testIds.projectTrustDialog)).toBeNull()
+    options.action.onClick()
+    await settle()
+    expect(byTestId(testIds.projectTrustDialog)).not.toBeNull()
+    expect(host.findComponent({ name: 'ProjectTrustDialog' }).props('focusKey')).toBeNull()
+  })
+
+  it('creates a project file from New file… in the project section heading (W12.11-T2)', async () => {
+    mocks.route!.query = { project: projectId(1), tab: 'commands' }
+    await mountIn(CustomizeSettings)
+    const sectionsBySource: Record<string, HTMLElement> = Object.fromEntries(sections().map(section => [section.dataset.source ?? '', section]))
+    expect(sectionsBySource.user!.querySelector('[data-action="new-project-file"]')).toBeNull()
+    const create = sectionsBySource.project!.querySelector<HTMLElement>('[data-action="new-project-file"]')!
+    expect(create.textContent?.trim()).toBe('New file…')
+    expect(create.dataset.kind).toBe('command')
+    create.click()
+    await settle()
+    const editor = byTestId(testIds.projectFileEditor)!
+    expect(editor.dataset).toMatchObject({ kind: 'command', mode: 'new' })
+    expect(editor.textContent).toContain('New command in website')
+    // The project has `.harness/commands`: the new file goes there.
+    expect(editor.querySelector<HTMLElement>('[data-slot="project-file-folder"]')?.dataset.value).toBe('.harness')
+    expect(api.projectDefinitions.read).not.toHaveBeenCalled()
+  })
+
+  it('offers no New file… while the project folder is unavailable', async () => {
+    mocks.route!.query = { project: projectId(1) }
+    api.customizations.list.mockResolvedValue({ ...projectList, project: { id: projectId(1), available: false, issue: 'The folder does not exist.', folders: [], scannedAt: 1 } })
+    await mountIn(CustomizeSettings)
+    expect(document.body.querySelector('[data-action="new-project-file"]')).toBeNull()
+  })
+
+  it('deletes a project file after the confirmation with the sha256 read when it opened (W12.11-T2)', async () => {
+    mocks.route!.query = { project: projectId(1) }
+    api.projectDefinitions.read.mockResolvedValue(projectDefinitionFile({ path: '.harness/agents/reviewer.md', sha256: trustSha(6) }))
+    api.projectDefinitions.remove.mockResolvedValue(undefined)
+    await mountIn(CustomizeSettings)
+    const reviewer = allByTestId(testIds.customizationRow).find(element => element.dataset.name === 'reviewer' && element.dataset.source === 'project')!
+    byTestId(testIds.customizationRowMenu, reviewer)!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await flushPromises()
+    const remove = byTestId(testIds.customizationDelete)!
+    expect(remove.dataset.source).toBe('project')
+    remove.click()
+    await settle()
+    expect(api.projectDefinitions.read).toHaveBeenCalledWith({ params: { id: projectId(1) }, query: { path: '.harness/agents/reviewer.md' } })
+    const dialog = document.body.querySelector<HTMLElement>('[data-slot="confirm-dialog"]')!
+    expect(dialog.textContent).toContain('Delete .harness/agents/reviewer.md?')
+    expect(dialog.textContent).toContain('The file is removed from the project folder. It can\'t be undone here.')
+    const confirm = byTestId(testIds.customizationDeleteConfirm)!
+    expect(confirm.textContent?.trim()).toBe('Delete file')
+    confirm.click()
+    await settle()
+    expect(api.projectDefinitions.remove).toHaveBeenCalledWith({ params: { id: projectId(1) }, query: { path: '.harness/agents/reviewer.md', expectedSha256: trustSha(6) } })
+    expect(api.customizations.remove).not.toHaveBeenCalled()
+    expect(mocks.toast.success).toHaveBeenCalledWith('Deleted .harness/agents/reviewer.md')
+    expect(mocks.toast.custom).not.toHaveBeenCalled()
+  })
+
+  it('shows a stale delete as a toast with the conflict text', async () => {
+    mocks.route!.query = { project: projectId(1) }
+    api.projectDefinitions.read.mockResolvedValue(projectDefinitionFile({ path: '.harness/agents/reviewer.md', sha256: trustSha(6) }))
+    api.projectDefinitions.remove.mockRejectedValue(new HarnessError({ code: 'conflict', message: 'The file changed on disk.', details: { reason: 'stale' } }))
+    const host = await mountIn(CustomizeSettings)
+    host.findComponent({ name: 'CustomizationSection' }).vm.$emit('action', 'delete', customizationEntry())
+    await settle()
+    byTestId(testIds.customizationDeleteConfirm)!.click()
+    await settle()
+    expect(mocks.toast.error).toHaveBeenCalledWith('reviewer.md changed on disk after you opened it.')
+    expect(document.body.querySelector('[data-slot="confirm-dialog"]')).toBeNull()
+  })
+
+  it('exports a qualified plugin entry as {bare name}.md', async () => {
+    mocks.route!.query = { tab: 'commands' }
+    const migrate = customizationEntry({ kind: 'command', name: 'review-kit:db:migrate', description: 'Migrate', source: 'plugin', pluginId: 'review-kit', path: undefined, tools: undefined })
+    api.customizations.list.mockResolvedValue({ ...globalList, items: [...globalList.items, migrate] })
+    api.customizations.source.mockResolvedValue({ content: '---\ndescription: Migrate\n---\nMigrate.\n' })
+    await mountIn(CustomizeSettings)
+    expect(row('review-kit:db:migrate').textContent).toContain('/review-kit:db:migrate')
+    await chooseFromMenu('review-kit:db:migrate', testIds.customizationExport)
+    expect(mocks.downloadText).toHaveBeenCalledWith('---\ndescription: Migrate\n---\nMigrate.\n', 'migrate.md', 'text/markdown')
+  })
 })

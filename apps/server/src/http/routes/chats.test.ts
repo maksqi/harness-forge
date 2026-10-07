@@ -619,6 +619,30 @@ describe('dELETE /api/chats/:id: SessionEnd (Phase 12, C44 call site)', () => {
     expect(hooks.calls.sessionEnd).toBe(1)
   })
 
+  it('only a single chat delete ends a session: a project delete and delete-all never call SessionEnd (W12.6-T6)', async () => {
+    const project = 'prj_sessionendproj02'
+    await app.db.insert(projects).values({ id: project, name: 'Session project 2', path: '/workspaces/session2', createdAt: 1, updatedAt: 1 })
+    const inProject = chatId(910)
+    const plain = chatId(911)
+    expect((await app.request('/api/chats', json('POST', { id: inProject, projectId: project }))).status).toBe(201)
+    expect((await app.request('/api/chats', json('POST', { id: plain }))).status).toBe(201)
+    const before = hooks.calls.sessionEnd
+    const ended = hooks.sessionEnds.length
+
+    // A project delete detaches its chats: no session ends.
+    expect((await app.request(`/api/projects/${project}`, { method: 'DELETE' })).status).toBe(204)
+    expect((await app.request(`/api/chats/${inProject}`)).status).toBe(200)
+
+    // Delete-all removes every chat: no session ends either.
+    const deleted = await app.request('/api/data/delete', json('POST', { confirm: 'DELETE' }))
+    expect(deleted.status).toBe(200)
+    expect(((await deleted.json()) as { chats: number }).chats).toBeGreaterThanOrEqual(2)
+    expect((await app.request(`/api/chats/${inProject}`)).status).toBe(404)
+    expect((await app.request(`/api/chats/${plain}`)).status).toBe(404)
+    expect(hooks.calls.sessionEnd).toBe(before)
+    expect(hooks.sessionEnds).toHaveLength(ended)
+  })
+
   it('a failing SessionEnd never fails the delete', async () => {
     const id = chatId(901)
     expect((await app.request('/api/chats', json('POST', { id }))).status).toBe(201)

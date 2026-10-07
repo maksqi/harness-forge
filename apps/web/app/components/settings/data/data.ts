@@ -155,6 +155,16 @@ export function deletedMessage(result: Pick<DataDeleteResult, 'chats'>): string 
   return `Deleted ${countLabel(result.chats, 'chat')}`
 }
 
+/**
+ * Phase 12 (docs/UI.md 9.14): "{t} commands turned off (they run shell lines)" ("1 command turned off (it runs shell
+ * lines)") for the commands with `!` lines a backup restore brought back turned off; null for none.
+ */
+export function turnedOffLine(count: number | undefined): string | null {
+  if (count === undefined || count <= 0)
+    return null
+  return count === 1 ? '1 command turned off (it runs shell lines)' : `${count} commands turned off (they run shell lines)`
+}
+
 /** The `details.reason` of a `409 conflict`, or null for any other error. */
 export function conflictReason(error: unknown): string | null {
   const failure = toHarnessError(error)

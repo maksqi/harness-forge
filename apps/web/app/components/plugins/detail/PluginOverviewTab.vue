@@ -2,6 +2,9 @@
 // Overview tab (docs/UI.md 2.4, 8.8): the description, then what the plugin adds (PluginContributions); beside it
 // the details: id, version, source, author, homepage, install and update times, plugin API range, the advisory
 // permissions and the trust pin of plugins that run code.
+// Phase 12 (ADR-053 / ADR-054, docs/UI.md 8.13; W12.9): a Claude Code plugin adds the "Claude Code plugin" section
+// (PluginClaudeInfo, after the contributions); the Source detail names a marketplace plugin's marketplace (the header
+// shows the origin).
 import type { PluginDetail } from '@harness-forge/shared'
 import { ArrowUpRightIcon, ShieldAlertIcon, ShieldCheckIcon } from '@lucide/vue'
 import { computed } from 'vue'
@@ -12,6 +15,7 @@ import { safeAssetUrl } from '~/components/common/format'
 import RelativeTime from '~/components/common/RelativeTime.vue'
 import { pluginSourceDescription, pluginSourceLabel } from '../list/plugin-display'
 import { permissionLabel } from './plugin-detail'
+import PluginClaudeInfo from './PluginClaudeInfo.vue'
 import PluginContributions from './PluginContributions.vue'
 
 const props = defineProps<{ plugin: PluginDetail }>()
@@ -43,6 +47,7 @@ const apiRange = computed(() => props.plugin.manifest.engines?.harness ?? null)
         {{ plugin.description }}
       </p>
       <PluginContributions :plugin="plugin" />
+      <PluginClaudeInfo v-if="plugin.claude" :claude="plugin.claude" />
     </div>
 
     <aside aria-label="Plugin details" class="min-w-0 lg:border-l lg:pl-6">

@@ -9,8 +9,10 @@
 // Props, emits and the root test id are frozen from Gate P10-0b (C33).
 // Phase 11 (W11.8; docs/UI.md 9.13): a style is titled by its label and lists its name and what it does with the coding
 // instructions; a skill lists the argument hint, whether it is in the slash menu and "Only when you run it".
-// Phase 12 (ADR-056; C46 CCR, W12.11 owns it in P12-A): project files get Edit in the footer (`data-action="edit"`), the
-// emit `edit` that CustomizeSettings answers with the project file editor.
+// Phase 12 (ADR-056, ADR-058; C46 CCR, W12.11): project files that can be edited get Edit in the footer
+// (`data-action="edit"`), the emit `edit` that CustomizeSettings answers with the project file editor; the list adds the
+// Claude Code keys (Tools not allowed, Max turns, Color, Skills, When to use, Runs in a sub-agent, a Claude model name).
+// Qualified plugin names are shown as they are; Export .md names the file after the bare name.
 import type { CustomizationEntry } from '@harness-forge/shared'
 import type { CustomizationDraft } from './customize'
 import { CopyPlusIcon, DownloadIcon, FileXIcon, PencilIcon } from '@lucide/vue'
@@ -27,7 +29,7 @@ import { usePluginsStore } from '~/stores/plugins'
 import { downloadText } from '~/utils/download'
 import { hasErrorCode, toHarnessError } from '~/utils/errors'
 import { testIds } from '~/utils/testids'
-import { displayName as displayNameOf, draftFromEntry, sourceLabel } from './customize'
+import { AGENT_COLOR_LABELS, bareName, displayName as displayNameOf, draftFromEntry, isEditableProjectEntry, sourceLabel } from './customize'
 
 const props = defineProps<{ open: boolean, entry: CustomizationEntry | null, projectId: string | null }>()
 
@@ -55,14 +57,34 @@ const details = computed(() => {
     rows.push({ term: 'Tools', value: entry.tools ? (entry.tools.length > 0 ? entry.tools.join(', ') : 'None') : 'All tools', mono: !!entry.tools?.length })
   else if (entry.kind === 'command')
     rows.push({ term: 'Allowed tools', value: entry.tools ? (entry.tools.length > 0 ? entry.tools.join(', ') : 'None') : 'No restriction', mono: !!entry.tools?.length })
-  if (entry.kind === 'agent' || entry.kind === 'command') {
+  // + Phase 12: a skill's allowed tools (like a command's).
+  else if (entry.kind === 'skill' && entry.tools)
+    rows.push({ term: 'Allowed tools', value: entry.tools.length > 0 ? entry.tools.join(', ') : 'None', mono: entry.tools.length > 0 })
+  // + Phase 12 (ADR-058): the tools removed after the allowed ones.
+  if (entry.disallowedTools && entry.disallowedTools.length > 0)
+    rows.push({ term: 'Tools not allowed', value: entry.disallowedTools.join(', '), mono: true })
+  if (entry.kind === 'agent' || entry.kind === 'command' || (entry.kind === 'skill' && (entry.modelRef || entry.modelAlias))) {
     const model = entry.modelRef === 'inherit'
       ? 'Same as the chat'
       : entry.modelRef
         ? models.byRef(entry.modelRef)?.name ?? entry.modelRef
-        : entry.kind === 'agent' ? 'Default sub-agent model' : 'The chat\'s model'
+        : entry.modelAlias
+          ? `${entry.modelAlias} (Claude model name)`
+          : entry.kind === 'agent' ? 'Default sub-agent model' : 'The chat\'s model'
     rows.push({ term: 'Model', value: model })
   }
+  if (entry.kind === 'agent') {
+    if (entry.maxTurns !== undefined)
+      rows.push({ term: 'Max turns', value: String(entry.maxTurns) })
+    if (entry.color)
+      rows.push({ term: 'Color', value: AGENT_COLOR_LABELS[entry.color] })
+    if (entry.skills && entry.skills.length > 0)
+      rows.push({ term: 'Skills', value: entry.skills.join(', '), mono: true })
+  }
+  if (entry.whenToUse)
+    rows.push({ term: 'When to use', value: entry.whenToUse })
+  if ((entry.kind === 'command' || entry.kind === 'skill') && entry.context === 'fork')
+    rows.push({ term: 'Runs in', value: `A sub-agent (${entry.agent ?? 'general'})` })
   if ((entry.kind === 'command' || entry.kind === 'skill') && entry.argumentHint)
     rows.push({ term: 'Argument hint', value: entry.argumentHint, mono: true })
   // + Phase 11: the skill and style keys.
@@ -130,8 +152,11 @@ function copyToPersonal(): void {
 function exportFile(): void {
   if (!props.entry || content.value === null)
     return
-  downloadText(content.value, `${props.entry.name}.md`, 'text/markdown')
+  downloadText(content.value, `${bareName(props.entry)}.md`, 'text/markdown')
 }
+
+/** + Phase 12: project files that can be edited in the project file editor. */
+const editable = computed(() => !!props.entry && isEditableProjectEntry(props.entry))
 </script>
 
 <template>
@@ -209,7 +234,7 @@ function exportFile(): void {
             Export .md
           </Button>
           <Button
-            v-if="entry?.source === 'project' && entry.path"
+            v-if="editable"
             type="button"
             variant="outline"
             data-action="edit"

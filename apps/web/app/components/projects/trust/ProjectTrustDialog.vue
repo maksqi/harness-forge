@@ -17,9 +17,13 @@
 // Data from `useProjectTrustStore()` (a fresh scan on every open) and the variables of MCP items from
 // `useProjectMcpStore()`. Mounted by ChatView, Settings -> Projects, the Customize Hooks tab and ProjectMcpDialog.
 // Props, emits and the root test id are frozen from Gate P11-0b (C39); W11.9.
+// Phase 12 (docs/UI.md 7.34; W12.13): a group's "Select all {n}" is mixed while some but not all of its pending items in
+// the filter are selected (`selectAllState`): it draws its own `Minus` through the frozen Checkbox's default slot (reka
+// sets `aria-checked="mixed"` and `data-state="indeterminate"`), filled like a checked box; a click on a mixed box
+// selects every pending item of the group, a second click clears them.
 import type { ProjectTrustList, TrustItem, TrustItemKind } from '@harness-forge/shared'
 import { LIMITS } from '@harness-forge/shared'
-import { CircleAlertIcon, ShieldAlertIcon } from '@lucide/vue'
+import { CheckIcon, CircleAlertIcon, MinusIcon, ShieldAlertIcon } from '@lucide/vue'
 import { computed, nextTick, ref, shallowRef, useId, useTemplateRef, watch } from 'vue'
 import { toast } from 'vue-sonner'
 import { Alert, AlertDescription } from '@/components/ui/alert'
@@ -46,6 +50,7 @@ import {
   orphanedText,
   pendingItems,
   revokedText,
+  selectAllState,
   selectedText,
   showOrphaned,
   staleText,
@@ -99,14 +104,6 @@ function headingId(kind: TrustItemKind): string {
 /** The group's pending items (the ones "Select all" selects). */
 function selectable(items: readonly TrustItem[]): TrustItem[] {
   return items.filter(item => item.state === 'pending')
-}
-
-function selectAllState(items: readonly TrustItem[]): boolean | 'indeterminate' {
-  const pending = selectable(items)
-  const count = pending.filter(item => selected.value.has(item.sha256)).length
-  if (count === 0)
-    return false
-  return count === pending.length ? true : 'indeterminate'
 }
 
 function setSelected(next: Set<string>): void {
@@ -482,12 +479,17 @@ function onOpenChange(value: boolean): void {
                   <div v-if="selectable(group.items).length > 0" class="flex items-center gap-2">
                     <Checkbox
                       :id="`${headingId(group.kind)}-all`"
-                      :model-value="selectAllState(group.items)"
+                      :model-value="selectAllState(group.items, selected)"
                       :disabled="busy"
                       :data-testid="testIds.projectTrustSelectAll"
-                      class="pointer-coarse:after:-inset-[13px]"
+                      class="data-[state=indeterminate]:border-primary data-[state=indeterminate]:bg-primary data-[state=indeterminate]:text-primary-foreground pointer-coarse:after:-inset-[13px]"
                       @update:model-value="value => selectAll(group.items, value)"
-                    />
+                    >
+                      <template #default="{ state }">
+                        <MinusIcon v-if="state === 'indeterminate'" aria-hidden="true" data-slot="project-trust-select-all-mixed" />
+                        <CheckIcon v-else aria-hidden="true" />
+                      </template>
+                    </Checkbox>
                     <label :for="`${headingId(group.kind)}-all`" class="text-sm select-none">
                       Select all {{ selectable(group.items).length }}
                     </label>

@@ -12,7 +12,10 @@
 // affected scopes used in the last minute (the others on their next use).
 // Phase 12 (ADR-056, ADR-057; C46 CCR, W12.12 implements; frozen from Gate P12-0b): `saveProjectHook(projectId, target,
 // draft)` edits a hook in a project's settings file (read the file, splice the handler into its `hooks` key, `PUT
-// /projects/:id/definitions/file` with `expectedSha256`; no fresh auth, never approves). P12-0b: not implemented yet.
+// /projects/:id/definitions/file` with `expectedSha256`; no fresh auth, never approves). An edited handler must still be
+// the one the cached listing shows at its position, else the save is refused like the server's stale answer (409
+// `conflict`, reason `stale`): the file changed after the editor opened it. `workspace.changed` with a project settings
+// file among its paths marks that project's scope stale (HooksPanel subscribes to the event while it is shown).
 import type {
   HookCreate,
   HookEntry,
@@ -24,9 +27,10 @@ import type {
   ServerEvent,
 } from '@harness-forge/shared'
 import type { HookDraft, ProjectHookTarget } from '~/components/settings/customize/hooks'
-import { HarnessError, isHookTurnOff } from '@harness-forge/shared'
+import { HarnessError, isHookTurnOff, LIMITS } from '@harness-forge/shared'
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
+import { draftFromHook, isProjectHookFile, projectEntryAt, rawHandlerMatches, spliceProjectHook } from '~/components/settings/customize/hooks'
 import { useApi } from '~/composables/useApi'
 import { hasErrorCode, withHarnessErrors } from '~/utils/errors'
 
@@ -43,6 +47,35 @@ export const HOOKS_RECENT_MS = 60_000
 /** The cache key of a scope: the project id, '' for none. */
 export function hookScopeKey(projectId: string | null): string {
   return projectId ?? ''
+}
+
+/** The message of the stale answer (the server's text for 409 `stale`). */
+export const PROJECT_HOOK_STALE_MESSAGE = 'The file changed on disk. Load it again or overwrite it.'
+
+function staleError(): HarnessError {
+  return new HarnessError({ code: 'conflict', status: 409, message: PROJECT_HOOK_STALE_MESSAGE, details: { reason: 'stale' } })
+}
+
+function invalidFile(path: string, problem: string): HarnessError {
+  return new HarnessError({ code: 'validation_error', status: 400, message: `${path} can't be changed here: ${problem} Fix it in the project folder.` })
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** The `hooks` value of a settings file's text (`undefined` without the key). Throws a 400 for unreadable JSON. */
+function settingsHooks(path: string, content: string): unknown {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(content.replace(/^\uFEFF/, ''))
+  }
+  catch {
+    throw invalidFile(path, 'it isn\'t valid JSON.')
+  }
+  if (!isRecord(parsed))
+    throw invalidFile(path, 'it must hold a JSON object.')
+  return parsed.hooks
 }
 
 function omit<T>(record: Record<string, T>, key: string): Record<string, T> {
@@ -258,13 +291,31 @@ export const useHooksStore = defineStore('hooks', () => {
   /**
    * Writes a hook of a project's settings file (Phase 12, ADR-056): reads the file (`GET /projects/:id/definitions/file`),
    * splices the draft's handler into its `hooks` key at `target` (a new handler without indexes; null removes the
-   * handler), then `PUT`s the key with the sha256 it read (409 `conflict` reason `stale` when the file changed). No fresh
-   * auth; saving never approves (the result counts the pending items). Marks the project's scope stale. W12.12 implements
-   * it; until then it throws `not_implemented`.
+   * handler; `spliceProjectHook`), then `PUT`s the key with the sha256 it read (409 `conflict` reason `stale` when the
+   * file changed meanwhile). An edited or removed handler must still be the one the cached listing of the project shows
+   * at that position (else the same 409 `stale` is thrown before any write: the file changed after the editor opened
+   * it). No fresh auth; saving never approves (the result counts the pending items). Marks the project's scope stale.
+   * Throws `HarnessError` (a 400 for a file whose JSON or `hooks` value can't be read).
    */
-  async function saveProjectHook(projectId: string, _target: ProjectHookTarget, _draft: HookDraft | null): Promise<ProjectDefinitionWriteResult> {
-    markStale([hookScopeKey(projectId)])
-    throw new HarnessError({ code: 'not_implemented', message: 'Editing project hooks is not available yet.' })
+  async function saveProjectHook(projectId: string, target: ProjectHookTarget, draft: HookDraft | null): Promise<ProjectDefinitionWriteResult> {
+    const scope = hookScopeKey(projectId)
+    try {
+      const file = await withHarnessErrors(api.projectDefinitions.read({ params: { id: projectId }, query: { path: target.path } }))
+      const current = file.exists && file.content !== null ? settingsHooks(target.path, file.content) : undefined
+      const listed = projectEntryAt(lists.value[scope]?.items ?? [], target)
+      if (listed && !rawHandlerMatches(current, target, draftFromHook(listed)))
+        throw staleError()
+      const spliced = spliceProjectHook(current, target, draft)
+      if (!spliced.ok)
+        throw spliced.reason === 'missing' ? staleError() : invalidFile(target.path, spliced.message)
+      return await withHarnessErrors(api.projectDefinitions.write({
+        params: { id: projectId },
+        body: { path: target.path, expectedSha256: file.exists ? file.sha256 : null, hooks: spliced.hooks },
+      }))
+    }
+    finally {
+      markStale([scope])
+    }
   }
 
   /** Refetches quietly the scopes among `scopes` that were used in the last minute. */
@@ -281,6 +332,8 @@ export const useHooksStore = defineStore('hooks', () => {
    * `project-trust.changed` (that project's scope: its rows change state), `plugin.changed` (every scope) and
    * `customization.changed` with a project (its files changed on disk): the affected scopes are stale and the ones used
    * in the last minute are refetched at once. `project.changed` with `project: null` drops the deleted project's scope.
+   * + Phase 12: `workspace.changed` whose paths hold a project settings file (or were cut at the event's path cap) marks
+   * that project's scope stale the same way.
    */
   function applyEvent(event: ServerEvent): void {
     let scopes: string[]
@@ -303,6 +356,11 @@ export const useHooksStore = defineStore('hooks', () => {
         if (event.data.project === null)
           dropScope(event.data.id)
         return
+      case 'workspace.changed':
+        if (!event.data.paths.some(isProjectHookFile) && event.data.paths.length < LIMITS.workspaceEventPathsMax)
+          return
+        scopes = [event.data.projectId]
+        break
       default:
         return
     }

@@ -143,18 +143,44 @@ describe('pluginCard', () => {
   })
 })
 
-describe('pluginCard: marketplace update (Phase 12, C46-T7)', () => {
-  it('shows the update badge with the offered version', () => {
-    const { card } = mountCard(pluginSummary({ id: 'review-kit', name: 'Review kit' }), pluginUpdate())
+describe('pluginCard: marketplace update (Phase 12, C46-T7, W12.9)', () => {
+  it('shows the update badge after the version with the offered version', () => {
+    const { card } = mountCard(pluginSummary({ id: 'review-kit', name: 'Review kit', version: '1.1.0' }), pluginUpdate())
     const badge = card.get(`[data-testid="${testIds.pluginUpdateAvailable}"]`)
     expect(badge.attributes('data-version')).toBe('1.2.0')
-    expect(badge.text()).toBe('Update to 1.2.0')
+    expect(badge.text()).toBe('Update 1.2.0')
+    // Next to the version (docs/UI.md 8.1), not among the source badges.
+    expect(badge.element.parentElement?.textContent).toContain('v1.1.0')
     const commit = mountCard(pluginSummary({ id: 'other' }), pluginUpdate({ pluginId: 'other', availableVersion: null }))
-    expect(commit.card.get(`[data-testid="${testIds.pluginUpdateAvailable}"]`).attributes('data-version')).toBe('')
+    const commitBadge = commit.card.get(`[data-testid="${testIds.pluginUpdateAvailable}"]`)
+    expect(commitBadge.attributes('data-version')).toBe('')
+    expect(commitBadge.text()).toBe('Update available')
   })
 
   it('shows no badge without an update', () => {
     const { card } = mountCard(pluginSummary())
     expect(card.find(`[data-testid="${testIds.pluginUpdateAvailable}"]`).exists()).toBe(false)
+  })
+})
+
+describe('pluginCard: Claude Code plugins and new sources (Phase 12, W12.9)', () => {
+  it('labels GitHub and marketplace sources and adds the "Claude Code" badge after the source badge', () => {
+    const github = mountCard(pluginSummary({ id: 'review-kit', kind: 'declarative', format: 'claude', source: 'github', sourceRef: 'anthropics/review-kit@0123456789ab', runsCode: true }))
+    expect(badges(github.card).slice(0, 3)).toEqual(['GitHub', 'Claude Code', 'Runs code'])
+    expect(github.card.get('[data-slot="plugin-format-badge"]').attributes('data-value')).toBe('claude')
+    github.wrapper.unmount()
+
+    const marketplace = mountCard(pluginSummary({ id: 'notes', kind: 'declarative', format: 'claude', source: 'marketplace', sourceRef: 'notes@claude-plugins-official', runsCode: false }))
+    expect(badges(marketplace.card).slice(0, 2)).toEqual(['claude-plugins-official', 'Claude Code'])
+    marketplace.wrapper.unmount()
+
+    const unknown = mountCard(pluginSummary({ id: 'other', kind: 'declarative', format: 'claude', source: 'marketplace', sourceRef: 'acme/tools@0123456789ab/plugins/x', runsCode: false }))
+    expect(badges(unknown.card)[0]).toBe('Marketplace')
+    unknown.wrapper.unmount()
+  })
+
+  it('shows no format badge for a harness plugin', () => {
+    const { card } = mountCard(pluginSummary())
+    expect(card.find('[data-slot="plugin-format-badge"]').exists()).toBe(false)
   })
 })

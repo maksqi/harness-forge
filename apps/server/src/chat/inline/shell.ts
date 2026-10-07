@@ -9,6 +9,9 @@
 // that cannot start is a failed span (a note instead of output). The run's abort kills the process group and rejects
 // (`AbortError`). Span outputs are not journaled (like a command typed in a terminal) and never logged; commands are
 // never logged.
+// Phase 12 (ADR-053; W12.7): `CommandSpanOptions.env` adds a plugin's variables to every span (`spanEnvironment(root,
+// pluginEnv)`: `CLAUDE_PLUGIN_ROOT`, `HARNESS_PLUGIN_ROOT`, `CLAUDE_PLUGIN_DATA` of a markdown plugin command); the
+// project variables win; never read from `process.env`.
 import type { ShellSpanResult } from '@harness-forge/shared'
 import type { RunShellOptions, ShellRunResult } from '../../workspace/shell.ts'
 import { performance } from 'node:perf_hooks'
@@ -38,6 +41,8 @@ export interface CommandSpanOptions {
   readonly now?: () => number
   /** Grace between SIGTERM and SIGKILL of a timed-out span (tests); default the runner's. */
   readonly killGraceMs?: number
+  /** Phase 12: extra variables of every span (a plugin's folder variables); the project variables win. */
+  readonly env?: Readonly<Record<string, string>>
 }
 
 /** What `runCommandSpans` did. */
@@ -52,9 +57,12 @@ export interface CommandSpanRun {
   readonly durationMs: number
 }
 
-/** The variables every span gets on top of `shellEnvironment`. */
-export function spanEnvironment(root: string): Record<string, string> {
-  return { HARNESS_PROJECT_DIR: root, CLAUDE_PROJECT_DIR: root }
+/**
+ * The variables every span gets on top of `shellEnvironment`: the project folder, and (Phase 12) `pluginEnv` of a
+ * plugin's span (`CLAUDE_PLUGIN_ROOT`, `HARNESS_PLUGIN_ROOT`, `CLAUDE_PLUGIN_DATA`); the project variables win.
+ */
+export function spanEnvironment(root: string, pluginEnv?: Readonly<Record<string, string>>): Record<string, string> {
+  return { ...(pluginEnv ?? {}), HARNESS_PROJECT_DIR: root, CLAUDE_PROJECT_DIR: root }
 }
 
 /** The span result of a finished shell: stdout, then stderr (when not empty). */
@@ -95,7 +103,7 @@ export async function runCommandSpans(commands: readonly string[], options: Comm
         cwd: options.root,
         timeoutMs: Math.max(1, Math.min(spanTimeoutMs, Math.floor(remaining))),
         signal: options.signal,
-        env: spanEnvironment(options.root),
+        env: spanEnvironment(options.root, options.env),
         headBytes: SPAN_HEAD_BYTES,
         tailBytes: SPAN_TAIL_BYTES,
         ...(options.killGraceMs === undefined ? {} : { killGraceMs: options.killGraceMs }),

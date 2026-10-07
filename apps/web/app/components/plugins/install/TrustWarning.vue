@@ -7,13 +7,24 @@
 // (sha256 = trust.hash, permissions = manifest.permissions, source = sourceRef).
 // Phase 11 (plugin API 1.5.0, W11.8): "Runs these commands" lists every command hook and every `!` span of a command
 // template (`runCommands`), each in mono with where it comes from ("PreToolUse hook", "/deploy").
+// Phase 12 (ADR-053, docs/UI.md 8.13; W12.9): a Claude Code plugin (`claude` of the inspection or the detail) lists its
+// `claude.executables` instead (every command hook handler, stdio MCP server and `!` span: "PostToolUse hook", "MCP server
+// {name}", "/{plugin}:{command}"), its `claude.hosts`, and the note that its whole file tree is pinned.
 import type { PluginDetail, PluginInspection } from '@harness-forge/shared'
 import { ShieldAlertIcon } from '@lucide/vue'
 import { computed } from 'vue'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import CopyButton from '~/components/common/CopyButton.vue'
 import { testIds } from '~/utils/testids'
-import { manifestHosts, permissionLabel, pluginSourceLabel, runCommands, stdioCommands, TRUST_WARNING_TEXT } from './install'
+import {
+  CLAUDE_TREE_PIN_NOTE,
+  manifestHosts,
+  permissionLabel,
+  pluginSourceLabel,
+  runCommands,
+  stdioCommands,
+  TRUST_WARNING_TEXT,
+} from './install'
 
 const props = defineProps<{
   inspection?: PluginInspection
@@ -21,12 +32,18 @@ const props = defineProps<{
 }>()
 
 const manifest = computed(() => props.inspection?.manifest ?? props.plugin?.manifest ?? null)
+/** + Phase 12: the Claude Code plugin info (null for a harness plugin). */
+const claude = computed(() => (props.inspection ? props.inspection.claude : props.plugin?.claude) ?? null)
 const sha256 = computed(() => props.inspection?.sha256 ?? props.plugin?.trust.hash ?? null)
 const permissions = computed(() => props.inspection?.permissions ?? props.plugin?.manifest.permissions ?? [])
-const commands = computed(() => (manifest.value ? stdioCommands(manifest.value) : []))
-/** + Phase 11: the shell commands of command hooks and `!` spans. */
-const shellCommands = computed(() => (manifest.value ? runCommands(manifest.value) : []))
-const hosts = computed(() => props.inspection?.networkHosts ?? (manifest.value ? manifestHosts(manifest.value) : []))
+/** Stdio MCP servers of a harness manifest (a Claude Code plugin lists its servers with its executables). */
+const commands = computed(() => (manifest.value && !claude.value ? stdioCommands(manifest.value) : []))
+/** + Phase 11: the shell commands of command hooks and `!` spans; + Phase 12: the executables of a Claude Code plugin. */
+const shellCommands = computed(() => (manifest.value ? runCommands(manifest.value, claude.value) : []))
+const hosts = computed(() => {
+  const declared = props.inspection?.networkHosts ?? (manifest.value ? manifestHosts(manifest.value) : [])
+  return [...new Set([...declared, ...(claude.value?.hosts ?? [])])].sort()
+})
 const source = computed(() => (props.plugin ? pluginSourceLabel(props.plugin) : null))
 </script>
 
@@ -86,6 +103,9 @@ const source = computed(() => (props.plugin ? pluginSourceLabel(props.plugin) : 
           </li>
         </ul>
       </div>
+      <p v-if="claude && claude.executables.length > 0" class="text-xs text-foreground" data-slot="trust-tree-note">
+        {{ CLAUDE_TREE_PIN_NOTE }}
+      </p>
       <div v-if="sha256" class="grid gap-1">
         <span class="text-xs font-medium text-muted-foreground">SHA-256 pin</span>
         <div class="flex min-w-0 items-center gap-1">

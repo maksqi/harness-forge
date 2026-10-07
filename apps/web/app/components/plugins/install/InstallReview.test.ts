@@ -63,6 +63,20 @@ function byTestId<T extends HTMLElement = HTMLElement>(id: string): T | null {
   return document.body.querySelector<T>(`[data-testid="${id}"]`)
 }
 
+async function type(input: HTMLInputElement | null, value: string) {
+  expect(input).not.toBeNull()
+  input!.value = value
+  input!.dispatchEvent(new Event('input', { bubbles: true }))
+  await nextTick()
+}
+
+/** A keydown Enter on `element`; returns the event (its `defaultPrevented`). */
+function pressEnter(element: HTMLElement, init: KeyboardEventInit = {}): KeyboardEvent {
+  const event = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true, ...init })
+  element.dispatchEvent(event)
+  return event
+}
+
 async function mountReview(current = ref(inspection())) {
   const events = { back: vi.fn(), installed: vi.fn(), stale: vi.fn() }
   const wrapper = mount(defineComponent({
@@ -119,5 +133,107 @@ describe('installReview', () => {
     expect(byTestId(testIds.installError)).toBeNull()
     expect(byTestId(testIds.installStale)).not.toBeNull()
     expect(byTestId(testIds.trustCheckbox)!.getAttribute('aria-checked')).toBe('false')
+  })
+
+  it('opens on the trust checkbox, and Install is never the default button (W12.9)', async () => {
+    api.pluginInstall.install.mockResolvedValue(pluginDetail({ id: 'review-kit', name: 'Review kit' }))
+    const { events } = await mountReview()
+    await flushPromises()
+    expect(document.activeElement).toBe(byTestId(testIds.trustCheckbox))
+    byTestId(testIds.trustCheckbox)!.click()
+    await flushPromises()
+    // Enter in the form (implicit submission) and Enter on the focused Install do nothing.
+    document.body.querySelector('[data-slot="install-review"] form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    const submit = byTestId<HTMLButtonElement>(testIds.installSubmit)!
+    expect(submit.type).toBe('button')
+    expect(pressEnter(submit).defaultPrevented).toBe(true)
+    await flushPromises()
+    expect(api.pluginInstall.install).not.toHaveBeenCalled()
+    // A click installs.
+    submit.click()
+    await flushPromises()
+    expect(api.pluginInstall.install).toHaveBeenCalledTimes(1)
+    expect(events.installed).toHaveBeenCalledTimes(1)
+  })
+
+  it('installs on Enter in the inline password field only, like a click on Install (W12.17)', async () => {
+    useAuthStore().status = authStatus({ enabled: true, source: 'settings', freshUntil: Date.now() - 1000 })
+    api.auth.login.mockResolvedValue(authStatus({ enabled: true, source: 'settings', freshUntil: Date.now() + 600_000 }))
+    api.pluginInstall.install.mockResolvedValue(pluginDetail({ id: 'review-kit', name: 'Review kit' }))
+    const { events } = await mountReview()
+    const field = byTestId<HTMLInputElement>(testIds.trustPassword)!
+    // Install is disabled until the consent is given: Enter in the field does nothing yet.
+    await type(field, 'secret')
+    expect(pressEnter(field).defaultPrevented).toBe(false)
+    await flushPromises()
+    expect(api.auth.login).not.toHaveBeenCalled()
+    byTestId(testIds.trustCheckbox)!.click()
+    await flushPromises()
+    // Enter on the review, on the checkbox, on Install or while an IME composes does nothing.
+    document.body.querySelector('[data-slot="install-review"] form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    expect(pressEnter(byTestId(testIds.trustCheckbox)!).defaultPrevented).toBe(true)
+    expect(pressEnter(byTestId(testIds.installSubmit)!).defaultPrevented).toBe(true)
+    pressEnter(field, { isComposing: true })
+    await flushPromises()
+    expect(api.auth.login).not.toHaveBeenCalled()
+    expect(api.pluginInstall.install).not.toHaveBeenCalled()
+    // Enter in the password field: the login, then the install of the reviewed hash.
+    pressEnter(field)
+    await flushPromises()
+    expect(api.auth.login).toHaveBeenCalledWith({ body: { password: 'secret' } })
+    expect(api.pluginInstall.install).toHaveBeenCalledTimes(1)
+    expect(api.pluginInstall.install).toHaveBeenCalledWith({ body: { source: 'github', repo: 'anthropics/review-kit', sha256: HASH, trust: true } })
+    expect(events.installed).toHaveBeenCalledTimes(1)
+  })
+
+  it('puts the focus back in the password field after a wrong password; Enter there goes on with the install (W12.17)', async () => {
+    useAuthStore().status = authStatus({ enabled: true, source: 'settings', freshUntil: Date.now() - 1000 })
+    api.auth.login.mockRejectedValueOnce(new HarnessError({ code: 'unauthorized', message: 'Invalid password' }))
+    api.auth.login.mockResolvedValue(authStatus({ enabled: true, source: 'settings', freshUntil: Date.now() + 600_000 }))
+    api.pluginInstall.install.mockResolvedValue(pluginDetail({ id: 'review-kit', name: 'Review kit' }))
+    const { events } = await mountReview()
+    byTestId(testIds.trustCheckbox)!.click()
+    await flushPromises()
+    await type(byTestId<HTMLInputElement>(testIds.trustPassword), 'wrong')
+    byTestId(testIds.installSubmit)!.click()
+    await flushPromises()
+    expect(document.body.textContent).toContain('Wrong password')
+    expect(api.pluginInstall.install).not.toHaveBeenCalled()
+    const field = byTestId<HTMLInputElement>(testIds.trustPassword)!
+    expect(field.disabled).toBe(false)
+    expect(document.activeElement).toBe(field)
+    await type(field, 'right')
+    pressEnter(field)
+    await flushPromises()
+    expect(api.auth.login).toHaveBeenLastCalledWith({ body: { password: 'right' } })
+    expect(api.pluginInstall.install).toHaveBeenCalledTimes(1)
+    expect(events.installed).toHaveBeenCalledTimes(1)
+  })
+
+  it('continues the clicked install when the password prompt is confirmed (W12.17)', async () => {
+    api.pluginInstall.install
+      .mockRejectedValueOnce(new HarnessError({ code: 'forbidden', message: 'Confirm your password to continue.', action: 'login' }))
+      .mockResolvedValueOnce(pluginDetail({ id: 'review-kit', name: 'Review kit' }))
+    api.auth.login.mockResolvedValue(authStatus({ enabled: true, source: 'settings', freshUntil: Date.now() + 600_000 }))
+    const { events } = await mountReview()
+    byTestId(testIds.trustCheckbox)!.click()
+    await flushPromises()
+    byTestId(testIds.installSubmit)!.click()
+    await flushPromises()
+    expect(byTestId(testIds.confirmPasswordDialog)).not.toBeNull()
+    await type(byTestId<HTMLInputElement>(testIds.confirmPasswordInput), 'secret')
+    // Enter in the prompt's field submits its form (implicit submission; the DOM under test does not synthesize it).
+    byTestId(testIds.confirmPasswordDialog)!.querySelector('form')!.requestSubmit()
+    await flushPromises()
+    expect(api.auth.login).toHaveBeenCalledWith({ body: { password: 'secret' } })
+    expect(api.pluginInstall.install).toHaveBeenCalledTimes(2)
+    expect(events.installed).toHaveBeenCalledTimes(1)
+  })
+
+  it('opens on Install when the plugin needs no trust', async () => {
+    await mountReview(ref(inspection({ requiresTrust: false, claude: claudePluginInfo({ executables: [] }) })))
+    await flushPromises()
+    expect(byTestId(testIds.trustCheckbox)).toBeNull()
+    expect(document.activeElement).toBe(byTestId(testIds.installSubmit))
   })
 })

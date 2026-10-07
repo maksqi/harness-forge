@@ -92,6 +92,26 @@ describe.skipIf(!posix)('runCommandSpans', () => {
     expect(formatShellSpanOutput(run.results[2]!)).toBe('out\nerr\n[exit code 3]')
     expect(await readFile(join(root, 'order.txt'), 'utf8')).toBe('a\nb\n')
     expect(spanEnvironment(root)).toEqual({ HARNESS_PROJECT_DIR: root, CLAUDE_PROJECT_DIR: root })
+    // Phase 12 (W12.7-T4): a plugin's variables join; the project variables win.
+    expect(spanEnvironment(root, { CLAUDE_PLUGIN_ROOT: '/p', CLAUDE_PLUGIN_DATA: '/d', CLAUDE_PROJECT_DIR: '/elsewhere' })).toEqual({
+      CLAUDE_PLUGIN_ROOT: '/p',
+      CLAUDE_PLUGIN_DATA: '/d',
+      HARNESS_PROJECT_DIR: root,
+      CLAUDE_PROJECT_DIR: root,
+    })
+  })
+
+  it('phase 12: CommandSpanOptions.env reaches every span (a markdown plugin command\'s folder variables)', async () => {
+    const seen: Array<Readonly<Record<string, string>> | undefined> = []
+    const run = async (options: RunShellOptions): Promise<ShellRunResult> => {
+      seen.push(options.env)
+      return shellResult({ out: 'x' })
+    }
+    await runCommandSpans(['echo a', 'echo b'], { root, signal: new AbortController().signal, run, env: { CLAUDE_PLUGIN_ROOT: '/p' } })
+    expect(seen).toEqual([
+      { CLAUDE_PLUGIN_ROOT: '/p', HARNESS_PROJECT_DIR: root, CLAUDE_PROJECT_DIR: root },
+      { CLAUDE_PLUGIN_ROOT: '/p', HARNESS_PROJECT_DIR: root, CLAUDE_PROJECT_DIR: root },
+    ])
   })
 
   it('gives each span at most its timeout and what is left of the total; later spans are skipped', async () => {

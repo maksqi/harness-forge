@@ -1,10 +1,13 @@
 // Rules of the plugin detail page (docs/UI.md 2.4, 8.7, 8.8, 8.11): which tabs a plugin has, the header actions it
 // offers, permission and policy wording, MCP status dots, and the log view helpers. Pure functions.
+// Phase 12 (ADR-053, docs/UI.md 8.13; W12.9): a Claude Code plugin (`format: 'claude'`) has no Source tab and no Edit in
+// wizard (its files are not editable in v1.8; the server also answers `editable: false`).
 import type {
   LogLevel,
   McpServer,
   McpStatus,
   PluginDetail,
+  PluginFormat,
   PluginLogEntry,
   PluginPermission,
   ToolOverride,
@@ -24,14 +27,14 @@ export const PLUGIN_TAB_LABELS: Record<PluginTab, string> = {
   logs: 'Logs',
 }
 
-type TabSubject = Pick<PluginDetail, 'builtin' | 'kind' | 'editable' | 'hasSettings'>
+type TabSubject = Pick<PluginDetail, 'builtin' | 'kind' | 'editable' | 'hasSettings'> & { format?: PluginFormat }
 
 /**
  * The Source tab: code plugins (read-only unless the plugin is editable) and editable declarative plugins, whose
- * `plugin.json` can be edited there. Builtins have no files.
+ * `plugin.json` can be edited there. Builtins have no files; Claude Code plugins (Phase 12) have no editor.
  */
 export function hasSourceTab(plugin: TabSubject): boolean {
-  return !plugin.builtin && (plugin.kind === 'code' || plugin.editable)
+  return !plugin.builtin && plugin.format !== 'claude' && (plugin.kind === 'code' || plugin.editable)
 }
 
 /** Tabs of a plugin in display order: Overview, Configuration (with a settings schema), Source, Logs. */
@@ -53,9 +56,9 @@ export function resolvePluginTab(value: unknown, tabs: readonly PluginTab[]): Pl
 
 // ---------- header actions ----------
 
-/** "Edit in wizard": declarative plugins created with the provider wizard. */
-export function canEditInWizard(plugin: Pick<PluginDetail, 'source' | 'kind'>): boolean {
-  return plugin.source === 'created' && plugin.kind === 'declarative'
+/** "Edit in wizard": declarative plugins created with the provider wizard (never a Claude Code plugin). */
+export function canEditInWizard(plugin: Pick<PluginDetail, 'source' | 'kind'> & { format?: PluginFormat }): boolean {
+  return plugin.source === 'created' && plugin.kind === 'declarative' && plugin.format !== 'claude'
 }
 
 /** Builtins are part of the server: they cannot be exported or uninstalled. */

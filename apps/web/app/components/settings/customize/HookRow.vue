@@ -9,10 +9,14 @@
 // plugin · Copy as JSON (command hooks). A chosen item is emitted once the menu has closed (focus is back on the
 // trigger, so a sheet or dialog it opens returns focus there).
 // Props, emits and the root test id are frozen from Gate P11-0b (C39 stub); implementation W11.8.
-// Phase 12 (ADR-056, ADR-057; C46, W12.12 owns it in P12-A): the hook of a plugin that is not trusted (the store's
-// `untrusted` state, or the server's `pending` state of a plugin row) offers Review plugin… (`data-action="trust-plugin"`);
-// a project command row offers Edit… (`hook-edit`, the hook editor in project mode) when HooksPanel allows it
-// (`HOOK_ROW_CONTEXT`); prompt rows carry `data-kind="prompt"`.
+// Phase 12 (ADR-056, ADR-057; C46, W12.12): the hook of a plugin that waits for trust (the server's `pending` state of a
+// plugin row, or the plugin's `untrusted` state) reads "Plugin not trusted" and offers Review plugin…
+// (`data-action="trust-plugin"`, the plugin's TrustDialog; harness-format plugins only: a Claude Code plugin is reviewed
+// on its page); a project row whose settings file can be edited here (`HOOK_ROW_CONTEXT`, a known `position`) offers
+// Edit… (`hook-edit`, the hook editor in project mode) and Delete… (`hook-delete`, removes the handler from the file);
+// prompt rows carry `data-kind="prompt"`, show `MessageSquareText` and the prompt's first line
+// (`data-slot="hook-row-prompt"`) instead of the command; an exec-form command shows its arguments; the meta line adds
+// "In the background" and "Only when {rule}".
 import type { HookEntry } from '@harness-forge/shared'
 import type { HookAction } from './hooks'
 import {
@@ -21,6 +25,7 @@ import {
   CopyIcon,
   CopyPlusIcon,
   ExternalLinkIcon,
+  MessageSquareTextIcon,
   MoreHorizontalIcon,
   PencilIcon,
   PowerIcon,
@@ -46,7 +51,7 @@ import { usePluginsStore } from '~/stores/plugins'
 import { testIds } from '~/utils/testids'
 import { middleTruncate } from './customize'
 import { HOOK_ROW_CONTEXT } from './customize-context'
-import { HOOK_COPY, hookMatcherText, hookRowMeta, hookStateBadge } from './hooks'
+import { execFormText, HOOK_COPY, hookMatcherText, hookRowMeta, hookStateBadge, promptFirstLine } from './hooks'
 
 const props = defineProps<{ entry: HookEntry, busy?: boolean }>()
 const emit = defineEmits<{ action: [action: HookAction] }>()
@@ -57,8 +62,12 @@ const ids = { diagnostics: useId() }
 const pluginName = (id: string): string => plugins.byId(id)?.name ?? id
 const context = inject(HOOK_ROW_CONTEXT, null)
 
-const command = computed(() => (props.entry.kind === 'command' ? props.entry.command : null))
+const isPrompt = computed(() => props.entry.kind === 'command' && props.entry.type === 'prompt')
+const command = computed(() => (props.entry.kind === 'command' && !isPrompt.value ? execFormText(props.entry.command, props.entry.args) : null))
 const shortCommand = computed(() => (command.value === null ? null : middleTruncate(command.value.replace(/\s+/g, ' '), 72)))
+/** + Phase 12: a prompt hook's prompt (its first line in the row, the whole prompt in the title). */
+const prompt = computed(() => (props.entry.kind === 'command' && isPrompt.value ? props.entry.prompt ?? '' : null))
+const promptLine = computed(() => (prompt.value === null ? null : middleTruncate(promptFirstLine(prompt.value), 96)))
 const matcher = computed(() => hookMatcherText(props.entry))
 const meta = computed(() => hookRowMeta(props.entry, pluginName))
 /** A plugin whose trust is missing: its hooks do not run until it is trusted again. */
@@ -67,12 +76,16 @@ const pluginUntrusted = computed(() => {
     return false
   return plugins.byId(props.entry.pluginId)?.state === 'untrusted'
 })
-/** + Phase 12: the plugin of a plugin row waits for trust (the server lists its hooks as `pending`). */
+/**
+ * + Phase 12: the plugin of a plugin row waits for trust (the server lists its hooks as `pending`); only a harness-format
+ * plugin is trusted through TrustDialog (a Claude Code plugin is reviewed on its page).
+ */
 const canTrustPlugin = computed(() => props.entry.source === 'plugin' && !!props.entry.pluginId
-  && (pluginUntrusted.value || props.entry.state === 'pending'))
-/** + Phase 12: a project command row whose settings file can be edited here. */
+  && (pluginUntrusted.value || props.entry.state === 'pending')
+  && plugins.byId(props.entry.pluginId)?.format !== 'claude')
+/** + Phase 12: a project row whose settings file can be edited here (its handler's position is known). */
 const canEditProject = computed(() => props.entry.source === 'project' && props.entry.kind === 'command' && !!props.entry.path
-  && context?.editProjectHooks.value === true)
+  && !!props.entry.position && context?.editProjectHooks.value === true)
 const badge = computed(() => {
   if (pluginUntrusted.value && props.entry.state !== 'invalid')
     return { label: HOOK_COPY.pluginNotTrusted!, tone: 'warning' as const }
@@ -114,7 +127,7 @@ function onMenuCloseAutoFocus(): void {
     class="flex min-w-0 flex-col gap-1.5 px-3 py-2"
   >
     <div class="flex min-h-(--row-height) min-w-0 items-start gap-3">
-      <component :is="off ? WebhookOffIcon : WebhookIcon" aria-hidden="true" class="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+      <component :is="isPrompt ? MessageSquareTextIcon : off ? WebhookOffIcon : WebhookIcon" aria-hidden="true" class="mt-0.5 size-4 shrink-0 text-muted-foreground" />
       <div class="flex min-w-0 flex-1 flex-col gap-1">
         <div class="flex min-w-0 flex-wrap items-baseline gap-x-2.5 gap-y-0.5">
           <span class="shrink-0 text-sm font-medium" :class="off ? 'text-muted-foreground' : undefined">{{ entry.event }}</span>
@@ -125,6 +138,12 @@ function onMenuCloseAutoFocus(): void {
             :title="command"
             class="min-w-0 flex-1 basis-48 truncate font-mono text-xs text-foreground/85"
           >{{ shortCommand }}</code>
+          <span
+            v-else-if="prompt !== null"
+            data-slot="hook-row-prompt"
+            :title="prompt"
+            class="min-w-0 flex-1 basis-48 truncate text-xs text-foreground/85"
+          >{{ promptLine }}</span>
         </div>
         <div class="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-muted-foreground">
           <template v-for="(item, index) in meta" :key="index">
@@ -233,11 +252,24 @@ function onMenuCloseAutoFocus(): void {
               <BracesIcon aria-hidden="true" />
               Copy as JSON
             </DropdownMenuItem>
+            <template v-if="canEditProject">
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                variant="destructive"
+                :data-testid="testIds.hookDelete"
+                :disabled="busy"
+                class="pointer-coarse:min-h-10"
+                @select="choose('delete')"
+              >
+                <Trash2Icon aria-hidden="true" />
+                Delete…
+              </DropdownMenuItem>
+            </template>
           </template>
           <template v-else>
             <DropdownMenuItem v-if="canTrustPlugin" data-action="trust-plugin" class="pointer-coarse:min-h-10" @select="choose('trust-plugin')">
               <ShieldAlertIcon aria-hidden="true" />
-              Review plugin…
+              {{ HOOK_COPY.reviewPlugin }}
             </DropdownMenuItem>
             <DropdownMenuItem v-if="entry.pluginId" data-action="open-plugin" class="pointer-coarse:min-h-10" @select="choose('open-plugin')">
               <ExternalLinkIcon aria-hidden="true" />

@@ -21,9 +21,12 @@ import {
   definition,
   hookChatMessages,
   PHASE11_SENTINELS,
+  PHASE12_PLUGIN_ID,
+  PHASE12_SENTINELS,
   PLAIN_COMMAND_CONTENT,
   realDataApp,
   seedPhase11,
+  seedPhase12,
   SPAN_COMMAND_CONTENT,
   STYLE_CONTENT,
 } from './backup-fixtures.test-util.ts'
@@ -477,5 +480,22 @@ describe('backup export: Phase 11 (settings, output styles; never hooks, approva
     for (const leaked of [PHASE11_SENTINELS.hookCommand, PHASE11_SENTINELS.trustLabel, PHASE11_SENTINELS.trustSha256, PHASE11_SENTINELS.variable, seeded.projectId, 'mcp.var.', 'hok_'])
       expect(text, leaked).not.toContain(leaked)
     expect(Object.keys(entries).some(name => /hook|trust|project|secret/i.test(name))).toBe(false)
+  })
+})
+
+describe('backup export: Phase 12 (never marketplaces, Claude Code plugins, transcripts or import plans)', () => {
+  it('writes the same explicit list of entries; no marketplace, plugin, transcript or import plan reaches the zip', async () => {
+    const t = await realDataApp()
+    const seeded = await seedPhase11(t)
+    const phase12 = await seedPhase12(t, seeded.chatId)
+    const entries = unzip(await exportBytes(t.deps, { files: true }))
+    expect(Object.keys(entries)).toEqual(['settings.json', `chats/${seeded.chatId}.json`, 'files/index.json', 'customizations.json', 'manifest.json'])
+
+    const text = Object.values(entries).map(bytes => Buffer.from(bytes).toString('utf8')).join('\n')
+    for (const leaked of [...Object.values(PHASE12_SENTINELS), phase12.marketplaceId, phase12.planId, 'acme-tools', PHASE12_PLUGIN_ID, 'transcripts/', '.jsonl'])
+      expect(text, leaked).not.toContain(leaked)
+    expect(Object.keys(entries).some(name => /marketplace|plugin|transcript|import|claude/i.test(name))).toBe(false)
+    // The plan is still held (in memory only) and the transcript is still on disk: the export only left them out.
+    expect(entryJson<BackupManifest>(entries, 'manifest.json').counts).toMatchObject({ chats: 1, customizations: 3 })
   })
 })

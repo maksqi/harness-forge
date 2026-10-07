@@ -6,8 +6,11 @@
 // hooks and output styles.
 // Phase 12 (ADR-053 / ADR-054; C46 declares, W12.9 implements; frozen from Gate P12-0b): the GitHub tab (`github`, the
 // draft's `githubRepo` / `githubRef` / `githubPath`, `parseGithubSpec` over the shared `parseMarketplaceShorthand`), the
-// Claude Code preview (`claudePreview`) and the executables of a Claude Code plugin in `runCommands`.
+// Claude Code preview (`claudePreview`) and the executables of a Claude Code plugin in `runCommands`. W12.9: the
+// Repository field split (`splitGithubRepoField`), the namespace lines, the components summary, the preview hosts and
+// the source line of each executable (`executableSource`).
 import type {
+  ClaudePluginExecutable,
   ClaudePluginInfo,
   PluginContributions,
   PluginInspection,
@@ -35,6 +38,12 @@ export const TAB_LABELS: Record<InstallTab, string> = {
 
 /** The GitHub tab's hint (docs/UI.md 8.3). */
 export const GITHUB_HINT = 'Downloads an archive of the exact commit over HTTPS. Nothing runs before you review it.'
+
+/** The format badge of a Claude Code plugin in the preview (docs/UI.md 8.13). */
+export const CLAUDE_FORMAT_LABEL = 'Claude Code plugin'
+
+/** TrustWarning of a Claude Code plugin that runs anything (ADR-053: the trust pin covers its whole file tree). */
+export const CLAUDE_TREE_PIN_NOTE = 'The files are pinned as a whole: editing any file of the plugin asks for your trust again.'
 
 /** Exact trust warning of docs/PLUGINS.md section 13 ("Trust warning"). */
 export const TRUST_WARNING_TEXT = 'Runs code on your server with harness-forge\'s permissions. It can read API keys and conversations and make network requests. Only install plugins from sources you trust.'
@@ -109,6 +118,26 @@ export function parseGithubSpec(text: string): { repo: string, ref?: string } | 
   if (parsed?.kind !== 'github')
     return null
   return parsed.ref === undefined ? { repo: parsed.repo } : { repo: parsed.repo, ref: parsed.ref }
+}
+
+/**
+ * The GitHub tab's Repository field after the user leaves it (docs/UI.md 8.3): a spec `parseGithubSpec` reads becomes
+ * `owner/repo`, and its ref (`#ref`, `@ref`, a `…/tree/<ref>` URL) fills the empty "Branch, tag or commit" field. Null when
+ * nothing changes: the text is not a GitHub repository, it is already `owner/repo`, or the ref field holds another ref
+ * (Inspect then asks the user to clear one of them).
+ */
+export function splitGithubRepoField(draft: Pick<InstallDraft, 'githubRepo' | 'githubRef'>): { githubRepo: string, githubRef: string } | null {
+  const text = draft.githubRepo.trim()
+  const spec = parseGithubSpec(text)
+  if (!spec)
+    return null
+  const typedRef = draft.githubRef.trim()
+  if (spec.ref !== undefined && typedRef !== '' && typedRef !== spec.ref)
+    return null
+  const githubRef = spec.ref ?? draft.githubRef
+  if (text === spec.repo && githubRef === draft.githubRef)
+    return null
+  return { githubRepo: spec.repo, githubRef }
 }
 
 /** npm spec of the two inputs (`name` + optional version / range / tag). */
@@ -335,11 +364,12 @@ export interface ManifestRunCommand {
  * Shell commands a manifest runs (plugin API 1.5.0, docs/PLUGINS.md 13 "Runs these commands"): the command of every
  * command hook (`contributes.hooks`, read with the shared `readHooksConfig`) and every `` !`cmd` `` span of a command
  * template (scanned with the shared `planCommandExpansion`), in manifest order. + Phase 12 (ADR-053): a Claude Code
- * plugin (`claude` given) lists its `executables` instead (the server's list is what trust approves).
+ * plugin (`claude` given) lists its `executables` instead (the server's list is what trust approves), each named by
+ * `executableSource` ("PostToolUse hook", "MCP server {name}", "/{plugin}:{command}").
  */
 export function runCommands(manifest: PluginManifest, claude?: ClaudePluginInfo | null): ManifestRunCommand[] {
   if (claude)
-    return claude.executables.map(executable => ({ source: executable.label, command: executable.command }))
+    return claude.executables.map(executable => ({ source: executableSource(executable, claude.namespace), command: executable.command }))
   const hooks = readHooksConfig(manifest.contributes?.hooks, { source: 'plugin' }).items.map(hook => ({ source: `${hook.event} hook`, command: hook.command }))
   const spans = (manifest.contributes?.commands ?? [])
     .flatMap(command => (command.template.includes('!`') ? planCommandExpansion(command.template).shellCommands : [])
@@ -387,9 +417,38 @@ export function manifestIcon(icon: string | undefined): { color?: string, mono?:
 // ---------- Claude Code preview (Phase 12) ----------
 
 /**
+ * Where a thing a Claude Code plugin runs comes from, as the trust consent names it (docs/UI.md 8.13): "PostToolUse
+ * hook" (the event of the handler's label; no matcher, like the harness hooks of 8.4), "MCP server {name}" and the
+ * command of a `` !`cmd` `` span as `/{plugin}:{command}` (a bare name is qualified with the plugin's namespace).
+ */
+export function executableSource(executable: ClaudePluginExecutable, namespace?: string): string {
+  const label = executable.label.trim()
+  switch (executable.kind) {
+    case 'hook': {
+      const event = label.split(/\s+/)[0]
+      return event ? `${event} hook` : 'Hook'
+    }
+    case 'mcp':
+      return label ? `MCP server ${label}` : 'MCP server'
+    case 'span': {
+      const name = label.replace(/^\//, '')
+      if (!name)
+        return 'Command'
+      return `/${name.includes(':') || !namespace ? name : `${namespace}:${name}`}`
+    }
+  }
+}
+
+/** One sentence of the server without its final period, for a parenthesis ("LSP servers are not supported"). */
+function clause(text: string): string {
+  return text.trim().replace(/\.+$/, '')
+}
+
+/**
  * The Claude Code lines of the preview (docs/UI.md 8.13): the namespace of its qualified names, "Asks for:" (the
- * `userConfig` titles, "(secret)" / "(required)" after them), the ignored parts with their reasons and the resolved
- * commit of a GitHub source (from `sourceRef` `owner/repo@<sha>`); null for a harness plugin.
+ * `userConfig` titles, "(secret)" / "(required)" after them), the ignored parts with their reasons ("{part} ({reason})")
+ * and the resolved commit of a GitHub source (the hex after the `@` of `sourceRef` `owner/repo@<sha>[/path]`; shown as
+ * its first 7 characters); null for a harness plugin.
  */
 export function claudePreview(inspection: PluginInspection): { namespace: string | null, asksFor: string[], ignored: string[], commit: string | null } | null {
   const claude = inspection.claude
@@ -399,9 +458,63 @@ export function claudePreview(inspection: PluginInspection): { namespace: string
     const notes = [option.sensitive ? '(secret)' : null, option.required ? '(required)' : null].filter(Boolean)
     return [option.title || option.key, ...notes].join(' ')
   })
-  const ignored = claude.unsupported.map(part => (part.reason ? `${part.component}: ${part.reason}` : part.component))
+  const ignored = claude.unsupported.map((part) => {
+    const reason = clause(part.reason)
+    return reason ? `${part.component} (${reason})` : part.component
+  })
   const commit = inspection.sourceRef?.match(/@([\da-f]{7,40})(?:\/|$)/)?.[1] ?? null
   return { namespace: claude.namespace, asksFor, ignored, commit }
+}
+
+/** `review-kit:review` for a bare `review` (names that already hold a `:` are qualified). */
+function qualified(namespace: string, name: string): string {
+  return name.includes(':') ? name : `${namespace}:${name}`
+}
+
+/**
+ * The namespace line of a Claude Code plugin (docs/UI.md 8.13, `data-slot="install-namespace"`): "Commands run as
+ * /{plugin}:{command}." with the first contributed command, and "Agents start as {plugin}:{agent}." when it has agents;
+ * empty for a harness plugin or a plugin without commands and agents.
+ */
+export function claudeNamespaceLines(inspection: Pick<PluginInspection, 'format' | 'claude' | 'contributions'>): string[] {
+  const claude = inspection.claude
+  if (inspection.format !== 'claude' || !claude)
+    return []
+  const namespace = claude.namespace
+  const lines: string[] = []
+  const command = inspection.contributions.commands[0]
+  if (command !== undefined || claude.components.commands > 0)
+    lines.push(`Commands run as /${qualified(namespace, command ?? '<command>')}.`)
+  const agent = inspection.contributions.agents[0]
+  if (agent !== undefined || claude.components.agents > 0)
+    lines.push(`Agents start as ${qualified(namespace, agent ?? '<agent>')}.`)
+  return lines
+}
+
+/**
+ * "3 commands · 1 agent · 1 skill · 1 output style · 2 hooks · 1 MCP server": what a Claude Code plugin brings (its
+ * `components`, read from its files by the server; empty parts omitted).
+ */
+export function claudeComponentsSummary(components: ClaudePluginInfo['components']): string {
+  const parts: string[] = []
+  if (components.commands > 0)
+    parts.push(plural(components.commands, 'command', 'commands'))
+  if (components.agents > 0)
+    parts.push(plural(components.agents, 'agent', 'agents'))
+  if (components.skills > 0)
+    parts.push(plural(components.skills, 'skill', 'skills'))
+  if (components.outputStyles > 0)
+    parts.push(plural(components.outputStyles, 'output style', 'output styles'))
+  if (components.hooks > 0)
+    parts.push(plural(components.hooks, 'hook', 'hooks'))
+  if (components.mcpServers > 0)
+    parts.push(plural(components.mcpServers, 'MCP server', 'MCP servers'))
+  return parts.join(' · ')
+}
+
+/** The hosts of the preview: the inspection's `networkHosts` and, for a Claude Code plugin, its `claude.hosts` (sorted). */
+export function inspectionHosts(inspection: Pick<PluginInspection, 'networkHosts' | 'claude'>): string[] {
+  return [...new Set([...inspection.networkHosts, ...(inspection.claude?.hosts ?? [])])].sort()
 }
 
 // ---------- stale review ----------

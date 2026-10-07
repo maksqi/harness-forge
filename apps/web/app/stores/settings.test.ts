@@ -89,6 +89,18 @@ describe('settings store', () => {
     expect(document.documentElement.getAttribute('data-density')).toBe('comfortable')
   })
 
+  it('rolls back a failed update of an object setting (modelAliases, Phase 12)', async () => {
+    api.settings.get.mockResolvedValue(settings())
+    api.settings.update.mockRejectedValue(new HarnessError({ code: 'validation_error', message: 'Bad value' }))
+    const store = useSettingsStore()
+    await store.fetch()
+    const before = { ...store.resolved.modelAliases }
+    const failed = store.update({ modelAliases: { ...before, sonnet: 'anthropic:claude-sonnet-5' } })
+    expect(store.resolved.modelAliases.sonnet).toBe('anthropic:claude-sonnet-5')
+    await expect(failed).rejects.toMatchObject({ code: 'validation_error' })
+    expect(store.resolved.modelAliases).toEqual(before)
+  })
+
   it('ignores an empty patch', async () => {
     const store = useSettingsStore()
     await store.update({})

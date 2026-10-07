@@ -229,7 +229,9 @@ test.describe('customize', () => {
     await page.getByTestId(testIds.customizeImport).click()
     await (await again).setFiles({ name: `${name}.md`, mimeType: 'text/markdown', buffer: Buffer.from(exported) })
     await expect(editor).toHaveAttribute('data-mode', 'import')
-    await expect(editor.getByTestId(testIds.customizationImportNotes)).toHaveAttribute('data-count', '1')
+    // Phase 12 (ADR-058): the editor keeps the Claude model name (`model: sonnet`), so its alias note comes back.
+    await expect(editor.getByTestId(testIds.customizationImportNotes)).toHaveAttribute('data-count', '2')
+    await expect(editor.getByTestId(testIds.customizationImportNotes)).toContainText('Claude model names use the model aliases of the settings')
     await expect(editor.getByTestId(testIds.customizationName)).toHaveValue(name)
     await expect(editor.getByTestId(testIds.customizationDescription)).toHaveValue(stored.description)
     for (const tool of ['read_file', 'search_files'])

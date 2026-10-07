@@ -31,6 +31,9 @@
 // streaming reply, also after text (Stop hooks run after the reply's text), unless the running hooks belong to a tool row
 // of this reply (the HOOK_ACTIVITY injection: that row shows "Running hook…"). The notes name a plugin hook's plugin
 // from the plugins store (when a store is active).
+// Phase 12 (ADR-057; docs/UI.md 7.34; W12.17): the message-level line shows the running hook's `statusMessage` (the
+// activity `label`) instead of "Running hooks…": SubmittedPlaceholder reads it through HOOK_ACTIVITY (like ToolPart for
+// its row), and `placeholderActivity` is 'hooks' only for message-level hooks, so a tool row's label never shows here.
 import type { HarnessUIMessage, HookData, MessageBranch } from '@harness-forge/shared'
 import type { FileUIPart, TextUIPart } from 'ai'
 import type { AllowRules } from '~/components/workspace/allowlist/allow-rule'

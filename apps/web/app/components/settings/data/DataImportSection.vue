@@ -6,8 +6,9 @@
 // the output styles too, and commands with shell lines come back turned off). The
 // result panel lists every chat; the chat list reloads, and so do the settings when the backup restored them, and the
 // customizations when it restored any. 409 `busy` and 413 become toasts, other failures show inline.
-// Phase 12 (ADR-055; C46, W12.10 owns it in P12-A): the link Import from Claude Code… (`data-import-claude`) opens the
-// import dialog of Customize (`/settings/customize?import=claude`).
+// Phase 12 (ADR-055; docs/UI.md 9.14; W12.10): the link Import from Claude Code… (`data-import-claude`, with the line
+// "Agents, commands, skills, hooks and MCP servers from a Claude Code folder.") opens the import dialog of Customize
+// (`/settings/customize?import=claude`); the result panel counts the commands a restore turned off.
 import type { DataConflictPolicy, DataImportResult } from '@harness-forge/shared'
 import { CircleAlertIcon, FileArchiveIcon, FileBracesIcon, FolderDownIcon, FolderOpenIcon, UploadIcon } from '@lucide/vue'
 import { computed, nextTick, ref, useId } from 'vue'
@@ -36,13 +37,13 @@ const emit = defineEmits<{
 }>()
 
 /** Import from Claude Code (Phase 12): the Customize dialog's deep link (docs/UI.md 6, 9.14). */
-const IMPORT_CLAUDE_ROUTE = { path: '/settings/customize', query: { import: 'claude' } } as const
+const IMPORT_CLAUDE_ROUTE = '/settings/customize?import=claude'
 
 const api = useApi()
 const chats = useChatsStore()
 const settings = useSettingsStore()
 const customizations = useCustomizationsStore()
-const ids = { fileName: useId(), policy: useId(), restore: useId() }
+const ids = { fileName: useId(), policy: useId(), restore: useId(), claude: useId() }
 
 const POLICY_OPTIONS: ReadonlyArray<{ value: DataConflictPolicy, label: string, hint: string }> = [
   { value: 'skip', label: 'Skip it', hint: 'The chat that is already here stays as it is.' },
@@ -253,15 +254,17 @@ async function runImport(): Promise<void> {
 
     <DataImportResultPanel v-if="result" :result="result" />
 
-    <p class="text-sm text-muted-foreground">
-      Coming from Claude Code?
-      <Button as-child variant="link" class="h-auto p-0">
-        <NuxtLink :to="IMPORT_CLAUDE_ROUTE" :data-testid="testIds.dataImportClaude">
+    <div class="grid gap-1 border-t pt-4" data-slot="data-import-claude-section">
+      <Button as-child variant="link" class="h-auto justify-self-start p-0 pointer-coarse:min-h-10">
+        <NuxtLink :to="IMPORT_CLAUDE_ROUTE" :aria-describedby="ids.claude" :data-testid="testIds.dataImportClaude">
           <FolderDownIcon aria-hidden="true" data-icon="inline-start" />
           Import from Claude Code…
         </NuxtLink>
       </Button>
-    </p>
+      <p :id="ids.claude" class="text-sm text-muted-foreground">
+        Agents, commands, skills, hooks and MCP servers from a Claude Code folder.
+      </p>
+    </div>
 
     <div class="sr-only" role="status" aria-live="polite" aria-atomic="true">
       {{ announcement }}

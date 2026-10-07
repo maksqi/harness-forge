@@ -526,14 +526,14 @@ describe('import: personal definitions (Phase 10; Phase 11 adds output styles)',
 
     target.events.clear()
     const restored = await importBytes(target, zip, { restoreCustomizations: true })
-    expect(restored.customizations).toEqual({ imported: 2, skipped: 1, failed: 0 })
+    expect(restored.customizations).toEqual({ imported: 2, skipped: 1, failed: 0, turnedOff: 0 })
     expect(restored.warnings).toEqual([])
     const items = (await target.deps.customizations.exportBackup()).items
     expect(items.map(item => [item.kind, item.name, item.enabled])).toEqual([['agent', 'reviewer', true], ['command', 'ship', false], ['skill', 'notes', true]])
     expect(items[0]!.content).toBe(kept.content)
     expect(target.events.ofType('customization.changed')).toHaveLength(2)
     // Running it again changes nothing.
-    expect((await importBytes(target, zip, { restoreCustomizations: true })).customizations).toEqual({ imported: 0, skipped: 3, failed: 0 })
+    expect((await importBytes(target, zip, { restoreCustomizations: true })).customizations).toEqual({ imported: 0, skipped: 3, failed: 0, turnedOff: 0 })
   })
 
   it('fails invalid items with a warning that names them (never their content) and restores the rest', async () => {
@@ -552,7 +552,7 @@ describe('import: personal definitions (Phase 10; Phase 11 adds output styles)',
       },
     })
     const result = await importBytes(target, zip, { restoreCustomizations: true })
-    expect(result.customizations).toEqual({ imported: 1, skipped: 0, failed: 4 })
+    expect(result.customizations).toEqual({ imported: 1, skipped: 0, failed: 4, turnedOff: 0 })
     expect(result.warnings).toEqual([
       'Item 2 in customizations.json is invalid and was not restored.',
       'The personal skill "huge" in customizations.json is invalid and was not restored.',
@@ -569,7 +569,7 @@ describe('import: personal definitions (Phase 10; Phase 11 adds output styles)',
     const zip = backupZip({ 'manifest.json': manifestOf(0, { includes: { files: false, settings: false, customizations: true } }), 'customizations.json': { items } })
     const result = await importBytes(target, zip, { restoreCustomizations: true })
     // The fake keeps the per-kind limit (200 agents); the 2 items past the file's cap fail without being read.
-    expect(result.customizations).toEqual({ imported: 200, skipped: 0, failed: CUSTOMIZATION_ITEMS_MAX + 2 - 200 })
+    expect(result.customizations).toEqual({ imported: 200, skipped: 0, failed: CUSTOMIZATION_ITEMS_MAX + 2 - 200, turnedOff: 0 })
     expect(result.warnings).toContain(`customizations.json holds ${CUSTOMIZATION_ITEMS_MAX + 2} items; only the first ${CUSTOMIZATION_ITEMS_MAX} were read.`)
     expect(target.customizations.calls.restoreBackup).toBe(1)
   })
@@ -636,7 +636,7 @@ describe('import: personal definitions (Phase 10; Phase 11 adds output styles)',
 })
 
 describe('import: Phase 11 round trip into a fresh server (settings, styles, commands; never hooks, approvals or variables)', () => {
-  it('restores outputStyle / hooksEnabled, the style and the commands (a command with spans turned off) and the hook records', async () => {
+  it('restores outputStyle / hooksEnabled, the style and the commands (a command with spans turned off: turnedOff 1) and the hook records', async () => {
     const source = await realDataApp()
     const seeded = await seedPhase11(source)
     const zip = await exportBytes(source.deps, { files: false })
@@ -645,7 +645,7 @@ describe('import: Phase 11 round trip into a fresh server (settings, styles, com
     const before = await target.deps.settings.get()
     expect(before).toMatchObject({ outputStyle: 'default', hooksEnabled: true })
     const result = dataImportResultSchema.parse(await target.deps.data.importData(new Blob([new Uint8Array(zip)]), { restoreSettings: true, restoreCustomizations: true }))
-    expect(result).toMatchObject({ counts: { imported: 1, failed: 0 }, settingsRestored: true, customizations: { imported: 3, skipped: 0, failed: 0 } })
+    expect(result).toMatchObject({ counts: { imported: 1, failed: 0 }, settingsRestored: true, customizations: { imported: 3, skipped: 0, failed: 0, turnedOff: 1 } })
     expect(result.warnings).toEqual([])
 
     expect(await target.deps.settings.get()).toMatchObject({ outputStyle: 'terse', hooksEnabled: false })
@@ -668,6 +668,6 @@ describe('import: Phase 11 round trip into a fresh server (settings, styles, com
 
     // Importing the same backup again keeps what is there (the commands stay as they are).
     const again = dataImportResultSchema.parse(await target.deps.data.importData(new Blob([new Uint8Array(zip)]), { restoreCustomizations: true }))
-    expect(again.customizations).toEqual({ imported: 0, skipped: 3, failed: 0 })
+    expect(again.customizations).toEqual({ imported: 0, skipped: 3, failed: 0, turnedOff: 0 })
   })
 })

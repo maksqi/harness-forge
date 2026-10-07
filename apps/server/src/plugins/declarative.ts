@@ -19,6 +19,9 @@
 // `DeclaredContributionHost.registerHookCommands` (its runtime's), which registers them in `registry.hookCommands` with
 // the plugin folder as the root. The host loads such a plugin only while it is trusted (`manifestRequiresTrust`), so an
 // untrusted plugin never gets here; the trust pin covers `plugin.json` only (scripts a hook calls are not pinned).
+// Plugin API 1.6.0 (ADR-053, ADR-057; W12.1): `contributes.skills[].baseDir` is passed on, and the prompt handlers of
+// `contributes.hooks` register with the command handlers (the registry reads them with prompts on; a plugin with
+// prompt-only hooks needs no trust). Claude Code plugins never come here: `plugins/claude/register.ts` registers them.
 import type {
   DeclarativeProvider,
   Disposable,
@@ -472,7 +475,13 @@ export function registerDeclaredContributions(ctx: PluginContext, manifest: Plug
   }
   for (const skill of contributes.skills ?? []) {
     registerOrSkip(ctx, `The skill "${skill.name}"`, () => {
-      ctx.skills.register({ name: skill.name, description: skill.description, content: skill.content })
+      ctx.skills.register({
+        name: skill.name,
+        description: skill.description,
+        content: skill.content,
+        // Plugin API 1.6.0 (ADR-053): the folder of the skill's supporting files (relative to the plugin folder).
+        ...(skill.baseDir === undefined ? {} : { baseDir: skill.baseDir }),
+      })
     })
   }
   // Plugin API 1.5.0 (ADR-048, ADR-051). A manifest without these keys (every plugin written for 1.4.0 or older)

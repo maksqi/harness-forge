@@ -1,15 +1,21 @@
 import type { BackgroundTask } from '@harness-forge/shared'
+import { createServerEvent } from '@harness-forge/shared'
 import { flushPromises, mount } from '@vue/test-utils'
+import { createPinia, disposePinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent, h, nextTick, ref } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
+import { useBackgroundTasksStore } from '~/stores/background-tasks'
 import { testIds } from '~/utils/testids'
-import { backgroundTask, backgroundTaskId, taskInput, taskOutput } from '~/utils/testing/fixtures'
+import { backgroundTask, backgroundTaskId, chatId, taskInput, taskOutput } from '~/utils/testing/fixtures'
+import { createMockApi } from '~/utils/testing/mock-api'
 import { stubLocalStorage } from '~/utils/testing/storage'
 import { BACKGROUND_TASK_INPUT } from '../chat-context'
-import { announcedTasks } from './background-agents'
+import { announcedTasks, BACKGROUND_STOPPED_LINGER_MS, visibleTasks } from './background-agents'
 import BackgroundAgents from './BackgroundAgents.vue'
 
+const mock = vi.hoisted(() => ({ api: null as unknown }))
+vi.mock('~/composables/useApi', () => ({ useApi: () => mock.api }))
 vi.mock('~/components/chat/nuxt-imports', () => ({ useColorMode: () => ({ value: 'dark' }) }))
 
 const T0 = 1_759_000_000_000
@@ -27,6 +33,9 @@ function screen(wide: boolean) {
   vi.stubGlobal('matchMedia', (query: string) => ({ matches: wide && query.includes('min-width'), media: query, addEventListener() {}, removeEventListener() {} }))
 }
 
+/** Every list mounted by a test (unmounted before the body is cleared). */
+const mounted: ReturnType<typeof mount>[] = []
+
 function mountList(initial: { tasks: readonly BackgroundTask[], stopping?: readonly string[], reveal?: { taskId: string, n: number } | null }) {
   const props = ref({ stopping: [] as readonly string[], reveal: null as { taskId: string, n: number } | null, ...initial })
   const onStop = vi.fn()
@@ -36,6 +45,7 @@ function mountList(initial: { tasks: readonly BackgroundTask[], stopping?: reado
       default: () => h(BackgroundAgents, { ...props.value, onStop, onStopAll }),
     }),
   }), { attachTo: document.body, global: { provide: { [BACKGROUND_TASK_INPUT as symbol]: () => taskInput() } } })
+  mounted.push(wrapper)
   const set = async (next: Partial<typeof props.value>) => {
     props.value = { ...props.value, ...next }
     await flushPromises()
@@ -53,17 +63,24 @@ function focusOn(node: { element: Element }) {
 }
 
 let storage: Storage
+let pinia: ReturnType<typeof createPinia>
 
 beforeEach(() => {
   storage = stubLocalStorage()
   announcedTasks.clear()
   screen(true)
+  mock.api = createMockApi()
+  pinia = createPinia()
+  setActivePinia(pinia)
 })
 
 afterEach(() => {
+  for (const wrapper of mounted.splice(0))
+    wrapper.unmount()
   vi.useRealTimers()
   vi.unstubAllGlobals()
   document.body.replaceChildren()
+  disposePinia(pinia)
 })
 
 describe('backgroundAgents', () => {
@@ -241,5 +258,122 @@ describe('backgroundAgents', () => {
     await set({ tasks: [ended(b), ended(a)] })
     expect(wrapper.get('[data-slot="background-agents-announcer"]').text()).toBe('Background agent finished: Agent A')
     expect(announcedTasks.has(a.id)).toBe(true)
+  })
+})
+
+describe('backgroundAgents: a row stopped from the list (Phase 12, W12.13: the mobile dock flake of P12-0a)', () => {
+  function delivered(task: BackgroundTask): BackgroundTask {
+    return { ...task, deliveredAt: T0 + 61_000, deliveredMessageId: 'msg_reply' }
+  }
+
+  /** Puts a snapshot into the store (`task.changed`) and returns what ChatView would pass: the visible tasks. */
+  function changed(task: BackgroundTask): readonly BackgroundTask[] {
+    const store = useBackgroundTasksStore()
+    store.applyEvent(createServerEvent('task.changed', { chatId: task.chatId, task }, 1))
+    return visibleTasks(store.tasks(task.chatId))
+  }
+
+  function rowOf(wrapper: ReturnType<typeof mount>, task: BackgroundTask) {
+    return wrapper.find(`[data-testid="${testIds.backgroundAgent}"][data-task-id="${task.id}"]`)
+  }
+
+  it('keeps showing "Stopped" when a running reply takes the report right after the stop answer', async () => {
+    vi.useFakeTimers({ now: T0 + 60_000, toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] })
+    const a = running(1, 'Agent A')
+    const { wrapper, set, onStop } = mountList({ tasks: changed(a) })
+    const stop = wrapper.get(`[data-testid="${testIds.backgroundAgentStop}"]`)
+    focusOn(stop)
+    await stop.trigger('click')
+    expect(onStop).toHaveBeenCalledWith(a.id)
+    // Progress events arrive while the stop is in flight.
+    await set({ tasks: changed({ ...a, output: { ...a.output, steps: [] } }), stopping: [a.id] })
+    expect(rowOf(wrapper, a).attributes()).toMatchObject({ 'data-state': 'running', 'aria-busy': 'true' })
+    // The stop answer (aborted), then at once the delivery at the reply's next step: the row leaves `tasks`.
+    await set({ tasks: changed(ended(a, 'aborted')), stopping: [] })
+    await set({ tasks: changed(delivered(ended(a, 'aborted'))) })
+    expect(rowOf(wrapper, a).exists()).toBe(true)
+    expect(rowOf(wrapper, a).attributes('data-state')).toBe('aborted')
+    expect(rowOf(wrapper, a).text()).toContain('Stopped')
+    expect(rowOf(wrapper, a).find('[data-slot="background-agent-pending"]').exists()).toBe(false)
+    expect(find(wrapper, testIds.backgroundAgents).attributes()).toMatchObject({ 'data-count': '0', 'data-total': '1' })
+    expect(document.activeElement).toBe(find(wrapper, testIds.backgroundAgentsToggle).element)
+    expect(wrapper.get('[data-slot="background-agents-announcer"]').text()).toBe('Background agent stopped: Agent A')
+
+    // It leaves once it ended BACKGROUND_STOPPED_LINGER_MS ago.
+    await vi.advanceTimersByTimeAsync(BACKGROUND_STOPPED_LINGER_MS - 1)
+    expect(rowOf(wrapper, a).exists()).toBe(true)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(find(wrapper, testIds.backgroundAgents).exists()).toBe(false)
+  })
+
+  it('lingers from the store snapshot when the end and the delivery arrive together', async () => {
+    vi.useFakeTimers({ now: T0 + 60_000, toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] })
+    const a = running(2, 'Agent A', T0 + 1000)
+    const b = running(1, 'Agent B')
+    const { wrapper, set } = mountList({ tasks: [...changed(b), ...changed(a)].filter((task, index, all) => all.findIndex(item => item.id === task.id) === index) })
+    await wrapper.get(`[data-task-id="${a.id}"] [data-testid="${testIds.backgroundAgentStop}"]`).trigger('click')
+    await set({ stopping: [a.id] })
+    changed(ended(a, 'aborted'))
+    await set({ tasks: changed(delivered(ended(a, 'aborted'))), stopping: [] })
+    // Newest first: the lingering row keeps its place above B.
+    const ids = wrapper.findAll(`[data-testid="${testIds.backgroundAgent}"]`).map(row => row.attributes('data-task-id'))
+    expect(ids).toEqual([a.id, b.id])
+    expect(rowOf(wrapper, a).attributes('data-state')).toBe('aborted')
+    expect(find(wrapper, testIds.backgroundAgents).attributes()).toMatchObject({ 'data-count': '1', 'data-total': '2' })
+    // A collapsed list shows no lingering row.
+    await find(wrapper, testIds.backgroundAgentsToggle).trigger('click')
+    expect(find(wrapper, testIds.backgroundAgents).attributes('data-total')).toBe('1')
+    await vi.advanceTimersByTimeAsync(BACKGROUND_STOPPED_LINGER_MS)
+    await find(wrapper, testIds.backgroundAgentsToggle).trigger('click')
+    expect(rowOf(wrapper, a).exists()).toBe(false)
+    expect(rowOf(wrapper, b).exists()).toBe(true)
+  })
+
+  it('a row that ended by itself, or whose stop failed, leaves as soon as its report was delivered', async () => {
+    const a = running(2, 'Agent A')
+    const b = running(1, 'Agent B')
+    changed(b)
+    const { wrapper, set } = mountList({ tasks: changed(a).slice() })
+    // A finished by itself and was delivered: gone at once.
+    await set({ tasks: changed(ended(a)) })
+    await set({ tasks: changed(delivered(ended(a))) })
+    expect(rowOf(wrapper, a).exists()).toBe(false)
+    expect(rowOf(wrapper, b).exists()).toBe(true)
+
+    // B's stop failed (it settled while B still runs); B later finishes and is delivered: gone at once too.
+    await wrapper.get(`[data-task-id="${b.id}"] [data-testid="${testIds.backgroundAgentStop}"]`).trigger('click')
+    await set({ stopping: [b.id] })
+    await set({ stopping: [] })
+    expect(rowOf(wrapper, b).attributes('data-state')).toBe('running')
+    await set({ tasks: changed(ended(b)) })
+    await set({ tasks: changed(delivered(ended(b))) })
+    expect(find(wrapper, testIds.backgroundAgents).exists()).toBe(false)
+  })
+
+  it('forgets a lingering row once the list shows another chat\'s agents', async () => {
+    const a = running(1, 'Agent A')
+    const { wrapper, set } = mountList({ tasks: changed(a) })
+    await wrapper.get(`[data-testid="${testIds.backgroundAgentStop}"]`).trigger('click')
+    await set({ stopping: [a.id] })
+    await set({ tasks: changed(ended(a, 'aborted')), stopping: [] })
+    await set({ tasks: changed(delivered(ended(a, 'aborted'))) })
+    expect(rowOf(wrapper, a).exists()).toBe(true)
+    const other = { ...running(2, 'Agent B'), chatId: chatId(2) }
+    await set({ tasks: changed(other) })
+    expect(rowOf(wrapper, a).exists()).toBe(false)
+    expect(rowOf(wrapper, other).exists()).toBe(true)
+  })
+
+  it('a stopped row that stays undelivered longer than the linger leaves at its delivery', async () => {
+    vi.useFakeTimers({ now: T0 + 60_000, toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] })
+    const a = running(1, 'Agent A')
+    const { wrapper, set } = mountList({ tasks: changed(a) })
+    await wrapper.get(`[data-testid="${testIds.backgroundAgentStop}"]`).trigger('click')
+    await set({ stopping: [a.id] })
+    await set({ tasks: changed(ended(a, 'aborted')), stopping: [] })
+    expect(rowOf(wrapper, a).find('[data-slot="background-agent-pending"]').text()).toBe('Report pending')
+    await vi.advanceTimersByTimeAsync(BACKGROUND_STOPPED_LINGER_MS + 1000)
+    await set({ tasks: changed(delivered(ended(a, 'aborted'))) })
+    expect(find(wrapper, testIds.backgroundAgents).exists()).toBe(false)
   })
 })

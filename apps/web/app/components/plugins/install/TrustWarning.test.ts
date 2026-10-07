@@ -4,8 +4,8 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { h } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { testIds } from '~/utils/testids'
-import { pluginDetail } from '~/utils/testing/fixtures'
-import { TRUST_WARNING_TEXT } from './install'
+import { claudePluginInfo, pluginDetail } from '~/utils/testing/fixtures'
+import { CLAUDE_TREE_PIN_NOTE, TRUST_WARNING_TEXT } from './install'
 import TrustWarning from './TrustWarning.vue'
 
 const HASH = 'b'.repeat(64)
@@ -101,6 +101,55 @@ describe('trustWarning', () => {
       'Stop hookpnpm lint --quiet',
       '/statusgit status --short',
     ])
+    wrapper.unmount()
+  })
+
+  it('lists the executables of a Claude Code plugin, its hosts and the whole-tree pin note (Phase 12)', () => {
+    const claude = claudePluginInfo({
+      hosts: ['mcp.example.com'],
+      executables: [
+        { kind: 'hook', label: 'PostToolUse Write|Edit', command: 'sh "$CLAUDE_PLUGIN_ROOT/hooks/format.sh"' },
+        { kind: 'mcp', label: 'github', command: 'node $CLAUDE_PLUGIN_ROOT/server.mjs --stdio' },
+        { kind: 'span', label: 'deploy', command: 'git status --short' },
+      ],
+    })
+    const wrapper = render({
+      inspection: inspection({
+        manifest: { manifestVersion: 1, id: 'review-kit', name: 'Review kit', version: '1.2.0', engines: { harness: '^1.6.0' } },
+        format: 'claude',
+        permissions: [],
+        claude,
+      }),
+    })
+    const block = wrapper.get('[data-slot="trust-run-commands"]')
+    expect(block.findAll('li').map(item => item.text())).toEqual([
+      'PostToolUse hooksh "$CLAUDE_PLUGIN_ROOT/hooks/format.sh"',
+      'MCP server githubnode $CLAUDE_PLUGIN_ROOT/server.mjs --stdio',
+      '/review-kit:deploygit status --short',
+    ])
+    // The servers are listed once, with the executables (not under "Starts these programs").
+    expect(wrapper.text()).not.toContain('Starts these programs')
+    expect(wrapper.get('[aria-label="Hosts"]').text()).toBe('mcp.example.com')
+    expect(wrapper.get('[data-slot="trust-tree-note"]').text()).toBe(CLAUDE_TREE_PIN_NOTE)
+    wrapper.unmount()
+  })
+
+  it('reads the executables of an installed Claude Code plugin from its detail (Phase 12)', () => {
+    const detail = pluginDetail({ id: 'review-kit', name: 'Review kit', format: 'claude', source: 'github', sourceRef: 'anthropics/review-kit@0123456789ab', claude: claudePluginInfo() })
+    const wrapper = render({ plugin: detail })
+    expect(wrapper.get('[data-slot="trust-run-commands"]').findAll('li').map(item => item.text())).toEqual([
+      'PostToolUse hooksh "$CLAUDE_PLUGIN_ROOT/hooks/format.sh"',
+      'MCP server review-kitnode server.mjs',
+    ])
+    expect(wrapper.get('[data-slot="trust-source"]').text()).toBe('anthropics/review-kit@0123456789ab')
+    expect(wrapper.find('[data-slot="trust-tree-note"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('shows no tree note for a Claude Code plugin that runs nothing', () => {
+    const wrapper = render({ inspection: inspection({ format: 'claude', manifest: { manifestVersion: 1, id: 'notes', name: 'Notes', version: '1.0.0', engines: { harness: '^1.6.0' } }, permissions: [], claude: claudePluginInfo({ executables: [] }) }) })
+    expect(wrapper.find('[data-slot="trust-run-commands"]').exists()).toBe(false)
+    expect(wrapper.find('[data-slot="trust-tree-note"]').exists()).toBe(false)
     wrapper.unmount()
   })
 })

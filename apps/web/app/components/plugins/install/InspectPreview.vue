@@ -2,6 +2,12 @@
 // Install preview (docs/UI.md 8.3 step 2) of a `PluginInspection`: identity, kind, what the plugin adds, the hosts it
 // talks to, advisory permissions, requested secrets, size, the sha256 that trust pins and the server's warnings.
 // Everything is plugin-provided text and is rendered as text.
+// Phase 12 (ADR-053 / ADR-054, docs/UI.md 8.13; W12.9): a Claude Code plugin (`format: 'claude'`) shows the format badge
+// "Claude Code plugin" (`data-slot="install-format"`, `data-value="claude"`) instead of the kind badge, the resolved
+// commit of a GitHub source ("Resolved commit {sha7}", `install-commit`, the full hex in its title), what its files
+// bring (`claude.components`), the namespace of its qualified names (`install-namespace`), "Asks for:" (its `userConfig`,
+// `install-user-config`) and "Ignored:" (the parts that are never used, `install-ignored`); the hosts include
+// `claude.hosts`. GitHub and marketplace sources get their names in the source line.
 import type { PluginInspection } from '@harness-forge/shared'
 import { CpuIcon, TriangleAlertIcon } from '@lucide/vue'
 import { computed } from 'vue'
@@ -9,7 +15,17 @@ import { Badge } from '@/components/ui/badge'
 import CopyButton from '~/components/common/CopyButton.vue'
 import ProviderIcon from '~/components/providers/ProviderIcon.vue'
 import { testIds } from '~/utils/testids'
-import { contributionSummary, filesSummary, manifestIcon, permissionLabel } from './install'
+import {
+  CLAUDE_FORMAT_LABEL,
+  claudeComponentsSummary,
+  claudeNamespaceLines,
+  claudePreview,
+  contributionSummary,
+  filesSummary,
+  inspectionHosts,
+  manifestIcon,
+  permissionLabel,
+} from './install'
 
 const props = defineProps<{
   inspection: PluginInspection
@@ -19,16 +35,36 @@ const props = defineProps<{
 
 const manifest = computed(() => props.inspection.manifest)
 const icon = computed(() => manifestIcon(manifest.value.icon))
-const adds = computed(() => contributionSummary(props.inspection.contributions))
 const isCode = computed(() => props.inspection.kind === 'code')
+/** + Phase 12: the Claude Code lines (null for a harness plugin). */
+const claude = computed(() => claudePreview(props.inspection))
+const adds = computed(() => {
+  const info = props.inspection.claude
+  if (claude.value && info)
+    return claudeComponentsSummary(info.components) || contributionSummary(props.inspection.contributions)
+  return contributionSummary(props.inspection.contributions)
+})
+const namespaceLines = computed(() => claudeNamespaceLines(props.inspection))
+const hosts = computed(() => inspectionHosts(props.inspection))
+/** A Claude Code plugin shows its version as written (none when its files name none). */
+const version = computed(() => (claude.value ? props.inspection.claude?.version ?? null : manifest.value.version))
 
-const SOURCE_NAMES: Record<string, string> = { zip: 'Zip', npm: 'npm', url: 'URL', link: 'Linked folder', copy: 'Copied folder' }
+const SOURCE_NAMES: Record<string, string> = {
+  zip: 'Zip',
+  npm: 'npm',
+  url: 'URL',
+  link: 'Linked folder',
+  copy: 'Copied folder',
+  github: 'GitHub',
+  marketplace: 'Marketplace',
+}
 </script>
 
 <template>
   <section
     :data-testid="testIds.installPreview"
     :data-kind="inspection.kind"
+    :data-format="inspection.format"
     :data-plugin-id="manifest.id"
     class="grid gap-4"
   >
@@ -37,8 +73,11 @@ const SOURCE_NAMES: Record<string, string> = { zip: 'Zip', npm: 'npm', url: 'URL
       <div class="grid min-w-0 flex-1 gap-1">
         <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
           <span class="font-medium break-words">{{ manifest.name }}</span>
-          <span class="font-mono text-xs text-muted-foreground">{{ manifest.version }}</span>
-          <Badge variant="outline">
+          <span v-if="version" class="font-mono text-xs break-all text-muted-foreground">{{ version }}</span>
+          <Badge v-if="claude" variant="outline" data-slot="install-format" data-value="claude">
+            {{ CLAUDE_FORMAT_LABEL }}
+          </Badge>
+          <Badge v-else variant="outline">
             {{ isCode ? 'Code' : 'Declarative' }}
           </Badge>
           <Badge v-if="inspection.requiresTrust" variant="outline" class="border-warning/50 text-warning">
@@ -59,6 +98,12 @@ const SOURCE_NAMES: Record<string, string> = { zip: 'Zip', npm: 'npm', url: 'URL
       </dt>
       <dd class="min-w-0 break-all">
         {{ SOURCE_NAMES[inspection.source] ?? inspection.source }} · {{ sourceLabel }}
+        <span
+          v-if="claude?.commit"
+          data-slot="install-commit"
+          :title="claude.commit"
+          class="block font-mono text-xs text-muted-foreground"
+        >Resolved commit {{ claude.commit.slice(0, 7) }}</span>
       </dd>
 
       <dt class="text-muted-foreground">
@@ -67,15 +112,31 @@ const SOURCE_NAMES: Record<string, string> = { zip: 'Zip', npm: 'npm', url: 'URL
       <dd class="min-w-0">
         <span v-if="adds">{{ adds }}</span>
         <span v-else class="text-muted-foreground">Nothing declared</span>
-        <span v-if="isCode" class="block text-xs text-muted-foreground">Code plugins can register more when they run.</span>
+        <span v-if="isCode && !claude" class="block text-xs text-muted-foreground">Code plugins can register more when they run.</span>
+        <span v-if="namespaceLines.length" data-slot="install-namespace" class="block text-xs break-words text-muted-foreground">
+          {{ namespaceLines.join(' ') }}
+        </span>
       </dd>
+
+      <template v-if="claude?.asksFor.length">
+        <dt class="text-muted-foreground">
+          Asks for
+        </dt>
+        <dd class="min-w-0" data-slot="install-user-config">
+          <ul class="flex flex-wrap gap-x-3 gap-y-0.5" aria-label="Asks for">
+            <li v-for="option in claude.asksFor" :key="option" class="break-words">
+              {{ option }}
+            </li>
+          </ul>
+        </dd>
+      </template>
 
       <dt class="text-muted-foreground">
         Network
       </dt>
       <dd class="min-w-0">
-        <ul v-if="inspection.networkHosts.length" class="flex flex-wrap gap-1.5">
-          <li v-for="host in inspection.networkHosts" :key="host" class="rounded-md bg-muted px-1.5 py-0.5 font-mono text-xs break-all">
+        <ul v-if="hosts.length" class="flex flex-wrap gap-1.5">
+          <li v-for="host in hosts" :key="host" class="rounded-md bg-muted px-1.5 py-0.5 font-mono text-xs break-all">
             {{ host }}
           </li>
         </ul>
@@ -104,6 +165,19 @@ const SOURCE_NAMES: Record<string, string> = { zip: 'Zip', npm: 'npm', url: 'URL
           <ul class="grid gap-0.5">
             <li v-for="secret in inspection.secretsRequested" :key="secret" class="break-words">
               {{ secret }}
+            </li>
+          </ul>
+        </dd>
+      </template>
+
+      <template v-if="claude?.ignored.length">
+        <dt class="text-muted-foreground">
+          Ignored
+        </dt>
+        <dd class="min-w-0" data-slot="install-ignored">
+          <ul class="grid gap-0.5" aria-label="Ignored">
+            <li v-for="part in claude.ignored" :key="part" class="break-words text-muted-foreground">
+              {{ part }}
             </li>
           </ul>
         </dd>

@@ -15,5 +15,5 @@ import { validateSkillDefinition } from './validate.ts'
 export type PluginSkillRegistry = SkillRegistry & Pick<DefinitionRegistry<SkillDefinition>, 'removeOwner'>
 
 export function createSkillRegistry(core: DefinitionRegistryCore): PluginSkillRegistry {
-  return createDefinitionRegistry<SkillDefinition>(core, { kind: 'skill', label: 'skill', validate: validateSkillDefinition })
+  return createDefinitionRegistry<SkillDefinition>(core, { kind: 'skill', label: 'skill', validate: (definition, pluginId) => validateSkillDefinition(definition, pluginId) })
 }

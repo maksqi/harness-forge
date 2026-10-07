@@ -14,6 +14,9 @@
 // and are part of `removeOwner`. The code hook events of 1.5.0 (`prompt.submit`, `session.start`, `run.stop`,
 // `subagent.stop`, `compact.before`, `notification`, and the `tool.after` output `context?`) run through `hooks.run`
 // like every other `HookMap` event (3 s guard, failures counted, nothing rethrown).
+// Phase 12 (plugin API 1.6.0, ADR-053; W12.1): commands, agents, skills and styles may be registered under a qualified
+// name `<pluginId>:<name>` of their owner (the validators check the owner); an MCP server may carry its Claude Code name
+// (`claudeName`, `mcp__<claudeName>__<tool>`); command hook registrations keep their `env` and prompt handlers.
 import type {
   CommandDefinition,
   Disposable,
@@ -32,6 +35,7 @@ import type { AppDeps } from '../types.ts'
 import type { HookEntry } from './hooks.ts'
 import type { Ordered } from './order.ts'
 import type {
+  McpServerRegisterOptions,
   RegisteredCommand,
   RegisteredHook,
   RegisteredMcpServer,
@@ -56,6 +60,7 @@ import {
   HOOK_NAMES,
   validateCommandDefinition,
   validateHook,
+  validateMcpRegisterOptions,
   validateMcpServerDecl,
   validateModels,
   validateProviderDefinition,
@@ -204,7 +209,7 @@ export function createRegistryCore(services: () => RegistryServices): PluginRegi
 
     commands: {
       register: (pluginId, definition: CommandDefinition) => {
-        validateCommandDefinition(definition)
+        validateCommandDefinition(definition, pluginId)
         const existing = commands.get(definition.name)
         if (existing)
           throw duplicate(`The command "/${definition.name}" is already registered by the plugin "${existing.pluginId}".`)
@@ -258,12 +263,14 @@ export function createRegistryCore(services: () => RegistryServices): PluginRegi
     },
 
     mcpServers: {
-      register: (pluginId, decl: McpServerDecl) => {
+      register: (pluginId, decl: McpServerDecl, options?: McpServerRegisterOptions) => {
         const parsed = validateMcpServerDecl(pluginId, decl)
+        const claudeName = validateMcpRegisterOptions(options)
         const existing = mcpServers.get(parsed.id)
         if (existing)
           throw duplicate(`The MCP server "${parsed.id}" is already declared by the plugin "${existing.pluginId}".`)
-        return keyed(mcpServers, 'mcpServer', parsed.id, { pluginId, seq: ++seq, value: Object.freeze({ pluginId, decl: parsed }) })
+        const value: RegisteredMcpServer = Object.freeze({ pluginId, decl: parsed, ...(claudeName === undefined ? {} : { claudeName }) })
+        return keyed(mcpServers, 'mcpServer', parsed.id, { pluginId, seq: ++seq, value })
       },
       get: id => mcpServers.get(id)?.value,
       list: () => sorted(mcpServers.values()),

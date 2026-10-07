@@ -74,3 +74,31 @@ describe('hook event results and records', () => {
     expect(singleOutcome('Stop', ran('Stop', ''))).toBeNull()
   })
 })
+
+describe('phase 12 records (W12.5)', () => {
+  const permission = (decision: Record<string, unknown>) => json({ hookSpecificOutput: { hookEventName: 'PermissionRequest', decision } })
+
+  it('permissionRequest: the decision and an allow\'s updatedInput reach the result; deny > allow; records linked to the call', () => {
+    const outcome = (...hooks: RanHook[]) => eventResult({ event: 'PermissionRequest', ran: hooks, id: ID, createdAt: 1, tool: TOOL }).result
+    const allowed = outcome(ran('PermissionRequest', permission({ behavior: 'allow', updatedInput: { command: 'ls -la' } })))
+    expect(allowed).toMatchObject({ decision: 'allow', block: false, updatedInput: { command: 'ls -la' }, record: { event: 'PermissionRequest', outcome: 'allowed', toolCallId: 'call-1', toolName: 'shell', updatedInput: { command: 'ls -la' } } })
+    const denied = outcome(ran('PermissionRequest', permission({ behavior: 'allow', updatedInput: { command: 'x' } })), ran('PermissionRequest', permission({ behavior: 'deny', message: 'Not this one.' })))
+    expect(denied).toMatchObject({ decision: 'deny', block: true, reason: 'Not this one.', record: { outcome: 'denied' } })
+    expect(denied.updatedInput).toBeUndefined()
+    // `interrupt: true` stops the run; the record stays `denied` (the tool row shows the decision).
+    expect(outcome(ran('PermissionRequest', permission({ behavior: 'deny', message: 'Stop.', interrupt: true })))).toMatchObject({ decision: 'deny', continue: false, record: { outcome: 'denied' } })
+    // Exit 2 is no decision for PermissionRequest.
+    expect(outcome(ran('PermissionRequest', '', { exitCode: 2, stderr: 'nope' }))).toMatchObject({ decision: null, block: false, record: { outcome: 'error' } })
+  })
+
+  it('postToolUseFailure records link the call; prompt entries carry kind and model; a prompt "no" without effect is context', () => {
+    const failure = eventResult({ event: 'PostToolUseFailure', ran: [ran('PostToolUseFailure', '', { exitCode: 2, stderr: 'Fix it.' })], id: ID, createdAt: 1, tool: TOOL }).result
+    expect(failure.record).toMatchObject({ outcome: 'blocked', reason: 'Fix it.', toolCallId: 'call-1', toolName: 'shell' })
+    const prompt: RanHook = { source: 'project', label: 'Is it done?', kind: 'prompt', model: 'mock:prompt-hook', exitCode: null, timedOut: false, durationMs: 3, outcome: { status: 'ok', decision: null, reason: 'Cannot be done.', context: null, continue: true, stopReason: null, systemMessage: null, suppressOutput: false, error: null, diagnostics: [] }, error: null }
+    const stop = eventResult({ event: 'Stop', ran: [prompt], id: ID, createdAt: 1 }).result
+    expect(stop).toMatchObject({ block: false, record: { outcome: 'context', reason: 'Cannot be done.', hooks: [{ source: 'project', kind: 'prompt', model: 'mock:prompt-hook', exitCode: null }] } })
+    expect(hookDataSchema.safeParse(stop.record).success).toBe(true)
+    // A command hook's entry has no kind (as in v1.7 records).
+    expect(recordEntry(ran('Stop', ''))).not.toHaveProperty('kind')
+  })
+})

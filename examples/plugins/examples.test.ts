@@ -6,7 +6,9 @@
 // command hook (with the plugin folder as its root; its script prints a PostToolUse context) and its output style. The
 // code snippets of PLUGINS.md section 15 (and the agent pack's `index.mjs` shown in PLUGINS.md 9 "Agents and skills",
 // the hook pack's `plugin.json` and script of example (g)) must equal the example files, and the plugins shown in
-// docs/guides/ must load too.
+// docs/guides/ must load too. Phase 12 (plugin API 1.6.0): `claude-review-kit` is a Claude Code plugin in Claude Code's
+// own layout (`.claude-plugin/plugin.json`, the only such folder of the repository): it is installed from its folder
+// with the format `claude` (id `review-kit`, its `plugin.json` name), listed with that format and its qualified entries.
 //
 // The MCP manager is replaced by a no-op fake, so the stdio server of `mcp-everything` (`npx -y ...`) never runs here.
 import type { IncomingHttpHeaders, IncomingMessage, Server, ServerResponse } from 'node:http'
@@ -30,6 +32,10 @@ import { HarnessError, manifestRequiresTrust, pluginManifestSchema, readHookOutp
 const EXAMPLES_DIR = dirname(fileURLToPath(import.meta.url))
 /** Folder name = plugin id (DECISIONS.md "Example plugins"). */
 const EXAMPLE_IDS = ['agent-pack', 'dice-roller', 'echo-provider', 'hook-pack', 'lmstudio', 'mcp-everything', 'together-ai'] as const
+/** Claude Code plugin examples (Phase 12): folder name -> plugin id (the `name` of its `.claude-plugin/plugin.json`). */
+const CLAUDE_EXAMPLES = { 'claude-review-kit': 'review-kit' } as const
+type ClaudeExampleFolder = keyof typeof CLAUDE_EXAMPLES
+const CLAUDE_EXAMPLE_FOLDERS = Object.keys(CLAUDE_EXAMPLES) as ClaudeExampleFolder[]
 type ExampleId = (typeof EXAMPLE_IDS)[number]
 /** `engines.harness` of each example: `^1.0.0` unless it uses a newer plugin API member (PLUGINS.md 3 "Versioning"). */
 const EXAMPLE_ENGINES: Record<ExampleId, string> = {
@@ -89,7 +95,17 @@ function manifestBlocks(doc: string): Record<string, unknown>[] {
 describe('example manifests', () => {
   it('ships exactly the documented examples', () => {
     const folders = readdirSync(EXAMPLES_DIR).filter(name => statSync(join(EXAMPLES_DIR, name)).isDirectory()).sort()
-    expect(folders).toEqual([...EXAMPLE_IDS])
+    expect(folders).toEqual([...EXAMPLE_IDS, ...CLAUDE_EXAMPLE_FOLDERS].sort())
+  })
+
+  it.each(CLAUDE_EXAMPLE_FOLDERS)('%s: a Claude Code plugin (no harness plugin.json, an inline MCP server, no .mcp.json)', (folder) => {
+    const dir = join(EXAMPLES_DIR, folder)
+    expect(existsSync(join(dir, 'plugin.json'))).toBe(false)
+    expect(existsSync(join(dir, '.mcp.json'))).toBe(false)
+    expect(existsSync(join(dir, 'README.md'))).toBe(true)
+    const manifest = JSON.parse(readFileSync(join(dir, '.claude-plugin', 'plugin.json'), 'utf8')) as Record<string, unknown>
+    expect(manifest.name).toBe(CLAUDE_EXAMPLES[folder])
+    expect(manifest.mcpServers).toBeTypeOf('object')
   })
 
   it.each(EXAMPLE_IDS)('%s: plugin.json parses with pluginManifestSchema and matches its folder', (id) => {
@@ -122,6 +138,19 @@ describe('docs/PLUGINS.md section 15 shows the examples as shipped', () => {
   it('agent-pack/plugin.json (example (f)) and its index.mjs (section 9 "Agents and skills")', () => {
     expect(JSON.parse(blockAfterHeading(doc, '### (f) Agents and skills: `agent-pack` (plugin API 1.4.0)', 'json'))).toEqual(readManifestJson(exampleDir('agent-pack')))
     expect(blockAfterHeading(doc, '### Agents and skills', 'js')).toBe(readFileSync(join(exampleDir('agent-pack'), 'index.mjs'), 'utf8'))
+  })
+
+  it('claude-review-kit: .claude-plugin/plugin.json, hooks/hooks.json and commands/review.md (example (h))', () => {
+    // The heading starts like this (W12.15 drops its "planned" note); the blocks run until the next heading.
+    const at = doc.indexOf('\n### (h) A Claude Code plugin: `claude-review-kit`')
+    expect(at).toBeGreaterThan(-1)
+    const section = doc.slice(at + 1, doc.indexOf('\n### ', at + 1))
+    const blocks = (lang: string): string[] => [...section.matchAll(new RegExp(`\n\`\`\`${lang}\n([\\s\\S]*?\n)\`\`\`\n`, 'g'))].map(match => match[1] ?? '')
+    const dir = join(EXAMPLES_DIR, 'claude-review-kit')
+    const [manifest, hooks] = blocks('json')
+    expect(JSON.parse(manifest ?? '')).toEqual(JSON.parse(readFileSync(join(dir, '.claude-plugin', 'plugin.json'), 'utf8')))
+    expect(JSON.parse(hooks ?? '')).toEqual(JSON.parse(readFileSync(join(dir, 'hooks', 'hooks.json'), 'utf8')))
+    expect(blocks('markdown')[0]).toBe(readFileSync(join(dir, 'commands', 'review.md'), 'utf8'))
   })
 
   it('hook-pack/plugin.json and scripts/remind-tests.sh (example (g))', () => {
@@ -275,6 +304,21 @@ describe('examples in the plugin host', () => {
         ...(inspection.requiresTrust ? { trustedHash: inspection.sha256 } : {}),
       })
     }
+    // Phase 12: a Claude Code plugin is copied into `plugins/<id>` (its id comes from its plugin.json name).
+    for (const folder of CLAUDE_EXAMPLE_FOLDERS) {
+      const id = CLAUDE_EXAMPLES[folder]
+      const dir = join(t.env.paths.plugins, id)
+      cpSync(join(EXAMPLES_DIR, folder), dir, { recursive: true })
+      const inspection = await t.deps.plugins.inspectDirectory(dir, { format: 'claude' })
+      expect(inspection.manifest.id).toBe(id)
+      await t.deps.plugins.saveRecord({
+        id,
+        source: 'copy',
+        format: 'claude',
+        version: inspection.manifest.version,
+        ...(inspection.requiresTrust ? { trustedHash: inspection.sha256 } : {}),
+      })
+    }
     // Not `startDeps()`: only the plugin host and the catalog start (which never refreshes with `HF_OFFLINE=1`).
     await t.deps.plugins.start()
     await t.deps.catalog.start()
@@ -373,8 +417,9 @@ describe('examples in the plugin host', () => {
     expect(agents.get('docs-writer')?.definition).toMatchObject({ model: 'inherit', tools: ['read_file', 'find_files', 'search_files', 'write_file', 'edit_file'] })
     expect(skills.get('commit-message')?.definition.content).toMatch(/^# Commit messages\n/)
     expect(skills.get('changelog-entry')?.definition.content).toMatch(/^# Changelog entries\n/)
-    expect(agents.list().map(agent => `${agent.pluginId}:${agent.definition.name}`)).toEqual(['agent-pack:code-reviewer', 'agent-pack:docs-writer'])
-    expect(skills.list().map(skill => `${skill.pluginId}:${skill.definition.name}`)).toEqual(['agent-pack:changelog-entry', 'agent-pack:commit-message'])
+    // The harness examples keep bare names; the Claude Code example registers qualified ones.
+    expect(agents.list().map(agent => `${agent.pluginId}/${agent.definition.name}`)).toEqual(['agent-pack/code-reviewer', 'agent-pack/docs-writer', 'review-kit/review-kit:code-reviewer'])
+    expect(skills.list().map(skill => `${skill.pluginId}/${skill.definition.name}`)).toEqual(['agent-pack/changelog-entry', 'agent-pack/commit-message', 'review-kit/review-kit:checklist'])
     expect([agents.owner('docs-writer'), skills.owner('commit-message')]).toEqual(['agent-pack', 'agent-pack'])
 
     // Nothing was skipped or refused.
@@ -387,7 +432,7 @@ describe('examples in the plugin host', () => {
     expect(listed).toMatchObject({ state: 'active', kind: 'declarative', runsCode: true, contributions: { commandHooks: 1, outputStyles: ['reviewer'] } })
 
     const root = realpathSync(join(t.env.paths.plugins, 'hook-pack'))
-    expect(t.deps.registry.hookCommands.list().map(entry => entry.pluginId)).toEqual(['hook-pack'])
+    expect(t.deps.registry.hookCommands.list().map(entry => entry.pluginId)).toEqual(['hook-pack', 'review-kit'])
     expect(t.deps.registry.hookCommands.get('hook-pack')).toEqual({
       pluginId: 'hook-pack',
       root,
@@ -406,7 +451,7 @@ describe('examples in the plugin host', () => {
         keepCodingInstructions: true,
       },
     })
-    expect(t.deps.registry.styles.list().map(style => `${style.pluginId}:${style.definition.name}`)).toEqual(['hook-pack:reviewer'])
+    expect(t.deps.registry.styles.list().map(style => `${style.pluginId}/${style.definition.name}`)).toEqual(['review-kit/review-kit:terse', 'hook-pack/reviewer'])
 
     const logs = (await t.client.plugins.logs({ params: { id: 'hook-pack' } })).items
     expect(logs.filter(entry => entry.level === 'warn' || entry.level === 'error')).toEqual([])
@@ -434,6 +479,98 @@ describe('examples in the plugin host', () => {
         stderr: capturedText(result.stderr),
       })
       expect(outcome).toMatchObject({ status: 'ok', context: 'A file changed: run the project tests before you finish.', error: null, continue: true })
+    }
+    finally {
+      rmSync(project, { recursive: true, force: true })
+    }
+  })
+
+  it('claude-review-kit: loads as a trusted Claude Code plugin and registers its qualified entries', async () => {
+    const detail = await t.client.plugins.get({ params: { id: 'review-kit' } })
+    expect(detail).toMatchObject({
+      id: 'review-kit',
+      name: 'Review kit',
+      version: '1.0.0',
+      format: 'claude',
+      kind: 'declarative',
+      state: 'active',
+      runsCode: true,
+      editable: false,
+      hasSettings: true,
+      lastError: null,
+      trust: { required: true, trusted: true },
+      manifest: { id: 'review-kit', engines: { harness: '^1.6.0' } },
+    })
+    expect(detail.trust.hash).toMatch(/^[\da-f]{64}$/)
+    expect(detail.contributions).toEqual({
+      providers: [],
+      models: 0,
+      tools: [],
+      mcpServers: ['review-kit'],
+      commands: ['review-kit:db:migrate', 'review-kit:review'],
+      hooks: [],
+      commandHooks: 1,
+      agents: ['review-kit:code-reviewer'],
+      skills: ['review-kit:checklist'],
+      outputStyles: ['review-kit:terse'],
+    })
+    expect(detail.claude).toMatchObject({
+      name: 'review-kit',
+      displayName: 'Review kit',
+      version: '1.0.0',
+      namespace: 'review-kit',
+      components: { commands: 2, agents: 1, skills: 1, outputStyles: 1, hooks: 1, mcpServers: 1 },
+      executables: [{ kind: 'hook', label: 'PostToolUse Write|Edit|MultiEdit', command: `sh "\${CLAUDE_PLUGIN_ROOT}/scripts/after-edit.sh"` }],
+      hosts: ['docs.example.com'],
+      userConfig: [
+        { key: 'DOCS_TOKEN', title: 'Docs token', sensitive: true, required: false },
+        { key: 'FOCUS', title: 'Review focus', sensitive: false, required: false },
+      ],
+    })
+    expect((await t.client.plugins.list()).items.find(plugin => plugin.id === 'review-kit')).toMatchObject({ format: 'claude', state: 'active' })
+
+    const root = realpathSync(join(t.env.paths.plugins, 'review-kit'))
+    const review = t.deps.registry.commands.get('review-kit:review')
+    expect(review).toMatchObject({ pluginId: 'review-kit', definition: { syntax: 'markdown', argumentHint: '[files]', allowedTools: ['read_file', 'search_files', 'find_files'] } })
+    // The non-sensitive option is substituted when the plugin loads (its default here).
+    expect(review?.definition.template).toBe('Review $ARGUMENTS with a focus on bugs. List bugs first, then risks, then style notes.')
+    expect(t.deps.registry.commands.get('review-kit:db:migrate')?.definition.template).toMatch(/^Plan a migration of the table \$0 that does this: \$1\./)
+    expect(t.deps.registry.agents.get('review-kit:code-reviewer')?.definition).toMatchObject({ model: 'sonnet', color: 'purple', disallowedTools: ['shell'] })
+    const skill = t.deps.registry.skills.get('review-kit:checklist')?.definition
+    expect(skill).toMatchObject({ baseDir: 'skills/checklist' })
+    expect(skill?.content).toContain(`(in this skill's folder: ${join(root, 'skills', 'checklist')})`)
+    expect(t.deps.registry.styles.get('review-kit:terse')?.definition).toMatchObject({ keepCodingInstructions: true })
+    expect(t.deps.registry.mcpServers.get('review-kit')).toMatchObject({
+      pluginId: 'review-kit',
+      claudeName: 'plugin_review-kit_docs',
+      decl: { id: 'review-kit', name: 'docs', transport: { type: 'http', url: 'https://docs.example.com/mcp', headers: { Authorization: 'Bearer {{settings.DOCS_TOKEN}}' } } },
+    })
+    const hooks = t.deps.registry.hookCommands.get('review-kit')
+    expect(hooks).toMatchObject({
+      root,
+      hooks: [{ event: 'PostToolUse', matcher: 'Write|Edit|MultiEdit', command: `sh "\${CLAUDE_PLUGIN_ROOT}/scripts/after-edit.sh"`, timeoutSec: 10 }],
+      diagnostics: [],
+      env: { CLAUDE_PLUGIN_DATA: join(t.env.paths.pluginData, 'review-kit'), CLAUDE_PLUGIN_OPTION_FOCUS: 'bugs' },
+      prompts: [],
+    })
+    const logs = (await t.client.plugins.logs({ params: { id: 'review-kit' } })).items
+    expect(logs.filter(entry => entry.level === 'warn' || entry.level === 'error')).toEqual([])
+  })
+
+  it.skipIf(process.platform === 'win32')('claude-review-kit: the hook command prints a PostToolUse context with POSIX sh', async () => {
+    const registration = t.deps.registry.hookCommands.get('review-kit')!
+    const project = realpathSync(mkdtempSync(join(tmpdir(), 'hf-review-kit-')))
+    try {
+      const result = await runShellCommand({
+        command: registration.hooks[0]!.command,
+        cwd: project,
+        timeoutMs: 10_000,
+        input: JSON.stringify({ hook_event_name: 'PostToolUse', tool_name: 'Edit', tool_input: { file_path: 'a.ts' } }),
+        env: { HARNESS_PLUGIN_ROOT: registration.root, CLAUDE_PLUGIN_ROOT: registration.root, HARNESS_PROJECT_DIR: project, CLAUDE_PROJECT_DIR: project, ...registration.env },
+      })
+      expect({ exitCode: result.exitCode, timedOut: result.timedOut }).toEqual({ exitCode: 0, timedOut: false })
+      const outcome = readHookOutput('PostToolUse', { exitCode: result.exitCode, timedOut: result.timedOut, stdout: capturedText(result.stdout), stdoutTruncated: false, stderr: capturedText(result.stderr) })
+      expect(outcome).toMatchObject({ status: 'ok', context: 'A file changed: review it with /review-kit:review before you finish.' })
     }
     finally {
       rmSync(project, { recursive: true, force: true })

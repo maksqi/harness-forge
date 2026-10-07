@@ -16,14 +16,21 @@
 //   plans is off; blur or Enter saves the trimmed value, Esc restores the saved one; checked with the shared settings
 //   schema ("Use a folder inside the project, like .harness/plans." / "Use at most 200 characters."); a 400 from the
 //   server shows the same texts and keeps the saved value; any other failure restores it with a toast.
+// - Hook model (Phase 12, ADR-057; `settings-hook-model`, `hookModelRef`): SettingsModelSelect (chat models), "Automatic
+//   (the provider's small model)" = null; it answers prompt hooks that don't name a model.
+// - Claude model names (Phase 12, ADR-058; `settings-model-alias`, `data-name` sonnet | opus | haiku | fable, setting
+//   `modelAliases`, sent whole): one SettingsModelSelect per name, "Not set" = null; used by agents, skills and hooks
+//   from Claude Code that say `model: sonnet` and the like.
 // The Shift+Tab switch (`settings-shift-tab-modes`) belongs to GeneralSettings. The section loads the model catalog
 // when nothing loaded it yet (the selects and the warning read it). Switches and inputs are 40px targets on coarse
 // pointers.
-import type { Settings } from '@harness-forge/shared'
+import type { ModelAliasName, Settings } from '@harness-forge/shared'
+import { MODEL_ALIAS_NAMES } from '@harness-forge/shared'
 import { TriangleAlertIcon } from '@lucide/vue'
 import { computed, nextTick, onMounted, useId, watch } from 'vue'
 import { Field, FieldContent, FieldDescription, FieldError, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { loadModelCatalog } from '~/composables/useComposerModel'
 import { useModelsStore } from '~/stores/models'
@@ -35,6 +42,11 @@ import { toastError } from '../notify'
 import SettingsModelSelect from '../SettingsModelSelect.vue'
 import SettingsSection from '../SettingsSection.vue'
 import {
+  AGENT_SECTION_DESCRIPTION,
+  HOOK_MODEL_AUTOMATIC_LABEL,
+  HOOK_MODEL_HELP,
+  MODEL_ALIAS_NOT_SET_LABEL,
+  MODEL_ALIASES_HELP,
   PLAN_DIRECTORY_FOLDER_ERROR,
   PLAN_DIRECTORY_PLACEHOLDER,
   planDirectoryError,
@@ -56,6 +68,10 @@ const ids = {
   planDirectory: useId(),
   planDirectoryHelp: useId(),
   planDirectoryError: useId(),
+  hookModel: useId(),
+  modelAliases: useId(),
+  modelAliasesHelp: useId(),
+  alias: Object.fromEntries(MODEL_ALIAS_NAMES.map(name => [name, useId()])) as Record<ModelAliasName, string>,
 }
 
 /** Switches: a 40px tall hit area on coarse pointers (the switch itself stays 18px). */
@@ -78,6 +94,21 @@ const subagentWarning = computed(() => {
   const modelRef = resolved.value.subagentModelRef
   return modelRef ? subagentModelWarning(models.byRef(modelRef)) : null
 })
+
+// ---------- prompt hooks and Claude model names (Phase 12) ----------
+
+/** Sets one Claude model name; the setting is sent whole. */
+async function saveAlias(name: ModelAliasName, value: string | null): Promise<boolean> {
+  const before = { ...resolved.value.modelAliases }
+  const next = { ...before, [name]: value }
+  const saved = await save({ modelAliases: next })
+  // Local adapter (CCR): the settings store's rollback compares each key by identity, and an object setting comes back
+  // from the reactive state as a proxy, so `modelAliases` keeps its optimistic value after a failure. Put the names
+  // back while nothing changed them meanwhile.
+  if (!saved && settings.settings && JSON.stringify(settings.settings.modelAliases) === JSON.stringify(next))
+    settings.settings = { ...settings.settings, modelAliases: before }
+  return saved
+}
 
 const subagentMaxSteps = useDraftField(() => String(resolved.value.subagentMaxSteps))
 
@@ -131,7 +162,7 @@ async function commitPlanDirectory(): Promise<void> {
 </script>
 
 <template>
-  <SettingsSection title="Agent" description="Long chats, sub-agents and plans.">
+  <SettingsSection title="Agent" :description="AGENT_SECTION_DESCRIPTION">
     <FieldGroup>
       <Field orientation="horizontal">
         <FieldContent>
@@ -282,6 +313,59 @@ async function commitPlanDirectory(): Promise<void> {
           <FieldError v-if="planDirectory.error.value" :id="ids.planDirectoryError" class="text-xs">
             {{ planDirectory.error.value }}
           </FieldError>
+        </div>
+      </Field>
+
+      <Field orientation="responsive">
+        <FieldContent>
+          <FieldLabel :for="ids.hookModel">
+            Hook model
+          </FieldLabel>
+          <FieldDescription>{{ HOOK_MODEL_HELP }}</FieldDescription>
+        </FieldContent>
+        <SettingsModelSelect
+          :id="ids.hookModel"
+          :model-value="resolved.hookModelRef"
+          kind="chat"
+          allow-none
+          :none-label="HOOK_MODEL_AUTOMATIC_LABEL"
+          label="Hook model"
+          :data-testid="testIds.settingsHookModel"
+          class="@md/field-group:w-96!"
+          @update:model-value="value => save({ hookModelRef: value })"
+        />
+      </Field>
+
+      <Field orientation="responsive">
+        <FieldContent>
+          <FieldLabel :id="ids.modelAliases">
+            Claude model names
+          </FieldLabel>
+          <FieldDescription :id="ids.modelAliasesHelp">
+            {{ MODEL_ALIASES_HELP }}
+          </FieldDescription>
+        </FieldContent>
+        <div
+          role="group"
+          :aria-labelledby="ids.modelAliases"
+          :aria-describedby="ids.modelAliasesHelp"
+          data-slot="settings-model-aliases"
+          class="grid gap-2 @md/field-group:w-96!"
+        >
+          <div v-for="name in MODEL_ALIAS_NAMES" :key="name" class="grid gap-1 @sm/field-group:grid-cols-[4.5rem_1fr] @sm/field-group:items-center @sm/field-group:gap-3">
+            <Label :for="ids.alias[name]" class="font-mono text-[13px] font-normal">{{ name }}</Label>
+            <SettingsModelSelect
+              :id="ids.alias[name]"
+              :model-value="resolved.modelAliases[name]"
+              kind="chat"
+              allow-none
+              :none-label="MODEL_ALIAS_NOT_SET_LABEL"
+              :label="name"
+              :data-testid="testIds.settingsModelAlias"
+              :data-name="name"
+              @update:model-value="value => saveAlias(name, value)"
+            />
+          </div>
         </div>
       </Field>
     </FieldGroup>

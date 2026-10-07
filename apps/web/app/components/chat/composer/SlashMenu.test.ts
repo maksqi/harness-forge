@@ -208,3 +208,43 @@ describe('slashMenu', () => {
     expect(wrapper.emitted('select')?.[0]?.[0]).toMatchObject({ name: 'help' })
   })
 })
+
+describe('slashMenu: qualified names (Phase 12, W12.13-T4)', () => {
+  const plugin: SlashItem[] = [
+    { name: 'review-kit:review', description: 'Review the diff', kind: 'server', group: 'plugin', source: 'Review kit' },
+    { name: 'review-kit:db:migrate', description: 'Run a migration', kind: 'server', group: 'plugin', source: 'Review kit', argumentHint: '<target>' },
+    { name: 'review-kit:pdf', description: 'Fill a PDF', kind: 'server', group: 'skill', skill: true, source: 'Review kit' },
+  ]
+
+  it('lists qualified names with the plugin namespace muted and the full name as data-value', () => {
+    const wrapper = mount(SlashMenu, { props: { open: true, query: '', items: plugin } })
+    const row = wrapper.get(`${byTestId(testIds.slashMenuItem)}[data-value="review-kit:db:migrate"]`)
+    expect(row.attributes('data-group')).toBe('plugin')
+    const name = row.get('[data-slot="slash-menu-name"]')
+    expect(name.text()).toBe('/review-kit:db:migrate')
+    expect(name.attributes('title')).toBe('/review-kit:db:migrate')
+    expect(name.get('[data-slot="slash-menu-namespace"]').text()).toBe('review-kit:')
+    expect(name.get('[data-slot="slash-menu-namespace"]').classes()).toContain('text-muted-foreground')
+    expect(row.attributes('aria-label')).toBe('/review-kit:db:migrate, Run a migration, arguments <target>')
+    expect(wrapper.get(`${byTestId(testIds.slashMenuItem)}[data-value="review-kit:pdf"]`).attributes('data-group')).toBe('skill')
+  })
+
+  it('finds a qualified command by any of its segments and picks the typed full name first', async () => {
+    const wrapper = mount(SlashMenu, { props: { open: true, query: 'migrate', items: plugin } })
+    expect(wrapper.findAll(byTestId(testIds.slashMenuItem)).map(row => row.attributes('data-value'))).toEqual(['review-kit:db:migrate'])
+    await wrapper.setProps({ query: 'review-kit:review' })
+    const vm = wrapper.vm as unknown as { handleKeydown: (event: KeyboardEvent) => boolean }
+    vm.handleKeydown(key('Enter'))
+    expect(wrapper.emitted('select')?.[0]?.[0]).toMatchObject({ name: 'review-kit:review' })
+  })
+
+  it('cuts a long qualified name in the middle and keeps the whole name in its title', () => {
+    const long = `review-kit:${'a'.repeat(30)}:${'b'.repeat(30)}`
+    const wrapper = mount(SlashMenu, { props: { open: true, query: '', items: [{ name: long, description: 'Long', kind: 'server', group: 'plugin' }] } })
+    const name = wrapper.get('[data-slot="slash-menu-name"]')
+    expect(name.text()).toContain('…')
+    expect(name.text().endsWith('b'.repeat(10))).toBe(true)
+    expect(name.attributes('title')).toBe(`/${long}`)
+    expect(wrapper.get(byTestId(testIds.slashMenuItem)).attributes('data-value')).toBe(long)
+  })
+})

@@ -13,7 +13,10 @@
 //   `workspace.changed` that touches a config file, `.claude/`, `.harness/` or a referenced file (or lists 200 paths),
 //   on `project.changed` and on `run.finished` of one of its chats (shell writes emit no `workspace.changed`); a
 //   dropped snapshot is rebuilt after `recheckDelayMs` (1 s) so a change is noticed without a consumer. The
-//   subscriptions start with the first call.
+//   subscriptions start with the first call. Phase 12: a file saved from the UI (`source: 'user'`) always announces the
+//   new pending count (`onUserSave`; a save before the first read is announced by the `invalidate` W12.4 calls).
+// - Phase 12 (ADR-057, W12.5): prompt handlers and the command fields `args` / `async` / `if` (`hook-items.ts`: trust
+//   item v2, the script files of exec-form arguments as references; v1 items keep their bytes).
 // - Changes: every build compares the item hashes with the previous build of the project; when they differ it emits
 //   `project-trust.changed { projectId, pending }` (`projectTrust.pending`) and, when hook items changed,
 //   `hooks.changed { projectId }` (coalesced per project). The project MCP manager and the hook service react to them.
@@ -38,9 +41,12 @@ import { realpath, stat } from 'node:fs/promises'
 import { isHarnessError, LIMITS, parseMcpJson, readSettingsHooks } from '@harness-forge/shared'
 import { folderUnavailableMessage } from '../projects/index.ts'
 import { createSnapshotCache } from './cache.ts'
-import { hashTrustRefs, hookRefPaths, mcpRefPaths, readProjectConfigFile, refPathsOf, trustSha256 } from './refs.ts'
+import { hookHashItem, hookItemLabel, hookWarningCommands, itemSpec, mergeHookSpecs, settingsHookRefPaths } from './hook-items.ts'
+import { hashTrustRefs, mcpRefPaths, readProjectConfigFile, refPathsOf, trustSha256 } from './refs.ts'
 import { commandWarnings, mcpServerWarnings } from './warnings.ts'
 
+export { hookItemRefPaths, mergeHookSpecs, projectPromptSpec } from './hook-items.ts'
+export type { ProjectPromptHookSpec, SettingsHookSpec } from './hook-items.ts'
 export {
   commandTrustRefPaths,
   commandTrustSubject,
@@ -165,6 +171,8 @@ export function createProjectConfigService(deps: AppDeps, options: ProjectConfig
   const announcing = new Map<string, Announcement>()
   /** The canonical root of each project after its first lookup (dropped on `project.changed`). */
   const roots = new Map<string, string>()
+  /** Phase 12: projects whose next build announces its pending count (a UI save, `announceSave`). */
+  const saved = new Set<string>()
 
   // ---------- reads ----------
 
@@ -222,9 +230,10 @@ export function createProjectConfigService(deps: AppDeps, options: ProjectConfig
         continue
       }
       files.push(file)
-      const result = readSettingsHooks(read.text, { file, maxBytes: LIMITS.projectSettingsFileBytes })
+      // Phase 12 (ADR-057): prompt handlers too (trust item v2); every v1.7 command item keeps its hash and its order.
+      const result = readSettingsHooks(read.text, { file, maxBytes: LIMITS.projectSettingsFileBytes, prompts: true })
       pushCapped(diagnostics, result.diagnostics)
-      for (const spec of result.items) {
+      for (const entry of mergeHookSpecs(result.items, result.prompts)) {
         if (items.length >= LIMITS.projectHookItemsMax) {
           if (!capped) {
             capped = true
@@ -232,8 +241,8 @@ export function createProjectConfigService(deps: AppDeps, options: ProjectConfig
           }
           break
         }
-        const refs = await hashTrustRefs(root, hookRefPaths(spec.command), { memo, openFile: options.openFile })
-        const hashItem: ProjectHookItem['hashItem'] = { kind: 'hook', event: spec.event, matcher: spec.matcher, command: spec.command, timeoutSec: spec.timeoutSec, refs }
+        const refs = await hashTrustRefs(root, settingsHookRefPaths(entry), { memo, openFile: options.openFile })
+        const hashItem = hookHashItem(entry, refs)
         const sha256 = trustSha256(hashItem)
         if (seen.has(sha256))
           continue
@@ -242,10 +251,10 @@ export function createProjectConfigService(deps: AppDeps, options: ProjectConfig
           kind: 'hook',
           sha256,
           hashItem,
-          spec,
+          spec: itemSpec(entry),
           path: file,
-          label: spec.command.slice(0, LABEL_MAX_CHARS),
-          warnings: commandWarnings([spec.command], refs),
+          label: hookItemLabel(entry, LABEL_MAX_CHARS),
+          warnings: commandWarnings(hookWarningCommands(entry), refs),
         }))
       }
     }
@@ -389,10 +398,32 @@ export function createProjectConfigService(deps: AppDeps, options: ProjectConfig
         break
       known.delete(key)
     }
-    if (previous !== undefined && previous.all !== next.all) {
-      log().debug('project config changed', { projectId: snapshot.projectId, hooks: previous.hooks !== next.hooks })
-      announce(snapshot.projectId, previous.hooks !== next.hooks)
+    // Phase 12: a UI save asked for an announcement of this build whatever it finds (`announceSave`).
+    const forced = saved.delete(snapshot.projectId)
+    if (forced || (previous !== undefined && previous.all !== next.all)) {
+      const hooksChanged = previous === undefined || previous.hooks !== next.hooks
+      log().debug('project config changed', { projectId: snapshot.projectId, hooks: hooksChanged, saved: forced })
+      announce(snapshot.projectId, hooksChanged)
     }
+  }
+
+  /**
+   * Phase 12 (ADR-056): a project file was saved from the UI. The next build of the project announces its pending count
+   * (once, whether or not it differs from a build before); the build starts a microtask later (after the saving request
+   * dropped the cache), joined by the request's own read of the pending count.
+   */
+  function announceSave(projectId: string): void {
+    if (stopped)
+      return
+    saved.add(projectId)
+    queueMicrotask(() => {
+      if (stopped)
+        return
+      cache.get(projectId).catch((error: unknown) => {
+        saved.delete(projectId)
+        log().debug('project config: the read after a save failed', { projectId, err: error })
+      })
+    })
   }
 
   // ---------- invalidation ----------
@@ -448,15 +479,32 @@ export function createProjectConfigService(deps: AppDeps, options: ProjectConfig
   function forget(projectId: string): void {
     cache.invalidate(projectId)
     known.delete(projectId)
+    saved.delete(projectId)
     const timer = rechecks.get(projectId)
     if (timer !== undefined)
       clearTimeout(timer)
     rechecks.delete(projectId)
   }
 
+  /**
+   * Phase 12 (ADR-056): a project file saved from the UI (`workspace.changed { source: 'user' }`, W12.4) under
+   * `.claude/`, `.harness/` or `.mcp.json`: the cached snapshot is dropped (also when there is none yet) and, once the
+   * saving request went on (a microtask later), the new pending count is announced (`project-trust.changed`), whether
+   * or not the project was read before: the trust chip and the review offer follow every save.
+   */
+  function onUserSave(projectId: string, paths: readonly string[]): void {
+    // Only the config files and the folders of executable items (the referenced files of a cached snapshot too).
+    if (!touchesConfig(projectId, paths))
+      return
+    cache.invalidate(projectId)
+    announceSave(projectId)
+  }
+
   function onEvent(event: ServerEvent): void {
     if (event.type === 'workspace.changed') {
-      if (cache.peek(event.data.projectId) !== null && touchesConfig(event.data.projectId, event.data.paths))
+      if (event.data.source === 'user')
+        onUserSave(event.data.projectId, event.data.paths)
+      else if (cache.peek(event.data.projectId) !== null && touchesConfig(event.data.projectId, event.data.paths))
         invalidateProject(event.data.projectId)
     }
     else if (event.type === 'project.changed') {
@@ -513,10 +561,20 @@ export function createProjectConfigService(deps: AppDeps, options: ProjectConfig
       }
     },
     invalidate: (projectId) => {
-      if (projectId === null)
+      // Phase 12: the first call before any read subscribes too. When it names a project, the change that caused it
+      // (a UI save right after a start, W12.4: its `workspace.changed` came before the subscription) is announced.
+      const first = subscription === null && !stopped
+      subscribe()
+      if (projectId === null) {
         cache.clear()
-      else
-        invalidateProject(projectId)
+        return
+      }
+      if (first) {
+        cache.invalidate(projectId)
+        announceSave(projectId)
+        return
+      }
+      invalidateProject(projectId)
     },
     stop: () => {
       if (stopped)
@@ -524,6 +582,7 @@ export function createProjectConfigService(deps: AppDeps, options: ProjectConfig
       stopped = true
       cache.clear()
       known.clear()
+      saved.clear()
       roots.clear()
       for (const timer of rechecks.values())
         clearTimeout(timer)

@@ -16,14 +16,15 @@ import { convertArrayToReadableStream, MockLanguageModelV4 } from 'ai/test'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { bindAgentScope } from '../../chat/agent-scope.ts'
 import { resolveApproval } from '../../chat/approval.ts'
+import { skillCallScopeOf } from '../../chat/skills-call.ts'
 import { chatBody, postChat, readSse, runnerOf, streamedText, testChatId } from '../../chat/testing.ts'
 import { createTestApp } from '../../testing/create-test-app.ts'
 import { catalogEntryKey, fakeCatalogEntry } from '../../testing/fake-customizations.ts'
 import { createFakeProjectService } from '../../testing/fake-projects.ts'
 import { readFilePolicy, writeFilePolicy } from '../core-workspace/policies.ts'
 import { MOCK_SKILLS_UNAVAILABLE } from '../mock/agents.ts'
-import { SKILL_TIMEOUT_MS } from './common.ts'
-import { createSkillTool, SKILL_TOOL_NAME, skillModelText, SKILLS_NOT_AVAILABLE_ERROR } from './skill.ts'
+import { TASK_TIMEOUT_MS } from './common.ts'
+import { createSkillTool, SKILL_DESCRIPTION, SKILL_TOOL_NAME, SKILL_TOOL_TIMEOUT_MS, skillFilesLine, skillModelText, SKILLS_NOT_AVAILABLE_ERROR } from './skill.ts'
 
 const CHAT = '0199a8f0-0000-7000-8000-000000000001'
 
@@ -58,11 +59,12 @@ const PDF: SkillOutput = {
 describe('skill execute', () => {
   const tool = createSkillTool() as unknown as ToolDefinition
 
-  it('keeps the frozen definition: safe, no workspace access, 60 s', () => {
+  it('keeps the definition: safe, no workspace access; Phase 12: the task tool\'s timeout (a fork skill runs a child)', () => {
     expect(tool.name).toBe(SKILL_TOOL_NAME)
     expect(tool.policy).toBe('safe')
     expect(tool.workspace).toBeUndefined()
-    expect(tool.timeoutMs).toBe(SKILL_TIMEOUT_MS)
+    expect(tool.timeoutMs).toBe(SKILL_TOOL_TIMEOUT_MS)
+    expect(SKILL_TOOL_TIMEOUT_MS).toBe(TASK_TIMEOUT_MS)
     expect(tool.inputSchema).toBe(skillInputSchema)
   })
 
@@ -85,6 +87,34 @@ describe('skill execute', () => {
       type: 'text',
       value: '# PDF\nRead ref.md first.\n\nBase folder: .harness/skills/pdf — read supporting files with read_file\nSupporting files: .harness/skills/pdf/ref.md',
     })
+  })
+
+  it('phase 12: passes file and the call id, bound to the call scope (chat id, runSubagent)', async () => {
+    const seen: Array<{ name: string, options: unknown }> = []
+    const c = context()
+    const runScope = scope(async (name, _signal, options) => {
+      seen.push({ name, options })
+      expect(skillCallScopeOf(options)).toEqual({ chatId: CHAT, runSubagent: runScope.runSubagent })
+      return PDF
+    })
+    bindAgentScope(c, runScope)
+    await Promise.resolve(tool.execute({ name: 'review-kit:pdf', file: 'scripts/fill.sh' }, c))
+    await Promise.resolve(tool.execute({ name: 'pdf' }, c))
+    expect(seen).toEqual([
+      { name: 'review-kit:pdf', options: { file: 'scripts/fill.sh', toolCallId: 'call_skill_1' } },
+      { name: 'pdf', options: { toolCallId: 'call_skill_1' } },
+    ])
+  })
+
+  it('phase 12: the model text of a plugin skill (files for skill { file }) and of a read file', () => {
+    const plugin: SkillOutput = { name: 'review-kit:pdf', description: 'PDF.', source: 'plugin', content: '# PDF', truncated: false, fileAccess: 'skill', files: ['reference.md', 'scripts/fill.sh'] }
+    expect(skillModelText(plugin)).toBe(`# PDF\n\n${skillFilesLine('review-kit:pdf', ['reference.md', 'scripts/fill.sh'])}`)
+    expect(skillFilesLine('review-kit:pdf', ['a.md'])).toBe('Supporting files (read one with the skill tool: name "review-kit:pdf", file set to its path): a.md')
+    expect(skillModelText({ ...plugin, files: [] })).toBe('# PDF')
+    const read: SkillOutput = { ...plugin, content: '', files: undefined, file: { path: 'scripts/fill.sh', content: '#!/bin/sh\n', truncated: true } }
+    expect(skillModelText(read)).toBe('File scripts/fill.sh of the skill review-kit:pdf:\n\n#!/bin/sh\n\n(The file was cut here: it is longer than 64 KB.)')
+    expect(SKILL_DESCRIPTION).toContain('file set to the file\'s path')
+    expect(SKILL_DESCRIPTION).toContain('sub-agent')
   })
 
   it('an unknown skill is the loader\'s error (it lists the available skills)', async () => {

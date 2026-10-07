@@ -3,6 +3,8 @@
 // single InstallDialog of pages/plugins.vue) and "New plugin"; the `?filter=` of the sidebar (below md a select) and
 // the PluginCard grid. Card switches enable or disable plugins, "View logs" opens the Logs tab and "Review" opens
 // TrustDialog (W3.2) for untrusted plugins. A safe-mode banner shows when the server loads builtins only.
+// Phase 12 (ADR-054; W12.9): when a listed plugin came from a marketplace, the marketplace list is loaded (at most 15 s
+// old: the stored catalogs, no network), so the cards show their update badges even when the sidebar is closed.
 import type { PluginSummary } from '@harness-forge/shared'
 import type { PluginFilter } from '~/stores/plugins'
 import { BlocksIcon, ChevronDownIcon, CircleAlertIcon, DownloadIcon, PlusIcon, SearchIcon, ShieldAlertIcon, XIcon } from '@lucide/vue'
@@ -16,6 +18,7 @@ import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from '
 import { errorTitle } from '~/components/common/harness-error'
 import PageHeader from '~/components/common/PageHeader.vue'
 import { useApi } from '~/composables/useApi'
+import { useMarketplacesStore } from '~/stores/marketplaces'
 import { parsePluginFilter, usePluginsStore } from '~/stores/plugins'
 import { useUiStore } from '~/stores/ui'
 import { isAbortError, toHarnessError } from '~/utils/errors'
@@ -28,6 +31,7 @@ import PluginGrid from './PluginGrid.vue'
 import PluginNewMenu from './PluginNewMenu.vue'
 
 const plugins = usePluginsStore()
+const marketplaces = useMarketplacesStore()
 const ui = useUiStore()
 const api = useApi()
 const route = useRoute()
@@ -108,6 +112,13 @@ async function load() {
     loading.value = false
   }
 }
+
+/** Marketplace plugins: the list holds their updates (a failure stays quiet; the cards show no badge). */
+const MARKETPLACES_MAX_AGE_MS = 15_000
+watch(() => plugins.items.some(plugin => plugin.source === 'marketplace'), (any) => {
+  if (any)
+    marketplaces.fetchAll({ maxAgeMs: MARKETPLACES_MAX_AGE_MS }).catch(() => {})
+}, { immediate: true })
 
 onMounted(() => {
   if (!plugins.loaded)

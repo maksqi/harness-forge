@@ -16,8 +16,12 @@
 // "/{name}" and "Only when you run it"; a project command whose `!` lines wait for approval shows Needs approval
 // (`ShieldQuestionMark`) and the menu item Review… (`customization-review`). The defaults and the pending trust come
 // from CustomizeSettings through `CUSTOMIZE_ROW_CONTEXT` (the props are frozen).
-// Phase 12 (ADR-056; C46, W12.11 owns it in P12-A): project rows add Edit… (`customization-edit`, `data-source="project"`,
-// after Review…), which CustomizeSettings answers with the project file editor.
+// Phase 12 (ADR-056, ADR-058; C46, W12.11): project rows whose file can be edited add Edit… (`customization-edit`,
+// `data-source="project"`, after Review…; CustomizeSettings answers with the project file editor) and Delete…
+// (`customization-delete`, `data-source="project"`, last; the file is deleted after a confirmation); agent rows with a
+// `color` show its dot (`data-slot="customization-color-dot"`, `data-value`, `aria-hidden`) and its name in the meta
+// line; fork skills and commands add "Runs in a sub-agent" (`rowMetaItems`). Qualified plugin names
+// (`review-kit:db:migrate`) are shown as they are.
 import type { CustomizationEntry } from '@harness-forge/shared'
 import type { CustomizationAction } from './customize'
 import {
@@ -53,10 +57,22 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { AGENT_COLOR_TOKENS } from '~/components/chat/agent/agent-tools'
 import { useModelsStore } from '~/stores/models'
 import { usePluginsStore } from '~/stores/plugins'
 import { testIds } from '~/utils/testids'
-import { displayName as displayNameOf, hasRowMenu, isScopeDefault, rowDiagnostics, rowMetaItems, shadowedTooltip, stateBadge, styleDefaultBadges } from './customize'
+import {
+  AGENT_COLOR_LABELS,
+  displayName as displayNameOf,
+  hasRowMenu,
+  isEditableProjectEntry,
+  isScopeDefault,
+  rowDiagnostics,
+  rowMetaItems,
+  shadowedTooltip,
+  stateBadge,
+  styleDefaultBadges,
+} from './customize'
 import { CUSTOMIZE_ROW_CONTEXT } from './customize-context'
 
 const props = defineProps<{ entry: CustomizationEntry, busy?: boolean }>()
@@ -104,6 +120,11 @@ const canSetDefault = computed(() => props.entry.kind === 'style' && props.entry
 const isDefault = computed(() => isScopeDefault(props.entry, context?.styleDefaults.value ?? null))
 /** + Phase 11: a project command whose `!` lines wait for approval. */
 const needsApproval = computed(() => !!context?.pendingTrust(props.entry))
+/** + Phase 12: a project row whose file can be edited and deleted here. */
+const editableFile = computed(() => isEditableProjectEntry(props.entry))
+/** + Phase 12: an agent's color (a dot and its name in the meta line). */
+const color = computed(() => (props.entry.kind === 'agent' ? props.entry.color ?? null : null))
+const colorStyle = computed(() => (color.value ? { backgroundColor: `var(--${AGENT_COLOR_TOKENS[color.value]})` } : undefined))
 
 /** The item chosen; emitted once the menu has closed and focus is back on the trigger. */
 let pending: CustomizationAction | null = null
@@ -151,6 +172,13 @@ function onMenuCloseAutoFocus(): void {
           <template v-for="(item, index) in meta" :key="index">
             <span v-if="index > 0" aria-hidden="true">·</span>
             <span :class="item.mono ? 'min-w-0 font-mono break-all' : undefined" :title="item.title">{{ item.text }}</span>
+          </template>
+          <template v-if="color">
+            <span aria-hidden="true">·</span>
+            <span class="inline-flex items-center gap-1">
+              <span aria-hidden="true" data-slot="customization-color-dot" :data-value="color" class="size-2 shrink-0 rounded-full" :style="colorStyle" />
+              {{ AGENT_COLOR_LABELS[color] }}
+            </span>
           </template>
 
           <template v-if="badge">
@@ -274,7 +302,7 @@ function onMenuCloseAutoFocus(): void {
               Review…
             </DropdownMenuItem>
             <DropdownMenuItem
-              v-if="entry.source === 'project' && entry.path"
+              v-if="editableFile"
               :data-testid="testIds.customizationEdit"
               data-source="project"
               @select="choose('edit')"
@@ -307,6 +335,19 @@ function onMenuCloseAutoFocus(): void {
               <ExternalLinkIcon aria-hidden="true" />
               Open plugin
             </DropdownMenuItem>
+            <template v-if="editableFile">
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                variant="destructive"
+                :data-testid="testIds.customizationDelete"
+                data-source="project"
+                :disabled="busy"
+                @select="choose('delete')"
+              >
+                <Trash2Icon aria-hidden="true" />
+                Delete…
+              </DropdownMenuItem>
+            </template>
           </template>
         </DropdownMenuContent>
       </DropdownMenu>

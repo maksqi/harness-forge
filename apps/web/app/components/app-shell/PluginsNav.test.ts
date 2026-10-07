@@ -6,6 +6,7 @@ import { createPinia, disposePinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { reactive } from 'vue'
 import { allByTestId, byTestId, mountInShell, openWithKeyboard, settle } from '~/components/plugins/list/testing'
+import { useMarketplacesStore } from '~/stores/marketplaces'
 import { usePluginsStore } from '~/stores/plugins'
 import { useUiStore } from '~/stores/ui'
 import { testIds } from '~/utils/testids'
@@ -243,6 +244,24 @@ describe('pluginsNav: marketplaces (Phase 12, C46-T2)', () => {
     await mountNav()
     expect(byTestId(testIds.pluginsMarketplaces)!.dataset.count).toBeUndefined()
     expect(document.querySelector('[data-slot="plugins-marketplaces-count"]')).toBeNull()
+  })
+
+  it('follows the update count live (plugin.changed refetches the list) and reuses a fresh list', async () => {
+    api.marketplaces.list.mockResolvedValue(marketplaceList({ updates: [] }))
+    await mountNav()
+    expect(byTestId(testIds.pluginsMarketplaces)!.dataset.count).toBeUndefined()
+    api.marketplaces.list.mockResolvedValue(marketplaceList({ updates: [pluginUpdate()] }))
+    useMarketplacesStore().applyEvent(createServerEvent('plugin.changed', { id: 'review-kit', plugin: null }, 1))
+    await settle()
+    expect(byTestId(testIds.pluginsMarketplaces)!.dataset.count).toBe('1')
+    expect(document.querySelector('[data-slot="plugins-marketplaces-count"]')?.textContent?.trim()).toBe('1')
+    expect(byTestId(testIds.pluginsMarketplaces)!.textContent).toContain('1 update available')
+    // A second nav within a minute answers from the store.
+    wrapper?.unmount()
+    api.marketplaces.list.mockClear()
+    wrapper = mountInShell(PluginsNav)
+    await settle()
+    expect(api.marketplaces.list).not.toHaveBeenCalled()
   })
 
   it('is active on the Marketplaces page, where no installed plugin is (a reserved id)', async () => {

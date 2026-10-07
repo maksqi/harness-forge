@@ -26,8 +26,9 @@
 //   (update, touch, setTitle, switchBranch, deleteMessage; `ChatUpdatedData`: the summary plus the row's active leaf),
 //   `chat.deleted` (remove, removeAll: one per chat). Message operations emit nothing.
 // - Usage totals (`ChatDetail.totals`) sum the usage rows of purpose `chat`, `image` (Phase 6), `compact` and
-//   `subagent` (Phase 9, ADR-040 / ADR-043: the summarizer calls and the child runs of a reply) of the chat, deleted
-//   versions included; `title`, `transcription` and `speech` rows are not counted.
+//   `subagent` (Phase 9, ADR-040 / ADR-043: the summarizer calls and the child runs of a reply) and `hook` (Phase 12,
+//   ADR-057, W12.6: the model calls of the chat's prompt hooks) of the chat, deleted versions included; `title`,
+//   `transcription` and `speech` rows are not counted.
 // - Projects (Phase 7, ADR-031, W7.5): `chats.project_id` (no foreign key) is in every record, summary, search result
 //   and event. The list filters by a project or `none` (./list.ts, index `chats_project_idx`). A chat gets a project
 //   only from `create`, from `ensure` when it creates the chat, and from the move of `update`; every write of a project
@@ -90,10 +91,10 @@ const SEARCH_BATCH_ROWS = 200
 /** Ids per `IN (...)` lookup. */
 const ID_LOOKUP_CHUNK = 500
 /**
- * The usage rows counted by `ChatDetail.totals` (Phase 6 adds `image`, Phase 9 `compact` and `subagent`; title,
- * transcription and speech rows are not).
+ * The usage rows counted by `ChatDetail.totals` (Phase 6 adds `image`, Phase 9 `compact` and `subagent`, Phase 12 `hook`:
+ * prompt-hook model calls; title, transcription and speech rows are not).
  */
-const TOTALS_PURPOSES: readonly UsagePurpose[] = ['chat', 'image', 'compact', 'subagent']
+export const TOTALS_PURPOSES: readonly UsagePurpose[] = ['chat', 'image', 'compact', 'subagent', 'hook']
 
 type ChatUpdateSet = SQLiteUpdateSetSource<typeof chats>
 /** A chat row to insert; `projectId` may be the guarded subquery of `projectIdValue`. */

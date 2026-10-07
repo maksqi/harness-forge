@@ -2,9 +2,12 @@
 // `ctx.agents` / `ctx.skills` W10.7 (plugin API 1.4.0, ADR-045); `ctx.outputStyles` W11.7 (plugin API 1.5.0, ADR-051):
 // registered in `registry.styles` (validated there; a name another plugin registered throws `conflict`).
 //
-// Host-only (not part of `ctx`): `PluginRuntime.registerHookCommands(hooks)` registers the manifest's command hooks
-// (`contributes.hooks`, plugin API 1.5.0, ADR-048) in `registry.hookCommands` with the plugin folder as the root, tracked
-// like every other registration (plugin code has no API to add command hooks).
+// Host-only (not part of `ctx`): `PluginRuntime.registerHookCommands(hooks, extra?)` registers the manifest's command
+// hooks (`contributes.hooks`, plugin API 1.5.0, ADR-048) in `registry.hookCommands` with the plugin folder as the root,
+// tracked like every other registration (plugin code has no API to add command hooks); plugin API 1.6.0 (ADR-053,
+// W12.1): `extra.env` / `extra.prompts` of a Claude Code plugin (its `CLAUDE_PLUGIN_DATA` / `CLAUDE_PLUGIN_OPTION_*`
+// variables). `PluginRuntime.registerMcpServer(decl, { claudeName })` declares a Claude Code plugin's MCP server with its
+// Claude name (`mcp__plugin_<name>_<server>__*`), checked and re-registered on settings changes like `ctx.mcp.register`.
 //
 // Every `register` goes through the registry with the plugin id as owner and is tracked in the plugin's
 // `DisposableStore`; disposing the runtime unregisters everything, and `abort()` aborts `ctx.signal` (disable, reload,
@@ -39,9 +42,9 @@ import type {
   SkillDefinition,
   ToolDefinition,
 } from '@harness-forge/plugin-sdk'
-import type { LogLevel } from '@harness-forge/shared'
+import type { LogLevel, PromptHookSpec } from '@harness-forge/shared'
 import type { LanguageModelInstance } from '../providers/types.ts'
-import type { Registry } from '../registry/types.ts'
+import type { McpServerRegisterOptions, Registry } from '../registry/types.ts'
 import type { Redactor } from '../security/types.ts'
 import type { ImageGenerationInput, ImageGenerationResult } from '../services/images/types.ts'
 import type { SecretScope, SecretStore } from '../services/secrets/types.ts'
@@ -135,6 +138,12 @@ export interface PluginRuntimeOptions {
   readonly services: PluginRuntimeServices
 }
 
+/** Phase 12: what a Claude Code plugin adds to its command hook registration (`HookCommandsRegistration`). */
+export interface HookCommandsExtra {
+  readonly env?: Readonly<Record<string, string>>
+  readonly prompts?: readonly PromptHookSpec[]
+}
+
 /** Runs one `settings.onChange` callback (the host guards it: 3 s). */
 export type SettingsCallbackRunner = (callback: (values: Record<string, unknown>) => void | Promise<void>, values: Record<string, unknown>) => Promise<void>
 
@@ -153,7 +162,12 @@ export interface PluginRuntime {
    * plugin folder (`PluginRuntimeOptions.dir`) as the root; owned by the plugin and removed with its other contributions.
    * Throws after disposal and for an invalid registration (`validation_error`).
    */
-  readonly registerHookCommands: (hooks: HooksConfig) => Disposable
+  readonly registerHookCommands: (hooks: HooksConfig, extra?: HookCommandsExtra) => Disposable
+  /**
+   * Plugin API 1.6.0 (ADR-053): declares an MCP server like `ctx.mcp.register` (the `{{settings.*}}` keys must be
+   * settings of the manifest), with the Claude Code name of a Claude Code plugin's server. Owned by the plugin.
+   */
+  readonly registerMcpServer: (decl: McpServerDecl, options?: McpServerRegisterOptions) => Disposable
   /** Unregisters every contribution; later registrations throw. Does not abort `ctx.signal`. */
   readonly disposeContributions: () => void
   /** Aborts `ctx.signal` (after `disposeContributions`). */
@@ -164,8 +178,8 @@ export interface PluginRuntime {
 class McpRegistration implements Disposable {
   #current: Disposable | null
 
-  constructor(private readonly registry: Registry, private readonly pluginId: string, readonly decl: McpServerDecl) {
-    this.#current = registry.mcpServers.register(pluginId, decl)
+  constructor(private readonly registry: Registry, private readonly pluginId: string, readonly decl: McpServerDecl, private readonly options?: McpServerRegisterOptions) {
+    this.#current = registry.mcpServers.register(pluginId, decl, options)
   }
 
   get usesSettings(): boolean {
@@ -176,7 +190,7 @@ class McpRegistration implements Disposable {
     if (this.#current === null)
       return
     this.#current.dispose()
-    this.#current = this.registry.mcpServers.register(this.pluginId, this.decl)
+    this.#current = this.registry.mcpServers.register(this.pluginId, this.decl, this.options)
   }
 
   dispose(): void {
@@ -307,6 +321,26 @@ export function createPluginRuntime(options: PluginRuntimeOptions): PluginRuntim
     return baseFetch(input, { ...init, headers, signal })
   }
 
+  const registerMcp = (decl: McpServerDecl, registerOptions?: McpServerRegisterOptions): Disposable => {
+    assertLive()
+    const parsed = mcpServerDeclSchema.safeParse(decl)
+    if (parsed.success) {
+      for (const key of mcpServerDeclSettingsKeys(parsed.data)) {
+        if (!settingsKeys.has(key))
+          throw invalidInput(`MCP server "${parsed.data.id}": "{{settings.${key}}}" refers to an undefined setting.`)
+      }
+      if (parsed.data.transport.type === 'stdio')
+        uses('process', `the stdio MCP server "${parsed.data.id}"`)
+    }
+    const registration = new McpRegistration(registry, pluginId, parsed.success ? parsed.data : decl, registerOptions)
+    mcpRegistrations.add(registration)
+    const handle = track(registration)
+    return toDisposable(() => {
+      mcpRegistrations.delete(registration)
+      handle.dispose()
+    })
+  }
+
   const ctx: PluginContext = {
     plugin: Object.freeze({ id: pluginId, version: manifest.version, dir: options.dir, dataDir: options.dataDir }),
     logger: Object.freeze(logger),
@@ -348,25 +382,7 @@ export function createPluginRuntime(options: PluginRuntimeOptions): PluginRuntim
       },
     }),
     mcp: Object.freeze({
-      register: (decl: McpServerDecl) => {
-        assertLive()
-        const parsed = mcpServerDeclSchema.safeParse(decl)
-        if (parsed.success) {
-          for (const key of mcpServerDeclSettingsKeys(parsed.data)) {
-            if (!settingsKeys.has(key))
-              throw invalidInput(`MCP server "${parsed.data.id}": "{{settings.${key}}}" refers to an undefined setting.`)
-          }
-          if (parsed.data.transport.type === 'stdio')
-            uses('process', `the stdio MCP server "${parsed.data.id}"`)
-        }
-        const registration = new McpRegistration(registry, pluginId, parsed.success ? parsed.data : decl)
-        mcpRegistrations.add(registration)
-        const handle = track(registration)
-        return toDisposable(() => {
-          mcpRegistrations.delete(registration)
-          handle.dispose()
-        })
-      },
+      register: (decl: McpServerDecl) => registerMcp(decl),
     }),
     commands: Object.freeze({
       register: (definition: CommandDefinition) => {
@@ -440,10 +456,16 @@ export function createPluginRuntime(options: PluginRuntimeOptions): PluginRuntim
       return store.isDisposed
     },
     settings: () => settings,
-    registerHookCommands: (hooks) => {
+    registerHookCommands: (hooks, extra) => {
       assertLive()
-      return track(registry.hookCommands.register(pluginId, { root: options.dir, hooks }))
+      return track(registry.hookCommands.register(pluginId, {
+        root: options.dir,
+        hooks,
+        ...(extra?.env === undefined ? {} : { env: extra.env }),
+        ...(extra?.prompts === undefined ? {} : { prompts: extra.prompts }),
+      }))
     },
+    registerMcpServer: (decl, registerOptions) => registerMcp(decl, registerOptions),
     updateSettings: async (values, run) => {
       settings = structuredClone(values)
       for (const callback of [...settingsCallbacks])

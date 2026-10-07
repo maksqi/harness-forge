@@ -7,7 +7,10 @@
 //   `409 conflict` (`reason: 'stale'`), whenever the inspection happened and on whichever server process.
 // - Fallback for API clients that inspect without passing the hash: the installer remembers the sha256 of recent
 //   inspections per npm spec / folder in memory (30 minutes, at most 100 entries) and refuses the same way. Zip uploads
-//   and URL installs are pinned by their bytes / SRI hash and need no entry.
+//   and URL installs are pinned by their bytes / SRI hash and need no entry. Phase 12 (W12.2): GitHub sources (a ref
+//   can move) and marketplace entries (a refresh can change the entry) have keys too; for both the hash is the tree
+//   hash of the staged plugin (`hf-claude-plugin/v1` for Claude Code plugins), so the commit's zip bytes need not be
+//   stable.
 import type { PluginInstallInput, PluginInstallOptions } from '../types.ts'
 import { HarnessError } from '@harness-forge/shared'
 
@@ -60,6 +63,10 @@ export function reviewKey(input: PluginInstallInput): string | null {
       return `npm:${input.spec.trim()}`
     case 'path':
       return `path:${input.mode}:${input.path}`
+    case 'github':
+      return `github:${input.repo.toLowerCase()}@${input.ref ?? 'HEAD'}:${input.path ?? ''}:${input.format ?? ''}`
+    case 'marketplace':
+      return `marketplace:${input.marketplaceId}:${input.plugin}:${input.format ?? ''}`
     default:
       return null
   }

@@ -1,0 +1,20 @@
+{
+  "name": "review-kit",
+  "displayName": "Review kit",
+  "version": "1.0.0",
+  "description": "Review commands, a reviewer agent, a checklist skill, a terse output style and a reminder hook.",
+  "author": { "name": "harness-forge examples" },
+  "license": "MIT",
+  "keywords": ["review", "example"],
+  "userConfig": {
+    "DOCS_TOKEN": { "type": "string", "title": "Docs token", "description": "Token of the docs MCP server.", "sensitive": true, "required": false },
+    "FOCUS": { "type": "string", "title": "Review focus", "options": ["bugs", "style", "security"], "default": "bugs" }
+  },
+  "mcpServers": {
+    "docs": {
+      "type": "http",
+      "url": "https://docs.example.com/mcp",
+      "headers": { "Authorization": "Bearer ${user_config.DOCS_TOKEN}" }
+    }
+  }
+}

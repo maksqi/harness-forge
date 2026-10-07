@@ -3,7 +3,8 @@
 // marketplace offers another version (`data-slot="plugin-update-banner"`): "Version {version} is available from
 // {marketplace}." ("A newer commit is available from {marketplace}." without a version) and Update… (`plugin-update`),
 // which the page answers with MarketplaceInstallDialog in update mode. Renders nothing without an update. Store-free.
-// Props, emits and the root slot are frozen from Gate P12-0b (C46 stub); W12.9 implements the banner in P12-A.
+// Props, emits and the root slot are frozen from Gate P12-0b (C46 stub); W12.9 implements the banner in P12-A: a polite
+// `status` (not an alert: it is news, not a problem), and Update… is 40 px tall on touch screens.
 import type { PluginUpdate } from '@harness-forge/shared'
 import { CircleArrowUpIcon } from '@lucide/vue'
 import { computed } from 'vue'
@@ -27,11 +28,18 @@ const text = computed(() => {
 </script>
 
 <template>
-  <Alert v-if="update" data-slot="plugin-update-banner" :data-version="update.availableVersion ?? ''">
+  <Alert v-if="update" role="status" data-slot="plugin-update-banner" :data-version="update.availableVersion ?? ''">
     <CircleArrowUpIcon aria-hidden="true" />
     <AlertDescription class="flex flex-wrap items-center gap-x-3 gap-y-1 text-foreground">
       <span>{{ text }}</span>
-      <Button type="button" size="sm" variant="outline" :data-testid="testIds.pluginUpdate" @click="emit('update')">
+      <Button
+        type="button"
+        size="sm"
+        variant="outline"
+        class="pointer-coarse:h-10"
+        :data-testid="testIds.pluginUpdate"
+        @click="emit('update')"
+      >
         Update…
       </Button>
     </AlertDescription>

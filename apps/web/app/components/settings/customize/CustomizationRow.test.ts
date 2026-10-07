@@ -238,4 +238,49 @@ describe('customizationRow: project files (Phase 12, C46-T7)', () => {
     await choose(testIds.customizationEdit)
     expect(actions).toEqual(['edit'])
   })
+
+  it('offers Delete… last on project rows whose file can be edited (W12.11-T2)', async () => {
+    const { row, actions } = mountRow(customizationEntry({ name: 'reviewer', source: 'project', path: '.claude/agents/reviewer.md', state: 'invalid' }))
+    await openMenu(row())
+    const items = [...document.body.querySelectorAll<HTMLElement>('[role="menuitem"]')]
+    const remove = byTestId(testIds.customizationDelete)!
+    expect(items.at(-1)).toBe(remove)
+    expect(remove.textContent?.trim()).toBe('Delete…')
+    expect(remove.dataset.source).toBe('project')
+    await choose(testIds.customizationDelete)
+    expect(actions).toEqual(['delete'])
+  })
+
+  it('offers neither Edit… nor Delete… for a project path that is not an editable definition', async () => {
+    const { row } = mountRow(customizationEntry({ kind: 'command', name: 'deep', source: 'project', path: '.claude/commands/a/b/c/d/deep.md' }))
+    await openMenu(row())
+    expect(byTestId(testIds.customizationEdit)).toBeNull()
+    expect(byTestId(testIds.customizationDelete)).toBeNull()
+    expect(byTestId(testIds.customizationView)).not.toBeNull()
+  })
+
+  it('shows an agent\'s color dot with its name and "Runs in a sub-agent" for a fork skill (W12.11-T3)', () => {
+    const { row } = mountRow(customizationEntry({ color: 'purple' }))
+    const dot = row().querySelector<HTMLElement>('[data-slot="customization-color-dot"]')!
+    expect(dot.dataset.value).toBe('purple')
+    expect(dot.getAttribute('aria-hidden')).toBe('true')
+    expect(dot.getAttribute('style')).toContain('var(--')
+    expect(row().textContent).toContain('Purple')
+    wrapper!.unmount()
+    wrapper = null
+    document.body.replaceChildren()
+
+    const fork = mountRow(customizationEntry({ kind: 'skill', name: 'pdf', source: 'user', id: customizationId(4), path: undefined, tools: undefined, context: 'fork' }))
+    expect(fork.row().textContent).toContain('Runs in a sub-agent')
+    expect(fork.row().querySelector('[data-slot="customization-color-dot"]')).toBeNull()
+  })
+
+  it('shows a qualified plugin name as it is (W12.11-T4)', async () => {
+    const { row } = mountRow(customizationEntry({ kind: 'command', name: 'review-kit:db:migrate', source: 'plugin', pluginId: 'review-kit', path: undefined, tools: undefined, namespace: 'db' }))
+    expect(row().dataset.name).toBe('review-kit:db:migrate')
+    expect(row().textContent).toContain('/review-kit:db:migrate')
+    await openMenu(row())
+    expect(byTestId(testIds.customizationEdit)).toBeNull()
+    expect(byTestId(testIds.customizationDelete)).toBeNull()
+  })
 })

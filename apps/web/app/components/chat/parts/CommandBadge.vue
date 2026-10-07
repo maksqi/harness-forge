@@ -13,7 +13,7 @@
 // plugin from the plugins store); the tooltip (and the screen reader text) adds "Ran {n} shell commands" / "Included
 // {paths}" from `metadata.command.inlined` (`data-slot="command-badge-inlined"`).
 import type { CommandInvocation } from '@harness-forge/shared'
-import { safeParseModelRef } from '@harness-forge/shared'
+import { safeParseModelRef, splitQualifiedName } from '@harness-forge/shared'
 import { BookOpenIcon, SquareTerminalIcon } from '@lucide/vue'
 import { getActivePinia } from 'pinia'
 import { computed, inject } from 'vue'
@@ -52,8 +52,10 @@ const pluginName = computed(() => {
   const contributed = (item: (typeof plugins.items)[number]): boolean => (invocationKind.value === 'skill'
     ? item.contributions.skills.includes(props.name)
     : item.contributions.commands.includes(props.name))
-  const plugin = listed?.pluginId ? plugins.byId(listed.pluginId) : plugins.items.find(contributed)
-  return plugin?.name ?? listed?.pluginId ?? null
+  // + Phase 12 (ADR-053): a qualified name (`review-kit:review`) names its plugin.
+  const pluginId = listed?.pluginId ?? splitQualifiedName(props.name)?.pluginId
+  const plugin = pluginId ? plugins.byId(pluginId) : plugins.items.find(contributed)
+  return plugin?.name ?? pluginId ?? null
 })
 
 const modelName = computed(() => {

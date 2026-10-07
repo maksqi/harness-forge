@@ -9,9 +9,13 @@
 // found.". "Add {n} hooks" (`hook-import-submit`, also Mod+Enter) creates the checked ones as personal hooks, one request
 // each under one password prompt ("Saving a hook needs your password.") → toast "Added {n} hooks", `imported`, close.
 // Mounted by HooksPanel. Props, emits and the root test id are frozen from Gate P11-0b (C39 stub); implementation W11.8.
+// Phase 12 (ADR-057; W12.12): prompt handlers are imported too (`MessageSquareText` and the prompt's first line instead
+// of the command, 30 s by default), with the handler fields (`args`, `async`, `if`, `statusMessage`, `model`,
+// `continueOnBlock`; the bodies from `hookCreateBody`); `http`, `mcp_tool` and `agent` handlers are noted as ignored.
 import type { PersonalHook } from '@harness-forge/shared'
 import type { ImportedHook } from './hooks'
-import { CircleAlertIcon, FileUpIcon } from '@lucide/vue'
+import { HOOK_LIMITS } from '@harness-forge/shared'
+import { CircleAlertIcon, FileUpIcon, MessageSquareTextIcon } from '@lucide/vue'
 import { computed, ref, shallowRef, useId, useTemplateRef, watch } from 'vue'
 import { toast } from 'vue-sonner'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
@@ -26,7 +30,7 @@ import { isFreshAuthCancelled, useFreshAuth } from '~/composables/useFreshAuth'
 import { useHooksStore } from '~/stores/hooks'
 import { toHarnessError } from '~/utils/errors'
 import { testIds } from '~/utils/testids'
-import { addedHooksText, addHooksText, foundHooksText, HOOK_COPY, HOOK_EVENT_INFO, HOOK_IMPORT_MAX_BYTES, importHooks, matchesEveryTool } from './hooks'
+import { addedHooksText, addHooksText, foundHooksText, HOOK_COPY, HOOK_EVENT_INFO, HOOK_IMPORT_MAX_BYTES, hookCreateBody, hookDraftText, importHooks, matchesEveryTool } from './hooks'
 
 defineProps<{ open: boolean }>()
 
@@ -83,6 +87,11 @@ function toggle(index: number, value: boolean | 'indeterminate'): void {
   else
     next.add(index)
   unchecked.value = next
+}
+
+/** The timeout an item shows: its own, else the default of its type (60 s; a prompt hook 30 s). */
+function itemTimeout(item: ImportedHook): number {
+  return item.draft.timeout ?? (item.draft.type === 'prompt' ? HOOK_LIMITS.promptTimeoutDefaultSec : HOOK_LIMITS.timeoutDefaultSec)
 }
 
 function itemTitle(item: ImportedHook): string {
@@ -143,14 +152,7 @@ async function submit(): Promise<void> {
       for (const { item, index } of chosen) {
         if (created.value.has(index))
           continue
-        const { draft } = item
-        const hook = await hooks.create({
-          event: draft.event,
-          matcher: draft.matcher.trim() || null,
-          command: draft.command,
-          timeout: draft.timeout,
-          enabled: draft.enabled,
-        })
+        const hook = await hooks.create(hookCreateBody(item.draft))
         created.value = new Map(created.value).set(index, hook)
       }
     }, { required: true })
@@ -257,8 +259,17 @@ async function submit(): Promise<void> {
               <div class="flex min-w-0 flex-1 flex-col gap-0.5">
                 <div class="flex min-w-0 flex-wrap items-baseline gap-x-2.5 gap-y-0.5 text-sm">
                   <span class="font-medium break-all" :class="item.valid ? undefined : 'text-muted-foreground'">{{ itemTitle(item) }}</span>
-                  <code class="min-w-0 flex-1 basis-40 truncate font-mono text-xs" :title="item.draft.command">{{ item.draft.command }}</code>
-                  <span class="text-xs text-muted-foreground tabular-nums">{{ item.draft.timeout ?? 60 }}s</span>
+                  <span
+                    v-if="item.draft.type === 'prompt'"
+                    data-slot="hook-import-prompt"
+                    :title="item.draft.prompt"
+                    class="flex min-w-0 flex-1 basis-40 items-center gap-1.5 text-xs"
+                  >
+                    <MessageSquareTextIcon aria-hidden="true" class="size-3.5 shrink-0 text-muted-foreground" />
+                    <span class="truncate">{{ hookDraftText(item.draft) }}</span>
+                  </span>
+                  <code v-else class="min-w-0 flex-1 basis-40 truncate font-mono text-xs" :title="hookDraftText(item.draft)">{{ hookDraftText(item.draft) }}</code>
+                  <span class="text-xs text-muted-foreground tabular-nums">{{ itemTimeout(item) }}s</span>
                 </div>
                 <p v-if="item.message" class="text-xs text-destructive">
                   {{ item.message }}

@@ -410,7 +410,9 @@ export function renderCommandExpansion(
         text += expanded.text
       }
       else {
-        text += part.text
+        // With options, a part without argument placeholders still gets its `${NAME}` variables and `\$` escapes (an
+        // empty input appends nothing; the input is appended once at the end).
+        text += partOptions === undefined ? part.text : expandArguments(part.text, '', partOptions).text
       }
     }
     else if (part.kind === 'shell') {

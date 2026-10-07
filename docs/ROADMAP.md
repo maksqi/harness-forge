@@ -341,15 +341,16 @@ compatibility, the four Phase 11 leftovers; plugin API 1.6.0.
   - [x] K3 schema + `pnpm db:generate` (coordinator)
   - [x] C43 server skeleton · [x] C44 chat seams · [x] C45 mocks, fixtures, fake remote · [x] C46 web skeleton
   - [x] Gate (incl. v1.7 data upgrade probe, by G12B) + FREEZE + checkpoint commit
-- [ ] P12-A Features (13 agents + gate probes)
-  - [ ] W12.1 claude-plugin-server · [ ] W12.2 sources-marketplaces-server · [ ] W12.3 claude-import-server
-  - [ ] W12.4 project-definitions-server · [ ] W12.5 hooks-server · [ ] W12.6 hook-events-server
-  - [ ] W12.7 catalog-frontmatter-server
-  - [ ] W12.8 marketplaces-web · [ ] W12.9 plugins-install-web · [ ] W12.10 claude-import-web
-  - [ ] W12.11 customize-defs-web · [ ] W12.12 hooks-web · [ ] W12.13 chat-web · [ ] G12P gate probes
-  - [ ] Gate + checkpoint commit
+- [x] P12-A Features (13 agents + gate probes)
+  - [x] W12.1 claude-plugin-server · [x] W12.2 sources-marketplaces-server · [x] W12.3 claude-import-server
+  - [x] W12.4 project-definitions-server · [x] W12.5 hooks-server · [x] W12.6 hook-events-server
+  - [x] W12.7 catalog-frontmatter-server
+  - [x] W12.8 marketplaces-web · [x] W12.9 plugins-install-web · [x] W12.10 claude-import-web
+  - [x] W12.11 customize-defs-web · [x] W12.12 hooks-web · [x] W12.13 chat-web · [x] G12P gate probes
+  - [x] W12.16 server fix-up (a plugin `userConfig` secret in `GET /hooks` args) · [x] W12.17 web fix-ups
+  - [x] Gate + checkpoint commit
 - [ ] P12-B Feature e2e, docs, fix-ups, final gate
-  - [ ] W12.14 e2e-features · [ ] W12.15 docs-final (W12.16 / W12.17 fix-ups only if the P12-A gate is red)
+  - [ ] W12.14 e2e-features · [ ] W12.15 docs-final (W12.18 / W12.19 fix-ups only if needed; W12.16 / W12.17 ran at the P12-A gate)
   - [ ] Final gate (e2e ×3, screenshots, audit, v1.7 → v1.8 upgrade, Docker) + checkpoint commit
 
 ## Backlog (not in v1.8)
@@ -431,3 +432,4 @@ mermaid (GHSA-238p-pmpm-9mq7, low) once mermaid allows katex 0.18.
 | P12-00 | coordinator | baseline 11787 tests, `git status` unchanged; actionlint 1.7.12 clean on the pinned runners; CI on `c89ca97` (Audit red only from GHSA-pqg4-j6r4-53mv, fixed by `bdc9348`); new advisories: shell-quote override, katex via mermaid (low) left as is; six ignores still unpatched; `.tmp/v17` built; `.tmp` archived | `c89ca97`, `bdc9348` |
 | P12-0a | coordinator (K1; SH skeletons `claude-{plugins,import,permissions}`), C40, C41, C42, D16, D17, K3S (+ coordinator: bridges replaced by `SH/index.ts` exports, examples' `harness-forge.d.ts` regenerated for 1.6.0, `activityDataSchema.label` (open point 1), `start:e2e` with `HF_CLAUDE_HOME=0` (open point 12 changed), W12.13 owns `projects/{trust,mcp}` and `chat/background` + `stores/background-tasks`, the customize import e2e pins (`color` read, alias note)) | audit ok (117 paths; C40 / C42 compile fixes accepted); frozen install ok (TypeScript 6.0.3, `yaml` 2.9.1); 12678 tests, `git status` unchanged; build ok (web js +9.5 KB gz vs v1.7); CSP 38/38; `pluginApiVersion` 1.6.0, 12 new routes answer 501 / 400; e2e 191 passed on a fresh `.tmp/e2e` (run 1 found the customize pin and the pre-existing `mobile/agent.spec.ts:191` stop flake, 1/6 on the v1.7 build too → W12.13); `pnpm audit --prod` clean (6 ignored); v1.7 seed `.tmp/upgrade-v17` (30 chats / 160 messages / 14 approvals) | (this commit) |
 | P12-0b | coordinator (K3: schema + `0009_claude_ecosystem`), C43, C44, C45, C46, G12B (+ coordinator: K3 compile fix in `services/hooks/personal.ts`; CCRs `hookModelText` feedback for a blocked `PostToolUseFailure`, `renderCommandExpansion(…, options?)` with one argument base per body, `hookEntrySchema.position?`; the `hook-pack` registration pin (`env`, `prompts`); C43 / C45 test fixes accepted) | audit ok (190 paths); `0009` = 1 CREATE TABLE + 1 CREATE UNIQUE INDEX + 6 ALTER ADD, a second generate: no changes; 12988 tests, `git status` unchanged; build ok; CSP 38/38; e2e 191 passed on a fresh `.tmp/e2e` (`HF_CLAUDE_HOME=0`: home `disabled`; `mock:prompt-hook` listed); upgrade probe on a v1.7 copy 95/98 (the 3 failures: the v1.8-only project prompt hook is not listed yet — W12.5, moved to Gate P12-A; nothing ran) + seam probe 76/76; `pnpm audit --prod` clean (6 ignored); FREEZE | (this commit) |
+| P12-A | W12.1 – W12.13, G12P (gate probes), W12.16 / W12.17 (fix-ups for the gate items) (+ coordinator: SDK 1.6.0 `CommandDefinition` / `SkillDefinition` frontmatter fields (+ mirror, pins), `renderCommandExpansion` variables in parts without placeholders, `hookEntrySchema.position`-era CCRs, `settings` store rollback of object settings, `HOOK_ACTIVITY.label`, `AgentDefinition.model` comment, examples' d.ts regenerated, two e2e pins (the kept `model: sonnet` alias note, the "Plugin not trusted" row), the P11-A regression copy updated for Phase 12 (`type` key, `transcript_path`, prompt hooks read), the archived `upgrade-v14` seed restored for P9-A; decisions: `skill` tool timeout 600 s, a prompt hook's missing handler model falls back to `hookModelRef`; refused: re-running W12.1's denied `chmod` (surfaced to the user)) | audit ok (331+ paths, no agent touched a frozen file); 13720 tests, `git status` unchanged; build ok; CSP 38/38; G12P probes 345/347 → the red security item (a sensitive `${user_config.*}` value in `GET /hooks` exec-form `args`) fixed by W12.16 (group 1 48/48 on the rebuild) + 1 spec-differs decision; `pnpm test` group 4/4; regressions P11-A copy (feature sections green) / P10-A copy / P9-A / P8-A passed; e2e 191 passed on a fresh `.tmp/e2e` (incl. the fixed `mobile/agent.spec.ts:191` flake, 3× green); `pnpm audit --prod` clean (6 ignored); screenshot review moved to P12-B (W12.14 writes the specs) | (this commit) |

@@ -3,10 +3,14 @@ import { describe, expect, it } from 'vitest'
 import { claudePluginInfo } from '~/utils/testing/fixtures'
 import {
   buildRequest,
+  claudeComponentsSummary,
+  claudeNamespaceLines,
   claudePreview,
   contributionSummary,
   emptyDraft,
+  executableSource,
   filesSummary,
+  inspectionHosts,
   inspectionSourceLabel,
   INSTALL_TABS,
   installBody,
@@ -19,6 +23,7 @@ import {
   requestSourceLabel,
   runCommands,
   serverFieldErrors,
+  splitGithubRepoField,
   TAB_LABELS,
   zipForm,
 } from './install'
@@ -177,13 +182,78 @@ describe('phase 12 additions (C46)', () => {
     expect(claudePreview(inspection as never)).toEqual({
       namespace: 'review-kit',
       asksFor: ['API token (secret) (required)'],
-      ignored: ['.lsp.json: LSP servers are not supported.'],
+      ignored: ['.lsp.json (LSP servers are not supported)'],
       commit: '0123456789ab',
     })
     expect(claudePreview({ format: 'harness', claude: null } as never)).toBeNull()
     expect(runCommands({ manifestVersion: 1, id: 'review-kit', name: 'Review kit', version: '1.2.0', engines: { harness: '^1.0.0' } }, claudePluginInfo())).toEqual([
-      { source: 'PostToolUse Write|Edit', command: 'sh "$CLAUDE_PLUGIN_ROOT/hooks/format.sh"' },
-      { source: 'review-kit', command: 'node server.mjs' },
+      { source: 'PostToolUse hook', command: 'sh "$CLAUDE_PLUGIN_ROOT/hooks/format.sh"' },
+      { source: 'MCP server review-kit', command: 'node server.mjs' },
     ])
+  })
+})
+
+describe('phase 12: the Claude Code preview (W12.9)', () => {
+  const manifest = { manifestVersion: 1 as const, id: 'review-kit', name: 'Review kit', version: '1.2.0', engines: { harness: '^1.6.0' } }
+  const contributions = { providers: [], models: 0, tools: [], mcpServers: [], commands: [], hooks: [], agents: [], skills: [], commandHooks: 0, outputStyles: [] }
+
+  it('names where each executable comes from like the trust consent', () => {
+    expect(executableSource({ kind: 'hook', label: 'PostToolUse Write|Edit', command: 'x' })).toBe('PostToolUse hook')
+    expect(executableSource({ kind: 'hook', label: 'Stop', command: 'x' })).toBe('Stop hook')
+    expect(executableSource({ kind: 'hook', label: '', command: 'x' })).toBe('Hook')
+    expect(executableSource({ kind: 'mcp', label: 'github', command: 'x' })).toBe('MCP server github')
+    expect(executableSource({ kind: 'span', label: 'deploy', command: 'x' }, 'review-kit')).toBe('/review-kit:deploy')
+    expect(executableSource({ kind: 'span', label: '/review-kit:db:migrate', command: 'x' }, 'review-kit')).toBe('/review-kit:db:migrate')
+    expect(executableSource({ kind: 'span', label: 'deploy', command: 'x' })).toBe('/deploy')
+    expect(runCommands(manifest, claudePluginInfo({ executables: [{ kind: 'span', label: 'status', command: 'git status --short' }] })))
+      .toEqual([{ source: '/review-kit:status', command: 'git status --short' }])
+    // A harness manifest keeps its own reading (no `claude`).
+    expect(runCommands(manifest, null)).toEqual([])
+  })
+
+  it('reads the commit of a GitHub source and keeps an ignored part without a reason as is', () => {
+    const base = { format: 'claude' as const, claude: claudePluginInfo({ unsupported: [{ component: 'bin/', reason: '' }, { component: 'themes/', reason: 'Never run.' }] }) }
+    expect(claudePreview({ ...base, sourceRef: 'acme/tools@0123456789abcdef0123456789abcdef01234567' } as never)?.commit).toBe('0123456789abcdef0123456789abcdef01234567')
+    expect(claudePreview({ ...base, sourceRef: 'review-kit.zip' } as never)?.commit).toBeNull()
+    expect(claudePreview({ ...base, sourceRef: undefined } as never)?.ignored).toEqual(['bin/', 'themes/ (Never run)'])
+    expect(claudePreview({ ...base, claude: claudePluginInfo({ userConfig: [{ key: 'BRANCH', title: '', sensitive: false, required: false }] }) } as never)?.asksFor).toEqual(['BRANCH'])
+  })
+
+  it('builds the namespace lines from the qualified names', () => {
+    const claude = claudePluginInfo()
+    expect(claudeNamespaceLines({ format: 'claude', claude, contributions: { ...contributions, commands: ['review-kit:review'], agents: ['review-kit:code-reviewer'] } }))
+      .toEqual(['Commands run as /review-kit:review.', 'Agents start as review-kit:code-reviewer.'])
+    // Bare names are qualified; counts without names show the pattern.
+    expect(claudeNamespaceLines({ format: 'claude', claude, contributions: { ...contributions, commands: ['review'] } }))
+      .toEqual(['Commands run as /review-kit:review.', 'Agents start as review-kit:<agent>.'])
+    expect(claudeNamespaceLines({ format: 'claude', claude: claudePluginInfo({ components: { commands: 0, agents: 0, skills: 1, outputStyles: 0, hooks: 0, mcpServers: 0 } }), contributions }))
+      .toEqual([])
+    expect(claudeNamespaceLines({ format: 'harness', claude: null, contributions: { ...contributions, commands: ['deploy'] } })).toEqual([])
+  })
+
+  it('summarizes the components and merges the hosts', () => {
+    expect(claudeComponentsSummary({ commands: 3, agents: 1, skills: 1, outputStyles: 2, hooks: 2, mcpServers: 1 }))
+      .toBe('3 commands · 1 agent · 1 skill · 2 output styles · 2 hooks · 1 MCP server')
+    expect(claudeComponentsSummary({ commands: 0, agents: 0, skills: 0, outputStyles: 0, hooks: 0, mcpServers: 0 })).toBe('')
+    expect(inspectionHosts({ networkHosts: ['mcp.example.com'], claude: claudePluginInfo({ hosts: ['api.example.com', 'mcp.example.com'] }) }))
+      .toEqual(['api.example.com', 'mcp.example.com'])
+    expect(inspectionHosts({ networkHosts: ['b.example', 'a.example'], claude: null })).toEqual(['a.example', 'b.example'])
+  })
+})
+
+describe('phase 12: the GitHub Repository field (W12.9)', () => {
+  it.each([
+    [{ githubRepo: 'anthropics/review-kit#v1.2.0', githubRef: '' }, { githubRepo: 'anthropics/review-kit', githubRef: 'v1.2.0' }],
+    [{ githubRepo: 'anthropics/review-kit@main', githubRef: '' }, { githubRepo: 'anthropics/review-kit', githubRef: 'main' }],
+    [{ githubRepo: 'https://github.com/anthropics/review-kit/tree/dev', githubRef: '' }, { githubRepo: 'anthropics/review-kit', githubRef: 'dev' }],
+    [{ githubRepo: 'https://github.com/anthropics/review-kit', githubRef: 'v2' }, { githubRepo: 'anthropics/review-kit', githubRef: 'v2' }],
+    [{ githubRepo: ' anthropics/review-kit#main', githubRef: 'main' }, { githubRepo: 'anthropics/review-kit', githubRef: 'main' }],
+    // Nothing changes: already split, another ref typed (Inspect reports it), or not a GitHub repository.
+    [{ githubRepo: 'anthropics/review-kit', githubRef: 'main' }, null],
+    [{ githubRepo: 'anthropics/review-kit#v1', githubRef: 'v2' }, null],
+    [{ githubRepo: 'https://gitlab.com/acme/tools', githubRef: '' }, null],
+    [{ githubRepo: '', githubRef: '' }, null],
+  ])('splits %j', (draft, expected) => {
+    expect(splitGithubRepoField(draft)).toEqual(expected)
   })
 })

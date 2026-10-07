@@ -1,5 +1,7 @@
-// HookRow (docs/UI.md 9.13, 10.8, 13.12; W11.8-T3): the row's data attributes, event, matcher and command, the state
-// badges, the meta line, the problems of an invalid row, and the row menu per source (emitted once the menu has closed).
+// HookRow (docs/UI.md 9.13, 9.14, 10.8, 13.12, 13.13; W11.8-T3, W12.12-T2): the row's data attributes, event, matcher and
+// command, the state badges, the meta line, the problems of an invalid row, and the row menu per source (emitted once the
+// menu has closed); Phase 12: prompt rows, exec-form commands, the handler fields in the meta line, project Edit… and
+// Delete…, and Review plugin… for the hook of a harness plugin that waits for trust.
 import type { HookEntry } from '@harness-forge/shared'
 import type { VueWrapper } from '@vue/test-utils'
 import { flushPromises, mount } from '@vue/test-utils'
@@ -164,18 +166,9 @@ describe('hookRow', () => {
   })
 })
 
-describe('hookRow: Phase 12 (C46-T7)', () => {
-  it('offers Review plugin… for the hook of a plugin that is not trusted', async () => {
-    const pending = mountRow(hookEntry({ key: 'plugin:hook-pack:0', source: 'plugin', id: undefined, pluginId: 'hook-pack', state: 'pending' }))
-    await openMenu(pending.row())
-    expect(menuItems()).toEqual(['Review plugin…', 'Open plugin', 'Copy as JSON'])
-    await choose(document.body.querySelector<HTMLElement>('[data-action="trust-plugin"]'))
-    expect(pending.actions).toEqual(['trust-plugin'])
-  })
-
-  it('offers Edit… on a project row when the panel allows it, and marks prompt rows', async () => {
+describe('hookRow: Phase 12 (W12.12-T2)', () => {
+  function mountProjectRow(entry: HookEntry) {
     const actions: string[] = []
-    const entry = hookEntry({ source: 'project', id: undefined, state: 'pending', path: '.claude/settings.json', sha256: trustSha(1) })
     const Host = defineComponent({
       setup() {
         provide(HOOK_ROW_CONTEXT, { editProjectHooks: computed(() => true) })
@@ -183,15 +176,65 @@ describe('hookRow: Phase 12 (C46-T7)', () => {
       },
     })
     wrapper = mount(Host, { attachTo: document.body })
-    const row = document.body.querySelector<HTMLElement>(`[data-testid="${testIds.hookRow}"]`)!
-    await openMenu(row)
-    expect(menuItems()).toEqual(['Edit…', 'Review…', 'Copy to personal', 'Copy as JSON'])
-    await choose(byTestId(testIds.hookEdit))
-    expect(actions).toEqual(['edit'])
-    wrapper.unmount()
-    wrapper = null
+    return { actions, row: () => document.body.querySelector<HTMLElement>(`[data-testid="${testIds.hookRow}"]`)! }
+  }
 
-    const prompt = mountRow(hookEntry({ type: 'prompt', command: '', prompt: 'Did the tests pass?' }))
-    expect(prompt.row().dataset.kind).toBe('prompt')
+  it('offers Review plugin… for the hook of a harness plugin that is not trusted', async () => {
+    const pending = mountRow(hookEntry({ key: 'plugin:hook-pack:0', source: 'plugin', id: undefined, pluginId: 'hook-pack', state: 'pending' }))
+    expect(pending.row().dataset).toMatchObject({ source: 'plugin', state: 'pending' })
+    expect(pending.row().querySelector('[data-slot="hook-row-state"]')?.textContent?.trim()).toBe('Plugin not trusted')
+    await openMenu(pending.row())
+    expect(menuItems()).toEqual(['Review plugin…', 'Open plugin', 'Copy as JSON'])
+    await choose(document.body.querySelector<HTMLElement>('[data-action="trust-plugin"]'))
+    expect(pending.actions).toEqual(['trust-plugin'])
+  })
+
+  it('offers no Review plugin… for a Claude Code plugin (its page reviews it)', async () => {
+    usePluginsStore().items = [pluginSummary({ id: 'review-kit', name: 'review-kit', format: 'claude', state: 'untrusted' })]
+    const { row } = mountRow(hookEntry({ key: 'plugin:review-kit:0', source: 'plugin', id: undefined, pluginId: 'review-kit', state: 'pending' }))
+    expect(row().querySelector('[data-slot="hook-row-state"]')?.textContent?.trim()).toBe('Plugin not trusted')
+    await openMenu(row())
+    expect(menuItems()).toEqual(['Open plugin', 'Copy as JSON'])
+  })
+
+  it('offers Edit… and Delete… on a project row whose position is known', async () => {
+    const entry = hookEntry({ source: 'project', id: undefined, state: 'pending', path: '.claude/settings.json', sha256: trustSha(1), position: [0, 1] })
+    const { row, actions } = mountProjectRow(entry)
+    await openMenu(row())
+    expect(menuItems()).toEqual(['Edit…', 'Review…', 'Copy to personal', 'Copy as JSON', 'Delete…'])
+    await choose(byTestId(testIds.hookEdit))
+    await openMenu(row())
+    await choose(byTestId(testIds.hookDelete))
+    expect(actions).toEqual(['edit', 'delete'])
+  })
+
+  it('offers no Edit… without a known position or without the panel', async () => {
+    const noPosition = mountProjectRow(hookEntry({ source: 'project', id: undefined, state: 'pending', path: '.claude/settings.json', sha256: trustSha(1) }))
+    await openMenu(noPosition.row())
+    expect(menuItems()).toEqual(['Review…', 'Copy to personal', 'Copy as JSON'])
+    wrapper!.unmount()
+    document.body.replaceChildren()
+
+    const alone = mountRow(hookEntry({ source: 'project', id: undefined, state: 'pending', path: '.claude/settings.json', sha256: trustSha(1), position: [0, 0] }))
+    await openMenu(alone.row())
+    expect(menuItems()).toEqual(['Review…', 'Copy to personal', 'Copy as JSON'])
+  })
+
+  it('shows a prompt hook\'s first prompt line instead of a command', () => {
+    const prompt = 'Did the tests run and pass?\nAnswer ok or not ok with a reason.'
+    const { row } = mountRow(hookEntry({ event: 'Stop', matcher: null, type: 'prompt', command: '', prompt, model: 'haiku' }))
+    expect(row().dataset.kind).toBe('prompt')
+    expect(row().querySelector('[data-slot="hook-row-command"]')).toBeNull()
+    const line = row().querySelector<HTMLElement>('[data-slot="hook-row-prompt"]')!
+    expect(line.textContent).toBe('Did the tests run and pass?')
+    expect(line.title).toBe(prompt)
+    expect(row().querySelector('svg')?.classList.toString()).toContain('message-square-text')
+  })
+
+  it('shows an exec-form command with its arguments and the handler fields in the meta line', () => {
+    const { row } = mountRow(hookEntry({ event: 'PreToolUse', matcher: 'Bash', command: 'node', args: ['scripts/guard.js', 'two words'], async: true, if: 'Bash(git *)' }))
+    expect(row().querySelector('[data-slot="hook-row-command"]')?.textContent).toBe('node scripts/guard.js "two words"')
+    expect(row().textContent).toContain('In the background')
+    expect(row().textContent).toContain('Only when Bash(git *)')
   })
 })

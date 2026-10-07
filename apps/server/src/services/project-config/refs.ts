@@ -25,6 +25,7 @@ import { join } from 'node:path'
 import { extractArgsFileRefs, extractCommandFileRefs, isHarnessError, TRUST_LIMITS, trustHashInput } from '@harness-forge/shared'
 import { openWorkspaceFile, resolveWorkspacePath } from '../../workspace/paths.ts'
 import { isSecretLookingPath } from '../../workspace/sensitive.ts'
+import { hashItemArgs, hookItemRefPaths } from './hook-items.ts'
 
 /** The opener of project files (`openWorkspaceFile`; a test seam). */
 export type OpenProjectFile = (root: string, rel: string) => Promise<OpenedWorkspaceFile>
@@ -217,8 +218,9 @@ export async function commandTrustSubject(root: string, name: string, spans: rea
 export function refPathsOf(hashItem: TrustHashItem): string[] {
   switch (hashItem.kind) {
     case 'hook':
-      // A prompt hook (Phase 12) has no command and names no file.
-      return hashItem.command === null ? [] : hookRefPaths(hashItem.command)
+      // A prompt hook (Phase 12) has no command and names no file; an exec-form hook also names the files of its
+      // arguments (`extra.args`), exactly as the reader hashed them.
+      return hashItem.command === null ? [] : hookItemRefPaths(hashItem.command, hashItemArgs(hashItem))
     case 'mcp':
       return mcpRefPaths(hashItem.server)
     case 'command':

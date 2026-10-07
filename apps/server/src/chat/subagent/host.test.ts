@@ -37,13 +37,18 @@ describe('the child spec (Phase 12)', () => {
     expect(childMaxSteps(0, DEFAULT_CHILD_SPEC)).toBe(1)
   })
 
-  it('childSpec (the C44 stub W12.6 implements) answers the default spec; an aborted signal rejects', async () => {
+  it('childSpec (W12.6): a builtin keeps the default spec; a definition sets maxTurns and disallowedTools; an aborted signal rejects', async () => {
     const choice = { name: 'general', base: 'general' as const, entry: null, agent: { source: 'builtin' as const, description: 'General.' } }
+    const session = { ctx: { logger: createSilentLogger(), deps: { customizations: createFakeCustomizationService() } } } as unknown as RunSession
     const definition = { name: 'reviewer', description: 'Reviews.', tools: null, model: null, instructions: 'Review.', maxTurns: 2, skills: ['pdf'], disallowedTools: ['shell'] }
-    expect(await childSpec({} as RunSession, choice, definition, new AbortController().signal)).toBe(DEFAULT_CHILD_SPEC)
+    expect(await childSpec(session, choice, null, new AbortController().signal)).toBe(DEFAULT_CHILD_SPEC)
+    // Without the run's catalog no skill is preloaded.
+    expect(await childSpec(session, choice, definition, new AbortController().signal)).toEqual({ maxTurns: 2, skillsText: null, disallowedTools: ['shell'] })
+    const plain = { name: 'plain', description: 'Plain.', tools: null, model: null, instructions: 'Work.' }
+    expect(await childSpec(session, choice, plain, new AbortController().signal)).toBe(DEFAULT_CHILD_SPEC)
     const controller = new AbortController()
     controller.abort(new DOMException('stopped', 'AbortError'))
-    await expect(childSpec({} as RunSession, choice, null, controller.signal)).rejects.toMatchObject({ name: 'AbortError' })
+    await expect(childSpec(session, choice, null, controller.signal)).rejects.toMatchObject({ name: 'AbortError' })
   })
 
   it('childFirstMessage: the prompt alone, or the prompt then the SubagentStart context', () => {

@@ -182,7 +182,7 @@ describe('registry.hookCommands (plugin API 1.5.0)', () => {
     expect(registry.contributions('acme').commandHooks).toBe(3)
   })
 
-  it('keeps diagnostics: unknown events, prompt handlers and invalid matchers never run and are not counted', () => {
+  it('keeps diagnostics: unknown events and invalid matchers never run and are not counted; prompt handlers are prompts (1.6.0)', () => {
     const { registry } = harness()
     const hooks = {
       PreToolUse: [
@@ -194,7 +194,9 @@ describe('registry.hookCommands (plugin API 1.5.0)', () => {
     registry.hookCommands.register('acme', { root: ROOT, hooks })
     const entry = registry.hookCommands.get('acme')!
     expect(entry.hooks.map(spec => spec.command)).toEqual(['sh guard.sh'])
-    expect(entry.diagnostics.map(diagnostic => diagnostic.code).sort()).toEqual(['ignored-field', 'invalid-matcher', 'unknown-event', 'unsupported-type'])
+    // Plugin API 1.6.0 (ADR-057): the prompt handler is read as a prompt hook (no `unsupported-type` any more).
+    expect(entry.prompts.map(spec => [spec.event, spec.matcher, spec.prompt])).toEqual([['PreToolUse', 'Bash', 'Is this safe?']])
+    expect(entry.diagnostics.map(diagnostic => diagnostic.code).sort()).toEqual(['ignored-field', 'invalid-matcher', 'unknown-event'])
     // Diagnostics never quote a command.
     expect(JSON.stringify(entry.diagnostics)).not.toContain('never.sh')
     expect(registry.contributions('acme').commandHooks).toBe(1)

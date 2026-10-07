@@ -19,5 +19,5 @@ export { kindListener } from './definitions.ts'
 export type PluginAgentRegistry = AgentRegistry & Pick<DefinitionRegistry<AgentDefinition>, 'removeOwner'>
 
 export function createAgentRegistry(core: DefinitionRegistryCore): PluginAgentRegistry {
-  return createDefinitionRegistry<AgentDefinition>(core, { kind: 'agent', label: 'agent', validate: validateAgentDefinition })
+  return createDefinitionRegistry<AgentDefinition>(core, { kind: 'agent', label: 'agent', validate: (definition, pluginId) => validateAgentDefinition(definition, pluginId) })
 }

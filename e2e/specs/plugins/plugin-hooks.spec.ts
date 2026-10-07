@@ -96,7 +96,10 @@ test.describe('plugin hooks @plugins', () => {
     await page.goto('/settings/customize?tab=hooks')
     await expect(page.getByTestId(testIds.hooksPanel)).toBeVisible()
     await expect(byTestId(page, testIds.hooksSection, { 'data-source': 'personal' })).toBeVisible()
-    await expect(hookRow(page, { 'data-plugin-id': PLUGIN_ID })).toHaveCount(0)
+    // Phase 12 (Phase 11 leftover): an untrusted plugin's command hook is listed as a pending "Plugin not trusted" row.
+    await expect(hookRow(page, { 'data-plugin-id': PLUGIN_ID })).toHaveCount(1)
+    await expect(hookRow(page, { 'data-plugin-id': PLUGIN_ID })).toHaveAttribute('data-state', 'pending')
+    await expect(hookRow(page, { 'data-plugin-id': PLUGIN_ID })).toContainText('Plugin not trusted')
 
     // The detail page: the warning lists the command; "Review and trust" trusts it.
     await page.goto(`/plugins/${PLUGIN_ID}`)

@@ -128,3 +128,18 @@ describe('commandBadge', () => {
     expect(wrapper.get('[data-slot="command-badge"]').text()).toContain(', Built-in command')
   })
 })
+
+describe('commandBadge: qualified names (Phase 12, W12.13-T4)', () => {
+  it('shows a qualified plugin command as typed and names its plugin from the name', () => {
+    usePluginsStore().items = [pluginSummary({ id: 'review-kit', name: 'Review kit' })]
+    const wrapper = badge(invocation({ name: 'review-kit:db:migrate', source: 'plugin' }))
+    const root = wrapper.get('[data-slot="command-badge"]')
+    expect(root.text()).toContain('/review-kit:db:migrate')
+    expect(root.text()).toContain(', From Review kit')
+    wrapper.unmount()
+
+    // A plugin that is gone: its id.
+    const gone = badge(invocation({ name: 'old-kit:review', source: 'plugin' }))
+    expect(gone.get('[data-slot="command-badge"]').text()).toContain(', From old-kit')
+  })
+})

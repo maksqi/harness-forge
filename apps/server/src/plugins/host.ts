@@ -17,6 +17,14 @@
 // active and trusted; disable, reload, uninstall and safe mode remove them. The pin still covers `plugin.json` only:
 // a script that a hook calls is not pinned.
 //
+// Plugin API 1.6.0 (ADR-053; W12.1-T6): a plugin row has a format. `claude` plugins (Claude Code's own layout, read in
+// place by `plugins/claude/reader.ts` through `formats.ts`) get a synthesized manifest (no `contributes`), the
+// whole-tree trust hash (`hf-claude-plugin/v1`, the marketplace overlay of their origin included) and their
+// contributions registered by `registerClaudeContributions` instead of the declarative adapter; `runsCode` and the
+// trust requirement come from the read (a command hook, a stdio MCP server or a `!` span), they are never `editable`,
+// saving their settings reloads them (the variables are substituted again), and a folder placed by hand is detected by
+// its layout (`detectFolderFormat`). The detail carries the origin (without the entry overlay) and the Claude Code info.
+//
 // Robustness: operations on one plugin are serialized; a failing plugin ends in `error` / `incompatible` /
 // `untrusted` and never breaks `start()` or other plugins; the boot sentinel (`plugins.loading_since`) skips a plugin
 // that crashed the process while loading; disposal runs `dispose()` (5 s), unregisters every contribution and aborts
@@ -28,6 +36,8 @@ import type {
   LogLevel,
   PluginContributions,
   PluginDetail,
+  PluginFormat,
+  PluginOrigin,
   PluginSettingsView,
   PluginState,
   PluginSummary,
@@ -35,7 +45,9 @@ import type {
   SecretState,
 } from '@harness-forge/shared'
 import type { AppDeps } from '../types.ts'
+import type { ClaudePluginRead } from './claude/types.ts'
 import type { PluginRuntime } from './context.ts'
+import type { FormatRead } from './formats.ts'
 import type { GuardServices } from './guard.ts'
 import type { PluginDirectoryRead } from './loader.ts'
 import type {
@@ -64,24 +76,24 @@ import {
   settingsPropertyValueSchema,
   validationError,
 } from '@harness-forge/shared'
-import { notImplementedError } from '../not-implemented.ts'
 import { appVersion, serverPackageRoot } from '../paths.ts'
 import { comparePluginIds, isBuiltinPluginId } from '../registry/order.ts'
+import { registerClaudeContributions } from './claude/register.ts'
+import { clearTreeHashCache } from './claude/tree-hash.ts'
 import { compileEntry } from './compile.ts'
 import { createPluginRuntime } from './context.ts'
 import { createDeclarativeProvider, registerDeclaredContributions } from './declarative.ts'
+import { claudeContributions, detectFolderFormat, inspectDirectoryFor, readPluginDirectoryFor } from './formats.ts'
 import { asPluginError, createPluginLogStore, GUARD_TIMEOUTS, guardCall, pluginError, thrownMessage } from './guard.ts'
 import {
   declaredContributions,
   ICON_CONTENT_TYPES,
   ICON_MAX_BYTES,
   importEntry,
-  inspectPluginDirectory,
   isInside,
   manifestKind,
   pathPin,
   pluginModuleOf,
-  readPluginDirectory,
   resolveInside,
   sha256Hex,
   synthesizeManifest,
@@ -113,6 +125,10 @@ interface PluginEntry {
   dir: string | null
   /** Last validation of the directory (user plugins). */
   read: PluginDirectoryRead | null
+  /** Phase 12: the format of the last read (`harness` for builtins). */
+  format: PluginFormat
+  /** Phase 12: the Claude Code part of the last read (`claude` plugins), else null. */
+  claude: ClaudePluginRead | null
   /** Manifest of the DTOs: the builtin manifest, the plugin's valid manifest, or a synthesized one. */
   manifest: PluginManifest
   /** `manifest` is the plugin's own valid manifest (always true for builtins). */
@@ -272,7 +288,21 @@ export function createPluginHost(deps: AppDeps, options: PluginHostOptions = {})
   function contributionsOf(entry: PluginEntry): PluginContributions {
     if (entry.runtime !== null)
       return deps.registry.contributions(entry.id)
+    if (entry.claude !== null)
+      return claudeContributions(entry.claude)
     return declaredContributions(entry.valid && entry.builtin === null ? entry.manifest : null)
+  }
+
+  /** The DTO origin of a row (the stored marketplace entry overlay left out). */
+  function originOf(record: PluginRecord | null): PluginOrigin | null {
+    const origin = record?.origin ?? null
+    if (origin === null)
+      return null
+    if (origin.kind === 'marketplace') {
+      const { overlay: _overlay, ...rest } = origin
+      return rest
+    }
+    return origin
   }
 
   function isPinned(record: PluginRecord | null, read: PluginDirectoryRead | null): boolean {
@@ -307,8 +337,7 @@ export function createPluginHost(deps: AppDeps, options: PluginHostOptions = {})
       description: entry.manifest.description ?? null,
       icon: iconRefOf(entry),
       kind,
-      // Phase 12 (C40 compile fix): every plugin is a harness plugin until the Claude Code format lands (W12.1).
-      format: 'harness',
+      format: entry.format,
       source: entry.record?.source ?? (builtin ? 'builtin' : 'copy'),
       sourceRef: entry.record?.sourceRef ?? null,
       builtin,
@@ -316,8 +345,8 @@ export function createPluginHost(deps: AppDeps, options: PluginHostOptions = {})
       enabled: entry.record?.enabled ?? true,
       state: entry.state,
       // A declarative plugin runs commands exactly when it requires trust: a stdio MCP server or (plugin API 1.5.0)
-      // command hooks or `!` spans in a command template.
-      runsCode: !builtin && (kind === 'code' || (entry.valid && manifestRequiresTrust(entry.manifest))),
+      // command hooks or `!` spans in a command template; a Claude Code plugin (1.6.0) when its read requires trust.
+      runsCode: !builtin && (kind === 'code' || (entry.valid && (entry.claude !== null ? entry.claude.requiresTrust : manifestRequiresTrust(entry.manifest)))),
       contributions: contributionsOf(entry),
       lastError: entry.lastError,
       installedAt: entry.record?.installedAt ?? now,
@@ -331,11 +360,11 @@ export function createPluginHost(deps: AppDeps, options: PluginHostOptions = {})
       ...summary,
       manifest: entry.manifest,
       trust: trustOf(entry),
-      editable: !summary.builtin && (summary.source === 'created' || summary.source === 'copy' || summary.source === 'link'),
+      // Phase 12: Claude Code plugins are not edited in the plugin editor (v1.8).
+      editable: !summary.builtin && entry.format !== 'claude' && (summary.source === 'created' || summary.source === 'copy' || summary.source === 'link'),
       hasSettings: entry.valid && entry.manifest.settings !== undefined,
-      // Phase 12 (C40 compile fix): no origin or Claude Code plugin info until W12.1 / W12.2 fill them.
-      origin: null,
-      claude: null,
+      origin: originOf(entry.record),
+      claude: entry.claude?.info ?? null,
     }
   }
 
@@ -563,7 +592,12 @@ export function createPluginHost(deps: AppDeps, options: PluginHostOptions = {})
     entry.runtime = runtime
     try {
       // Plugin API 1.5.0: the command hooks of the manifest go through the runtime (no `ctx` API), owned like the rest.
-      await guard(id, () => registerDeclaredContributions(runtime.ctx, manifest, runtime), { timeoutMs: GUARD_TIMEOUTS.setup, phase: 'load', label: 'contributions' })
+      // Plugin API 1.6.0: a Claude Code plugin registers what its reader found instead (no `contributes`).
+      const claude = entry.format === 'claude' ? entry.claude : null
+      if (claude !== null)
+        await guard(id, () => registerClaudeContributions(runtime.ctx, claude, runtime), { timeoutMs: GUARD_TIMEOUTS.setup, phase: 'load', label: 'contributions' })
+      else
+        await guard(id, () => registerDeclaredContributions(runtime.ctx, manifest, runtime), { timeoutMs: GUARD_TIMEOUTS.setup, phase: 'load', label: 'contributions' })
       let module: LoadedModule | null = entry.builtin ? entry.builtin.module as LoadedModule : null
       const deadline = Date.now() + GUARD_TIMEOUTS.setup
       if (!module && outputFile !== null) {
@@ -629,7 +663,10 @@ export function createPluginHost(deps: AppDeps, options: PluginHostOptions = {})
       entry.record = record
   }
 
-  function applyRead(entry: PluginEntry, read: PluginDirectoryRead): void {
+  function applyRead(entry: PluginEntry, formatRead: FormatRead): void {
+    const read = formatRead.directory
+    entry.format = formatRead.format
+    entry.claude = formatRead.claude
     entry.read = read
     entry.dir = read.dir
     entry.fingerprint = fingerprintOf(read)
@@ -652,6 +689,34 @@ export function createPluginHost(deps: AppDeps, options: PluginHostOptions = {})
     if (record?.source === 'link' && record.sourceRef)
       return record.sourceRef
     return join(deps.env.paths.plugins, id)
+  }
+
+  /** The raw version a Claude Code plugin without one reads as: the 12-character commit or archive sha of its origin. */
+  function versionHintOf(record: PluginRecord | null): string | undefined {
+    const origin = record?.origin ?? null
+    if (origin === null)
+      return undefined
+    if (origin.kind === 'github')
+      return origin.commit.slice(0, 12)
+    return origin.commit?.slice(0, 12) ?? origin.archiveSha256?.slice(0, 12)
+  }
+
+  /**
+   * Reads a user plugin's folder with the reader of its format: the row's format, else (a folder placed by hand) the
+   * detected layout, else `harness`. A Claude Code plugin is read with its origin's overlay and version hint.
+   */
+  async function readUserPlugin(id: string, record: PluginRecord | null): Promise<FormatRead> {
+    const dir = pluginDirOf(id, record)
+    const format = record?.format ?? await detectFolderFormat(dir) ?? 'harness'
+    const overlay = record?.origin?.kind === 'marketplace' ? record.origin.overlay : undefined
+    const versionHint = versionHintOf(record)
+    return readPluginDirectoryFor(format, dir, {
+      expectedId: id,
+      nameHint: id,
+      ...(overlay === undefined ? {} : { overlay }),
+      ...(versionHint === undefined ? {} : { versionHint }),
+      linked: record?.source === 'link',
+    })
   }
 
   function shouldWatch(entry: PluginEntry): boolean {
@@ -706,11 +771,12 @@ export function createPluginHost(deps: AppDeps, options: PluginHostOptions = {})
   async function loadUserLocked(entry: PluginEntry, options: LoadOptions = {}): Promise<void> {
     const id = entry.id
     let record = await refreshRecord(entry)
-    const read = await readPluginDirectory(pluginDirOf(id, record), { expectedId: id })
-    applyRead(entry, read)
+    const formatRead = await readUserPlugin(id, record)
+    const read = formatRead.directory
+    applyRead(entry, formatRead)
     if (record === null && read.dir !== null) {
-      // A folder placed in data/plugins by hand: remember it like a copied folder.
-      record = await records.upsert({ id, source: 'copy', sourceRef: null, version: read.manifest?.version ?? read.lenient.version ?? '0.0.0' })
+      // A folder placed in data/plugins by hand: remember it like a copied folder (Phase 12: in the format it has).
+      record = await records.upsert({ id, source: 'copy', sourceRef: null, version: read.manifest?.version ?? read.lenient.version ?? '0.0.0', format: formatRead.format })
       entry.record = record
     }
     else if (record !== null && read.manifest && record.version !== read.manifest.version) {
@@ -825,6 +891,8 @@ export function createPluginHost(deps: AppDeps, options: PluginHostOptions = {})
       record: null,
       dir: null,
       read: null,
+      format: 'harness',
+      claude: null,
       manifest: builtin ? builtin.manifest : synthesizeManifest(id, {}),
       valid: builtin !== null,
       state: 'loading',
@@ -902,7 +970,7 @@ export function createPluginHost(deps: AppDeps, options: PluginHostOptions = {})
       await withLock(id, async () => {
         if (stopped || entries.get(id) !== entry)
           return
-        const read = await readPluginDirectory(pluginDirOf(id, entry.record), { expectedId: id })
+        const read = (await readUserPlugin(id, entry.record)).directory
         if (fingerprintOf(read) === entry.fingerprint)
           return
         log(id, 'info', 'Files changed on disk: reloading.')
@@ -1043,6 +1111,7 @@ export function createPluginHost(deps: AppDeps, options: PluginHostOptions = {})
         return
       stopped = true
       watcher.close()
+      clearTreeHashCache()
       process.off('unhandledRejection', onUnhandledRejection)
       registrySubscription?.dispose()
       const loaded = [...entries.values()].sort((a, b) => comparePluginIds(b.id, a.id))
@@ -1153,8 +1222,9 @@ export function createPluginHost(deps: AppDeps, options: PluginHostOptions = {})
       if (entry.builtin)
         throw forbidden('Builtin plugins are always trusted.')
       const record = await refreshRecord(entry)
-      const read = await readPluginDirectory(pluginDirOf(id, record), { expectedId: id })
-      applyRead(entry, read)
+      const formatRead = await readUserPlugin(id, record)
+      const read = formatRead.directory
+      applyRead(entry, formatRead)
       if (read.hash === null || read.dir === null)
         throw new HarnessError({ code: 'validation_error', message: 'The plugin files cannot be read, so they cannot be trusted.' })
       if (read.hash !== sha256) {
@@ -1212,6 +1282,12 @@ export function createPluginHost(deps: AppDeps, options: PluginHostOptions = {})
       }
       await writeSettingsValues(deps.db, id, next)
       const runtime = entry.runtime
+      if (runtime && entry.format === 'claude') {
+        // Phase 12: a Claude Code plugin substitutes its options when it loads (bodies, MCP servers, hooks): reload it.
+        log(id, 'info', 'Settings saved: reloading.')
+        await trackContributions(id, () => loadLocked(entry))
+        return settingsView(entry)
+      }
       if (runtime) {
         await runtime.updateSettings(await fullSettings(id, schema), async (callback, current) => {
           await guard(id, () => callback(current), { timeoutMs: GUARD_TIMEOUTS.hook, phase: 'hook', label: 'settings.onChange' }).catch(() => {})
@@ -1256,12 +1332,8 @@ export function createPluginHost(deps: AppDeps, options: PluginHostOptions = {})
     guard,
     log,
 
-    // Phase 12 (C43 compile fix): the options are accepted; the Claude Code reader lands with W12.1.
-    inspectDirectory: async (dir, options) => {
-      if (options?.format === 'claude')
-        throw notImplementedError('Reading a Claude Code plugin')
-      return inspectPluginDirectory(dir)
-    },
+    // Phase 12 (ADR-053): `format: 'claude'` reads a Claude Code plugin (`formats.ts`, `plugins/claude/reader.ts`).
+    inspectDirectory: async (dir, options) => inspectDirectoryFor(dir, options),
 
     saveRecord: async (input) => {
       if (!PLUGIN_ID_PATTERN.test(input.id))
@@ -1322,7 +1394,10 @@ export function createPluginHost(deps: AppDeps, options: PluginHostOptions = {})
       if (entry.builtin)
         throw forbidden('Builtin plugins cannot be built.')
       const record = await refreshRecord(entry)
-      const read = await readPluginDirectory(pluginDirOf(id, record), { expectedId: id })
+      const formatRead = await readUserPlugin(id, record)
+      if (formatRead.format === 'claude')
+        throw forbidden('Claude Code plugins have no code to build.')
+      const read = formatRead.directory
       if (read.manifest === null) {
         const message = read.problem?.error.message ?? 'The manifest is invalid.'
         const result: PluginCompileResult = {
@@ -1350,7 +1425,7 @@ export function createPluginHost(deps: AppDeps, options: PluginHostOptions = {})
         const entry = entries.get(id)
         if (entry && entry.builtin === null) {
           try {
-            const read = await readPluginDirectory(pluginDirOf(id, entry.record), { expectedId: id })
+            const read = (await readUserPlugin(id, entry.record)).directory
             entry.fingerprint = fingerprintOf(read)
           }
           catch {}
@@ -1367,7 +1442,7 @@ export function createPluginHost(deps: AppDeps, options: PluginHostOptions = {})
         return detailOf(entry)
       const before = JSON.stringify(detailOf(entry))
       const record = await refreshRecord(entry)
-      const read = await readPluginDirectory(pluginDirOf(id, record), { expectedId: id })
+      const read = await readUserPlugin(id, record)
       // The fingerprint keeps describing the files the host saw (loaded, or written through `withoutWatch`), so a
       // change made on disk in the meantime still hot-reloads.
       const fingerprint = entry.fingerprint

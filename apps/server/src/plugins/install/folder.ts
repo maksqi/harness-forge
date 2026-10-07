@@ -107,7 +107,7 @@ async function readFileNoFollow(path: string, shown: string, size: number): Prom
 
 /**
  * Reads a folder for a `copy` install: every entry is admitted by `collector` (names, count, size, conflicts) and the
- * files are loaded into memory. `plugin.json` must be at the root of the folder.
+ * files are loaded into memory with their owner exec bit (Phase 12). The caller checks the plugin layout.
  */
 export async function readFolder(root: string, collector: EntryCollector): Promise<ArchiveEntry[]> {
   const entries: ArchiveEntry[] = []
@@ -132,8 +132,11 @@ export async function readFolder(root: string, collector: EntryCollector): Promi
       if (!info.isFile())
         throw invalid(`The folder contains a special file: ${quoteName(shown)}.`, ['path'])
       const admitted = collector.admit(shown, 'file', info.size)
-      if (admitted !== null)
-        entries.push({ path: admitted, type: 'file', data: await readFileNoFollow(path, shown, info.size) })
+      if (admitted !== null) {
+        // Phase 12: the owner exec bit (kept only for the Claude Code format).
+        const executable = (info.mode & 0o100) !== 0
+        entries.push({ path: admitted, type: 'file', data: await readFileNoFollow(path, shown, info.size), ...(executable ? { executable: true } : {}) })
+      }
     }
   }
   await walk(root, '')

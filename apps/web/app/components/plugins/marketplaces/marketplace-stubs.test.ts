@@ -1,5 +1,6 @@
-// The P12-0b stubs of the Marketplaces page (Phase 12, ADR-054; docs/UI.md 8.13, 10.9; C46-T2 / T3): one mount per
-// component (root test id, props accepted, emits), the route of the page (static over `[id].vue`) and the reserved id.
+// The frozen contracts of the Marketplaces components (Phase 12, ADR-054; docs/UI.md 8.13, 10.9; C46-T2 / T3, kept by
+// W12.8): one mount per component (root test id, props accepted, emits), the route of the page (static over `[id].vue`)
+// and the reserved id. The behavior lives in the per-component tests.
 import type { MockApi } from '~/utils/testing/mock-api'
 import { isReservedPluginId } from '@harness-forge/shared'
 import { createPinia, disposePinia, setActivePinia } from 'pinia'
@@ -29,6 +30,12 @@ import MarketplacesView from './MarketplacesView.vue'
 const mock = vi.hoisted(() => ({ api: null as unknown }))
 vi.mock('~/composables/useApi', () => ({ useApi: () => mock.api }))
 vi.mock('vue-sonner', () => ({ toast: Object.assign(vi.fn(), { success: vi.fn(), error: vi.fn() }) }))
+vi.mock('./nuxt-imports', () => ({
+  useRoute: () => ({ path: '/plugins/marketplaces', fullPath: '/plugins/marketplaces', query: {} }),
+  useRouter: () => ({ replace: vi.fn(async () => {}) }),
+  navigateTo: vi.fn(),
+  useHead: vi.fn(),
+}))
 
 let api: MockApi
 let pinia: ReturnType<typeof createPinia>
@@ -55,7 +62,7 @@ function render(component: object, props: Record<string, unknown> = {}) {
   return wrapper
 }
 
-describe('marketplace stubs (P12-0b)', () => {
+describe('marketplace component contracts (P12-0b)', () => {
   it('marketplacesView renders its root, loads the list and lists the loaded entries', async () => {
     api.marketplaces.list.mockResolvedValue(marketplaceList())
     render(MarketplacesView)

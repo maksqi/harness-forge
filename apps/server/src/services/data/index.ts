@@ -8,7 +8,8 @@
 //   share links and background task rows) through `ChatsService`, optionally the usage rows and every uploaded file,
 //   then stops any run or task whose chat appeared meanwhile. Settings, providers, credentials, plugins, MCP servers and
 //   the personal customizations stay; Phase 11: so do the personal hooks, the project approvals (`project_trust`) and
-//   the project MCP variables (configuration, like projects).
+//   the project MCP variables (configuration, like projects); Phase 12: so do the marketplaces and the Claude Code
+//   plugins (configuration as well).
 // - Imports and delete-all run under the maintenance lock (Phase 7, C16-T1: `deps.maintenance.exclusive('import' |
 //   'delete-all', ...)`, shared with the key rotation and the file cleanup; it replaced the private mutex): while
 //   another maintenance operation runs they fail at once with `409 conflict` (`reason: 'busy'`). Summaries and exports

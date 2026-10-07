@@ -6,8 +6,9 @@
 // incompatible -> badge with the reason; loading -> spinner; disabled -> dimmed. Presentational: the parent runs
 // the actions.
 // Phase 12 (ADR-054; C46 declares the prop, W12.9 owns the badge in P12-A): `update` (from
-// `useMarketplacesStore().updateOf(id)`, passed by PluginGrid) shows the badge `plugin-update-available` (`data-version`:
-// the offered version, '' for a newer commit).
+// `useMarketplacesStore().updateOf(id)`, passed by PluginGrid) shows the badge `plugin-update-available` after the version
+// ("Update {version}", "Update available" for a newer commit; `data-version`: the offered version, '' for a commit); a
+// Claude Code plugin (`format: 'claude'`, ADR-053) gets the "Claude Code" badge after its source badge.
 import type { PluginSummary, PluginUpdate } from '@harness-forge/shared'
 import { CircleAlertIcon, CircleArrowUpIcon, ShieldAlertIcon } from '@lucide/vue'
 import { computed } from 'vue'
@@ -19,6 +20,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { cn } from '@/lib/utils'
 import { testIds } from '~/utils/testids'
 import { contributionsSummary, pluginDetailRoute } from './plugin-display'
+import PluginFormatBadge from './PluginFormatBadge.vue'
 import PluginIcon from './PluginIcon.vue'
 import PluginRunsCodeBadge from './PluginRunsCodeBadge.vue'
 import PluginSourceBadge from './PluginSourceBadge.vue'
@@ -73,9 +75,21 @@ const ABOVE_LINK = 'relative z-10'
           </h3>
           <Spinner v-if="plugin.state === 'loading'" class="size-3.5 shrink-0 text-muted-foreground" />
         </div>
-        <p class="truncate font-mono text-xs leading-4 text-muted-foreground">
-          v{{ plugin.version }}
-        </p>
+        <div class="flex min-w-0 items-center gap-1.5">
+          <p class="truncate font-mono text-xs leading-4 text-muted-foreground">
+            v{{ plugin.version }}
+          </p>
+          <Badge
+            v-if="update"
+            variant="outline"
+            :data-testid="testIds.pluginUpdateAvailable"
+            :data-version="update.availableVersion ?? ''"
+            class="h-4 shrink-0 rounded-md border-transparent bg-info/15 px-1 text-[11px] text-foreground dark:text-info"
+          >
+            <CircleArrowUpIcon aria-hidden="true" data-icon="inline-start" class="text-info" />
+            {{ update.availableVersion ? `Update ${update.availableVersion}` : 'Update available' }}
+          </Badge>
+        </div>
       </div>
       <Switch
         size="sm"
@@ -108,6 +122,7 @@ const ABOVE_LINK = 'relative z-10'
 
     <div class="mt-auto flex min-w-0 flex-wrap items-center gap-1.5">
       <PluginSourceBadge :plugin="plugin" />
+      <PluginFormatBadge :format="plugin.format" />
       <PluginRunsCodeBadge v-if="plugin.runsCode" />
       <Badge
         v-if="plugin.state === 'untrusted'"
@@ -116,16 +131,6 @@ const ABOVE_LINK = 'relative z-10'
       >
         <ShieldAlertIcon aria-hidden="true" data-icon="inline-start" class="text-warning" />
         Untrusted
-      </Badge>
-      <Badge
-        v-if="update"
-        variant="outline"
-        :data-testid="testIds.pluginUpdateAvailable"
-        :data-version="update.availableVersion ?? ''"
-        class="rounded-md border-transparent bg-info/15 px-1.5 text-foreground dark:text-info"
-      >
-        <CircleArrowUpIcon aria-hidden="true" data-icon="inline-start" class="text-info" />
-        {{ update.availableVersion ? `Update to ${update.availableVersion}` : 'Update available' }}
       </Badge>
       <Tooltip v-if="plugin.state === 'incompatible'">
         <TooltipTrigger as-child>

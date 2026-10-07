@@ -475,3 +475,34 @@ describe('shareToolRow: custom agents, background calls and skills (Phase 10)', 
     expect(byTestId(testIds.shareToolRowOutput)!.querySelector('[data-slot="skill-body"]')).toBeNull()
   })
 })
+
+describe('shareToolRow: qualified names and skill files (Phase 12, W12.13-T5)', () => {
+  it('keeps the qualified name of a Claude Code plugin agent', () => {
+    mountRow({ type: 'tool', toolName: 'task', status: 'done', input: taskInput({ type: 'review-kit:code-reviewer', description: 'Review the diff' }), output: taskOutput({ type: 'review-kit:code-reviewer' }) })
+    const row = byTestId(testIds.shareToolRow)!
+    expect(row.textContent).toContain('review-kit:code-reviewer')
+    expect(row.querySelector('.lucide-bot-message-square')).not.toBeNull()
+  })
+
+  it('keeps the qualified name of a plugin skill and shows the supporting file it read', async () => {
+    const output = skillOutput({
+      name: 'review-kit:pdf',
+      source: 'plugin',
+      content: '',
+      baseDir: undefined,
+      files: ['scripts/fill.sh'],
+      fileAccess: 'skill',
+      file: { path: 'scripts/fill.sh', content: '#!/bin/sh\necho fill', truncated: false },
+    })
+    mountRow({ type: 'tool', toolName: 'skill', status: 'done', input: { name: 'review-kit:pdf', file: 'scripts/fill.sh' }, output })
+    const row = byTestId(testIds.shareToolRow)!
+    expect(row.textContent).toContain('Loaded skill')
+    expect(row.textContent).toContain('review-kit:pdf')
+    row.querySelector('button')!.click()
+    await settle()
+    const body = byTestId(testIds.shareToolRowOutput)!.querySelector<HTMLElement>('[data-slot="skill-body"]')!
+    expect(body.dataset.mode).toBe('file')
+    expect(body.querySelector('[data-slot="skill-file-path"]')?.textContent?.trim()).toBe('scripts/fill.sh')
+    expect(body.querySelector('[data-slot="skill-file-content"]')?.textContent).toBe('#!/bin/sh\necho fill')
+  })
+})

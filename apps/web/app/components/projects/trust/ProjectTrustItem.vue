@@ -8,8 +8,12 @@
 // (timeout, referenced files, environment / header names, the variables with their state from the project's MCP list,
 // `variables`) and the warnings. Never shows a value of an environment variable, a header or a variable. Store-free.
 // Props, emits and the root test id are frozen from Gate P11-0b (C39); W11.9.
+// Phase 12 (ADR-057, docs/UI.md 7.34; W12.13): a prompt hook (trust item v2, `data-type="prompt"`, `MessageSquareText`
+// before its title) shows its prompt in the `pre` named "Prompt" ("Copy prompt"), then "Model: {model}" ("Model: Hook
+// model" without one), "Continue on block" and the timeout; every hook also lists its handler fields ("Only when
+// {rule}", "In the background"), and an exec-form hook (`args`) shows each word single-quoted, as the shell runs it.
 import type { ProjectMcpList, TrustItem } from '@harness-forge/shared'
-import { ShieldAlertIcon, ShieldCheckIcon, ShieldQuestionMarkIcon } from '@lucide/vue'
+import { MessageSquareTextIcon, ShieldAlertIcon, ShieldCheckIcon, ShieldQuestionMarkIcon } from '@lucide/vue'
 import { computed, useId } from 'vue'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -18,12 +22,14 @@ import CopyButton from '~/components/common/CopyButton.vue'
 import McpTransportBadge from '~/components/plugins/mcp/McpTransportBadge.vue'
 import { testIds } from '~/utils/testids'
 import {
+  isPromptHookItem,
   trustCommandText,
   trustItemDetails,
   trustItemName,
   trustItemState,
   trustItemTitle,
   trustStateText,
+  trustTextLabel,
   trustWarningText,
 } from './project-trust'
 
@@ -45,6 +51,9 @@ const stateText = computed(() => trustStateText(props.item))
 const command = computed(() => trustCommandText(props.item))
 const details = computed(() => trustItemDetails(props.item, props.variables))
 const transport = computed(() => (props.item.kind === 'mcp' ? props.item.detail.transport : null))
+/** + Phase 12: "Prompt" for a prompt hook, else "Command" (the `pre` and its copy button). */
+const textLabel = computed(() => trustTextLabel(props.item))
+const promptHook = computed(() => isPromptHookItem(props.item))
 
 function onChecked(value: boolean | 'indeterminate'): void {
   if ((value === true) !== props.selected)
@@ -58,6 +67,7 @@ function onChecked(value: boolean | 'indeterminate'): void {
     :data-kind="item.kind"
     :data-state="state"
     :data-key="item.sha256"
+    :data-type="item.kind === 'hook' ? (promptHook ? 'prompt' : 'command') : undefined"
     :aria-label="trustItemName(item)"
     :aria-busy="busy ? 'true' : undefined"
     class="flex min-w-0 gap-3 py-3 text-sm"
@@ -77,6 +87,7 @@ function onChecked(value: boolean | 'indeterminate'): void {
 
     <div class="grid min-w-0 flex-1 gap-1.5">
       <div class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+        <MessageSquareTextIcon v-if="promptHook" aria-hidden="true" class="size-3.5 shrink-0 text-muted-foreground" />
         <label
           v-if="state !== 'approved'"
           :id="ids.title"
@@ -120,13 +131,13 @@ function onChecked(value: boolean | 'indeterminate'): void {
 
       <div class="min-w-0 overflow-hidden rounded-md border bg-muted/40">
         <div class="flex items-center justify-between gap-2 border-b py-0.5 pr-0.5 pl-2.5 text-xs text-muted-foreground">
-          <span aria-hidden="true">Command</span>
-          <CopyButton :text="command" label="Copy command" class="pointer-coarse:size-10" />
+          <span aria-hidden="true">{{ textLabel }}</span>
+          <CopyButton :text="command" :label="`Copy ${textLabel.toLowerCase()}`" class="pointer-coarse:size-10" />
         </div>
         <pre
           data-slot="project-trust-command"
           role="group"
-          aria-label="Command"
+          :aria-label="textLabel"
           tabindex="0"
           class="overflow-x-auto px-2.5 py-2 font-mono text-xs leading-relaxed text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
         >{{ command }}</pre>

@@ -1,6 +1,9 @@
 <script setup lang="ts">
 // The consent block of the install and trust dialogs (docs/UI.md 8.3 step 3, 8.4): the required "I trust {source}"
 // checkbox and, when a password is set and the session is not fresh (ADR-017), the "Confirm your password" field.
+// W12.17: Enter in the password field (not while an IME composes) emits `confirm`: the install review confirms the
+// password and goes on with the install (its form never submits, so Install is never the default button); the trust
+// dialog does not listen (its form submits Trust).
 import { useId } from 'vue'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
@@ -19,6 +22,11 @@ const props = withDefaults(defineProps<{
   disabled: false,
 })
 
+const emit = defineEmits<{
+  /** + W12.17: Enter in the password field. */
+  confirm: []
+}>()
+
 const checked = defineModel<boolean>('checked', { required: true })
 const password = defineModel<string>('password', { required: true })
 
@@ -26,6 +34,13 @@ const ids = { checkbox: useId(), password: useId(), error: useId() }
 
 function onChecked(value: boolean | 'indeterminate') {
   checked.value = value === true
+}
+
+/** Enter in the password field; Enter that ends an IME composition is not a confirmation. */
+function onPasswordEnter(event: KeyboardEvent) {
+  if (event.isComposing)
+    return
+  emit('confirm')
 }
 </script>
 
@@ -55,6 +70,7 @@ function onChecked(value: boolean | 'indeterminate') {
         :aria-invalid="props.passwordError ? true : undefined"
         :aria-describedby="props.passwordError ? ids.error : undefined"
         :data-testid="testIds.trustPassword"
+        @keydown.enter="onPasswordEnter"
       />
       <p v-if="props.passwordError" :id="ids.error" role="alert" class="text-sm text-destructive">
         {{ props.passwordError }}

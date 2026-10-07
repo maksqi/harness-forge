@@ -1,4 +1,5 @@
-// PluginUpdateBanner (Phase 12, ADR-054; docs/UI.md 8.13, 10.9; C46 stub); its mount is tested in PluginDetailView.test.ts.
+// PluginUpdateBanner (Phase 12, ADR-054; docs/UI.md 8.13, 10.9; C46 stub, W12.9); its mount is tested in
+// PluginDetailView.test.ts.
 import type { PluginUpdate } from '@harness-forge/shared'
 import { mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -26,6 +27,8 @@ describe('pluginUpdateBanner', () => {
     render({ update: pluginUpdate(), marketplaceName: 'claude-plugins-official', onUpdate: update })
     const banner = document.body.querySelector<HTMLElement>('[data-slot="plugin-update-banner"]')!
     expect(banner.textContent).toContain('Version 1.2.0 is available from claude-plugins-official.')
+    expect(banner.getAttribute('role')).toBe('status')
+    expect(banner.dataset.version).toBe('1.2.0')
     document.body.querySelector<HTMLElement>(`[data-testid="${testIds.pluginUpdate}"]`)!.click()
     expect(update).toHaveBeenCalledTimes(1)
   })
@@ -33,5 +36,11 @@ describe('pluginUpdateBanner', () => {
   it('says a newer commit is available without a version', () => {
     render({ update: pluginUpdate({ availableVersion: null }), marketplaceName: 'acme' })
     expect(document.body.textContent).toContain('A newer commit is available from acme.')
+    expect(document.body.querySelector<HTMLElement>('[data-slot="plugin-update-banner"]')?.dataset.version).toBe('')
+  })
+
+  it('falls back to "its marketplace" when the marketplace is not loaded', () => {
+    render({ update: pluginUpdate(), marketplaceName: null })
+    expect(document.body.textContent).toContain('Version 1.2.0 is available from its marketplace.')
   })
 })

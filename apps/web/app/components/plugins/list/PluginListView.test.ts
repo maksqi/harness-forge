@@ -8,7 +8,7 @@ import { reactive } from 'vue'
 import { usePluginsStore } from '~/stores/plugins'
 import { useUiStore } from '~/stores/ui'
 import { testIds } from '~/utils/testids'
-import { pluginDetail, pluginSummary } from '~/utils/testing/fixtures'
+import { marketplaceList, pluginDetail, pluginSummary, pluginUpdate } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { lastListRoute } from './list-route'
 import PluginListView from './PluginListView.vue'
@@ -241,5 +241,23 @@ describe('pluginListView: actions', () => {
     expect(usePluginsStore().byId('core-providers')?.removable).toBe(false)
     expect(card('core-providers').textContent).toContain('Core')
     expect(card('core-providers').querySelector('button:not([role="switch"])')).toBeNull()
+  })
+})
+
+describe('pluginListView: marketplace updates (Phase 12, W12.9)', () => {
+  it('loads the marketplace list when a plugin came from a marketplace and shows its update badge', async () => {
+    api.plugins.list.mockResolvedValue({ items: [...PLUGINS, pluginSummary({ id: 'review-kit', name: 'review-kit', kind: 'declarative', format: 'claude', source: 'marketplace', sourceRef: 'review-kit@claude-plugins-official', runsCode: false, contributions: none })] })
+    api.marketplaces.list.mockResolvedValue(marketplaceList({ updates: [pluginUpdate({ pluginId: 'review-kit', availableVersion: '1.3.0' })] }))
+    await mountList()
+    await settle()
+    expect(api.marketplaces.list).toHaveBeenCalledTimes(1)
+    const badge = card('review-kit').querySelector<HTMLElement>(`[data-testid="${testIds.pluginUpdateAvailable}"]`)!
+    expect(badge.dataset.version).toBe('1.3.0')
+    expect(card('review-kit').querySelector('[data-slot="plugin-source-badge"]')?.textContent?.trim()).toBe('claude-plugins-official')
+  })
+
+  it('sends no marketplace request without a marketplace plugin', async () => {
+    await mountList()
+    expect(api.marketplaces.list).not.toHaveBeenCalled()
   })
 })

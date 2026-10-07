@@ -12,7 +12,8 @@
 // Phase 12 (ADR-056; C46 CCR, W12.11 implements; frozen from Gate P12-0b): the project definition files edited from the UI
 // (`GET` / `PUT` / `DELETE /projects/:id/definitions/file`; no fresh auth, `expectedSha256` → 409 `stale`, saving never
 // approves) and `projectSource(projectId, entry)`, the editable target of a project entry. With the hooks store the only
-// caller of the project definition routes.
+// caller of the project definition routes. W12.11 (P12-A): a save or a delete marks only that project's scope stale
+// (also when it fails: the file may have changed); qualified plugin names (`review-kit:db:migrate`) are kept as listed.
 import type {
   CommandSummary,
   Customization,
@@ -389,6 +390,7 @@ export const useCustomizationsStore = defineStore('customizations', () => {
    * definition file; null for every other source (and without a project).
    */
   function projectSource(projectId: string | null, entry: CustomizationEntry): ProjectFileTarget | null {
+    // The rule of `isEditableProjectEntry` (customize.ts), kept here so the store does not load the page's helpers.
     if (projectId === null || entry.source !== 'project' || !entry.path)
       return null
     const kind = projectDefinitionPathKind(entry.path)

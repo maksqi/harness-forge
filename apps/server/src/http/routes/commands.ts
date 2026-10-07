@@ -12,6 +12,9 @@
 // Phase 11 (C37-T9, W11.5, ADR-052): every item carries `kind`: `command` for the entries above, `skill` for the scope's
 // active user-invocable skills (`argumentHint`, `pluginId` of a plugin skill; names up to 64 characters), listed after
 // the commands own their names (a command wins a name over a skill).
+// Phase 12 (ADR-053 / ADR-058; W12.7): the names of Claude Code plugin entries are qualified (`review-kit:review`,
+// `review-kit:db:migrate`) and listed as they are (a bare alias is not an item); plugin commands carry their
+// `argumentHint` and model ref; a definition's `when_to_use` is appended to its description (`<description> - <when>`).
 import type { CommandSummary, ListResponse } from '@harness-forge/shared'
 import type { CustomizationCatalog } from '../../services/customizations/types.ts'
 import type { AppDeps } from '../../types.ts'

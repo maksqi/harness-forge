@@ -471,6 +471,19 @@ reconciled docs (W12.15) follow these, not the task text further down.
     (C46; W12.5 fills it, W12.12 uses it).
   - C46 deviations (UI.md won; W12.15 updates UI.md 10.9 / 11.9): see `.tmp/waves/P12-0b-notes.md` (C46).
   - `examples.test.ts`: the registered hook commands of `hook-pack` carry `env: {}` and `prompts: []`.
+- **Gate P12-A** (coordinator; details `.tmp/waves/P12-A-notes.md`):
+  - Security fix (W12.16): a Claude plugin's exec-form hook `args` keep `${user_config.KEY}` as written in the
+    registry, `GET /hooks`, `/hooks/runs` and `data-hook` labels; values are filled only when the hook process starts,
+    from `CLAUDE_PLUGIN_OPTION_<KEY>`; a missing option reaches the hook as the literal placeholder.
+  - Decisions: the `skill` tool timeout is 600 s (a fork skill runs a sub-agent); a prompt hook whose `model` names a
+    missing provider falls back to `hookModelRef`, then the small model, then the run model (PROVIDERS.md 8 aligned by
+    W12.15); the edited script of a Claude plugin is blocked from the next load / reload / trust on (project items keep
+    verify-before-run).
+  - SDK 1.6.0 additions: `CommandDefinition.{ disallowedTools, arguments, whenToUse, context, agent }`,
+    `SkillDefinition.{ allowedTools, disallowedTools, model, arguments, whenToUse, context, agent }`.
+  - `renderCommandExpansion(…, options)` applies `${NAME}` and `\$` in text parts without argument placeholders.
+  - W12.13 fixed the pre-existing `mobile/agent.spec.ts:191` flake (a stopped row lingers 3 s in the open dock).
+  - The screenshot review of the new screens moves to P12-B (W12.14 writes the screenshot specs).
 
 ## Rules for every Phase 12 agent
 

@@ -90,3 +90,53 @@ describe('projectTrustItem', () => {
     expect(pending.get(`[data-testid="${testIds.projectTrustSelect}"]`).attributes('disabled')).toBeDefined()
   })
 })
+
+describe('projectTrustItem: prompt hooks and handler fields (Phase 12, W12.13-T1)', () => {
+  it('shows a prompt hook\'s prompt in the pre named "Prompt", its model and its timeout, without script refs', () => {
+    const wrapper = mountItem({
+      item: trustHookItem({
+        label: 'Did the tests pass?',
+        refs: [],
+        detail: { event: 'Stop', matcher: null, command: '', timeout: 20, type: 'prompt', prompt: 'Did the tests pass?\n$ARGUMENTS', model: 'haiku', continueOnBlock: true },
+      }),
+      selected: false,
+      busy: false,
+    })
+    const root = wrapper.get(`[data-testid="${testIds.projectTrustItem}"]`)
+    expect(root.attributes('data-type')).toBe('prompt')
+    expect(root.text()).toContain('Stop')
+    const pre = root.get('pre[data-slot="project-trust-command"]')
+    expect(pre.attributes('aria-label')).toBe('Prompt')
+    expect(pre.text()).toBe('Did the tests pass?\n$ARGUMENTS')
+    expect(root.find('button[aria-label="Copy prompt"]').exists()).toBe(true)
+    expect(root.findAll('[data-slot="project-trust-details"] li').map(line => line.text())).toEqual(['Model: haiku', 'Continue on block', 'timeout 20s'])
+  })
+
+  it('names the hook model when a prompt hook names none', () => {
+    const wrapper = mountItem({
+      item: trustHookItem({ refs: [], detail: { event: 'PreToolUse', matcher: 'Bash', command: '', timeout: null, type: 'prompt', prompt: 'Is this safe?' } }),
+      selected: false,
+      busy: false,
+    })
+    expect(wrapper.get('[data-slot="project-trust-details"]').text()).toBe('Model: Hook model')
+  })
+
+  it('shows an exec-form command hook word by word, and its "if" and "async" fields', () => {
+    const wrapper = mountItem({
+      item: trustHookItem({
+        detail: { event: 'PreToolUse', matcher: 'Bash', command: 'node', args: ['.claude/hooks/check.mjs', 'a b'], timeout: null, if: 'Bash(git:*)', async: true },
+      }),
+      selected: false,
+      busy: false,
+    })
+    const root = wrapper.get(`[data-testid="${testIds.projectTrustItem}"]`)
+    expect(root.attributes('data-type')).toBe('command')
+    expect(root.get('pre[data-slot="project-trust-command"]').text()).toBe('\'node\' \'.claude/hooks/check.mjs\' \'a b\'')
+    expect(root.get('pre[data-slot="project-trust-command"]').attributes('aria-label')).toBe('Command')
+    expect(root.findAll('[data-slot="project-trust-details"] li').map(line => line.text())).toEqual([
+      'Only when Bash(git:*)',
+      'In the background',
+      'Runs .claude/hooks/guard.sh',
+    ])
+  })
+})

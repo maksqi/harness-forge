@@ -32,7 +32,8 @@ import coreAgent, {
 } from './index.ts'
 
 const POLICIES: Record<string, string> = { todo_write: 'safe', exit_plan_mode: 'always', task: 'safe', skill: 'safe' }
-const TIMEOUTS: Record<string, number> = { todo_write: 60_000, exit_plan_mode: 60_000, task: 600_000, skill: 60_000 }
+// Phase 12 (W12.7): `skill` has the `task` timeout (a fork skill runs a sub-agent).
+const TIMEOUTS: Record<string, number> = { todo_write: 60_000, exit_plan_mode: 60_000, task: 600_000, skill: 600_000 }
 
 const VALID_INPUTS: Record<string, unknown> = {
   todo_write: { todos: [{ id: '1', content: 'Read the code', status: 'in_progress', activeForm: 'Reading the code' }] },

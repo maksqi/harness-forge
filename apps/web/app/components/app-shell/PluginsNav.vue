@@ -6,7 +6,7 @@
 // props, no emits; renders inside <SidebarContent> and never renders its own <Sidebar>.
 // Phase 12 (ADR-054; C46, frozen from Gate P12-0b; W12.8 owns it in P12-A): the "Marketplaces" row (`Store`,
 // `plugins-marketplaces`, a link to /plugins/marketplaces) between Install… and Browse with the count of installed
-// plugins that have an update (`data-count`, absent at 0; sr-only "{n} updates available"), from
+// plugins that have an update (`data-count`, absent at 0; sr-only "{n} updates available", "1 update available"), from
 // `useMarketplacesStore().fetchAll({ maxAgeMs: 60_000 })` on mount (answered from the stored catalogs); the Installed
 // group's active row skips the reserved ids (`isReservedPluginId`: `new`, `marketplaces`).
 import { isReservedPluginId } from '@harness-forge/shared'
@@ -145,7 +145,7 @@ function openInstall() {
             <NuxtLink :to="MARKETPLACES_ROUTE">
               <StoreIcon aria-hidden="true" />
               <span>Marketplaces</span>
-              <span v-if="updateCount > 0" class="sr-only">, {{ updateCount }} updates available</span>
+              <span v-if="updateCount > 0" class="sr-only">, {{ updateCount }} {{ updateCount === 1 ? 'update' : 'updates' }} available</span>
             </NuxtLink>
           </SidebarMenuButton>
           <SidebarMenuBadge

@@ -151,3 +151,75 @@ describe('hook routes', () => {
     expect(hookRunListSchema.parse(runs.body)).toEqual({ items: [] })
   })
 })
+
+describe('hook routes: prompt hooks and the handler fields (Phase 12, W12.5-T6)', () => {
+  it('cRUD of a prompt hook: 201 with fresh auth, 403 without; the listing; switching the type; 400 for the other type\'s fields', async () => {
+    const h = await app()
+    const body = { type: 'prompt', event: 'Stop', prompt: 'Did the agent run the tests? $ARGUMENTS', model: 'haiku', timeout: 20, continueOnBlock: false, statusMessage: 'Checking the work…' }
+    const refused = await send(h.t, 'POST', '/api/hooks', h.stale, body)
+    expect(refused.status).toBe(403)
+    expect(await h.t.db.select().from(hooks)).toEqual([])
+
+    const created = await send(h.t, 'POST', '/api/hooks', h.fresh, body)
+    expect(created.status).toBe(201)
+    const hook = personalHookSchema.parse(created.body)
+    expect(hook).toMatchObject({ type: 'prompt', event: 'Stop', prompt: body.prompt, model: 'haiku', timeout: 20, statusMessage: 'Checking the work…', enabled: true })
+    const [row] = await h.t.db.select().from(hooks)
+    expect(row).toMatchObject({ type: 'prompt', command: '', prompt: body.prompt, model: 'haiku', options: { statusMessage: 'Checking the work…' } })
+    const listed = hookListSchema.parse((await send(h.t, 'GET', '/api/hooks', h.stale)).body)
+    expect(listed.items).toEqual([expect.objectContaining({ kind: 'command', type: 'prompt', command: '', prompt: body.prompt, model: 'haiku', statusMessage: 'Checking the work…', state: 'active', source: 'personal' })])
+
+    // Prompt hooks only on the prompt events; command fields on a prompt hook are refused.
+    expect((await send(h.t, 'POST', '/api/hooks', h.fresh, { ...body, event: 'SessionStart' })).status).toBe(400)
+    expect((await send(h.t, 'PATCH', `/api/hooks/${hook.id}`, h.fresh, { args: ['x'] })).status).toBe(400)
+    expect((await send(h.t, 'PATCH', `/api/hooks/${hook.id}`, h.fresh, { event: 'Notification' })).status).toBe(400)
+    // Turning it off needs no fresh auth; any other change does.
+    expect((await send(h.t, 'PATCH', `/api/hooks/${hook.id}`, h.stale, { enabled: false })).status).toBe(200)
+    expect((await send(h.t, 'PATCH', `/api/hooks/${hook.id}`, h.stale, { prompt: 'Other' })).status).toBe(403)
+    const edited = await send(h.t, 'PATCH', `/api/hooks/${hook.id}`, h.fresh, { prompt: 'Other prompt', model: null, continueOnBlock: true, statusMessage: null })
+    expect(edited.status).toBe(200)
+    expect(personalHookSchema.parse(edited.body)).toMatchObject({ type: 'prompt', prompt: 'Other prompt', model: null, continueOnBlock: true, enabled: false })
+    expect(personalHookSchema.parse(edited.body)).not.toHaveProperty('statusMessage')
+
+    // A switch to a command hook needs a command; the prompt fields go.
+    expect((await send(h.t, 'PATCH', `/api/hooks/${hook.id}`, h.fresh, { type: 'command' })).status).toBe(400)
+    const switched = await send(h.t, 'PATCH', `/api/hooks/${hook.id}`, h.fresh, { type: 'command', command: 'sh', args: ['.claude/hooks/check.sh', 'a b'], async: true })
+    expect(switched.status).toBe(200)
+    expect(personalHookSchema.parse(switched.body)).toMatchObject({ type: 'command', command: 'sh', args: ['.claude/hooks/check.sh', 'a b'], async: true })
+    const [after] = await h.t.db.select().from(hooks)
+    expect(after).toMatchObject({ type: 'command', prompt: null, model: null, options: { args: ['.claude/hooks/check.sh', 'a b'], async: true } })
+    // An `if` rule only on a tool event.
+    expect((await send(h.t, 'PATCH', `/api/hooks/${hook.id}`, h.fresh, { if: 'Bash(git:*)' })).status).toBe(400)
+    expect((await send(h.t, 'PATCH', `/api/hooks/${hook.id}`, h.fresh, { event: 'PreToolUse', if: 'Bash(git:*)' })).status).toBe(200)
+    expect((await send(h.t, 'PATCH', `/api/hooks/${hook.id}`, h.fresh, { event: 'Stop' })).status).toBe(400)
+    expect(changed(h)).toHaveLength(5)
+  })
+
+  it('importPersonal: one hooks.changed; command hooks off unless enabled, prompt hooks as given; invalid items and the cap fail per item', async () => {
+    const h = await app()
+    const results = await h.t.deps.hooks.importPersonal([
+      { event: 'PreToolUse', matcher: 'Bash', command: 'sh guard.sh' },
+      { event: 'Stop', command: 'sh stop.sh', enabled: true },
+      { type: 'prompt', event: 'Stop', prompt: 'Done?' },
+      { event: 'PreToolUse', matcher: '^Bash', command: 'sh x.sh' },
+      { type: 'prompt', event: 'SessionStart', prompt: 'Hi' } as never,
+    ])
+    expect(results.map(result => result.ok ? [result.hook.type, result.hook.enabled] : result.message)).toEqual([
+      ['command', false],
+      ['command', true],
+      ['prompt', true],
+      'This hook is not valid and was not imported.',
+      'This hook is not valid and was not imported.',
+    ])
+    expect(JSON.stringify(results)).not.toContain('^Bash')
+    expect(changed(h)).toEqual([{ projectId: null }])
+    expect(await h.t.deps.hooks.importPersonal([{ event: 'Stop', command: '' }])).toEqual([{ ok: false, message: 'This hook is not valid and was not imported.' }])
+    expect(changed(h)).toHaveLength(1)
+
+    await h.t.db.insert(hooks).values(Array.from({ length: LIMITS.personalHooksMax - 4 }, (_, index) => ({ id: `hok_${String(index).padStart(16, '0')}`, event: 'Stop' as const, command: 'sh x.sh', createdAt: index, updatedAt: index })))
+    const capped = await h.t.deps.hooks.importPersonal([{ event: 'Stop', command: 'sh a.sh' }, { event: 'Stop', command: 'sh b.sh' }])
+    expect(capped.map(result => result.ok)).toEqual([true, false])
+    expect(capped[1]).toEqual({ ok: false, message: `At most ${LIMITS.personalHooksMax} personal hooks can be stored; delete one first.` })
+    expect(changed(h)).toHaveLength(2)
+  })
+})
