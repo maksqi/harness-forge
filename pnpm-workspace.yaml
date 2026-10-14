@@ -14,7 +14,7 @@ catalog:
   typescript: ~6.0.3
   vitest: ^4.0.0
   yaml: ^2.9.1
-  zod: ^4.1.0
+  zod: ^4.6.7
 
 overrides:
   # TypeScript 7 breaks .vue files that import prop types (ADR-013). Never upgrade.
