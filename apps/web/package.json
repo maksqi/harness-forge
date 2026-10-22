@@ -1,7 +1,7 @@
 {
   "name": "@harness-forge/web",
   "type": "module",
-  "version": "1.8.1",
+  "version": "1.9.0",
   "private": true,
   "description": "harness-forge web app (Nuxt 4 SPA).",
   "license": "MIT",

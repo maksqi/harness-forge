@@ -24,6 +24,9 @@ Reference: [ARCHITECTURE.md](../ARCHITECTURE.md) (the MCP sign-in flow and the s
    shows "Signed in to {server}." and returns you to the page you started from.
 5. The row now reads "Connected · {n} tools · Signed in", and the server's tools work in every chat.
 
+When the server still has valid tokens for harness-forge (or answers without a token after all), **Sign in** does not
+leave the page: it reconnects the server and shows "Signed in to {server}." right away.
+
 A reply that was running when you left keeps running on the server; the chat resumes when you are back. When your
 session expired while you were away (a password is set), the callback page first asks you to log in, then finishes the
 sign-in.
@@ -33,7 +36,10 @@ What happens on the way, so you know what the server sees:
 - harness-forge sends one request without a token to read the server's `WWW-Authenticate` answer, then reads its
   protected-resource metadata and its authorization server's metadata (discovery).
 - It registers itself as a client of that authorization server (dynamic client registration), unless you entered a
-  **Client ID** (section 2). It never registers a client in the background: only a click on **Sign in** does.
+  **Client ID** (section 2). It never registers a client in the background: only a click on **Sign in** does. A
+  registered client is reused for the next sign-in to the same server as long as the redirect URI is the same.
+- A server that answers 401 but publishes no protected-resource metadata cannot sign in: **Sign in** answers "This
+  server asked for sign-in but does not support OAuth." (it expects a token header instead).
 - It starts the sign-in with PKCE (S256), a one-time `state` value and the server's address as the `resource`. A
   sign-in link is valid for 10 minutes and works once; starting a new sign-in for the same server replaces the old one.
 - The callback page removes the code from the address bar at once and sends it to the server together with your
@@ -64,9 +70,15 @@ value exactly:
   `Host` header and `X-Forwarded-Proto` (README "Behind a reverse proxy").
 - In development (`pnpm dev`) the browser is on `http://localhost:3000`, so the redirect URI is
   `http://localhost:3000/oauth/callback`.
+- In Docker it is the address the browser uses for the published port, not the container's own: with `-p 8793:8787`
+  it is `http://localhost:8793/oauth/callback`, so a pre-registered client must register that exact URI. The flow also
+  works with a password (`HF_PASSWORD`): the callback page posts the code with its own same-origin request, which carries
+  the session cookie.
 
 Changing the server's URL, its transport type or the client id forgets the stored tokens (they belong to that server
-and that client); renaming it or changing its policy keeps them.
+and that client; the dialog warns "Saving signs you out of {name}."); renaming it or changing its policy keeps them. A
+server with an `Authorization` header row cannot use these fields: the header wins, and a 401 to it reads "The server
+rejected its Authorization header." with **Edit…** instead of **Sign in**.
 
 ## 3. Plugin servers and Claude Code plugin servers
 
@@ -90,8 +102,11 @@ servers**) with **Sign in**, and their tokens belong to the plugin (scope `plugi
   ```
 
   Without `oauth` the server still signs in through dynamic registration when it supports it.
-- A **Claude Code plugin** keeps the `oauth` object of its MCP servers (v1.8 dropped it with a note): the client id is
-  used; `callbackPort` is ignored, because harness-forge signs in through its own callback page.
+- A **Claude Code plugin** keeps the `oauth` object of its MCP servers (v1.8 dropped it with a note): the client id and
+  the scopes are used (a client id written as `${user_config.KEY}` becomes the plugin setting `KEY`; any other variable
+  drops the client id with a warning, and the server registers its client at sign-in instead); `callbackPort` is
+  ignored with a note, because harness-forge signs in through its own callback page. A Claude Code plugin with a single
+  MCP server names that server after the plugin (the plugin id), so its tokens are `mcp-oauth.<pluginId>`.
 
 Uninstalling the plugin deletes its tokens (unless you keep its data).
 
@@ -113,8 +128,10 @@ client and scopes:
 ```
 
 - **Approval first.** The server must be approved in the project's review dialog before it can sign in; a pending row
-  shows **Review…**, never **Sign in**. After the approval the row in the project's **MCP servers** dialog (the
-  project chip's menu in a chat → **MCP servers…**, or Settings → Projects) shows **Sign in required** and **Sign in**.
+  shows **Review…**, never **Sign in**. After the approval the server starts with the first reply of a project chat
+  that uses tools; once it has answered 401, its row in the project's **MCP servers** dialog (the project chip's menu in
+  a chat → **MCP servers…**, or Settings → Projects) shows **Sign in required** and **Sign in**. A signed-in row reads
+  "Connected · {n} tools · Signed in" (its tooltip says when the token expires or that it renews by itself).
 - A `clientSecret` is never read from a repository file. `callbackPort` (Claude Code's key) is ignored with the note
   that harness-forge signs in through its own callback page.
 - The approval covers the whole server entry, `oauth` included: approvals made in v1.8 stay valid, and changing the
@@ -129,9 +146,13 @@ client and scopes:
   the server's address and client id. They never appear in an API answer, a log line, a chat or a backup zip.
 - A master key rotation re-encrypts them; **Delete all data** keeps them (it deletes chats, not servers). Deleting the
   server, the plugin or the project deletes them.
-- **Sign out…** (the row's `⋯` menu) asks "harness-forge forgets the tokens; the server stays configured." and then
-  deletes the stored tokens and asks the authorization server to revoke them (best effort: a revocation that fails is
-  not retried). The row goes back to **Sign in required**.
+- **Sign out…** (the row's `⋯` menu) asks "Sign out of {name}?" ("harness-forge forgets the tokens; the server stays
+  configured.") and then deletes the stored tokens and asks the authorization server to revoke them (best effort, at
+  most 10 seconds: a revocation that fails is not retried). A client secret you entered for one of your servers stays.
+  The row goes back to **Sign in required**.
+- A server that never signed in, or that you signed out, has no sign-in record at all; a server whose refresh token
+  was refused keeps its record (the client registration stays) but is no longer signed in. Both show **Sign in
+  required** and **Sign in**.
 - `HF_OFFLINE=1` and `HF_SAFE_MODE=1` change nothing here (safe mode still starts the servers of the MCP servers panel,
   and no project server).
 
@@ -141,12 +162,16 @@ client and scopes:
 |---|---|
 | **Sign in required** on a server that worked with a header | a 401 now means "sign in", not "retry later": the server is never retried with increasing delays. With a token header, check the token; to use sign-in instead, remove the `Authorization` header |
 | No **Sign in** button | the server is stdio (only remote servers sign in), has an `Authorization` header, is disabled, or is a project server that still needs approval (**Review…**) |
-| An error saying the server does not support sign-in (a 401 without OAuth metadata) | the server publishes no MCP authorization metadata; it expects a token header instead |
+| "This server asked for sign-in but does not support OAuth." | the server answers 401 but publishes no protected-resource metadata (MCP authorization); it expects a token header instead |
 | The provider refuses the redirect URI | register the exact **Redirect URI** of the dialog (section 2). Many providers accept `http://` only for `localhost`: open harness-forge over HTTPS (a reverse proxy) or at `localhost` |
-| The error card after the provider's page | it shows the provider's own message (for example `access_denied` when you declined); **Try again** starts a new sign-in, **Back to MCP servers** returns to the list |
-| "This sign-in link was already used or expired." | a sign-in link works once and for 10 minutes, and a newer sign-in for the same server replaces it: press **Sign in** again |
-| The sign-in stops before the provider's page | harness-forge refuses an authorization server on a private or local address (`10.x`, `169.254.169.254`, …) or over plain `http`, unless it is on the MCP server's own address, or both are on loopback (a local test server) |
+| The error card after the provider's page | it shows the provider's own message as plain text (for example `access_denied` when you declined); **Try again** starts a new sign-in for the same server, **Back to MCP servers** returns to the list. An answer from another issuer than the one the sign-in started with is refused too |
+| "This sign-in link was already used or expired." | a sign-in link works once and for 10 minutes, a newer sign-in for the same server replaces it, and pending sign-ins end when the server stops, the master key is rotated or the server, its plugin or its project is removed: press **Sign in** again |
+| The sign-in stops before the provider's page ("The authorization server of this MCP server is not allowed: …") | harness-forge refuses an authorization server on a private or local address (`10.x`, `169.254.169.254`, …) or over plain `http`, unless it is on the MCP server's own address, or both are on loopback (a local test server) |
+| The sign-in stops with "OAuth protected resource metadata URL … must have the same origin as the MCP server URL" | the server's metadata names another address than the one harness-forge uses to reach it. Typical in Docker: a server on the host that advertises `http://127.0.0.1:<port>` but is reached from the container as `host.docker.internal:<port>`. Run the server where harness-forge reaches it at the address it advertises (or make it advertise the address harness-forge uses) |
+| "The authorization server of {server} is not reachable." | the authorization server did not answer (each sign-in step has 30 seconds); check the network and press **Sign in** again |
 | Signed in, later **Sign in required** again | the refresh token expired or was revoked (`invalid_grant`); sign in again |
 | The server's questions never show up in the chat | servers on MCP protocol `2026-07-28` cannot ask questions through harness-forge yet; harness-forge connects them without that feature ([adding an MCP server](adding-an-mcp-server.md#elicitation-a-server-asks-you-v19)) |
 
-Every sign-in step and failure is written to the owning plugin's **Logs** tab, without tokens, codes or secrets.
+Every sign-in step and failure is written to the owning plugin's **Logs** tab, without tokens, codes or secrets (a
+server of yours or of a plugin that needs sign-in logs "[{id}] Needs a sign-in."; one whose header was refused, "[{id}]
+The server rejected its Authorization header.").

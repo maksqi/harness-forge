@@ -86,7 +86,9 @@ monitors, workflows, the plugin's own `settings.json` and `http` / `mcp_tool` / 
 "Ignored". An MCP server's `headersHelper` is dropped (the server connects without it; a note on the plugin's
 Overview), and a server that uses `${CLAUDE_PROJECT_DIR}` is skipped (plugin servers are global). v1.9 (ADR-059): an MCP
 server's `oauth` settings are kept: the server shows "Sign in required" on the plugin's Overview until you click **Sign
-in** there (its `callbackPort` is ignored with a note: harness-forge signs in through its own `/oauth/callback` page; see
+in** there (its `callbackPort` is ignored with a note: harness-forge signs in through its own `/oauth/callback` page; a
+`clientId` written as `${user_config.KEY}` is filled from the plugin's settings, and any other variable drops the client
+id with a warning, so the server registers its client at sign-in; see
 [Signing in to remote MCP servers](mcp-oauth.md)). In v1.8 they were dropped.
 
 ## 4. Marketplaces

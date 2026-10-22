@@ -24,7 +24,7 @@ Reference: [ARCHITECTURE.md 6.35](../ARCHITECTURE.md) (how the import works) and
 | `output-styles/*.md` | personal output styles |
 | `settings.json` → `hooks` | personal hooks; command hooks arrive **turned off**, prompt hooks arrive on; other handler types (`http`, `mcp_tool`, `agent`), prompt hooks on an event that takes none and events harness-forge does not have are listed as Unsupported |
 | `settings.json` → `permissions.allow` `Bash(npm run test:*)`, `Bash(npm run test *)`, `Bash(git status)` | global shell rules (`npm run test`, `git status`); an exact rule such as `Bash(git status)` becomes a prefix rule and says so ("Becomes a prefix rule: longer commands that start the same way are allowed too.") |
-| `settings.json` → whole-tool `permissions.deny` (`WebFetch`, `Write`) | tool preferences set to **Deny** (`web_fetch`, `write_file`) |
+| `settings.json` → whole-tool `permissions.deny` (`WebFetch`, `Write`; v1.9: `WebSearch`) | tool preferences set to **Deny** (`web_fetch`, `write_file`; v1.9: `search_web`) |
 | `settings.json` → `outputStyle` | your default output style (Settings → General) |
 | `CLAUDE.md` | your custom instructions (Settings → General): **Append** (default), **Replace** or **Skip** |
 | `~/.claude.json` → `mcpServers` | global MCP servers (Plugins → MCP servers); a stdio server arrives **turned off**, an `http` / `sse` server on |

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // Settings -> General body (docs/UI.md 9.4): display name, send key, default permission mode (Ask, Accept edits, Plan,
 // Auto, Off) and effort, max steps (per response in chats without a project, and in project chats: 1-200 each), Alt
-// shortcuts (Alt+M / R / P, Alt+V and, since Phase 8, Alt+C for the changes panel), the Shift+Tab switch (Phase 9:
+// shortcuts (Alt+M / R / P, Alt+V, since Phase 8 Alt+C for the changes panel and since Phase 14 Alt+W for web search), the Shift+Tab switch (Phase 9:
 // Shift+Tab in the composer cycles Ask, Accept edits and Plan; off, it moves focus), custom instructions and the
 // password block. Choices save at once (optimistic, toast on failure); text fields save on blur or Enter (Mod+Enter in
 // the instructions), Esc restores the saved value. Bulk export, import and delete-all live in Settings -> Data
@@ -358,7 +358,7 @@ const instructionsCount = computed(() => `${instructions.draft.value.length.toLo
           <FieldLabel :for="ids.altShortcuts">
             Alt shortcuts
           </FieldLabel>
-          <FieldDescription>Use Alt+M, Alt+R and Alt+P for composer menus, Alt+V to dictate and Alt+C for changes.</FieldDescription>
+          <FieldDescription>Use Alt+M, Alt+R and Alt+P for composer menus, Alt+V to dictate, Alt+W for web search and Alt+C for changes.</FieldDescription>
         </FieldContent>
         <Switch
           :id="ids.altShortcuts"

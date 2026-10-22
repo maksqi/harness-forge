@@ -36,8 +36,9 @@
 // - Elicitation: `capabilities: { elicitation: {} }`, the broker's handler per client (runtime key
 //   `project:<projectId>/<serverId>#<generation>`), the `2026-07-28` fallback remembered per server and item hash.
 // - Prompts and resources: the caches (keys `<projectId>/<serverId>`) are filled after connecting and on a stdio
-//   `list_changed`; `prompts` / `resources` list only servers that already run (a listing never starts one: project
-//   servers start lazily for a run, ADR-050; Gate P14-A);
+//   `list_changed`; `prompts` / `resources` with `waitMs: 0` (the UI listings) list only servers that already run (a
+//   project server starts lazily for a run, ADR-050; Gate P14-A); a listing that may wait (`waitMs > 0`: a typed
+//   `/mcp__…` command on send) starts the approved servers like `toolsFor`;
 //   `getPrompt` / `readResource` wait up to `LIMITS.projectMcpConnectWaitMs` for a server that is not connected yet.
 import type { MCPClient, MCPClientConfig, MCPTransport } from '@ai-sdk/mcp'
 import type { Disposable, ToolCallContext } from '@harness-forge/plugin-sdk'
@@ -1214,9 +1215,10 @@ export function createProjectMcpManagerCore(deps: AppDeps, options: ProjectMcpMa
   // ---------- prompts and resources (Phase 14, ADR-061) ----------
 
   /**
-   * The cached entries of a project's approved servers that already run (a listing never starts a server; project
-   * servers start lazily for a run, ADR-050): connected servers with the capability list through `read`; the others are
-   * `unavailable` with their state (pending servers and safe mode name nothing). `not_found` for an unknown project; never rejects for a server problem.
+   * The cached entries of a project's approved servers: with `waitMs: 0` (the UI listings) only servers that already run
+   * (project servers start lazily for a run, ADR-050); with `waitMs > 0` (a command resolved on send) the approved
+   * servers are started like `toolsFor` and waited for. Connected servers with the capability list through `read`; the
+   * others are `unavailable` with their state (pending servers and safe mode name nothing). `not_found` for an unknown project; never rejects for a server problem.
    */
   async function projectListing<T>(
     projectId: string,
@@ -1229,7 +1231,8 @@ export function createProjectMcpManagerCore(deps: AppDeps, options: ProjectMcpMa
     await deps.projects.get(projectId)
     let ready: ReadyProject | null
     try {
-      ready = await readyServers(projectId, signal ?? new AbortController().signal, listingOptions.waitMs ?? 0, false)
+      const waitMs = listingOptions.waitMs ?? 0
+      ready = await readyServers(projectId, signal ?? new AbortController().signal, waitMs, waitMs > 0)
     }
     catch (error) {
       signal?.throwIfAborted()

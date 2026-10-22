@@ -1,7 +1,7 @@
 {
   "name": "harness-forge",
   "type": "module",
-  "version": "1.8.1",
+  "version": "1.9.0",
   "private": true,
   "packageManager": "pnpm@11.28.6",
   "description": "Self-hosted, single-user, BYOK AI chat and agent harness with a plugin system.",

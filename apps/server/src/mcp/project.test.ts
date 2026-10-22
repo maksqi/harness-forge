@@ -599,7 +599,7 @@ describe('project MCP manager: Phase 14 seams', () => {
     await expect(app.t.deps.projectMcp.readResource(app.project.id, 'nope', 'file:///a', signal)).rejects.toMatchObject({ code: 'not_found' })
   })
 
-  it('the listings never start a server (lazy start for a run, ADR-050) and list it once a run started it', async () => {
+  it('a UI listing (waitMs 0) never starts a server (lazy start for a run, ADR-050) and lists it once a run started it', async () => {
     const endpoint = await startElicitServer()
     servers.push(endpoint)
     const app = await open()
@@ -607,12 +607,25 @@ describe('project MCP manager: Phase 14 seams', () => {
     app.setServers([item])
     await app.approve(item)
     expect(await stateOf(app, 'elicit')).toBe('idle')
-    const first = await app.t.deps.projectMcp.prompts(app.project.id, { waitMs: 200 })
+    const first = await app.t.deps.projectMcp.prompts(app.project.id)
     expect(first.unavailable).toEqual([{ serverId: 'elicit', status: 'idle' }])
-    expect((await app.t.deps.projectMcp.resources(app.project.id)).unavailable).toEqual([{ serverId: 'elicit', status: 'idle' }])
+    expect((await app.t.deps.projectMcp.resources(app.project.id, { waitMs: 0 })).unavailable).toEqual([{ serverId: 'elicit', status: 'idle' }])
     expect(await stateOf(app, 'elicit')).toBe('idle')
     await app.t.deps.projectMcp.toolsFor(app.project.id, { signal: new AbortController().signal, waitMs: 5000 })
     await waitFor(async () => (await stateOf(app, 'elicit')) === 'connected')
     expect((await app.t.deps.projectMcp.resources(app.project.id)).unavailable).toEqual([])
+  })
+
+  it('a listing that may wait (a typed command on send) starts the approved servers and waits for them', async () => {
+    const endpoint = await startElicitServer()
+    servers.push(endpoint)
+    const app = await open()
+    const item = remoteServerItem('Elicit', endpoint.url)
+    app.setServers([item])
+    await app.approve(item)
+    expect(await stateOf(app, 'elicit')).toBe('idle')
+    const listing = await app.t.deps.projectMcp.prompts(app.project.id, { waitMs: 5000 })
+    expect(listing.unavailable).toEqual([])
+    expect(await stateOf(app, 'elicit')).toBe('connected')
   })
 })

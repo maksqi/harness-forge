@@ -177,7 +177,10 @@ dialog for a `.mcp.json` server (after you approve it). **Sign in** opens the se
 comes back through harness-forge's `/oauth/callback` page; the row then reads "Connected · {n} tools · Signed in".
 Tokens are stored encrypted and refreshed by themselves; **Sign out…** forgets them.
 
-- Only HTTP and SSE servers without an `Authorization` header sign in.
+- Only HTTP and SSE servers without an `Authorization` header sign in, and only when the server publishes its
+  protected-resource metadata ("This server asked for sign-in but does not support OAuth." otherwise). A server whose
+  `Authorization` header is answered with 401 reads "The server rejected its Authorization header." and offers
+  **Edit…**: fix the header.
 - A server that needs sign-in is never retried on a timer, and its tools are unavailable (also to sub-agents and
   background agents) until you sign in. Nothing ever asks you to sign in in the middle of a reply.
 - Pre-registered clients, the redirect URI to register, `.mcp.json` `oauth`, Claude Code plugins and troubleshooting:
@@ -196,16 +199,23 @@ server's name and the prompt's arguments as a hint (`<required> [optional]`); th
 ```
 
 - **Arguments** bind in the order the prompt declares them, or by name with `name=value`; quotes group words, and the
-  last argument takes the rest of the line. A missing required argument, or a server that is not connected, gives a
-  reply that says so instead of a model answer.
-- The prompt is fetched **once**, when you send it, and the text it returns is kept with your message (at most 64 KB):
-  a regenerate or a later turn reuses it and never asks the server again. Messages the prompt adds for the assistant
+  last argument takes the rest of the line. A missing required argument ("Missing argument: pr. Usage:
+  /mcp__github__review_pr <pr> [base]"), a server that is not connected (or needs sign-in: "Sign in to the MCP server
+  "github" first."), a prompt the server does not list or a prompt that fails gives a reply that says so instead of a
+  model answer. A `/mcp__…` name whose server harness-forge does not know is sent to the model as typed text.
+- The prompt is fetched **once**, when you send it (the server has 30 seconds to answer), and the text it returns is
+  kept with your message (at most 64 KB; a longer text is cut and ends with "[The MCP prompt was cut: it is longer
+  than 64 KB.]"): a regenerate or a later turn reuses it and never asks the server again. Messages the prompt adds for the assistant
   are kept with their role; embedded text resources are inlined; images and other binary content become a one-line
   placeholder.
 - A project's `.mcp.json` servers add their prompts only in that project's chats (a project server with the id of a
-  global one replaces its prompts there). Servers that wait for approval or for a sign-in list no prompts.
+  global one replaces its prompts there). Servers that wait for approval or for a sign-in list no prompts. Opening the
+  slash menu never starts a project server: an approved project server starts with the first reply that uses tools
+  (as before), and its prompts appear in the menu from then on (before that, sending one of them answers that the
+  server is not connected).
 - The list follows the server: it is read when the server connects, when a stdio server announces a change, and again
-  when the menu asks and the list is more than a minute old.
+  when the menu asks and the list is more than a minute old; the menu never waits for a server that is not
+  connected.
 
 ## 6. Resources in `@` mentions (v1.9)
 
@@ -213,10 +223,14 @@ In every chat whose permission mode is not **Off**, `@` in the composer also lis
 servers (and, in a project chat, of the project's servers) in a section "MCP resources", under "Files in {project}"
 when the chat has a project. Typing after `@` filters both.
 
-- Picking a resource reads it once and attaches it to the message like an uploaded file (a chip under the composer);
-  the text shows `@<serverId>:<uri>`, which is only a label: the attachment is what the model reads.
+- Picking a resource reads it once (the server has 60 seconds to answer) and attaches it to the message like an
+  uploaded file (a chip under the composer); the text shows `@<serverId>:<uri>`, which is only a label: the
+  attachment is what the model reads (a text resource is put into the message as text, like an attached text file).
 - Text resources attach as text (several text parts are joined); binary resources only when they are an image or a PDF.
-  A resource over 5 MB cannot be attached ("This resource is larger than 5 MB.").
+  A resource over 5 MB cannot be attached ("This resource is larger than 5 MB."; a resource whose listed size is
+  larger is refused before it is read); a server that needs sign-in answers "Sign in to {server} first.".
+- The "MCP resources" section shows only when one of the chat's servers offers resources. Like prompts, a project
+  server's resources are listed only once a reply has started the server (the `@` menu never starts one).
 - Resource templates (URIs with parameters) are not listed.
 - v1.9 also makes tool results more readable: a tool result that returns a resource or a resource link reaches the
   model as text instead of raw JSON.
@@ -234,7 +248,9 @@ and the caution "Share only what you would give {server}. Never enter passwords 
 - The card waits **8 minutes** (a countdown shows it); then the request is cancelled. **Stop**, deleting the chat, a
   master key rotation and a server stop cancel it too. Reloading the page shows the card again while the reply runs.
 - The values you enter go only to the server: the saved tool result keeps the question, the field names and your answer
-  (submitted, declined, cancelled), **never the values**.
+  (submitted, declined, cancelled), **never the values**. The finished tool row shows one line per request ("You
+  answered {server}'s request.", "{server}'s request expired.", "Stopped before you answered.", …) with "Asked for:
+  {fields}".
 - Sub-agents and background agents never ask you: their servers' questions are declined automatically. A question
   harness-forge cannot tie to one chat (the server is busy in several chats at once) is declined too, and so is a form
   harness-forge cannot show (nested fields, a "URL mode" request).

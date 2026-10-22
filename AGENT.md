@@ -182,7 +182,7 @@ Read this file fully before doing anything. Then read the docs listed in "Where 
   only ignored advisories are node-forge GHSA-86w9-cpqp-85rv and braces GHSA-vfj7-8cjw-p6xm (build tooling, still
   unpatched 2026-10-22); the simple-git ignores are gone (`@nuxt/devtools` 3.4.4 no longer depends on it).
   `@nuxt/test-utils` is removed; Vitest 5 (catalog `vitest` / `@vitest/coverage-v8` `^5.0.5`). Every `package.json`
-  carries the app version (1.8.1). `HF_OFFLINE=1` also stops every automatic provider model listing (explicit
+  carries the app version (1.8.1; 1.9.0 since Phase 14). `HF_OFFLINE=1` also stops every automatic provider model listing (explicit
   refreshes, the provider test and the checks after a credential save still list; the e2e mock models come from the
   seeds). Every `<Switch>` needs a coarse-pointer hit area of at least 40 px (`pointer-coarse:after:-inset-y-3`,
   `size="sm"`: `-inset-y-3.5`; `apps/web/app/components/switch-hit-areas.test.ts` guards it). The approval card
@@ -216,7 +216,9 @@ Read this file fully before doing anything. Then read the docs listed in "Where 
   redirects). No migration (`McpTransportRecord.oauth?`, `chats.settings.webSearch` are JSON); settings
   `webSearchDefault`, `webSearchNative`; mocks `mock:search` / `mock:search-tool`; the OAuth fixture
   `apps/server/src/mcp/__fixtures__/oauth-mcp-server.mjs`. Tests never contact real MCP, OAuth or search hosts (the
-  fixture on loopback, `createFakeSearchFetch`, `HF_TEST_REMOTE_URL` only with `HF_MOCK_PROVIDER=1`).
+  fixture on loopback, `createFakeSearchFetch`, `HF_TEST_REMOTE_URL` only with `HF_MOCK_PROVIDER=1`). The slash and `@`
+  listings (`waitMs: 0`) never start a project MCP server (a run, an attach or a typed `/mcp__…` on send does); the
+  stdio transport reports an exception of `onmessage` through `onerror`; `auth: null` = no stored sign-in record.
 - **vue-tsc 3.3** (vuejs/language-tools#6240, found on 3.3.12): a `//` inside a component prop value in a template (a
   URL literal) corrupts the generated code; put URLs into script constants
   (`apps/web/app/components/template-literals.test.ts` guards it).
@@ -262,7 +264,7 @@ data/                                          runtime data (gitignored)
 | `pnpm dev` | server (`tsx watch`, :8787) + web (`nuxt dev`, :3000, proxies `/api`) — coordinator only |
 | `pnpm build` | `nuxt generate` (web) + `tsdown` (server) — coordinator only |
 | `pnpm start` | production server on :8787 serving API + SPA |
-| `pnpm start:e2e` | production server with `HF_MOCK_PROVIDER=1 HF_OFFLINE=1 HF_CLAUDE_HOME=0 HF_PORT=8899 HF_DATA_DIR=.tmp/e2e` |
+| `pnpm start:e2e` | production server with `HF_MOCK_PROVIDER=1 HF_OFFLINE=1 HF_CLAUDE_HOME=0 HF_TEST_REMOTE_URL=http://127.0.0.1:${E2E_FAKE_REMOTE_PORT:-8889} HF_PORT=8899 HF_DATA_DIR=.tmp/e2e` |
 | `pnpm test` | Vitest (all projects); `pnpm -F <pkg> test` for one package |
 | `pnpm test:live` | opt-in live provider suite (`*.live.test.ts`; needs provider keys, its config sets `HF_LIVE=1`; paid calls) — never in `pnpm test` |
 | `pnpm test:e2e` | Playwright |
@@ -310,10 +312,10 @@ Claude Code folder the import scan reads, default `~/.claude`, `0` = off, ADR-05
 fallbacks (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, ...). CLI-only: `HF_NEW_MASTER_KEY` (read by `rotate-key`, ADR-034). Test-only: `HF_LIVE`, `HF_LIVE_PROVIDERS`,
 `HF_LIVE_MAX_COST_USD`, `HF_LIVE_MEDIA`, `HF_TEST_REQUIRE_WEB_BUILD`, `E2E_SCREENSHOTS`, `HF_TEST_FILE_SWEEP_DELAY_MS`
 (only with `HF_MOCK_PROVIDER=1`, ADR-039), `HF_TEST_ELICITATION_WAIT_MS` (Phase 14: replaces the 480 s elicitation
-wait; only with `HF_MOCK_PROVIDER=1`, ADR-060), `HF_TEST_REMOTE_URL` (loopback fake for GitHub / codeload / archive hosts;
+wait, 1000–480000, an invalid value fails the boot; only with `HF_MOCK_PROVIDER=1`, ADR-060), `HF_TEST_REMOTE_URL` (loopback fake for GitHub / codeload / archive hosts;
 only with `HF_MOCK_PROVIDER=1`, ADR-054), `E2E_MOCK_OPENAI_PORT` (port of the plugin specs' mock OpenAI server,
 default 8894, `0` = any free port; `e2e/README.md`), `E2E_FAKE_REMOTE_PORT` (Phase 14: port of the e2e fake remote
-that serves Brave / Tavily / Exa behind `HF_TEST_REMOTE_URL`; `e2e/README.md`). See `.env.example` and
+that serves Brave / Tavily / Exa behind `HF_TEST_REMOTE_URL`, default 8889; `e2e/README.md`). See `.env.example` and
 `docs/DECISIONS.md` (Contract seed).
 
 **Never run `pnpm test:live` unless your task prompt says so** — it makes paid provider calls with real keys.

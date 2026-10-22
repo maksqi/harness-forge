@@ -5,7 +5,7 @@ registers tools, providers, slash commands, MCP servers, hooks, (plugin API 1.4.
 (plugin API 1.5.0) output styles through `ctx`. Use a code plugin when a manifest is not enough: a tool the model can
 call, a provider for an unusual API, a command that computes its answer, a hook that changes prompts and tool calls, or
 agents, skills and styles built from code. (Command hooks, the shell commands of Claude Code's `hooks` format, are
-declared in `plugin.json` as `contributes.hooks`; the plugin API (1.6.0) has no `ctx` API for them.)
+declared in `plugin.json` as `contributes.hooks`; the plugin API (1.7.0) has no `ctx` API for them.)
 
 > **Trust.** A code plugin runs **inside the server process with its full rights**. It can read every API key and
 > conversation, the data directory and `process.env`, make any network request and start programs. harness-forge
@@ -360,6 +360,17 @@ ctx.providers.register({
   result also carries `modelName`; errors in [PLUGINS.md 9](../PLUGINS.md#plugincontext)). Keep the ids of files your
   plugin needs in `ctx.storage` or its settings: the storage cleanup (Settings → Data) keeps only files something
   references, and it does not look into `ctx.plugin.dataDir`.
+- Native web search (plugin API 1.7.0): `webSearch(model, { functionTools, maxUses })` returns the provider package's
+  own search tool for a model, `{ tools: { web_search: vendor.tools.webSearch({ maxUses }) } }`, and / or
+  `providerOptions`, or `undefined` when the model cannot search. It is synchronous and does no I/O (called inside
+  try / catch like `reasoning`); add `exclusive: true` when the search tool drops the other tools of a request (it is
+  then used only for turns without function tools). The host keeps at most 4 tools of `type: 'provider'` under tool
+  names that do not start with `mcp__` and are not `search_web`, and provider options that are JSON objects; a bad
+  tool entry is dropped, a malformed answer is ignored as a whole, and a tool whose name a function tool of the turn
+  already uses is left out of that turn. The catalog calls it with `{ functionTools: 0 }` to set the model's `webSearch` (`native` /
+  `exclusive`), and the composer's Search toggle uses it ([web search](./web-search.md),
+  [PLUGINS.md](../PLUGINS.md)). Declare `"engines": { "harness": "^1.7.0" }`; declarative providers have no native
+  search.
 
 ## Commands
 
@@ -456,7 +467,7 @@ changes discarded; after 5 failures in a row it is switched off until the plugin
 | `run.stop` (1.5.0) | `continue` (a reason: the agent goes on; at most 5 in a row) | "the tests are red, keep going" |
 | `subagent.stop` (1.5.0) | `continue` (one more sub-agent round, at most 2) | a report that misses a section |
 | `compact.before` (1.5.0) | nothing (observe) | logging |
-| `notification` (1.5.0) | nothing (observe; a run waits for an approval) | desktop or chat notifications |
+| `notification` (1.5.0) | nothing (observe; a run waits for an approval; 1.7.0: `input.type` is `permission_prompt` or `elicitation_dialog`, an MCP server waits for the user's answer in a form card, never with the values) | desktop or chat notifications |
 
 `prompt.submit`, `session.start` and `run.stop` carry `projectId` (null outside projects). Declare
 `"engines": { "harness": "^1.5.0" }` when you use one. The 1.5.0 events run together with the command hooks of the same
@@ -522,8 +533,8 @@ Calls are billed to the user's key, so say in your description that the plugin m
 ## Lifecycle, debugging and trust
 
 - **States**: `active`, `disabled`, `untrusted` (the files changed since they were trusted), `incompatible`
-  (`engines.harness` does not match the plugin API `1.6.0`, so use `"^1.0.0"`, or `"^1.1.0"` / `"^1.2.0"` /
-  `"^1.3.0"` / `"^1.4.0"` / `"^1.5.0"` / `"^1.6.0"` for the members of those versions),
+  (`engines.harness` does not match the plugin API `1.7.0`, so use `"^1.0.0"`, or `"^1.1.0"` / `"^1.2.0"` /
+  `"^1.3.0"` / `"^1.4.0"` / `"^1.5.0"` / `"^1.6.0"` / `"^1.7.0"` for the members of those versions),
   `error` (invalid manifest, `setup` threw or timed out, build failed). The plugin card and the detail header show the
   state and the last error.
 - **Logs**: `ctx.logger.debug/info/warn/error(message, data)` shows up in the Logs tab (last 500 entries) and the

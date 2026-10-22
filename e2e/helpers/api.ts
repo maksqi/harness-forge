@@ -16,6 +16,7 @@ import type {
   Settings,
   SettingsUpdate,
   ToolMode,
+  WebSearchMode,
 } from '../../packages/shared/src/index.ts'
 import { expect, request as playwrightRequest } from '@playwright/test'
 import { createApiClient, createChatId, createMessageId } from '../../packages/shared/src/index.ts'
@@ -120,6 +121,11 @@ export interface SendChatInput {
   imageOptions?: ImageOptions
   /** The project of a new chat (Phase 7, ADR-031): honored only when this request creates the chat. */
   projectId?: string
+  /**
+   * The turn's web search mode (Phase 14, docs/API.md 4.39): omitted = the chat's `settings.webSearch`, else the global
+   * `webSearchDefault`; stored as the chat's setting only when this request creates the chat.
+   */
+  webSearch?: WebSearchMode
 }
 
 export interface AnswerApprovalsInput {
@@ -292,6 +298,7 @@ export class HarnessApi {
         toolMode: input.toolMode ?? 'ask',
         ...(input.imageOptions === undefined ? {} : { imageOptions: input.imageOptions }),
         ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
+        ...(input.webSearch === undefined ? {} : { webSearch: input.webSearch }),
       },
     })
     const chunks = parseUiMessageStream(await response.text())

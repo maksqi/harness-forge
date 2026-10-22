@@ -42,21 +42,30 @@
 // on a `notes` agent, the hook editor with the Prompt type, and the project trust dialog with a partly selected group
 // (the mixed Select all). Their data: the marketplace folder and the fake home live in temp folders outside the
 // repository, removed with the server; nothing is installed or imported.
+// Phase 14 screens (W14.11): the MCP panel with a server that waits for its sign-in next to a signed-in one, the sign-in
+// callback page after a refused sign-in, the server dialog's OAuth section, the composer's Search toggle, a builtin
+// search with its results and sources chips, an MCP question's form card, the slash menu's MCP group, the mention menu
+// with MCP resources, and Settings -> Web search after Test search. Their data: the OAuth MCP fixture and the fake search
+// remote run in the worker (the server's `HF_TEST_REMOTE_URL`); the two personal MCP servers (`tracker`, signed in
+// through the API, and `docs`) and the Brave Search key exist only while a screen that needs them is open (added by
+// `open`, removed in `close`), so the other screens keep their menus and sidebars; the two search chats are the oldest.
 // A screen that starts something (a run, a recording, a dialog, settings only it needs, the open changes panel) undoes
 // it in `close`, so the other screens look the same in every run.
 // `@readme` (also `@screenshots`): the README images as full 1440x900 frames, written to `.tmp/screenshots/readme/`
 // with the file names of `docs/assets/screenshots/` (chat-dark, chat-light, plugins-dark, provider-wizard-dark,
 // settings-dark, workspace-dark, changes-panel-dark) plus customize-dark (Phase 10: Settings -> Customize), hooks-dark
 // (Phase 11: Settings -> Customize -> Hooks), marketplaces-dark and claude-import-dark (Phase 12: the Marketplaces page
-// and the import preview), candidates for the README.
+// and the import preview), mcp-sign-in-dark, elicitation-dark and web-search-dark (Phase 14: the MCP panel, an MCP
+// question and a builtin search), candidates for the README.
 import type { Locator, Page } from '@playwright/test'
-import type { HooksConfig, HookScriptName, HookScriptOptions, StartedServer, TempFolder, UiStreamChunk } from '../../helpers/index.ts'
+import type { HooksConfig, HookScriptName, HookScriptOptions, OAuthMcpServer, StartedServer, TempFolder, UiStreamChunk } from '../../helpers/index.ts'
 import { createHash } from 'node:crypto'
 import { copyFile, mkdir, utimes, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import process from 'node:process'
 import { devices } from '@playwright/test'
 import { createMessageId } from '../../../packages/shared/src/index.ts'
+import { startFakeSearchRemote } from '../../fixtures/fake-remote.mjs'
 import { chooseClaudeFolder, continueToPreview, fakeClaudeHomeTree, openClaudeImport } from '../../helpers/claude-home.ts'
 import {
   approveProjectItems,
@@ -78,26 +87,35 @@ import {
   initGitRepository,
   lastAssistantMessage,
   makeTempFolder,
+  mcpToolName,
   mcpVariable,
   MOCK_CHECKPOINT_DIR,
   MOCK_CHECKPOINT_DONE,
   MOCK_CHECKPOINT_FILE,
   MOCK_HOOKS_MODEL,
+  MOCK_SEARCH_MODEL,
+  MOCK_SEARCH_TOOL_MODEL,
   MOCK_WORKSPACE_DONE,
   naturalSize,
   openRewind,
   parseUiMessageStream,
   pressShortcut,
   projectSettings,
+  removeMcpServer,
   REPO_ROOT,
   sendMessage,
+  setSearchKey,
+  signInMcpServer,
+  startOAuthFixture,
   startServer,
   stubClaudeHome,
   test,
   testIds,
   trustItem,
   userMessages,
+  waitForMcpStatus,
   waitForTestId,
+  webSearchToggle,
   workspaceRoot,
   writeHookScript,
   writeProjectFile,
@@ -183,6 +201,12 @@ interface Seed {
   claudeHome: { home: string, claudeDir: string, claudeJson: string, writeClaudeFile: (relative: string, content: string) => Promise<void> }
   /** Phase 12: the temp folders of the seed, removed with the server. */
   tempFolders: TempFolder[]
+  /** Phase 14: a `mock:search` chat whose reply searched with the model's own search (web search on). */
+  searchNative: string
+  /** Phase 14: a `mock:search-tool` chat whose reply searched with `search_web` (Brave Search on the fake remote). */
+  searchBuiltin: string
+  /** Phase 14: the OAuth MCP fixture of the MCP screens (in the worker, on `127.0.0.1`). */
+  mcpFixture: OAuthMcpServer
   /** The screenshot server (API calls of the screens that start something). */
   baseURL: string
   /** The start of the browser clock: a little after the seed, so relative times read "2m ago". */
@@ -445,6 +469,47 @@ async function openHooksTab(page: Page, seed: Seed): Promise<void> {
     await expect(byTestId(page, testIds.hooksSection, { 'data-source': 'project' })).toHaveAttribute('data-count', '5')
     await revealCustomizeTab(page, 'hooks')
   })
+}
+
+/** Phase 14: the personal MCP servers of the MCP screens (see the top of this file). */
+const MCP_SERVERS = { tracker: { id: 'tracker', name: 'Issue tracker' }, docs: { id: 'docs', name: 'Docs search' } } as const
+/** Phase 14: the Brave Search key of the search screens (the fake remote takes any key but `invalid-key`). */
+const SEARCH_KEY = 'screenshots-brave-key'
+/** Phase 14: the chat of the MCP question screen (deleted again in `close`). */
+let questionChatId: string | null = null
+
+/**
+ * Phase 14: adds the two personal MCP servers of the MCP screens: `tracker` (its tools run without a card; signed in
+ * through the API: the fixture's auto-approval) and `docs` (a configured client with a stored secret and scopes, waiting
+ * for its sign-in). `removeMcpServers` deletes them in `close`.
+ */
+async function addMcpServers(page: Page, seed: Seed): Promise<void> {
+  const api = pageApi(page, seed)
+  await api.client.mcp.create({ body: { ...MCP_SERVERS.tracker, policy: 'safe', transport: { type: 'http', url: seed.mcpFixture.url } } })
+  await api.client.mcp.create({
+    body: {
+      ...MCP_SERVERS.docs,
+      transport: { type: 'http', url: seed.mcpFixture.url, oauth: { clientId: 'harness-forge', clientSecret: 'screenshots-client-secret', scopes: 'docs:read' } },
+    },
+  })
+  if ((await waitForMcpStatus(api, MCP_SERVERS.tracker.id, ['needs-auth', 'connected'])).status === 'needs-auth')
+    await signInMcpServer(api, MCP_SERVERS.tracker.id)
+  await waitForMcpStatus(api, MCP_SERVERS.docs.id, 'needs-auth')
+}
+
+async function removeMcpServers(page: Page, seed: Seed): Promise<void> {
+  const api = pageApi(page, seed)
+  for (const server of Object.values(MCP_SERVERS))
+    await removeMcpServer(api, server.id)
+}
+
+/** Phase 14: the MCP panel of `core-mcp` with both servers in their states. */
+async function openMcpPanel(page: Page): Promise<Locator> {
+  await page.goto('/plugins/core-mcp')
+  const panel = page.getByTestId(testIds.mcpPanel)
+  await expect(byTestId(panel, testIds.mcpServerRow, { 'data-server-id': MCP_SERVERS.docs.id })).toHaveAttribute('data-status', 'needs-auth')
+  await expect(byTestId(panel, testIds.mcpServerRow, { 'data-server-id': MCP_SERVERS.tracker.id })).toHaveAttribute('data-status', 'connected')
+  return panel
 }
 
 const SCREENS: Screen[] = [
@@ -1024,6 +1089,159 @@ const SCREENS: Screen[] = [
       await expect(page.getByTestId(testIds.rememberDialog)).toHaveCount(0)
     },
   },
+  // ---------- Phase 14 (W14.11) ----------
+  {
+    name: 'mcp-needs-auth',
+    open: async (page, seed) => {
+      await addMcpServers(page, seed)
+      const panel = await openMcpPanel(page)
+      await expect(byTestId(panel, testIds.mcpSignIn, { 'data-server-id': MCP_SERVERS.docs.id })).toBeVisible()
+      await panel.scrollIntoViewIfNeeded()
+    },
+    close: removeMcpServers,
+  },
+  {
+    name: 'mcp-dialog-oauth',
+    only: 'desktop',
+    open: async (page, seed) => {
+      await addMcpServers(page, seed)
+      await openMcpPanel(page)
+      await page.locator(`[data-action="mcp-menu"][data-server-id="${MCP_SERVERS.docs.id}"]`).click()
+      await byTestId(page, testIds.mcpEdit, { 'data-server-id': MCP_SERVERS.docs.id }).click()
+      const dialog = page.getByTestId(testIds.mcpDialog)
+      const section = dialog.getByTestId(testIds.mcpOauthSection)
+      await expect(section).toHaveAttribute('data-state', 'open')
+      await expect(section.getByTestId(testIds.mcpOauthClientSecret)).toHaveAttribute('data-stored', 'true')
+      await section.getByTestId(testIds.mcpOauthRedirectUri).scrollIntoViewIfNeeded()
+    },
+    close: async (page, seed) => {
+      await page.keyboard.press('Escape')
+      await expect(page.getByTestId(testIds.mcpDialog)).toHaveCount(0)
+      await removeMcpServers(page, seed)
+    },
+  },
+  {
+    name: 'oauth-callback',
+    open: async (page, seed) => {
+      // A sign-in of `docs` refused at its authorization server: the callback page with the provider's answer.
+      await addMcpServers(page, seed)
+      const start = await pageApi(page, seed).client.mcpAuth.start({ params: { id: MCP_SERVERS.docs.id }, body: { returnTo: '/plugins/core-mcp' } })
+      const state = new URL(start.authorizationUrl ?? '').searchParams.get('state') ?? ''
+      await page.goto(`/oauth/callback?${new URLSearchParams({ state, error: 'access_denied', error_description: 'The user denied the request.' })}`)
+      await expect(page.getByTestId(testIds.oauthCallback)).toHaveAttribute('data-state', 'error')
+      await expect(page.getByTestId(testIds.oauthCallbackRetry)).toBeVisible()
+      await page.getByTestId(testIds.oauthCallbackError).blur()
+    },
+    close: removeMcpServers,
+  },
+  {
+    name: 'composer-web-search',
+    open: async (page, seed) => {
+      await openChat(page, seed.searchNative)
+      const toggle = webSearchToggle(page)
+      await expect(toggle).toHaveAttribute('data-state', 'on')
+      if (!isPhone(page)) {
+        await toggle.hover()
+        await expect(page.getByRole('tooltip')).toContainText('Web search on')
+      }
+    },
+    close: async (page) => {
+      await page.mouse.move(0, 0)
+    },
+  },
+  {
+    name: 'sources-chips',
+    open: async (page, seed) => {
+      await openChat(page, seed.searchBuiltin)
+      const reply = lastAssistantMessage(page)
+      // The desktop shows the results too; the phone keeps the row closed, so the sources chips stay in view.
+      if (!isPhone(page)) {
+        const row = byTestId(reply, testIds.toolRow, { 'data-tool-name': 'search_web' })
+        await row.getByRole('button').first().click()
+        await expect(reply.getByTestId(testIds.webSearchResult)).toHaveCount(5)
+      }
+      await expect(reply.getByTestId(testIds.sourcesChip).first()).toBeVisible()
+    },
+  },
+  {
+    name: 'elicitation-card',
+    open: async (page, seed) => {
+      // The card counts down from the server's time: the page clock runs at the real time here (see the image turn).
+      clockOffsetMs = await page.evaluate<number>('Date.now()') - Date.now()
+      await page.clock.setSystemTime(Date.now())
+      await addMcpServers(page, seed)
+      questionChatId = (await pageApi(page, seed).createChat({ title: 'File the login bug', modelRef: MOCK_HOOKS_MODEL })).id
+      await page.goto(`/chat/${questionChatId}`)
+      await expect(composer(page).getByTestId(testIds.modelPickerTrigger)).toHaveAttribute('data-model-ref', MOCK_HOOKS_MODEL)
+      await sendMessage(page, `call ${mcpToolName(MCP_SERVERS.tracker.id, 'ask')} {}`)
+      const card = byTestId(page, testIds.elicitationCard, { 'data-server-id': MCP_SERVERS.tracker.id })
+      await expect(card).toHaveAttribute('data-state', 'pending')
+      await expectTranscriptAtBottom(page)
+    },
+    close: async (page, seed) => {
+      const card = byTestId(page, testIds.elicitationCard, { 'data-server-id': MCP_SERVERS.tracker.id })
+      if (await card.count() > 0)
+        await card.getByTestId(testIds.elicitationDecline).click()
+      if (questionChatId)
+        await pageApi(page, seed).removeChat(questionChatId)
+      questionChatId = null
+      await removeMcpServers(page, seed)
+      await page.clock.setSystemTime(Date.now() + clockOffsetMs)
+    },
+  },
+  {
+    name: 'slash-mcp-group',
+    only: 'desktop',
+    open: async (page, seed) => {
+      await addMcpServers(page, seed)
+      await openChat(page, seed.searchNative)
+      await page.getByTestId(testIds.composerInput).click()
+      await page.keyboard.type('/')
+      const menu = page.getByTestId(testIds.slashMenu)
+      await expect(byTestId(menu, testIds.slashMenuItem, { 'data-value': `mcp__${MCP_SERVERS.tracker.id}__greet`, 'data-group': 'mcp' })).toBeAttached()
+      // The App group fills the first rows: scroll the MCP heading to the top.
+      await menu.locator('[data-group="mcp"]:not([data-testid])').evaluate(element => element.scrollIntoView({ block: 'start' }))
+    },
+    close: async (page, seed) => {
+      await page.keyboard.press('Escape')
+      await page.getByTestId(testIds.composerInput).fill('')
+      await removeMcpServers(page, seed)
+    },
+  },
+  {
+    name: 'mention-resources',
+    only: 'desktop',
+    open: async (page, seed) => {
+      await addMcpServers(page, seed)
+      await openChat(page, seed.subagents)
+      await page.getByTestId(testIds.composerInput).click()
+      await page.keyboard.type('Summarize @re')
+      const menu = page.getByTestId(testIds.mentionMenu)
+      await expect(menu).toHaveAttribute('data-state', 'ready')
+      await expect(byTestId(menu, testIds.mentionMenuSection, { 'data-value': 'files' })).toBeVisible()
+      await expect(menu.getByTestId(testIds.mentionMenuResource).first()).toBeVisible()
+    },
+    close: async (page, seed) => {
+      await page.keyboard.press('Escape')
+      await page.getByTestId(testIds.composerInput).fill('')
+      await removeMcpServers(page, seed)
+    },
+  },
+  {
+    name: 'settings-web-search',
+    open: async (page, seed) => {
+      await setSearchKey(pageApi(page, seed), 'brave', SEARCH_KEY)
+      await openSettings(page, '/settings/search', async (page) => {
+        await expect(byTestId(page, testIds.settingsSearchKey, { 'data-backend': 'brave' })).toHaveAttribute('data-state', 'set')
+        await page.getByTestId(testIds.settingsSearchTest).click()
+        await expect(page.getByTestId(testIds.settingsSearchTestResult)).toHaveAttribute('data-state', 'ok')
+        await page.getByTestId(testIds.settingsSearchTest).blur()
+      })
+    },
+    close: async (page, seed) => {
+      await setSearchKey(pageApi(page, seed), 'brave', '')
+    },
+  },
   {
     name: 'share-dialog',
     open: async (page, seed) => {
@@ -1599,7 +1817,7 @@ async function seedHooksProject(api: HarnessApi, root: string): Promise<{ projec
 }
 
 /** Creates the chats of the screenshots through the API of the screenshot server. */
-async function seed(server: StartedServer): Promise<Seed> {
+async function seed(server: StartedServer, mcpFixture: OAuthMcpServer): Promise<Seed> {
   const api = await HarnessApi.create(server.baseURL)
   try {
     await api.client.auth.login({ body: { password: PASSWORD } })
@@ -1618,6 +1836,18 @@ async function seed(server: StartedServer): Promise<Seed> {
       await writeFile(join(root, 'notes', file), content)
     }
     const notes = (await api.client.projects.create({ body: { name: 'notes', path: join(root, 'notes') } })).id
+    // Phase 14 first of all (the oldest chats: the sidebar lists them last): a search with the model's own search and
+    // one with `search_web` (Brave Search on the fake remote; the key only for this turn), web search on for both.
+    const searchChat = async (title: string, modelRef: string, text: string) => {
+      const id = (await api.createChat({ title, modelRef })).id
+      await api.client.chats.update({ params: { id }, body: { settings: { webSearch: 'auto' } } })
+      await api.sendChat({ chatId: id, modelRef, toolMode: 'ask', text })
+      return id
+    }
+    const searchNative = await searchChat('What changed in MCP auth?', MOCK_SEARCH_MODEL, 'What changed in the MCP authorization spec this year?')
+    await setSearchKey(api, 'brave', SEARCH_KEY)
+    const searchBuiltin = await searchChat('Open source search engines', MOCK_SEARCH_TOOL_MODEL, 'open source search engines')
+    await setSearchKey(api, 'brave', '')
     // Phase 11 first of all (the oldest chats: the sidebar lists them last).
     const hooks = await seedHooksProject(api, root)
     // Phase 10 first (the oldest chats: the sidebar lists them last), with the sub-agents on the chats' own models.
@@ -1778,6 +2008,9 @@ async function seed(server: StartedServer): Promise<Seed> {
       marketplace,
       claudeHome,
       tempFolders,
+      searchNative,
+      searchBuiltin,
+      mcpFixture,
       baseURL: server.baseURL,
       now: Date.now() + 2 * 60_000,
     }
@@ -1861,6 +2094,10 @@ const README_SHOTS: readonly { file: string, screen: string, theme: Theme }[] = 
   // Phase 12: candidates for the README (W12.15 decides).
   { file: 'marketplaces-dark', screen: 'plugins-marketplaces', theme: 'dark' },
   { file: 'claude-import-dark', screen: 'claude-import-preview', theme: 'dark' },
+  // Phase 14: candidates for the README (W14.12 decides).
+  { file: 'mcp-sign-in-dark', screen: 'mcp-needs-auth', theme: 'dark' },
+  { file: 'elicitation-dark', screen: 'elicitation-card', theme: 'dark' },
+  { file: 'web-search-dark', screen: 'sources-chips', theme: 'dark' },
 ]
 
 /** Captures the README images of one theme as full 1440x900 frames (no crops) into `.tmp/screenshots/readme/`. */
@@ -1898,16 +2135,22 @@ interface ScreenshotFixtures {
 const shots = test.extend<object, ScreenshotFixtures>({
   // eslint-disable-next-line no-empty-pattern -- Playwright fixtures must destructure their first argument.
   screenshotServer: [async ({}, use) => {
-    const server = await startServer({ env: { HF_PASSWORD: PASSWORD }, label: 'hf-e2e-screenshots' })
+    // Phase 14: the fake search remote (the server's `HF_TEST_REMOTE_URL`) and the OAuth MCP fixture, in this worker.
+    const remote = await startFakeSearchRemote({ port: 0 })
+    const mcpFixture = await startOAuthFixture()
+    let server: StartedServer | undefined
     let seeded: Seed | undefined
     try {
-      seeded = await seed(server)
+      server = await startServer({ env: { HF_PASSWORD: PASSWORD, HF_TEST_REMOTE_URL: remote.url }, label: 'hf-e2e-screenshots' })
+      seeded = await seed(server, mcpFixture)
       await use({ server, seed: seeded })
     }
     finally {
-      await server.stop()
+      await server?.stop()
       for (const folder of seeded?.tempFolders ?? [])
         await folder.remove()
+      await mcpFixture.stop()
+      await remote.stop()
     }
   }, { scope: 'worker', timeout: 60_000 }],
   // Pages and `page.goto('/...')` go to the screenshot server.

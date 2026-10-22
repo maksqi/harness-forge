@@ -9,6 +9,10 @@
 //   the project never gets them.
 // - A project server whose id equals a global server's id replaces it in the project's chats ("Replaces your server
 //   {id} …"); an HTTP server needs approval like a stdio one (Review…, the private-network warning).
+// - Phase 14 (ADR-059; W14.11): an approved `.mcp.json` HTTP server with `oauth` (the OAuth MCP fixture on `127.0.0.1`,
+//   its pre-registered client) asks for a sign-in once it starts; **Sign in** in the MCP dialog leaves for the fixture's
+//   authorization page and the callback page returns to the chat ("Signed in to docs."); the row then reads "Connected · 4
+//   tools · Signed in" with **Sign out…** (confirmed). A pending server keeps Review… and never offers Sign in.
 import type { Page } from '@playwright/test'
 import type { HarnessApi } from '../../helpers/index.ts'
 import { readdir, readFile } from 'node:fs/promises'
@@ -19,6 +23,7 @@ import {
   byTestId,
   expect,
   expectMessageStatus,
+  FIXTURE_CLIENT_ID,
   lastAssistantMessage,
   mcpVariable,
   MOCK_HOOKS_MODEL,
@@ -26,6 +31,7 @@ import {
   REPO_ROOT,
   seedProjectChat,
   sendMessage,
+  startOAuthFixture,
   test,
   testIds,
   toastWith,
@@ -194,5 +200,58 @@ test.describe('project MCP servers', () => {
     await review.locator('[data-action="close"]').click()
     await expect(review).toBeHidden()
     await expect(dialog).toBeVisible()
+  })
+
+  test('an approved .mcp.json server with oauth signs in from the MCP dialog; a pending one only offers Review…', async ({ page, api, cleanup }) => {
+    const fixture = await startOAuthFixture({}, cleanup)
+    const { project, chatId } = await seedMcpProject(api, cleanup, {
+      docs: { type: 'http', url: fixture.url, oauth: { clientId: FIXTURE_CLIENT_ID } },
+      wiki: { type: 'http', url: fixture.url, oauth: { clientId: FIXTURE_CLIENT_ID, scopes: 'mcp:read' } },
+    })
+    await approveProjectItems(api, project.id, item => item.kind === 'mcp' && item.detail.id === 'docs')
+    await page.goto(`/chat/${chatId}`)
+    const dialog = page.getByTestId(testIds.projectMcpDialog)
+    const openDialog = async () => {
+      await page.getByTestId(testIds.chatProjectChip).click()
+      await page.getByTestId(testIds.chatProjectMcp).click()
+      await expect(dialog).toBeVisible()
+    }
+    await openDialog()
+    const docs = byTestId(dialog, testIds.projectMcpServer, { 'data-server-id': 'docs' })
+    const wiki = byTestId(dialog, testIds.projectMcpServer, { 'data-server-id': 'wiki' })
+    await expect(wiki).toHaveAttribute('data-state', 'pending')
+    await expect(wiki.getByTestId(testIds.projectMcpReview)).toBeVisible()
+    await expect(wiki.getByTestId(testIds.projectMcpSignIn)).toHaveCount(0)
+
+    // The approved server starts (Reconnect) and asks for a sign-in; nothing was signed in before.
+    await expect(docs).toHaveAttribute('data-state', 'idle')
+    await expect(docs.getByTestId(testIds.projectMcpSignIn)).toHaveCount(0)
+    await docs.getByTestId(testIds.projectMcpReconnect).click()
+    await expect(docs).toHaveAttribute('data-state', 'needs-auth')
+    await expect(docs.locator('[data-slot="project-mcp-status"]')).toHaveText('Sign in required')
+    await expect(docs.getByTestId(testIds.projectMcpReconnect)).toHaveCount(0)
+    const signIn = docs.getByTestId(testIds.projectMcpSignIn)
+    await expect(signIn).toHaveAccessibleName('Sign in to docs')
+    await expect(wiki.getByTestId(testIds.projectMcpSignIn)).toHaveCount(0)
+
+    // Sign in: the fixture (its pre-registered client, auto-approved), the callback page, back in the chat.
+    await signIn.click()
+    await expect(page).toHaveURL(new RegExp(`/chat/${chatId}$`))
+    await expect(toastWith(page, 'Signed in to docs.')).toBeVisible()
+    expect(fixture.counters().registrations, 'the configured client needs no registration').toBe(0)
+    expect((await projectMcp(api, project.id)).items.find(item => item.id === 'docs')?.auth).toMatchObject({ signedIn: true, client: 'configured' })
+    await openDialog()
+    await expect(docs).toHaveAttribute('data-state', 'connected')
+    await expect(docs.locator('[data-slot="project-mcp-status"]')).toHaveText('Connected · 4 tools · Signed in')
+    await expect(wiki).toHaveAttribute('data-state', 'pending')
+    await expect(wiki.getByTestId(testIds.projectMcpSignIn)).toHaveCount(0)
+
+    // Sign out (confirmed): the server asks for a sign-in again.
+    await docs.getByTestId(testIds.projectMcpSignOut).click()
+    await expect(page.getByRole('alertdialog')).toContainText('Sign out of docs?')
+    await page.locator('[data-action="project-mcp-sign-out-confirm"]').click()
+    await expect(toastWith(page, 'Signed out of docs.')).toBeVisible()
+    await expect(docs).toHaveAttribute('data-state', 'needs-auth')
+    await expect(docs.getByTestId(testIds.projectMcpSignIn)).toBeVisible()
   })
 })

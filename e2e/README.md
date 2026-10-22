@@ -7,7 +7,9 @@ in Chromium with the dev-only `mock` provider (`HF_MOCK_PROVIDER=1`, docs/PROVID
 mocks `mock:compact`, `mock:plan`, `mock:todo`, `mock:subagent` and `mock:steer` (compaction, plan mode, todos,
 sub-agents and the steer queue, Phase 9), the customization mocks `mock:agents` and `mock:background` (custom agents,
 commands and skills, background agents, Phase 10), the hook mock `mock:hooks` (hooks, project trust, project MCP
-servers, output styles and the command extras, Phase 11) and `mock:prompt-hook` (the verdicts of prompt hooks, Phase 12).
+servers, output styles and the command extras, Phase 11), `mock:prompt-hook` (the verdicts of prompt hooks, Phase 12) and
+the search mocks `mock:search` and `mock:search-tool` (native and builtin web search, Phase 14; MCP sign-in, questions,
+prompts and resources use `mock:hooks` and `mock:echo` with the OAuth MCP fixture).
 Tests tagged `@smoke` in their title run at every gate (`--grep @smoke`); every core test is.
 
 ```
@@ -20,17 +22,20 @@ e2e/
                       todos, sub-agents, file mentions, steer queue (W9.13), Customize, custom commands, custom agents,
                       skills, background agents, Remember, plan files (W10.13), hooks, hook import, prompt hooks, Stop
                       continuations, project trust, project MCP servers, output styles, command shell lines and `@path`
-                      (W11.13), the import from Claude Code, project file editing, prompt hooks (W12.14)
+                      (W11.13), the import from Claude Code, project file editing, prompt hooks (W12.14), MCP questions,
+                      MCP prompts, MCP resources, web search, Settings -> Web search, project MCP sign-in (W14.11)
   specs/plugins/      plugins tab, install, wizard, code plugins, MCP (W3.6), plugin agents and skills (W10.13), plugin
-                      hooks (W11.13), marketplaces, Claude Code plugins, plugin updates (W12.14)
-  specs/mobile/       phone layout, project `mobile` only (W5.8, W6.12, W7.14, W8.12, W9.13, W10.13, W11.13, W12.14)
-  specs/tablet/       touch tablet (icon rail, Phase 7 – 12 controls), project `tablet` only (W6.12, W7.14, W8.12, W9.13,
-                      W10.13, W11.13, W12.14)
+                      hooks (W11.13), marketplaces, Claude Code plugins, plugin updates (W12.14), MCP sign-in (W14.11)
+  specs/mobile/       phone layout, project `mobile` only (W5.8, W6.12, W7.14, W8.12, W9.13, W10.13, W11.13, W12.14,
+                      W14.11)
+  specs/tablet/       touch tablet (icon rail, Phase 7 – 14 controls), project `tablet` only (W6.12, W7.14, W8.12, W9.13,
+                      W10.13, W11.13, W12.14, W14.11)
   specs/screenshots/  screenshots for the visual review and the README images, opt-in with `E2E_SCREENSHOTS=1` (W5.8,
-                      W6.12, W7.14, W8.12, W9.13, W10.13, W11.13, W12.14)
+                      W6.12, W7.14, W8.12, W9.13, W10.13, W11.13, W12.14, W14.11)
   fixtures/           plugin fixtures used by the plugin specs (W3.6), the stdio MCP echo server (also copied into
-                      project folders by the Phase 11 specs); Phase 14 (planned): `fake-remote.mjs`, the fake Brave
-                      Search, Tavily and Exa APIs (C53), and the OAuth / elicitation MCP fixtures (W14.11)
+                      project folders by the Phase 11 specs); Phase 14: `fake-remote.mjs` (+ `.d.mts`), the fake Brave
+                      Search, Tavily and Exa APIs (C53), and `mcp-oauth-server.mjs` (+ `.d.mts`), a re-export of the
+                      server's OAuth MCP fixture (C53; OAuth, elicitation, prompts, resources) for the specs (W14.11)
 ```
 
 ## Running
@@ -56,10 +61,12 @@ pnpm test:e2e --grep @smoke
 pnpm test:e2e --project=mobile
 pnpm test:e2e --project=tablet
 
-# an agent slot k: own server, fresh data directory, own output folder
+# an agent slot k: own server, fresh data directory, own output folder; Phase 14: a fake remote of its own first
+# (any free port P) and the app on `localhost` (the OAuth fixture listens on 127.0.0.1: a cross-site sign-in)
 rm -rf .tmp/<agent>/data
-HF_MOCK_PROVIDER=1 HF_OFFLINE=1 HF_PORT=889k HF_DATA_DIR=.tmp/<agent>/data node apps/server/dist/main.mjs &
-E2E_BASE_URL=http://127.0.0.1:889k pnpm exec playwright test e2e/specs/core --output .tmp/<agent>/test-results
+node e2e/fixtures/fake-remote.mjs --port P &
+HF_MOCK_PROVIDER=1 HF_OFFLINE=1 HF_CLAUDE_HOME=0 HF_TEST_REMOTE_URL=http://127.0.0.1:P HF_PORT=889k HF_DATA_DIR=.tmp/<agent>/data node apps/server/dist/main.mjs &
+E2E_BASE_URL=http://localhost:889k E2E_FAKE_REMOTE_PORT=P pnpm exec playwright test e2e/specs/core --output .tmp/<agent>/test-results
 
 # screenshots (skipped without E2E_SCREENSHOTS=1); @screenshots includes the README images
 E2E_SCREENSHOTS=1 pnpm test:e2e --grep @screenshots
@@ -115,14 +122,19 @@ specs that need the password prompt or turn hooks off for the whole server run o
 ever writes `.claude/`, `.harness/` or `.mcp.json` outside a seeded project folder; the MCP fixtures are copied into the
 project folder and listen on stdio or loopback only.
 
-Phase 14 (v1.9, planned; W14.11, docs/phases/phase-14-v1-9.md): `core/web-search.spec.ts`,
-`core/mcp-elicitation.spec.ts`, `core/mcp-prompts.spec.ts`, `core/mcp-resources.spec.ts`,
-`core/settings-search.spec.ts`, `plugins/mcp-oauth.spec.ts` (also a run with a password: the callback page finishes the
-sign-in with the session cookie), an extended `core/project-mcp.spec.ts`, `mobile/{web-search,elicitation,mcp-oauth}.spec.ts`
-and the tablet touch targets of the Search toggle, the form card's buttons, Sign in and the switches. They use the mocks `mock:search` and
-`mock:search-tool` (docs/PROVIDERS.md "MCP and search mocks (Phase 14)"), the fake remote above and MCP fixtures
-started by the specs on free loopback ports; the fake authorization server listens on `localhost` while the app runs
-on `127.0.0.1`, so the sign-in redirect is a real cross-site navigation.
+Phase 14 (v1.9; W14.11, docs/phases/phase-14-v1-9.md): `core/web-search.spec.ts`, `core/mcp-elicitation.spec.ts`,
+`core/mcp-prompts.spec.ts`, `core/mcp-resources.spec.ts`, `core/settings-search.spec.ts`, `plugins/mcp-oauth.spec.ts`
+(also a run with a password: the callback page finishes the sign-in with the session cookie), an extended
+`core/project-mcp.spec.ts`, `mobile/{web-search,elicitation,mcp-oauth}.spec.ts` and the tablet touch targets of the
+Search toggle, the form card's buttons, Sign in and the Web search settings. They use the mocks `mock:search` and
+`mock:search-tool` (docs/PROVIDERS.md 8 "MCP and search mocks (Phase 14)"), the fake remote above (`helpers/web-search.ts`
+reads its log at `http://127.0.0.1:${E2E_FAKE_REMOTE_PORT:-8889}`) and the OAuth MCP fixture (`fixtures/mcp-oauth-server.mjs`),
+which each test starts in the Playwright worker on a free port of `127.0.0.1` (`startOAuthFixture`, stopped through
+`cleanup`) while the app runs on `localhost` (`E2E_BASE_URL`, default `http://localhost:8899`), so the sign-in redirect
+is a genuinely cross-site navigation (the password run opens its own server as `localhost` too). The OAuth specs never
+reach a real host: the fixture is its own authorization server. Personal MCP servers and the search configuration are
+global state of the server, so every spec gives its servers unique ids and removes them (and every search key) through
+`cleanup` (`addHttpMcpServer`, `useWebSearchConfig`).
 
 ## Core specs (`specs/core`)
 
@@ -170,7 +182,12 @@ on `127.0.0.1`, so the sign-in redirect is a real cross-site navigation.
 | `hook-prompts.spec.ts` | Phase 11 (docs/UI.md 7.31) with approved project hooks: a blocking UserPromptSubmit hook (`prompt-block`) refuses the message: the composer keeps the text and the file chip and shows `composer-refusal` (`hook-blocked`, the reason, "UserPromptSubmit · Project hook", the textarea described by it), nothing is stored; Esc keeps the refusal, typing clears it, × dismisses it; on `/` a new chat in that project stays on `/` and no chat is created; a message queued during a `mock:steer` reply is refused at enqueue and comes back to the composer without steering. `context?` lists the SessionStart and UserPromptSubmit contexts (no SessionStart on the second message); after a reload their notes sit below the bubbles and "Show context" opens the text and the source line. The live notes appear without a reload, and the refusal shows the hook's reason once |
 | `hook-continuation.spec.ts` | Phase 11 (docs/UI.md 7.31): a `stop-once` Stop hook adds the inline note "A Stop hook asked the agent to continue" and a carrier (a turn note with "run the tests" and "Sent to the agent", no actions); a server-started reply follows ("Hook continuation: run the tests"), the change is announced, and a second page follows it live; the carrier is stored as `data-hook` parts only. An always-blocking `exit2` Stop hook stops after 5 carriers and 6 replies with the notice `hook-continuation-limit` ("Stopped after 5 hook continuations in a row.") |
 | `project-trust.spec.ts` | Phase 11 (docs/UI.md 7.33) with `mock:hooks`: a project with a UserPromptSubmit `context` hook, a `.mcp.json` stdio server (the dependency-free `mcp-min.mjs --marker`, copied into the folder) and a command with `` !`echo hi` ``: the chip reads "3 to review"; nothing runs before the approval (`Context: none`, `MCP tools: none`, no marker file, the refusal `untrusted`); the dialog shows the warning, "Needs review · 3", three groups, New items with their exact commands and the focus on the first checkbox; checking each item gives "Approve 3 items" and a toast, then all three run; a script changed on disk is `changed` ("Changed since you approved it.") and stops running; a change while the dialog is open gives the stale alert (focused); Revoke toasts and focuses the checkbox; the entry points: the chip's menu, the Settings -> Projects badge and menu, Customize "Review 1…"; on a password server the approval asks for the password 11 minutes after the login. Phase 12 (docs/UI.md 7.34): a command hook and a prompt hook in one group (`data-type` command / prompt; the prompt in the "Prompt" block, "Model: mock:prompt-hook"); one selected makes "Select all 2" mixed (`aria-checked="mixed"`, `data-state="indeterminate"`, the minus icon), a click selects both ("Approve 2 items"), another clears them; Escape approves nothing |
-| `project-mcp.spec.ts` | Phase 11 (docs/UI.md 7.33) with `mcp-min.mjs` copied into the project: the MCP servers dialog goes from pending (Review… opens the trust item) to "Set 1 variable", a saved write-only variable ("•••• · stored"), "Starts with the first chat", then `mcp?` lists its tools (the fixture's marker shows `TOKEN` set) and the row reads "Connected · 3 tools"; Reconnect starts a new process; chats outside the project get no tools; a server with a global server's id shows "Replaces your server …" (the global server is `fixtures/mcp-echo-server.mjs`); an HTTP server is pending with the private-network warning |
+| `project-mcp.spec.ts` | Phase 11 (docs/UI.md 7.33) with `mcp-min.mjs` copied into the project: the MCP servers dialog goes from pending (Review… opens the trust item) to "Set 1 variable", a saved write-only variable ("•••• · stored"), "Starts with the first chat", then `mcp?` lists its tools (the fixture's marker shows `TOKEN` set) and the row reads "Connected · 3 tools"; Reconnect starts a new process; chats outside the project get no tools; a server with a global server's id shows "Replaces your server …" (the global server is `fixtures/mcp-echo-server.mjs`); an HTTP server is pending with the private-network warning. Phase 14 (docs/UI.md 2.20, 8.14): `.mcp.json` HTTP servers with `oauth` (the OAuth fixture, its pre-registered `fixture-client`): the pending one shows Review… and never Sign in; the approved one starts on Reconnect, reads "Sign in required" (`needs-auth`, no Reconnect) with "Sign in to docs"; Sign in goes through the fixture and the callback page back to the chat ("Signed in to docs.", no client registration); the dialog then reads "Connected · 4 tools · Signed in"; Sign out… (confirmed, `project-mcp-sign-out-confirm`) → "Signed out of docs." and `needs-auth` again |
+| `mcp-elicitation.spec.ts` | Phase 14 (docs/UI.md 2.20, 7.35; docs/API.md 4.37) with the OAuth fixture (`noAuth`) as a personal server (`policy: 'safe'`) and `mock:hooks` `call mcp__<server>__ask {}`: the row reads "Waiting for your input" and the card (`elicitation-card[data-state=pending]`, heading "{server} needs more information", the message, five fields with their `data-type`, the countdown "{m}:{ss} left", the caution) waits under it; the sidebar dot `chat-status-dot[data-status=input]` reads "Needs your input" and `awaitingInput` is true. Submit with an empty required name and a bad email shows `elicitation-field-error` under both and focuses the name (`aria-invalid`); valid values → the card goes, the reply `Called …: ok \| {"action":"accept","fields":[…]}`, the row's body "You answered {server}'s request." (`elicitation-result[data-action=accept]`), no dot, and the stored chat holds no typed value. Decline and × Dismiss ("Dismiss request") → `decline` / `cancel`. A reload while waiting shows the same card (`data-elicitation-id`). With a short window and earlier turns, scrolling up shows the pill "{server} needs your input · Show" (`elicitation-jump`), which brings the card back and focuses its first field |
+| `mcp-prompts.spec.ts` | Phase 14 (docs/UI.md 7.35; docs/API.md 4.38) with the OAuth fixture (`noAuth`) as a personal server: `GET /commands` lists `mcp__<server>__greet` (`source: 'mcp'`, hint `<name> [greeting]`, `mcpServer`); `/` shows the MCP group (heading "MCP", after the App group) with the hint and the server's name (`slash-menu-detail`) and the other prompts; `/<server>__gre` finds it; `/mcp__<server>__greet Ada` on `mock:echo` answers "Hello, Ada!" (one `prompts/get`), the bubble keeps the typed command and, after a reload, its badge (`data-source="mcp"`) names "MCP · {server}"; without the argument the reply reads "Missing argument: name. Usage: /mcp__<server>__greet <name> [greeting]" and no `prompts/get` runs |
+| `mcp-resources.spec.ts` | Phase 14 (docs/UI.md 7.35; docs/API.md 4.38) with the OAuth fixture (`noAuth`) as a personal server and `mock:hooks` (a model with tools): in a chat without a project `@` lists only the "MCP resources" section (`mention-menu-section[data-value=resources]`) with the three resources and the server badge; `readme` + Enter inserts `@<server>:fixture://notes/readme.md ` and a done chip `composer-attachment[data-kind=resource]`; the 6 MiB resource toasts "This resource is larger than 5 MB." and adds no chip; the sent message carries one file part. In a project chat one listbox "Files and MCP resources" holds "Files in {project}" and "MCP resources", and the arrow keys move from the last file to the first resource (`aria-activedescendant`) |
+| `web-search.spec.ts` | Phase 14 (docs/UI.md 2.20, 7.35, 12; docs/API.md 4.39): `mock:search`: the toggle (`composer-web-search`, "Web search", `data-mode=native`) off → on; the reply's provider-executed row "Searched the web" with the query (named "Searched the web, {query}"), no approval card, "Search done: 2 sources" and the sources row with the chips `example.com` / `example.org` (expanded: two `source-item`s); the chat stores `webSearch: 'auto'` and the toggle stays on after a reload. A Brave Search key saved in Settings -> Web search makes `mock:search-tool` call `search_web` (`data-mode=builtin`): "Searched the web" with "5 results", the body (`web-search-tool[data-mode=builtin][data-state=done]`) lists Result one … five, the sources chips, the reply "Results: Result one \| … \| Result five" and one GET in the fake remote's log. Unavailable: no key (`data-reason=no-backend`, its text, "Set up web search" → `/settings/search`) and tools off (`tool-mode-off`, "Tools are off in this chat.", "Turn off web search"); a turn sent anyway answers `Search off` with one `web-search-unavailable` notice; Turn off web search stores `off`. Alt+W toggles it from the composer (announced "Web search on" / "Web search off", the focus stays) and opens the popover when unavailable (Escape returns the focus to the message) |
+| `settings-search.spec.ts` | Phase 14 (docs/UI.md 9.15; docs/API.md 4.39, 5.40): Settings → Web search from its nav entry: the two switches change `webSearchDefault` / `webSearchNative`; Test search is disabled without a key; the search API select picks Tavily (`data-value`, the `core-search` setting, its key row first); a Tavily key is saved write-only ("Saved the Tavily key", "Key saved", no input, the value nowhere in the page or the API); Test search answers "{n} results from Tavily in {ms} ms" (the fake remote logged a POST with a JSON body, the key never in it); Replace focuses the input, the key `invalid-key` → "Tavily rejected the key."; Remove → "Removed the Tavily key" and `missing`. Max results refuses 12 ("Enter a whole number from 1 to 10.") and stores 8 |
 | `output-styles.spec.ts` | Phase 11 (docs/UI.md 7.32, 9.13) with `mock:hooks` (`style?` reads the first line of the system text): Settings -> Customize -> Output styles lists the built-ins (Default, Explanatory, Learning) and the scope bar (`customize-style-default`) shows the global default; a new personal style (`customize-new` `data-kind` style, "Keep coding instructions" on, "Save output style", toast "Output style saved") lists "Keeps coding instructions"; "Use by default" (`customization-set-default`) badges it "Your default", writes `outputStyle` and Settings -> General's `settings-output-style` shows it; a new chat on Automatic (`output-style-trigger` `data-source` automatic, named "Output style: {name} (automatic)") answers `Style: {name} \| workspace-rules: no`; Explanatory picked on `/` travels with the first message and is saved with the chat; "Manage output styles" opens the tab. A project style (`.harness/output-styles/`, `keep-coding-instructions` off) set for the project is what Automatic resolves to ("Uses {name}, set for {project}", the sources "Project" / "Built-in") and answers `workspace-rules: no \| todo-hint: no`; Learning from the menu and `/output-style explanatory` set the chat's own style (`data-source` chat, saved), `/output-style` alone opens the menu on the checked option, `/output-style nope` toasts "Unknown output style "nope". …", `style?` then reads `Style: Explanatory \| workspace-rules: yes \| todo-hint: yes`; a reload keeps the choice and `/output-style auto` returns to the project's style (the chat drops its own) |
 | `command-shell.spec.ts` | Phase 11 (ADR-052) with `mock:hooks`: a project command's `` !`…` `` output and `@README.md` are frozen into the expansion (`Hooks mock: …` shows both; after a reload the badge tooltip reads "Ran 1 shell command" and "Included README.md", `command-badge-inlined`), and a regenerate does not run the span again; an unapproved command shows "Needs approval" in the slash menu (`data-trust="pending"`), is refused (`untrusted`, the text kept, nothing stored), and Review… -> approve lets it run; on a server of its own with `HF_WORKSPACE_SHELL=0` the server answers 409 and the chat shows it as a request error (`chat-error`), nothing stored. A blocking UserPromptSubmit hook refuses an approved command before its `!` line runs (the span's counter stays at 0) |
 | `claude-import.spec.ts` | Phase 12 (docs/UI.md 2.19, 9.14; docs/API.md 4.35, 5.35) with a fake Claude Code home in a temp folder outside the repository (`claude-home.ts`) and `GET /api/claude-import/home` stubbed (`stubClaudeHome`; never a server-side scan): Customize's header action and Settings -> Data's link (`data-import-claude` → `?import=claude`) open the dialog on "Step 1 of 3 · Choose what to read" (focused) with the scan option off ("Scanning is turned off on this server (HF_CLAUDE_HOME=0).") and Continue disabled; Cancel / Escape close it and drop the query. On a password server of its own: the folder (`setInputFiles(<.claude folder>)`) and `.claude.json` ("8 files picked · .claude.json added") preview "Found 18 items" in ten groups in order (agents … instructions, unsupported last without checkboxes), New / Unsupported statuses, the model-alias, `statusLine` and prefix-rule notes, "Import 14 items" and "Includes 3 items that run commands on this server."; one command unchecked makes the Commands Select all mixed (`aria-checked="mixed"`), Select all picks both again; `deploy` (a `!` line), the command hook and the stdio server read "Imported turned off: …" with Turn on after import off; `deploy` turned on, `DOCS_TOKEN` filled; 11 minutes after the login Import asks "Importing hooks and commands that run on this server needs your password."; the result reads "Imported 14 items", "1 command turned off (it runs shell lines)", "1 MCP server turned off" with MCP servers; Open Customize shows the agents (the reviewer's green dot), the commands active, the command hook off and the Stop prompt hook on, the MCP servers (stdio off) and the shell rules. A re-import with the reviewer changed: "Replaces yours" (Keep mine: not picked; Replace picks it), the rest "Unchanged" without checkboxes, "Import 1 item"; Escape asks "Discard this import?" |
@@ -180,13 +197,14 @@ on `127.0.0.1`, so the sign-in redirect is a real cross-site navigation.
 ## Plugin specs (`specs/plugins`)
 
 The plugins tab, install, the provider wizard, code plugins and MCP servers (W3.6), plugin agents and skills (W10.13).
-Phase 11 and Phase 12 add:
+Phase 11, Phase 12 and Phase 14 add:
 
 | Spec | Covers |
 |---|---|
 | `plugin-hooks.spec.ts` | Phase 11 with the `hook-pack` example from a zip: the install preview lists its command under "Runs these commands" and Install waits for trust; installed untrusted, the card reads "1 output style · 1 hook", the Hooks tab has no row for it and `write_file` gives `hooks: none`; "Review and trust" adds the detail's Hooks section (the trust note, PostToolUse with `Write\|Edit\|MultiEdit` and the command) and Output styles section (`reviewer`); the next `write_file` gets the context, with the tool-row note "Hook added context · PostToolUse · From Hook pack"; then it is uninstalled. Phase 12: untrusted, the Hooks tab lists its hook as a pending "Plugin not trusted" row whose menu offers Review plugin… (`data-action="trust-plugin"`: the plugin's trust dialog with the command; Escape trusts nothing) |
 | `marketplaces.spec.ts` | Phase 12 (docs/UI.md 2.19, 8.13) on a password server of its own with a local-folder marketplace (a temp folder outside the repository): the empty state and the official suggestion, whose Dismiss survives a reload and sends no `POST /api/marketplaces` (`page.route` counter); Add marketplace… → "Folder on this server" → "Added {name}", the selected chip (`?m=`), the entries sorted by name with two unsupported rows ("Unsupported source (command)" / "(url)" with the reason, no button); search (`?q=`, no-match, Clear filters) and category (`?category=`); Install… of a plugin with a hook: the Claude preview and the trust warning, Install waits for "I trust …" and the password (browser clock 11 min past the login), "Installed {name}" opens the plugin; the entry then reads "Installed" with Open; Remove… keeps the plugin |
 | `claude-plugin.spec.ts` | Phase 12 (docs/UI.md 8.3, 8.13): from a zip, the preview's "Claude Code plugin" badge, the namespace line, "Asks for:" (the secret), "Ignored:", the hook command and the whole-tree pin note, Install after the trust checkbox; the plugin page's Claude section, qualified commands / agent / skill / hook, no Source tab, no Edit in wizard; the `userConfig` secret is a password field stored on Save; `/{plugin}:review` comes from the slash menu's Plugins group and expands for `mock:echo`. From a folder (Copy): no trust, the card's "Claude Code" badge |
+| `mcp-oauth.spec.ts` | Phase 14 (docs/UI.md 2.20, 8.14; docs/API.md 4.36) with the OAuth MCP fixture on `127.0.0.1` (the app on `localhost`): a personal HTTP server added in the MCP panel (the OAuth section closed) is "Sign in required" without tools; Sign in leaves for the fixture's page ("Authorize access", `approvePage`), Approve, the callback page and back on `/plugins/core-mcp` ("Signed in to {server}."), the row "Connected · 4 tools · Signed in" and its four tools in the tools table (`auth.client: 'dynamic'`); Sign out… in the row menu ("Sign out of {server}?", `mcp-sign-out-confirm`) → "Signed out of {server}.", `needs-auth`, `auth: null`, the fixture counts a revocation; the used callback link reads "This sign-in link was already used or expired." (`data-code=conflict`, no Try again, the address without its query) and Back to MCP servers. The OAuth fields: the redirect URI `<app>/oauth/callback` and its Copy (clipboard), client ID, write-only secret (`data-stored`, "… · stored", Remove; the value never in the page) and scopes; the configured client signs in (`client: 'configured'`, no registration); editing the URL shows "Saving signs you out of {server}.". With a password (a server of its own opened as `localhost`): the `hf_session` cookie is `SameSite=Strict`, the redirect to the callback carries no cookie, and the callback page still signs in |
 | `plugin-update.spec.ts` | Phase 12 (docs/UI.md 8.1, 8.7, 8.13): a version bumped in a local-folder marketplace → Refresh → "Installed · Update to 1.1.0" with Update… and the chip "· 1 update"; the card badge "Update 1.1.0"; the banner "Version 1.1.0 is available from {marketplace}." → Update… review → "Updated {name} to 1.1.0", the banner is gone |
 
 ## Mobile specs (`specs/mobile`, project `mobile`)
@@ -206,6 +224,9 @@ full suite runs them, or `pnpm test:e2e --project=mobile`.
 | `hooks.spec.ts` | Phase 11 at 390 px (docs/UI.md 2.18, 7.33, 9.13): Settings -> Customize -> Hooks with a project (an approved and a pending project hook with long commands, a personal `Notification` hook) never scrolls sideways; the five kind tabs sit in a row of their own (`overflow-x: auto`, 40 px tall); every `hook-row-menu` is a 40 px target and its menu opens inside the screen; the hook editor is a full-width sheet whose footer (Cancel, Save hook, 40 px) stays on the screen while its body scrolls, Cancel with changes asks to discard; the import dialog with a two-hook preview fits the screen with a 40 px "Add 2 hooks". A project chat with a pending hook, a pending `.mcp.json` server and a command with a shell line: the trust chip ("3") is a 40 px target, the trust dialog fits with its 40 px checkboxes and Approve still on the screen after scrolling the list, the MCP servers dialog (from the project chip's menu) fits with a 40 px Review… |
 | `marketplaces.spec.ts` | Phase 12 at 390 px: no sideways scroll; the chips become the "Marketplace" select (40 px options; All drops `?m=`); 40 px row menu, suggestion buttons and entry Install…; the install review dialog fits with its footer on screen; the two selects (marketplace, category) and the icon-only header buttons (Add marketplace…, Refresh all) are 40x40 px (fixed by W12.19) |
 | `claude-import.spec.ts` | Phase 12 at 390 px (docs/UI.md 9.14, 14.5): the import dialog fills the screen (0, 0, 390 x 844); the source radios, Choose folder…, Continue, Back and Import are 40 px; after the folder upload the footer stays at the bottom while the body scrolls; Select all, an item checkbox, a conflict's resolution select (an `explore` agent) and the variable input are 40 px targets; nothing scrolls sideways (page or dialog); Escape asks "Discard this import?" inside the screen. The project file editor is a sheet as wide as the screen with 40 px Copy path, Cancel and Save, nothing scrolling sideways |
+| `web-search.spec.ts` | Phase 14 at 390 px (docs/UI.md 2.20, 7.35, 14.5): the Search toggle of a `mock:search` chat is a 40 px icon-only target (the "Search" label hidden), the dot shows once it is on, the toggle stays on the screen and nothing scrolls sideways; a native search reply shows "Searched the web", the sources row (a 40 px target) with both chips inside the screen. A `mock:search-tool` chat without a key: the unavailable toggle (40 px) opens a popover inside the screen whose "Set up web search" (40 px) leads to Settings → Web search, which fits 390 px |
+| `elicitation.spec.ts` | Phase 14 at 390 px (docs/UI.md 2.20, 7.35, 14.5): the elicitation card of the OAuth fixture (`noAuth`, `mock:hooks`) fits the screen without sideways scroll; Submit and Decline are stacked full width with Submit first, both 40 px; × Dismiss, the name and count inputs, the subscribe checkbox and a color radio are 40 px targets; Decline finishes the call |
+| `mcp-oauth.spec.ts` | Phase 14 at 390 px (docs/UI.md 2.20, 8.14, 14.5): a `needs-auth` row of the MCP panel puts a full-width 40 px Sign in under its status; the sign-in (the fixture's page, Approve, the callback page) returns to the panel with the row connected; the used callback link's error card fits the screen and its Back to MCP servers is a full-width 40 px button |
 | `media.spec.ts` | Phase 6 at 390 px: the mic is a 40x40 target; recording and transcribing keep the layout (no sideways scroll, the indicator and the composer inside the viewport) and the textarea gets no focus afterwards (touch); a four-image gallery keeps two columns inside the column; the lightbox fits the screen; the image options trigger, Read aloud, Delete this version and the version switcher are 40x40 targets (sizes are polled: a dialog zooms in from 95%) |
 
 ## Tablet specs (`specs/tablet`, project `tablet`)
@@ -214,7 +235,7 @@ docs/UI.md 14.5, 14.7 (S9), with the existing test ids; not tagged `@smoke` (`pn
 
 | Spec | Covers |
 |---|---|
-| `touch-targets.spec.ts` | `pointer: coarse` and the sidebar in the page (not a sheet); collapsed with its own trigger, the icon rail is 56 px wide (the page, `getByRole('main')`, starts at x = 56; the sidebar fills the rail inside its 1 px border) in the chat, plugins and settings modes, every visible button and link of the rail is at least 40x40 px and inside the rail (the project switcher and the Projects settings link among them); the rail's "Expand sidebar" expands it again; Phase 7: in a project chat with a pending `mock:workspace` approval the expanded sidebar's project switcher, the header chip and the card's Deny and Allow are 40x40 px targets, and so is the "Accept all edits in this chat" checkbox (its `::after` hit area); Phase 8: the changes toggle, "Rewind files to here", the pane's Close and Refresh (1024 px: the desktop pane), a changes row (height), its Revert (shown without hover) and a 24 px hit area of `changes-resize`; on a pending `mock:shell` card the "Always allow commands starting with" checkbox, the prefix input (height), both scope options and Run; Phase 9: while a `mock:steer` reply runs, the todo strip toggle, "Queue message" and the queue's Edit and Cancel; in a project chat with sub-agents and a pending plan, both task triggers, the three plan buttons and the `@` mention rows (height) Phase 10: with two running background agents (1024 px: the dock opens by default) the dock's toggle, Stop all and both rows' Stop; the Remember dialog's three targets, Save and Cancel; the `⋯` menus of Settings -> Customize, the editor's Cancel and Save (height), its model select and its Tools options Phase 11: the hook rows' `⋯` menus of the Hooks tab, the trust dialog's item checkbox, Select all and Approve (opened by `customize-trust-review`), Reconnect of an approved idle `.mcp.json` server and its variable's input (height) in the MCP servers dialog, and the composer's output style trigger and options (height) Phase 12: a local-folder marketplace's chip, row menu, Add marketplace… and an entry's Install…; the import wizard's source radios (height), Select all, an item checkbox, a conflict's resolution select, Back and Import (height); the project file editor's Copy path, Cancel, Save and × Close (fixed by W12.19); the hook editor's Type toggle (Command, Prompt) and Save hook |
+| `touch-targets.spec.ts` | `pointer: coarse` and the sidebar in the page (not a sheet); collapsed with its own trigger, the icon rail is 56 px wide (the page, `getByRole('main')`, starts at x = 56; the sidebar fills the rail inside its 1 px border) in the chat, plugins and settings modes, every visible button and link of the rail is at least 40x40 px and inside the rail (the project switcher and the Projects settings link among them); the rail's "Expand sidebar" expands it again; Phase 7: in a project chat with a pending `mock:workspace` approval the expanded sidebar's project switcher, the header chip and the card's Deny and Allow are 40x40 px targets, and so is the "Accept all edits in this chat" checkbox (its `::after` hit area); Phase 8: the changes toggle, "Rewind files to here", the pane's Close and Refresh (1024 px: the desktop pane), a changes row (height), its Revert (shown without hover) and a 24 px hit area of `changes-resize`; on a pending `mock:shell` card the "Always allow commands starting with" checkbox, the prefix input (height), both scope options and Run; Phase 9: while a `mock:steer` reply runs, the todo strip toggle, "Queue message" and the queue's Edit and Cancel; in a project chat with sub-agents and a pending plan, both task triggers, the three plan buttons and the `@` mention rows (height) Phase 10: with two running background agents (1024 px: the dock opens by default) the dock's toggle, Stop all and both rows' Stop; the Remember dialog's three targets, Save and Cancel; the `⋯` menus of Settings -> Customize, the editor's Cancel and Save (height), its model select and its Tools options Phase 11: the hook rows' `⋯` menus of the Hooks tab, the trust dialog's item checkbox, Select all and Approve (opened by `customize-trust-review`), Reconnect of an approved idle `.mcp.json` server and its variable's input (height) in the MCP servers dialog, and the composer's output style trigger and options (height) Phase 12: a local-folder marketplace's chip, row menu, Add marketplace… and an entry's Install…; the import wizard's source radios (height), Select all, an item checkbox, a conflict's resolution select, Back and Import (height); the project file editor's Copy path, Cancel, Save and × Close (fixed by W12.19); the hook editor's Type toggle (Command, Prompt) and Save hook; Phase 14: Web search in the settings rail; the composer's Search toggle (a `mock:search` chat), an elicitation card's Submit, Decline and × Dismiss (the OAuth fixture with `noAuth`), Sign in of a `needs-auth` server in the MCP panel; Settings → Web search's two switches (their `::after` hit areas), the search API select, a key row's input, Save and Remove, and Test search |
 
 ## Screenshots (`specs/screenshots`)
 
@@ -290,7 +311,16 @@ install-claude-preview (a Claude Code plugin zip inspected: the preview with its
 claude-import-preview (the import dialog at step 2 with the fake home: groups, statuses, turned-off notes),
 project-file-editor (Edit… of the `notes` project's `.harness/agents/test-writer.md`), hook-editor-prompt (desktop: New
 hook with the Prompt type, a WebFetch matcher and Continue on block) and trust-select-partial (the `hooks-demo` trust
-dialog with one of its two hooks selected: the mixed Select all); then share-dialog, share-page, share-unavailable, model-picker,
+dialog with one of its two hooks selected: the mixed Select all), Phase 14: mcp-needs-auth (the MCP panel: `tracker`
+"Issue tracker" connected and signed in, `docs` "Docs search" with Sign in), mcp-dialog-oauth (desktop: Edit of `docs`:
+the OAuth section open with its client ID, the stored secret, the scopes and the redirect URI), oauth-callback (a
+sign-in of `docs` answered `access_denied`: "Sign-in failed" with Try again and Back to MCP servers), composer-web-search
+(the native search chat: the toggle on, its tooltip on the desktop), sources-chips (the builtin search chat: the results
+expanded on the desktop, the sources row with its chips), elicitation-card (a live `mock:hooks` question of its own in
+"File the login bug", the page clock at the real time for the countdown; Decline and the chat deleted in `close`),
+slash-mcp-group (desktop: `/` scrolled to the MCP group of `tracker`), mention-resources (desktop: `Summarize @re` in a
+project chat: files and MCP resources) and settings-web-search (a Brave Search key and a Test search result; the key
+removed in `close`); then share-dialog, share-page, share-unavailable, model-picker,
 command-palette, shortcuts (desktop), sidebar (mobile), plugins, plugin-detail, plugin-mcp, plugin-new-provider,
 plugin-new-code, settings-providers, settings-provider-key, settings-models, settings-media (every model chosen, voice
 and speed), settings-general, settings-appearance, settings-data (with the share link), settings-data-key (the Encryption key
@@ -306,8 +336,18 @@ same in every run; the image-turn screen runs the page clock at the real time wh
 workspace-dark (the Accept edits shell approval), changes-panel-dark (This chat with the diff), plugins-dark,
 provider-wizard-dark (the API step with the LM Studio template; the draft is discarded afterwards), settings-dark
 (Settings -> Providers) and chat-light (the tool approval card); Phase 10 adds customize-dark (the settings-customize
-screen), Phase 11 hooks-dark (the settings-customize-hooks screen) and Phase 12 marketplaces-dark (plugins-marketplaces)
-and claude-import-dark (claude-import-preview), candidates for the README.
+screen), Phase 11 hooks-dark (the settings-customize-hooks screen), Phase 12 marketplaces-dark (plugins-marketplaces)
+and claude-import-dark (claude-import-preview), and Phase 14 mcp-sign-in-dark (mcp-needs-auth), elicitation-dark
+(elicitation-card) and web-search-dark (sources-chips), candidates for the README.
+
+Phase 14 data: the fake search remote (`startFakeSearchRemote` of `fixtures/fake-remote.mjs`, the server's
+`HF_TEST_REMOTE_URL`) and the OAuth MCP fixture run in the worker next to the screenshot server; two chats created first
+(the oldest): "What changed in MCP auth?" (`mock:search`, web search on, a native search) and "Open source search
+engines" (`mock:search-tool`, web search on, a `search_web` call against the fake Brave Search with a key set only for
+that turn). The personal MCP servers `tracker` (its tools run without a card; signed in through the API) and `docs` (a
+configured client `harness-forge` with a stored secret and the scope `docs:read`, never signed in) and the Brave Search
+key exist only while a Phase 14 screen that needs them is open (added in `open`, removed in `close`), so the earlier
+screens keep their slash and mention menus, tool lists and settings.
 
 Phase 12 data: a local-folder marketplace `acme-tools` (`review-kit`, `release-notes`, `db-migrations`; the trees of
 `specs/plugins/_support/claude.ts`) and a fake Claude Code home (`fakeClaudeHomeTree()` of `helpers/claude-home.ts`),
@@ -386,6 +426,16 @@ installed or imported: the install and import screens close their dialogs on the
   own (`startServer`). An import or a marketplace install that asks for a password runs on `startPasswordServer({
   dedicated: true })` with `page.clock.install()` and `fastForward('11:00')`. Since Gate P12-B the next `call …` after a
   turn that a PreToolUse prompt hook ended works in the same chat too (the `mock:hooks` turn rule).
+- Phase 14: start the OAuth MCP fixture per test with `startOAuthFixture(toggles, cleanup)` (on `127.0.0.1`; the app is
+  `localhost`) and add personal servers with `addHttpMcpServer(api, cleanup, …)` (unique ids: their tools, prompts and
+  resources reach every chat while they exist); `noAuth` skips the sign-in, `policy: 'safe'` the approval card,
+  `approvePage` serves Approve / Deny. Capture the callback link with `page.waitForRequest` (a navigation to
+  `/oauth/callback?code=…`): the page drops its query at once. Change the search configuration only through
+  `useWebSearchConfig(api, cleanup, patch)` (it removes every key afterwards). Playwright counts an `aria-disabled`
+  control as disabled: click the unavailable Search toggle with `{ force: true }` (a user can), but only after a modal
+  menu closed (`getByRole('menu')` gone, `body` without `pointer-events: none`), or the click lands nowhere. An answered
+  elicitation's result line under the row lasts only until the final output: read it in the finished row's body
+  (expand the row). Specs that start a chat from the composer register `cleanup(api => api.removeChat(chatIdFromUrl(page)))`.
 
 ```ts
 import { expect, lastAssistantMessage, startChat, test, testIds } from '../../helpers/index.ts'
@@ -600,6 +650,27 @@ in text fields (Home / End scroll on macOS instead of moving the caret).
 | `useCleanMarketplace(api, cleanup, name)` · `addFolderMarketplace(api, path)` · `installMarketplaceEntry(api, id, plugin, { trust? })` · `useCleanPlugin(api, cleanup, id)` · `uninstallPlugin(api, id)` | marketplaces and plugins through the API, removed through `cleanup` (and leftovers of an earlier run first) |
 | `openMarketplaces(page, query?)` · `marketplaceChip(scope, id)` · `marketplaceEntry(scope, name)` · `countMarketplaceAdds(page)` | the Marketplaces page, a chip (`''` = All), an entry row, and a counter of `POST /api/marketplaces` |
 
+### MCP 2.0 and web search (`mcp.ts`, `web-search.ts`, Phase 14)
+
+| Export | Description |
+|---|---|
+| `startOAuthFixture(toggles?, cleanup?)` · `OAuthMcpServer` · `FixtureToggles` · `FixtureCounters` | the OAuth MCP fixture (`fixtures/mcp-oauth-server.mjs`) on a free port of `127.0.0.1` in the worker: `{ url, origin, counters(), setToggle(), issueToken(), revokeAll(), stop() }`; toggles `approvePage`, `noAuth`, `preRegistered`, `tokenLifeSec`, … (stopped through `cleanup` when given) |
+| `FIXTURE_TOOLS` · `FIXTURE_PROMPTS` · `FIXTURE_FORM_FIELDS` · `FIXTURE_FORM_MESSAGE` · `README_URI` · `LARGE_URI` · `PIXEL_URI` · `FIXTURE_CLIENT_ID` · `FIXTURE_CLIENT_SECRET` | what the fixture serves: tools `ask`, `ask_echo`, `slow_ask`, `whoami`; prompts `greet`, `review`, `with_resource`, `with_image`; the basic form; the three resources; the pre-registered client |
+| `mcpToolName(server, tool)` | `mcp__<server>__<tool>` |
+| `addHttpMcpServer(api, cleanup, { id, name, url, policy?, oauth? })` · `removeMcpServer(api, id)` · `addSignedInMcpServer(api, cleanup, fixture, input)` | a personal HTTP server through the API, removed through `cleanup` (registered first); signed in through the API when it asks |
+| `mcpServer(api, id)` · `waitForMcpStatus(api, id, status \| statuses, timeout?)` | a server of `GET /api/mcp`; waits for its status |
+| `signInMcpServer(api, id)` · `followAuthorization(url)` | the API side of a sign-in: start, the fixture's auto-approved `/authorize` followed with `fetch` (`redirect: 'manual'`), the callback with `state`, `code`, `iss`; waits for `connected` |
+| `openMcpPanel(page)` · `mcpServerRow(page, id)` | Plugins → core-mcp and a row of its MCP panel |
+| `elicitationCard(scope, attributes?)` · `elicitationField(card, name)` · `elicitationHeading(server)` · `elicitationResultText(server, action)` · `fillBasicForm(card, values)` | the elicitation card, a field, the heading and result texts, and the basic form filled (name, email, count, subscribe, a color radio) |
+| `MOCK_SEARCH_MODEL` · `MOCK_SEARCH_TOOL_MODEL` · `MOCK_SEARCH_DONE` · `MOCK_SEARCH_OFF` · `MOCK_SEARCH_SOURCES` · `fakeResultTitles(n)` · `mockSearchToolText(n)` | the two search mocks and what they answer (`web-search.ts`) |
+| `fakeRemoteUrl()` · `fakeRemoteLog()` · `INVALID_KEY` · `RATE_LIMITED_KEY` | the fake remote at `E2E_FAKE_REMOTE_PORT` (default 8889) and its request log; the keys it answers 401 / 429 |
+| `useWebSearchConfig(api, cleanup, { native?, defaultMode?, backend?, maxResults?, keys? })` · `setSearchKey(api, backend, key)` · `CORE_SEARCH_PLUGIN_ID` · `SEARCH_KEY_SETTINGS` · `SEARCH_BACKEND_LABELS` | the search configuration for one test (restored, every key removed), a key stored or removed (`''`) |
+| `webSearchToggle(page)` · `webSearchUnavailable(page)` | the composer's Search toggle and its unavailable popover |
+
+`HarnessApi.sendChat` takes `webSearch` (`'off' | 'auto'`, the turn's mode; stored only when the request creates the
+chat). `fixtures/fake-remote.d.mts` types `startFakeSearchRemote` for a spec that needs an instance of its own (the
+screenshots).
+
 ### Other helpers
 
 | Export | Description |
@@ -678,3 +749,11 @@ hook from the first marker in its input (the hook's prompt, then the event JSON)
 PreToolUse prompt hook and `call write_file {"path":"a.txt","content":"[[ph:deny x]]"}` → blocked, the turn ends;
 with Continue on block the reply reads `Called write_file: denied | Blocked by hook: x | hooks: none` (in a new chat,
 see "Writing specs").
+
+Search mocks (Phase 14, docs/PROVIDERS.md 8 "MCP and search mocks (Phase 14)"): `mock:search` searches with its own
+provider-executed `web_search` when the chat's web search is on (a `tool-web_search` part with the query, two sources
+`example.com` / `example.org`, `Search done: 2 sources`), else `Search off`; `mock:search-tool` (no search of its own)
+calls the builtin `search_web` once when it is offered (web search on and a key for the selected search API) and
+answers `Results: <title 1> | <title 2> | …` (`Results: none`, `Search failed: <error>`), without it `Tools are
+disabled.`. MCP questions use `mock:hooks` (`call mcp__<server>__ask {}`), MCP prompts `mock:echo` (it echoes the
+expansion).

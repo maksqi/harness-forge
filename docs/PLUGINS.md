@@ -93,9 +93,10 @@ alias `general-purpose`) for every plugin. Load order: `core-providers`, `core-t
 `mock`. Likewise (v1.7) the builtin **output styles** `default`, `explanatory` and `learning` are not registry
 contributions: the catalog lists them as `builtin` entries from the shared `BUILTIN_OUTPUT_STYLES`, and the style
 registry refuses their names for every plugin. v1.9 (Phase 14): `core-providers` gains the `webSearch` hook on six of
-its providers ([PROVIDERS.md 14](./PROVIDERS.md#14-web-search)) and `mock` one for `mock:search`, so by the rule of the
-API version section both move to `"^1.7.0"`; the new `core-search` uses only 1.0 members (a tool, settings and
-`ctx.settings.onChange`). The manifests are updated in P14-0b (C50, C53) and P14-A (W14.4).
+its providers ([PROVIDERS.md 14](./PROVIDERS.md#14-web-search)) and `mock` one for `mock:search`; both manifests keep
+version 1.0.0 / 1.1.0 and `"^1.1.0"` (a builtin always runs on the host it ships with, so the optional 1.7.0 member is
+always understood; the one exception to the rule of the API version section). The new `core-search` (version 1.0.0)
+declares `"^1.0.0"`: it uses only 1.0 members (a tool, settings and `ctx.settings.onChange`).
 
 Builtin tools (`core-tools`):
 
@@ -123,10 +124,14 @@ Settings of `core-search` (Settings → Web search writes them through `/api/plu
 (`braveApiKey`), **Tavily API key** (`tavilyApiKey`), **Exa API key** (`exaApiKey`) (all three `format: 'secret'`, scope
 `plugin:core-search`, write-only toward the client) and **Max results** (`maxResults`, 1-10, default 5). Every backend
 request goes through the server's SSRF-guarded fetch (`createPluginSourceFetch`: https only, 10 s, 1 MB, no redirect;
-POST bodies since Phase 14); a 401 / 403 is `provider_error` "key rejected" (the key is never echoed), a 429
-`rate_limited`, a network failure `provider_unreachable`. `HF_OFFLINE` does not block it (like `web_fetch`). Queries
-and keys are never logged at `info`. After every final `search_web` output the chat pipeline adds the result URLs as
-`source-url` parts (deduplicated, http(s) only), so they show as the reply's sources and reach shares and exports. The
+POST bodies since Phase 14); the backend and its key are read when the call runs; no key is `provider_not_configured`
+("No API key is set for <backend>: add one in Settings → Web search."), a 401 / 403 `provider_error` "The search key
+was rejected." (the key is never echoed), a 429 `rate_limited` (with `retryAfterMs`), a network failure or timeout
+`provider_unreachable`, anything else `provider_error`. The model gets the output as JSON. `HF_OFFLINE` does not block
+it (like `web_fetch`). Queries and keys are never logged at `info` (one `search_web: searched` line per call with the
+backend, the result count, the status and the time). After every final `search_web` output the chat pipeline adds the
+result URLs as `source-url` parts (deduplicated within the reply, http(s) only), so they show as the reply's sources
+and reach shares and exports. The
 backends, their endpoints and what is sent: [PROVIDERS.md 14](./PROVIDERS.md#14-web-search). The chat's web search
 mode decides whether `search_web` or the model's native search is offered (never both in one request; the shared
 `resolveWebSearch`).
@@ -358,7 +363,8 @@ the 1.6 fields of `ctx.commands.register` (a `syntax: 'markdown'` body would be 
 `oauth` (an unknown key of the strict transport) and never calls `webSearch` (its models never search natively). The
 builtins follow the same rule:
 `core-agent` declares `"^1.4.0"` (v1.6), `core-tools` (1.2.0) and `core-workspace` `"^1.2.0"`, `core-providers` and
-`mock` `"^1.1.0"`. The in-browser templates and the example plugins still declare `"^1.0.0"` (they use no newer
+`mock` `"^1.1.0"` (v1.9: kept although both use the 1.7.0 `webSearch`; builtins ship with their host, section 1), and
+`core-search` `"^1.0.0"`. The in-browser templates and the example plugins still declare `"^1.0.0"` (they use no newer
 member), except `examples/plugins/agent-pack` (`"^1.4.0"`) and `examples/plugins/hook-pack` (`"^1.5.0"`, v1.7). A 1.3.0
 plugin loads unchanged on a 1.4.0 host unless it uses the command name `remember`: a manifest with
 `contributes.commands` named `remember` now fails the strict manifest schema (the plugin goes to `error`, "Reserved
@@ -703,7 +709,9 @@ Connection lifecycle: servers connect in the background after the plugin is `act
 
 - A plugin server never has a client secret (only a server of the MCP panel can store one); a pre-registered client
   must accept the redirect URI `<origin>/oauth/callback` (the address the user opens harness-forge at; the dialog shows
-  it with Copy).
+  it with Copy). The MCP servers list (`GET /api/mcp`) shows the client id with the plugin's non-secret settings filled
+  in (a placeholder of a secret setting stays as written; an empty setting shows no client id), and a sign-in whose
+  client id needs an empty setting is refused with a message naming it.
 - An `oauth` object is optional: every http / sse server without an `Authorization` header can sign in when it answers
   401 with OAuth metadata (the MCP authorization spec); `oauth` only pins the client id or the scopes. A server with an
   `Authorization` header never signs in (400 on Sign in).
@@ -1575,12 +1583,16 @@ runs the search and streams the call, its result and its citations back, so harn
 
 - `request.functionTools` is the number of function tools the turn sends besides search, `request.maxUses` the most
   searches per turn (`WEB_SEARCH_MAX_USES`, 5); pass it to the tool's own limit when it has one.
-- The host keeps only tools whose value has `type === 'provider'` (a provider-defined tool from the provider package,
-  e.g. `anthropic.tools.webSearch_20250305(...)`) and whose key does not collide with a function tool of the turn; a
-  function tool in the result is dropped (and logged). The key is the ToolSet name the stream reports (`web_search`,
-  `google_search`, …); never use `search_web`, the builtin tool's name.
-- `providerOptions` are deep-merged into the call's options (under the `reasoning()` options), e.g. a search plugin
-  option of a gateway that has no tool form.
+- The host keeps only tools whose value has `type === 'provider'`, an `id` `<provider>.<tool>` (at most 128
+  characters) and an `args` object (a provider-defined tool from the provider package, e.g.
+  `anthropic.tools.webSearch_20250305(...)`), at most 4 of them, and whose key does not collide with a function tool of
+  the turn; a function tool or another bad entry in the result is dropped (and logged at `warn` with the provider id,
+  never a value). The key is the ToolSet name the stream reports (`web_search`, `google_search`, …); keys starting with
+  `mcp__` and `search_web` (the builtin tool's name) are refused.
+- `providerOptions` must be an object of JSON objects keyed by provider (at most 16 levels deep; copied) and are
+  deep-merged into the call's options (under the `reasoning()` options), e.g. a search plugin option of a gateway that
+  has no tool form. An answer that is not an object, a `tools` that is not an object, unusable `providerOptions` or a
+  non-boolean `exclusive` is ignored as a whole. `request.maxUses` arrives as a whole number 1 – 20.
 - `exclusive: true` marks a model that silently drops function tools when the search tool is present (Gemini 2.x with
   Google Search): the host then uses native search only on turns that send no function tool (`functionTools: 0`), and
   otherwise the builtin `search_web` (or no search). Without `exclusive`, native search runs next to the turn's tools.
@@ -1839,7 +1851,7 @@ the folder path).
 | `run.stop` (1.5.0) | `chatId`, `modelRef`, `origin` (the run's `run.started.origin`), `hookActive` (true when this run is itself a hook continuation), `projectId` | `continue?` (a reason: the agent goes on with it) | when a model run is about to finish normally (not aborted, no error, no approval pending, no queued message); with the `Stop` command hooks. A `continue` starts a follow-up turn (`run.started.origin = 'hook'`) under the same cap as `Stop` hooks: at most 5 in a row | 3 s | ignored (the run finishes) |
 | `subagent.stop` (1.5.0) | `chatId`, `modelRef`, `type` (the agent type), `toolCallId`, `report`, `hookActive` | `continue?` | when a sub-agent (foreground or background) is about to complete; with the `SubagentStop` command hooks. A `continue` gives the child one more round with the reason, at most 2 | 3 s | ignored |
 | `compact.before` (1.5.0) | `chatId`, `modelRef`, `trigger` (`manual` for `/compact`, `auto`), `focus` | none (observe) | before every compaction; with the `PreCompact` command hooks | 3 s | logged only |
-| `notification` (1.5.0) | `chatId`, `modelRef`, `type` (`permission_prompt`; 1.7.0: `elicitation_dialog`), `message` | none (observe) | when a run ends waiting for an approval (`permission_prompt`); 1.7.0: when an MCP server asks the user for input and the chat shows its form card while the run waits (`elicitation_dialog`, the message names the server; never the fields' values); with the `Notification` command hooks (`notification_type` with the same values) | 3 s | logged only |
+| `notification` (1.5.0) | `chatId`, `modelRef`, `type` (`permission_prompt`; 1.7.0: `elicitation_dialog`), `message` | none (observe) | when a run ends waiting for an approval (`permission_prompt`); 1.7.0: once per request when an MCP server asks the user for input and the chat shows its form card while the run waits (`elicitation_dialog`; the message is the server's request text, cleaned and capped; never the values the user enters); with the `Notification` command hooks (`notification_type` with the same values) | 3 s | logged only |
 
 #### Command hooks (1.5.0)
 
@@ -2992,7 +3004,10 @@ stays as written) and `secret-in-body` (a body names a secret option; it stays e
   dropped with an info (the server connects without it). Since v1.9 (Phase 14, ADR-059) the `oauth` object of an http /
   sse server is kept (`clientId`, `scopes`; `callbackPort` is ignored with an info: harness-forge signs in through its own
   callback page, so a client registered for Claude Code's local port may need the redirect URI `<origin>/oauth/callback`
-  added at the authorization server); such a server, and any server that answers 401 with OAuth metadata, is
+  added at the authorization server; a `${user_config.KEY}` client id of a declared option becomes `{{settings.KEY}}`,
+  and any other variable, a `{{…}}` placeholder or a client id that is not printable ASCII is dropped with a warning,
+  so the server registers its client at sign-in instead); such a server, and any server that answers 401 with OAuth
+  metadata, is
   `needs-auth` until the user signs in from the MCP servers list (v1.8 dropped the object and the server failed to
   connect); its tokens live under `plugin:<pluginId>` `mcp-oauth.<serverId>`; `.mcpb` / `.dxt` bundles, `ws` servers,
   servers that use `${CLAUDE_PROJECT_DIR}` (plugin servers are global) and servers whose `command` uses a variable are

@@ -1,36 +1,38 @@
 # Phase 14 — v1.9: MCP 2.0 and web search
 
 Part of the harness-forge build plan. Progress is tracked in `docs/ROADMAP.md` (coordinator only). Shared names come
-from `docs/DECISIONS.md` (ADR-059 … ADR-063, the amendment notes on ADR-008, ADR-012, ADR-017, ADR-024, ADR-034,
-ADR-042 … ADR-046, ADR-048, ADR-050, ADR-052 and ADR-053, and the Phase 14 contract seed; it wins on conflict);
-endpoints and DTOs from `docs/API.md` (the new schema sections for MCP sign-in and the auth info, MCP elicitation, MCP
-resources and web search (planned 4.36 – 4.39), the chat setting, request body, summary, settings and catalog model
-additions, the route sections for the modules `mcpAuth`, `chatElicitations`, `mcpResources` and `webSearch` (planned
-5.37 – 5.40), the chat stream notes on the elicitation preliminary output and provider-executed search parts (planned
-6.12), the conflict reason `needs-auth`, the notice `web-search-unavailable`, the two settings and the 141-route key
-index; **C47 fixes the final numbers**); components, props, store and module signatures, routes, shortcuts and test ids
-from `docs/UI.md` (the 2.20 wireframes, 5.5 the Settings nav "Web search", 6 routes (`/oauth/callback` with the `auth`
-layout, `/settings/search`), 7.35 the chat additions (elicitation card, "Needs your input", sources chips, search rows),
-8.14 MCP sign-in, 9.15 Web search settings, 10.10 contracts, 11.10 modules, 12 Alt+W, 13.14 the Phase 14 test ids, 14
-accessibility, 15 copy); flows, tables and security rules from `docs/ARCHITECTURE.md` (the new flow sections for the MCP
-OAuth sign-in, the elicitation live wait, MCP prompts and resources, web search resolution with the provider-executed
-approval rule and the history stage, and the `core-search` request path with `safeFetch` POST (planned 6.39 – 6.43),
-the stop order, backups and key rotation, the Phase 14 security section (planned 10.14), the log rules); plugin API
-1.7.0 (the version rows, `ProviderDefinition.webSearch?`, `McpServerDecl.transport.oauth?`, the `elicitation_dialog`
+from `docs/DECISIONS.md` (ADR-059 … ADR-063, the amendment notes on ADR-008, ADR-012, ADR-017, ADR-024, ADR-034, ADR-042
+… ADR-046, ADR-048, ADR-050, ADR-052 and ADR-053, and the Phase 14 contract seed; it wins on conflict); endpoints and
+DTOs from `docs/API.md` (the new schema sections for MCP sign-in and the auth info, MCP elicitation, MCP resources and
+web search (4.36 – 4.39), the chat setting, request body, summary, settings and catalog model additions, the route
+sections for the modules `mcpAuth`, `chatElicitations`, `mcpResources` and `webSearch` (5.37 – 5.40), the chat stream
+notes on the elicitation preliminary output and provider-executed search parts (6.12), the conflict reason `needs-auth`,
+the notice `web-search-unavailable`, the two settings and the 141-route key index (8)); components, props, store and
+module signatures, routes, shortcuts and test ids from `docs/UI.md` (the 2.20 wireframes, 5.5 the Settings nav "Web
+search", 6 routes (`/oauth/callback` with the `auth` layout, `/settings/search`), 7.35 the chat additions (elicitation
+card, "Needs your input", sources chips, search rows), 8.14 MCP sign-in, 9.15 Web search settings, 10.10 contracts,
+11.10 modules, 12 Alt+W, 13.14 the Phase 14 test ids, 14 accessibility, 15 copy); flows, tables and security rules from
+`docs/ARCHITECTURE.md` (the new flow sections for the MCP OAuth sign-in, the elicitation live wait, MCP prompts and
+resources, web search resolution with the provider-executed approval rule and the history stage, and the `core-search`
+request path with `safeFetch` POST (6.39 OAuth, 6.40 elicitation, 6.41 prompts, 6.42 resources, 6.43 web search, 6.44
+`search_web`), the stop order, backups and key rotation, the Phase 14 security section (10.14), the log rules); plugin
+API 1.7.0 (the version rows, `ProviderDefinition.webSearch?`, `McpServerDecl.transport.oauth?`, the `elicitation_dialog`
 notification type, the builtin `core-search`) from `docs/PLUGINS.md`; the native search matrix and the mock models
-`mock:search` / `mock:search-tool` from `docs/PROVIDERS.md` (section 8, "MCP and search mocks (Phase 14)": the probe
-contract); the user guides `docs/guides/mcp-oauth.md` and `docs/guides/web-search.md` (and the updated
-`docs/guides/adding-an-mcp-server.md` and `docs/guides/hooks-and-project-mcp.md`). The UI.md, ARCHITECTURE.md,
-PLUGINS.md and PROVIDERS.md sections and the guides are written by D19 in P14-0a, API.md by C47; W14.12 reconciles every
-doc with the code in P14-B (the facts that change are listed under "Deviations found while building").
+`mock:search` / `mock:search-tool` from `docs/PROVIDERS.md` (section 14 "Web search", section 8 "MCP and search mocks
+(Phase 14)": the probe contract, section 12 "Web search checks (Phase 14)"); the user guides `docs/guides/mcp-oauth.md`
+and `docs/guides/web-search.md` (and the updated `docs/guides/adding-an-mcp-server.md` and
+`docs/guides/hooks-and-project-mcp.md`). The UI.md, ARCHITECTURE.md, PLUGINS.md and PROVIDERS.md sections and the guides
+were written by D19 in P14-0a, API.md by C47; W14.12 reconciled every doc with the code in P14-B (the facts that changed
+are listed under "Deviations found while building").
 
-**Status (2026-10-22): in progress.** P14-00 is done: the six design reports of the planning session extracted into
+**Status (2026-10-22): done** (v1.9.0). P14-00 is done: the six design reports of the planning session extracted into
 `.tmp/p14-designs` (with `plan.md`, `README.md` and `agent-rules.md`), the baseline `pnpm check` on `8108c56` green with
 **13815 tests** and `git status --porcelain` unchanged before and after, CI and the scheduled Audit on `8108c56` green,
 the two ignored advisories (node-forge GHSA-86w9-cpqp-85rv, braces GHSA-vfj7-8cjw-p6xm) re-checked and unchanged,
-`.tmp/v181` (a worktree of the `v1.8.1` tag, `27699db`) installed and built, the old `.tmp` content archived. P14-0a is
-running (K1, C47, C48, C49, D18, D19, K3S). "Deviations found while building" and "Outcome" are filled in by the
-coordinator at each gate.
+`.tmp/v181` (a worktree of the `v1.8.1` tag, `27699db`) installed and built, the old `.tmp` content archived. P14-0a
+(`4c81fd3`), P14-0b (`0ebcc52`, FREEZE), P14-A (`72aee58`) and P14-B with the final gate passed (see "Outcome"); every
+`package.json` carries 1.9.0. Pushing `main` and tagging `v1.9.0` wait for the user. "Deviations found while building"
+and "Outcome" were filled in by the coordinator at each gate (W14.12 reconciled them with the notes digests).
 
 Paths: `S` = `apps/server/src`, `W` = `apps/web/app`, `SH` = `packages/shared/src`, `SDK` = `packages/plugin-sdk/src`,
 `P` = `node_modules/.pnpm/@ai-sdk+mcp@2.0.81_zod@4.6.7/node_modules/@ai-sdk/mcp/dist` (the server resolves `@ai-sdk/mcp`
@@ -515,6 +517,29 @@ reconciled docs (W14.12) follow these, not the task text further down.
     `iss` mismatch → 400; a refused authorization server or a server without OAuth metadata → 502 `provider_error`.
   - The frozen `chat/tools.ts` keeps only the latest preliminary value, so no `{ status: 'running' }` is seen after an
     answer; ambiguous and sub-agent elicitation declines store no record (behavior-checked).
+- **Wave P14-B** (W14.12, the docs reconciliation; to be confirmed at the final gate). The docs follow the code where it
+  differs from the plan sections above:
+  - The builtin plugins keep their `engines.harness` ranges: `core-providers` and `mock` `^1.1.0`, `core-search`
+    `^1.0.0` (not `^1.7.0`; builtins are versioned with the app), documented as the exception in PLUGINS.md.
+  - The notice `web-search-unavailable` carries no `details`; its message names the reason (`S/chat/notices.ts`).
+  - A Claude Code plugin with one MCP server uses the plugin id as the server id; a `${user_config.KEY}` OAuth client id
+    becomes `{{settings.KEY}}` (any other variable drops the client id); the MCP list shows a plugin's client id with
+    its non-secret settings filled in (`presentMcpServer`, `S/http/routes/mcp.ts`).
+  - Prompt and resource listings with `waitMs: 0` (the slash and `@` menus) never start a project server. W14.12 found
+    that a typed `/mcp__<projectServer>__<prompt>` resolved on send read the same non-starting listing and failed with
+    "The MCP server "{id}" is not connected." before a run had started the server; **coordinator fix-up**: a listing
+    that may wait (`waitMs > 0`: the resolution on send passes `LIMITS.projectMcpConnectWaitMs`) starts the approved
+    servers like a run (`S/mcp/project.ts`, + test). The General settings help line names Alt+W (coordinator fix-up).
+  - A second elicitation request while the same call already waits is declined with reason `ambiguous` (the card's
+    "Declined automatically: more than one chat was using {server}." copy then reads oddly; rare).
+  - The General settings help line of Alt shortcuts does not mention Alt+W (`GeneralSettings.vue`); Alt+W works and
+    obeys `altShortcuts`.
+  - Share snapshots keep a message's `command` only for bare slash names (pre-existing since Phase 12: qualified names
+    are dropped too); API.md now says so.
+  - Docker (G14D): the redirect URI is the browser's address of the published port (`http://localhost:8793/oauth/callback`
+    with `-p 8793:8787`), and an MCP server's protected-resource metadata must name the URL the container itself uses
+    (a server advertising `http://127.0.0.1:<port>` but reached through `host.docker.internal` is refused by the SDK's
+    same-origin check); the session cookie reaches the callback page's own POST (the flow works with a password).
 
 ## Rules for every Phase 14 agent
 
@@ -2738,11 +2763,11 @@ Completed by the coordinator at each gate ("audit" is the ownership audit of `sc
 | Wave | Agents | Gate result | Commit |
 |---|---|---|---|
 | P14-00 | coordinator | baseline `pnpm check` 13815 green on `8108c56`, `git status` unchanged; CI and Audit green; the two ignored advisories unchanged; design reports in `.tmp/p14-designs`; `.tmp/v181` built; `.tmp` archived | — |
-| P14-0a | coordinator (K1, K2, contract skeletons, K3 seed by K3S), C47, C48, C49, D18, D19 | _pending_ | _pending_ |
-| P14-0b | coordinator (K4), C50, C51, C52, C53, C54, G14B | _pending_ | _pending_ |
-| P14-A | W14.1 – W14.10, G14P (+ W14.13 / W14.14 if red) | _pending_ | _pending_ |
-| P14-B | W14.11, W14.12 (+ W14.13 / W14.14 if needed), G14D | _pending_ | _pending_ |
-| Final gate v1.9 | coordinator | _pending_ | _pending_ |
+| P14-0a | coordinator (K1, K2, contract skeletons, K3 seed by K3S), C47, C48, C49, D18, D19 | audit ok (99 paths; 20 C47 compile-fix files accepted); frozen install ok (TypeScript 6.0.3 only); 14537 tests, `git status` unchanged; build ok; CSP 38/38; `pluginApiVersion` 1.7.0, the 9 new routes answer 400 / 501; e2e 215 on a fresh `.tmp/e2e`; `pnpm audit --prod` clean (2 ignored); examples' `harness-forge.d.ts` regenerated for 1.7.0; C48 follow-up (Pydantic optional fields, punycode source domains); open points 1, 2, 4–7, 9–17 confirmed, 3 accepted, 8 changed; v1.8.1 seed `.tmp/upgrade-v181` (32 chats / 164 messages / 17 approved trust items) | `4c81fd3` |
+| P14-0b | coordinator (K4), C50, C51, C52, C53, C54, G14B | audit ok (170 paths; C50 / C53 test fixes and four C54 out-of-glob files accepted); `db:generate` no changes (no migration); 14789 tests, `git status` unchanged; build ok; CSP 38/38; e2e 215 on a fresh `.tmp/e2e` with the fake remote (8889); G14B upgrade probe on a v1.8.1 copy 164/164 (10 migrations, messages byte-identical, all 17 trust hashes kept, the seeded OAuth servers `needs-auth` with one connect and no retry, nothing pending ran, backup restores) + seam probe 129/129; CCR C50-1 (`core-search` in `BUILTIN_PLUGIN_IDS`); FREEZE | `0ebcc52` |
+| P14-A | W14.1 – W14.10, G14P (W14.13 / W14.14 not needed) | audit ok (191 paths; W14.1 / W14.2 / W14.5 test fixes and the forced `claude/register.ts` edit accepted); 15369 tests, `git status` unchanged; build ok; CSP 38/38; G14P probes green after the `auth: null` decision (OAuth 55, restart 6, origins 22, elicitation 31 incl. a live timeout, prompts 16, resources 12, native search 13, builtin search 28 incl. `HF_OFFLINE`, plugin API 18, upgrade = G14B at stage A + 10 (both seeded OAuth servers sign in), hygiene 16; no outbound connection but a refused `models.dev` refresh); e2e 213/215 on the first run (a load flake while the probes ran + the project-server start on listings, fixed by the coordinator) then 215 on a fresh `.tmp/e2e`; `pnpm audit --prod` clean (2 ignored); coordinator fixes: lazy start for listings, the stdio `onmessage` guard | `72aee58` |
+| P14-B | W14.11, W14.12, G14D (W14.13 / W14.14 not launched: the coordinator fixed the two items W14.12 found — a typed `/mcp__<projectServer>__x` before any run (a listing that may wait starts the servers) and the Alt+W help line) | audit ok (64 paths); W14.11: 245 e2e tests (239 + 6 screenshot tests; new specs `plugins/mcp-oauth` (incl. a password run: the `SameSite=Strict` cookie and a cross-site callback), `core/{mcp-elicitation,mcp-prompts,mcp-resources,web-search,settings-search}`, `mobile/{web-search,elicitation,mcp-oauth}`, extended `core/project-mcp` and tablet touch targets), the new specs 3× green, screenshots dark + light; W14.12: docs reconciled (API, UI, ARCHITECTURE, PLUGINS, PROVIDERS, 10 guides, README "v1.9"); G14D Docker 61/61 twice (callback through the container's origin, uid 1000, canaries never in plain text, no orphan after `docker stop`) | (with the final gate) |
+| Final gate v1.9 | coordinator, G14F (probes) | frozen install ok; version 1.9.0; `pnpm check` 15369 / 15370 (the git sentinel suite timed out under external load → explicit 30 s timeout, then green; G14F's three `pnpm test` runs 15370 green, `git status` unchanged); build ok; CSP 38/38; fresh v1.8.1 seed by the `.tmp/v181` build (88 + boot 19); Phase 14 probes at stage `final` 237 (+3 accepted spec differences; both seeded OAuth servers sign in on the upgraded data) and regressions P12-A copy 346, P11-A copy 345, P10-A copy 173, P9-A 71, P8-A 47 (no real failure); e2e 239 passed ×3 (chromium + mobile + tablet) on fresh `.tmp/e2e`; README images refreshed + `mcp-sign-in-dark`, `elicitation-dark`, `web-search-dark`; `pnpm audit --prod` clean (2 ignored, still unpatched) | (this commit) |
 
 ---
 

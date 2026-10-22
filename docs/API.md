@@ -77,10 +77,10 @@ to `/login` only on `code === 'unauthorized'`, never on the HTTP status alone.
 | `unauthorized` | 401 | `login` | No valid session (or wrong password on `POST /auth/login`). |
 | `forbidden` | 403 | `login` when fresh auth is missing | Origin check failed, fresh auth missing, operation not allowed for this resource (builtin plugin, read-only source). |
 | `not_found` | 404 | - | Unknown route, chat, message, plugin, provider, file, tool, MCP server, icon, share link, project, shell rule or change batch, a file the chat never changed, a missing project folder, or a message that is not queued (already delivered or started; Phase 9); Phase 12: a marketplace or one of its entries, a GitHub repository, ref or folder, an expired import plan, the Claude Code folder of a scan, an unavailable project folder or a missing project definition file; Phase 14: a pending MCP elicitation or an MCP resource. Every failure of the public share routes is the same 404 (section 5.20). |
-| `conflict` | 409 | - | State conflict: a run is active for the chat (or for a chat of the project, also during a rewind, revert or undo), id already exists (also a project for the folder, the new folder, or a shell rule), stale file `baseEtag` (or a revert's `expectedSha`), password managed by `HF_PASSWORD`, another maintenance operation (import, delete-all, key rotation, file cleanup) is running, a chat request arrives during a key rotation, the message to delete is its only version, the master key comes from `HF_MASTER_KEY` or fails the key check, a message is queued for a chat with no active run and no pending approval, or the chat's queue is full (Phase 9), a `UserPromptSubmit` / `SessionStart` hook refused the turn or a queued message, a project command's `!` spans are not approved, a command's `!` spans while `HF_WORKSPACE_SHELL=0`, a project approval whose hashes changed, or the personal hook (100) or project MCP variable (50) limit (Phase 11), `HF_OFFLINE=1` refusing a marketplace or GitHub fetch, a marketplace name or plugin id already taken, the marketplace limit (50), the import scan while `HF_CLAUDE_HOME=0` or stopped by a shutdown (without `details`), or a project definition file that changed since the editor read it (Phase 12). |
+| `conflict` | 409 | - | State conflict: a run is active for the chat (or for a chat of the project, also during a rewind, revert or undo), id already exists (also a project for the folder, the new folder, or a shell rule), stale file `baseEtag` (or a revert's `expectedSha`), password managed by `HF_PASSWORD`, another maintenance operation (import, delete-all, key rotation, file cleanup) is running, a chat request arrives during a key rotation, the message to delete is its only version, the master key comes from `HF_MASTER_KEY` or fails the key check, a message is queued for a chat with no active run and no pending approval, or the chat's queue is full (Phase 9), a `UserPromptSubmit` / `SessionStart` hook refused the turn or a queued message, a project command's `!` spans are not approved, a command's `!` spans while `HF_WORKSPACE_SHELL=0`, a project approval whose hashes changed, or the personal hook (100) or project MCP variable (50) limit (Phase 11), `HF_OFFLINE=1` refusing a marketplace or GitHub fetch, a marketplace name or plugin id already taken, the marketplace limit (50), the import scan while `HF_CLAUDE_HOME=0` or stopped by a shutdown (without `details`), or a project definition file that changed since the editor read it (Phase 12), an MCP server that must be signed in first, a used, expired or unknown OAuth sign-in, an elicitation that was already answered or ended, or a sign-in to a disabled or a pending project MCP server (Phase 14). |
 | `payload_too_large` | 413 | - | Body, upload, zip, backup, recording, share snapshot or file over the limit (`details.limitBytes`; a backup with too many entries: `details.limitEntries`). |
 | `provider_not_configured` | 400 | `configure-provider` | Provider unknown/disabled or required credentials missing, wherever a model ref is resolved (chat, media routes, `ctx.ai`, `ctx.models.resolve`, `ctx.images`, `generate_image`; an unknown provider since Phase 7). Returned before any streaming. Routes that address a provider by id (`/providers/:id/...`, `GET /models?providerId=`, model prefs, custom models) answer `404 not_found` for an unknown one. |
-| `auth_invalid` | 502 | `configure-provider` | Provider rejected the credentials (upstream 401/403). |
+| `auth_invalid` | 502 | `configure-provider` | Provider rejected the credentials (upstream 401/403). Phase 14: an MCP sign-in the authorization server refused (the callback's `error`, a failed code exchange; `details.target`, section 5.37), and the `McpServer.error` / `ProjectMcpServer.error` of a `needs-auth` server (`status: 401`). |
 | `rate_limited` | 429 | `retry` | Upstream rate limit, login rate limit or share link rate limit; `retryAfterMs` when known. |
 | `model_not_found` | 404 | `refresh-models` | Provider does not know the model (upstream 404). |
 | `context_overflow` | 400 | - | Prompt exceeds the model context window even after trimming. |
@@ -88,7 +88,7 @@ to `/login` only on `code === 'unauthorized'`, never on the HTTP status alone.
 | `provider_error` | 502 | `retry` | Any other upstream error (provider, MCP server, npm registry, install URL). |
 | `plugin_error` | 500 | - | Plugin code threw, timed out, or failed to load/build (`details.pluginId`). |
 | `internal_error` | 500 | `retry` | Unexpected server error (`details.requestId`). Message is generic; details are logged. |
-| `not_implemented` | 501 | - | Route and service stubs between a contract wave and the feature wave that implements them (the Phase 0 skeleton; in Phase 6 `audio.transcribe`, `audio.speech` and `chats.deleteMessage` from P6-0a until P6-A; in Phase 7 the five `projects` routes, `keys.get`, `keys.rotate`, `data.cleanupPreview` and `data.cleanup` from P7-0a until P7-A; in Phase 8 the seven `changes` routes and the three `shellRules` routes from P8-0a until P8-A; in Phase 9 the three `chatQueue` routes and the two `projectFiles` routes from P9-0a until P9-A; in Phase 11 the five `hooks`, three `projectTrust` and three `projectMcp` routes from P11-0a until P11-A; in Phase 12 the five `marketplaces`, four `claudeImport` and three `projectDefinitions` routes from P12-0a until P12-A; these stubs validate their input first, so invalid input is still `400`). No route of a release answers it. |
+| `not_implemented` | 501 | - | Route and service stubs between a contract wave and the feature wave that implements them (the Phase 0 skeleton; in Phase 6 `audio.transcribe`, `audio.speech` and `chats.deleteMessage` from P6-0a until P6-A; in Phase 7 the five `projects` routes, `keys.get`, `keys.rotate`, `data.cleanupPreview` and `data.cleanup` from P7-0a until P7-A; in Phase 8 the seven `changes` routes and the three `shellRules` routes from P8-0a until P8-A; in Phase 9 the three `chatQueue` routes and the two `projectFiles` routes from P9-0a until P9-A; in Phase 11 the five `hooks`, three `projectTrust` and three `projectMcp` routes from P11-0a until P11-A; in Phase 12 the five `marketplaces`, four `claudeImport` and three `projectDefinitions` routes from P12-0a until P12-A; in Phase 14 the five `mcpAuth`, one `chatElicitations`, two `mcpResources` and one `webSearch` routes from P14-0a until P14-A; these stubs validate their input first, so invalid input is still `400`). No route of a release answers it. |
 
 `HarnessErrorAction` = `configure-provider | refresh-models | login | retry`.
 
@@ -287,7 +287,7 @@ Other exports:
 | `createMarketplaceId` / `createImportPlanId` | `() => string` `mkt_` / `cip_` + 16 chars of `[0-9A-Za-z]` (Phase 12, ADR-054 / ADR-055; generated by the server; also exported as `newMarketplaceId` / `newImportPlanId`, the names of the Phase 12 design) |
 | `createElicitationId` / `newElicitationId` | `() => string` `eli_` + 16 chars of `[0-9A-Za-z]` (Phase 14, ADR-060; generated by the server for each pending MCP elicitation, memory only) |
 | `parseElicitationForm` / `validateElicitationAnswer` / `elicitationMessageText` / `isSensitiveField` / `elicitationInitialValues` / `coerceElicitationValue` | MCP elicitation forms (Phase 14, `util/mcp-elicitation.ts`, ADR-060; section 4.37): reads the requested form schema of an `elicitation/create` request into the supported subset (else `{ ok: false, reason }`: declined `unsupported`), validates an answer (field issues), caps the message, flags secret-looking fields (an extra warning on the card), and the web's initial values and coercion; pure, isomorphic, never throw; `ELICITATION_FIELDS_MAX` (20), `ELICITATION_OPTIONS_MAX` (100), `ELICITATION_MESSAGE_MAX_CHARS` (2000), `ELICITATION_TEXT_MAX_CHARS` (500), `ELICITATION_VALUE_MAX_CHARS` (10000), `ELICITATION_FIELD_NAME_PATTERN` |
-| `mcpPromptCommandName` / `isMcpPromptCommandName` / `mcpPromptArgumentHint` / `bindMcpPromptArguments` | MCP prompts as slash commands (Phase 14, `util/mcp-prompts.ts`, ADR-061; section 4.38): the command name `mcp__<serverId>__<prompt>` (`mcpToolName` sanitizing, <= 64 chars), the `<required> [optional]` hint and the argument binding (positional or `name=value`, the last argument takes the rest); `MCP_PROMPT_PREFIX`, `MCP_PROMPT_NAME_PATTERN`, `MCP_PROMPT_ARGUMENTS_MAX` (20) |
+| `mcpPromptCommandName` / `isMcpPromptCommandName` / `mcpPromptServerId` / `mcpPromptArgumentHint` / `bindMcpPromptArguments` | MCP prompts as slash commands (Phase 14, `util/mcp-prompts.ts`, ADR-061; section 4.38): the command name `mcp__<serverId>__<prompt>` (`mcpToolName` sanitizing, <= 64 chars), the server id a command name names, the `<required> [optional]` hint (<= 100 chars) and the argument binding (positional or `name=value`, the last argument takes the rest; a value <= 16384 chars, the input <= 65536); `MCP_PROMPT_PREFIX`, `MCP_PROMPT_NAME_PATTERN`, `MCP_PROMPT_ARGUMENTS_MAX` (20) |
 | `resolveWebSearch` / `isProviderExecutedPart` / `sourceDomain` | web search (Phase 14, `util/web-search.ts`, ADR-062 / ADR-063; section 4.39): the one resolution rule (server and composer), provider-executed parts, the host of a source URL; `SEARCH_WEB_TOOL_NAME` (`'search_web'`), `WEB_SEARCH_MAX_USES` (5), `WEB_SEARCH_MODES`, `MODEL_WEB_SEARCH_KINDS`, `WEB_SEARCH_BACKENDS`, `WEB_SEARCH_UNAVAILABLE_REASONS` |
 | `isSafeReturnTo` | `(value) => boolean`: a safe in-app return path of an MCP sign-in (`/`-relative, not `//`, no backslash, whitespace or control character, <= 512 chars; section 4.36) |
 | `QUALIFIED_NAME_PATTERN` / `CATALOG_NAME_PATTERN` / `qualifiedName` / `splitQualifiedName` | qualified catalog names (Phase 12, ADR-053; section 4.1): `<pluginId>:<segment>[:<segment>…]` (1–3 segments of `^[a-z][a-z0-9-]{0,63}$`, at most 128 characters, `QUALIFIED_NAME_MAX_CHARS`, `QUALIFIED_NAME_SEGMENTS_MAX`); a catalog name is bare (`AGENT_NAME_PATTERN`) or qualified; `qualifiedName(pluginId, ...segments)` joins with `:` (throws `validation_error` when the result is not valid); `splitQualifiedName(name)` → `{ pluginId, segments, name }` (`name` = the last segment) or null for a bare or invalid name |
@@ -313,7 +313,7 @@ Other exports:
 | `isSafePlanDirectory` | `(value) => boolean`: the rule of the `planDirectory` setting (section 4.3) |
 | `parseShellCommand` / `parseShellRule` / `matchShellRules` / `suggestShellRules` | the shared shell command parser and rule matcher (Phase 8, ADR-038; section 4.24): pure, isomorphic, fails closed |
 | `findCompaction` / `compactionMarkers` / `splitSteers` / `latestTodos` | history-derived agent state (Phase 9, `util/agent-state.ts`; section 6.9): the latest compaction marker on a message path (its message and part index, and the kept user message), every marker of a path, the messages with each assistant message split at its steers (assistant / user / assistant), the todo list of the latest `todo_write` output on a path; pure, isomorphic, branch-aware; the server and the web never re-implement them. Phase 10 (ADR-046): `splitTaskResults` (a separate stage after `splitSteers`, which is unchanged) and `taskResultText` (`<background-task …>…</background-task>`), `TASK_RESULT_PART_TYPE` (section 6.10) |
-| `mentionTokenAt` / `parseMentions` / `formatMention` / `scorePath` / `rankPaths` | file mentions (Phase 9, `util/mentions.ts`; section 4.27): the `@` token at the caret, the mentions of a text, the `@path` text of a path (`@"path"` when it holds whitespace; `null` for an empty path or one with `"` or a line break), the fuzzy match of a query against a path (`{ score, ranges }`), the best entries for a query (`{ items, truncated }`); the grammar and the ranking tiers are in section 4.27 |
+| `mentionTokenAt` / `parseMentions` / `formatMention` / `scorePath` / `rankPaths` | file mentions (Phase 9, `util/mentions.ts`; section 4.27): the `@` token at the caret, the mentions of a text, the `@path` text of a path (`@"path"` when it holds whitespace; `null` for an empty path or one with `"` or a line break), the fuzzy match of a query against a path (`{ score, ranges }`), the best entries for a query (`{ items, truncated }`); the grammar and the ranking tiers are in section 4.27. Phase 14 (ADR-061): `formatResourceMention` / `parseResourceMention` / `isResourceMentionPath` (the `@<serverId>:<uri>` display text of an MCP resource and its shape check; `RESOURCE_MENTION_URI_MAX_CHARS` 2048); `parseMentions` skips an unquoted resource-shaped token and `formatMention` quotes a path of that shape |
 | `createMessageId` | `() => string` `msg_` + 16 chars of `[0-9A-Za-z]`; the server passes it as `generateMessageId` (equivalent to AI SDK `createIdGenerator({ prefix: 'msg', separator: '_', size: 16 })`; the SDK default separator is `-`) |
 | `parseModelRef` / `formatModelRef` | `(ref) => { providerId, modelId }` (throws on invalid) / `(providerId, modelId) => string` |
 | `LIMITS` | `{ uploadBytes: 20971520, pluginFileBytes: 1048576, jsonBodyBytes: 1048576, chatBodyBytes: 2097152, pluginZipBytes: 20971520, pageLimitDefault: 50, pageLimitMax: 100, toolOutputBytes: 65536, sseHeartbeatMs: 25000, ... }`; the schemas add `iconFileBytes` / `manifestBytes` (256 KB), `chatImportMessagesMax` (2000), `messagePartsMax` (1000), `instructionsMaxChars` (20000), `credentialValueMaxChars` (4096), `pluginLogsLimitDefault` / `pluginLogsLimitMax` (200 / 500), `commandTemplateBytes` (16 KB), `commandExpansionBytes` (64 KB); bulk data and share links (Phase 5): `backupImportBytes` (256 MB), `backupEntriesMax` (50000), `backupChatEntryBytes` (64 MB), `backupChatMessagesMax` (20000), `shareSnapshotBytes` (10 MB), `shareToolValueChars` (16384), `sharesPerChatMax` (20); images and voice (Phase 6): `imagesPerTurnMax` (4), `imageInputsMax` (4), `generatedImageBytes` (20 MB, = `uploadBytes`), `imagePromptMaxChars` (32000), `audioUploadBytes` (25 MB), `speechTextMaxChars` (4096), `transcriptionMaxSeconds` (600), `speechFirstChunkChars` (300), `speechChunkChars` (1500); agent workspace (Phase 7): `projectNameMaxChars` (80), `projectsMax` (200), `workspacePathMaxChars` (4096), `browseEntriesMax` (500), `projectFileBytes` (32768), `stepsMax` (200, the bound of `maxSteps` and `projectMaxSteps`); the workspace tools have their own `WORKSPACE_LIMITS` (section 4.21); workspace 2.0 (Phase 8): `checkpointFileMaxBytes` (8 MiB), `checkpointProjectMaxBytes` (512 MiB), `checkpointMaxAgeMs` (30 days), `changesFilesMax` (500), `changesLineCountFiles` (200), `changesLineCountMaxBytes` (256 KiB), `changeDiffSideMaxBytes` (1 MiB), `gitStatusFilesMax` (2000), `gitTimeoutMs` (15000), `gitOutputMaxBytes` (8 MiB), `rewindUntrackedListMax` (50), `workspaceEventPathsMax` (200), `shellRulesPerScopeMax` (200), `shellRulePrefixMaxChars` (200), `shellCommandSegmentsMax` (32), `journalCommandMaxChars` (1000); agent 2.0 (Phase 9): `compactionSummaryMaxChars` (60000), `compactFocusMaxChars` (1000), `compactionsPerRunMax` (10), `todoItemsMax` (50), `planMaxChars` (50000), `approvalReasonMaxChars` (2000), `taskPromptMaxChars` (20000), `taskReportMaxChars` (32000), `taskStepsShownMax` (50), `subagentParallelMax` (3), `subagentsPerRunMax` (20), `subagentTimeoutMs` (570000), `queueItemsMax` (10), `queueItemBytes` (256 KiB), `mentionQueryMaxChars` (256), `mentionResultsMax` (50), `mentionFileMaxBytes` (5 MiB), `mentionIndexFilesMax` (50000), `mentionIndexTtlMs` (30000); agent customization (Phase 10): `customizationContentBytes` (64 KiB, = `DEFINITION_LIMITS.contentBytes`), `customizationFrontmatterBytes` (8 KiB), `customizationFilesPerFolderMax` (200), `customizationDescriptionMaxChars` (1024), `customizationsPerKindMax` (200), `customizationIndexTtlMs` (10000), `agentTypesListedMax` (30), `skillsListedMax` (50), `listedDescriptionMaxChars` (250), `skillFilesListedMax` (50), `rememberTextMaxChars` (2000), `rememberFileMaxBytes` (1 MiB), `backgroundTasksPerChatMax` (3), `backgroundTasksMax` (10), `backgroundTaskTimeoutMs` (1800000), `backgroundTasksKeptPerChat` (100); hooks, trust, project MCP and command extras (Phase 11; mirrors `HOOK_LIMITS`, `TRUST_LIMITS`, `MCP_CONFIG_LIMITS`, `COMMAND_TEMPLATE_LIMITS`, checked equal by `limits.test.ts`; `limits.ts` imports nothing): `hookTimeoutDefaultMs` (60000), `hookTimeoutMaxMs` (600000), `hooksPerEventMax` (20), `personalHooksMax` (100), `hookProcessesMax` (16), `hookPayloadBytes` (256 KiB), `hookStdoutBytes` (64 KiB), `hookStderrBytes` (16 KiB), `hookCommandMaxChars` (4096), `hookMatcherMaxChars` (200), `hookLabelMaxChars` (200), `hookContextMaxChars` (10000), `hookReasonMaxChars` (2000), `hookSystemMessageMaxChars` (2000), `hookUpdatedInputBytes` (64 KiB), `hookContinuationsMax` (5), `subagentStopContinuationsMax` (2), `hookRunsKept` (200), `hookRunErrorMaxChars` (500), `hookListItemsMax` (300), `pluginHooksMax` (50), `pluginOutputStylesMax` (20), `projectSettingsFileBytes` (256 KiB), `projectHookItemsMax` (100), `projectMcpFileBytes` (256 KiB), `projectMcpServersMax` (20), `projectMcpVariablesMax` (50), `projectMcpVariableValueMaxChars` (4096), `projectMcpToolsMax` (1000), `projectMcpConnectWaitMs` (5000), `projectMcpIdleMs` (600000), `trustItemsMax` (200), `trustApproveItemsMax` (50), `trustRefFilesMax` (8), `trustRefFileBytes` (1 MiB), `commandShellSpansMax` (10), `commandShellTimeoutMs` (30000), `commandShellTotalMs` (60000), `commandShellOutputBytes` (16 KiB), `commandFileRefsMax` (10), `commandFileRefBytes` (32 KiB); Claude Code ecosystem (Phase 12; mirrors `CLAUDE_PLUGIN_LIMITS` and `CLAUDE_HOME_LIMITS`, checked equal by `limits.test.ts`): `claudePluginManifestBytes` (256 KiB), `marketplaceJsonBytes` (1 MiB), `marketplaceEntriesMax` (1000), `claudeComponentsPerKindMax` (100), `claudeOutputStylesMax` (20), `claudeUserConfigMax` (50), `qualifiedNameMaxChars` (128), `qualifiedNameSegmentsMax` (3), `claudePluginDiagnosticsMax` (200), `claudePluginExecutablesMax` (200), `marketplacesMax` (50), `repoArchiveBytes` (50 MiB), `skillFileReadBytes` (64 KiB), `claudeImportDefinitionBytes` (64 KiB), `claudeImportDefinitionsPerKindMax` (200), `claudeImportCommandDepthMax` (3), `claudeImportSettingsBytes` (256 KiB), `claudeMdBytes` (1 MiB), `claudeJsonBytes` (16 MiB), `claudeImportBytesMax` (32 MiB, also the upload limit), `claudeImportItemsMax` (1000), `claudeImportSkippedMax` (200), `claudeImportSummaryMaxChars` (300), `claudeImportPlanTtlMs` (600000), `claudeImportPlansMax` (4), `claudeImportScanTimeoutMs` (10000), `promptHookTimeoutDefaultMs` (30000), `promptHookPromptMaxChars` (16384), `promptHookMaxOutputTokens` (512), `hookModelCallsMax` (8), `hookErrorBytes` (16 KiB), `transcriptBytesMax` (8 MiB), `transcriptPartBytes` (64 KiB), `transcriptToolResultBytes` (16 KiB), `sessionEndBudgetMs` (1500), `sessionEndBudgetMaxMs` (60000), `agentSkillsPreloadMax` (5), `agentSkillsPreloadBytes` (32 KiB), `agentMaxTurnsMax` (200), `definitionArgumentsMax` (9); Phase 14: `mcpElicitationWaitMs` (480000), `mcpToolActiveMs` (60000), `mcpOAuthFlowMs` (600000), `mcpOAuthFlowsMax` (20), `mcpPromptsMax` (200), `mcpPromptArgumentsMax` (20), `mcpResourcesMax` (1000), `mcpResourceReadBytes` (5 MiB, = `mentionFileMaxBytes`), `mcpReturnToMaxChars` (512), `searchWebOutputBytes` (32 KiB), `searchWebFetchBytes` (1 MiB), `searchWebTimeoutMs` (10000) |
@@ -406,7 +406,7 @@ noted, strings are trimmed and non-empty in request schemas.
 | `trustStateSchema` / `TrustState` | `'approved' \| 'pending'`: whether the current sha256 of an item is in the project's approved set |
 | `trustWarningSchema` / `TrustWarning` | `'private-network' \| 'referenced-file-missing' \| 'runs-repository-code'`: review warnings of a project item (section 4.32) |
 | `projectMcpTransportSchema` / `McpJsonTransport` | `'stdio' \| 'http' \| 'sse'` (`MCP_JSON_TRANSPORTS` of `util/mcp-config.ts`; ADR-050) |
-| `projectMcpStateSchema` / `ProjectMcpState` | `'pending' \| 'needs-variables' \| 'idle' \| 'connecting' \| 'connected' \| 'error' \| 'disabled'`: state of a project MCP server (section 4.32): `pending` not approved (or changed since the approval), `needs-variables` a referenced variable has no value and no default, `idle` approved and not running, `connecting`, `connected`, `error` (with the reason), `disabled` only in safe mode (`HF_SAFE_MODE`), Phase 14 (ADR-059) `needs-auth` an approved http / sse server answered 401 (sign in with `POST /projects/:id/mcp/:serverId/oauth`; never retried with backoff); an unavailable project folder lists no servers |
+| `projectMcpStateSchema` / `ProjectMcpState` | `'pending' \| 'needs-variables' \| 'idle' \| 'connecting' \| 'connected' \| 'error' \| 'disabled' \| 'needs-auth'`: state of a project MCP server (section 4.32): `pending` not approved (or changed since the approval), `needs-variables` a referenced variable has no value and no default, `idle` approved and not running, `connecting`, `connected`, `error` (with the reason), `disabled` only in safe mode (`HF_SAFE_MODE`), Phase 14 (ADR-059) `needs-auth` an approved http / sse server answered 401 (sign in with `POST /projects/:id/mcp/:serverId/oauth`; never retried with backoff); an unavailable project folder lists no servers |
 | `invocationKindSchema` / `InvocationKind` | `'command' \| 'skill'` (Phase 11, ADR-052): what a slash name invokes (`CommandSummary.kind`, `CommandInvocation.kind`, `ShareMessage.command.kind`) |
 | `mcpAuthClientKindSchema` / `McpAuthClientKind` | `'dynamic' \| 'configured'` (Phase 14, ADR-059): how an MCP server's OAuth client was obtained (`McpAuthInfo.client`): dynamic client registration, or the server's `oauth.clientId` |
 | `elicitationActionSchema` / `ElicitationAction` | `'accept' \| 'decline' \| 'cancel'` (Phase 14, ADR-060): how an MCP elicitation ended (the MCP `elicitation/create` result action; only `accept` sends content) |
@@ -721,9 +721,11 @@ type ChatSummary = {                    // chatSummarySchema
   updatedAt: Timestamp
   snippet?: string                      // only for GET /chats?q=: matching excerpt, <= 160 chars, plain text
   awaitingInput?: boolean               // Phase 14 (ADR-060): an MCP tool call of the chat's run waits for an
-}                                       // elicitation answer (live, from the elicitation broker, sent with
-                                        // chat.updated; the sidebar shows "Needs your input"); absent = false;
-                                        // stored snapshots and exports never set it
+}                                       // elicitation answer (live, from the elicitation broker; the sidebar shows
+                                        // "Needs your input"); always a boolean in GET /chats and GET /chats/:id;
+                                        // chat.updated carries it only on a 0 <-> 1+ change of the chat's pending
+                                        // requests (absent = unchanged); other answers, stored snapshots and
+                                        // exports never set it
 
 type UsageTotals = {                    // usageTotalsSchema; sums over the chat's usage rows (purposes 'chat',
                                         // 'image' (ADR-028), since Phase 9 'compact' and 'subagent', since Phase 12
@@ -998,8 +1000,10 @@ type ChatRequestBody = {                // chatRequestBodySchema; body of POST /
                                         // settings.outputStyle; null = automatic); ignored for an existing chat
   webSearch?: WebSearchMode             // Phase 14 (ADR-063): the web search mode of this turn (the composer sends
 }                                       // the effective mode: picked > chat setting > global webSearchDefault);
-                                        // omitted = settings.webSearch, else webSearchDefault; never stored by
-                                        // the request (the composer persists a change with PATCH /chats/:id)
+                                        // omitted = settings.webSearch, else webSearchDefault; saved as
+                                        // settings.webSearch only when this request creates the chat (like
+                                        // outputStyle); an existing chat keeps its setting (the composer persists
+                                        // a change with PATCH /chats/:id)
 
 type ChatStopResult = {                 // chatStopResultSchema
   stopped: boolean                      // false when no run was active
@@ -1015,9 +1019,10 @@ approval continuation (`400` on `['modelRef']`, section 5.10). `projectId` only 
 chat: an existing chat keeps its project (move it with `PATCH /chats/:id`). `outputStyle` (Phase 11) likewise: the
 composer of a new chat sends its choice once; an existing chat changes its style with `PATCH /chats/:id` (`settings:
 { outputStyle }`). An unknown style name is not refused: the run uses `default` with the notice
-`output-style-unavailable`. `webSearch` (Phase 14) applies to the turn only: the server resolves it with
-`resolveWebSearch` (section 4.39) against the turn's model, tool mode and tools; an unavailable search is not an error
-(the turn runs without search and gets the notice `web-search-unavailable`).
+`output-style-unavailable`. `webSearch` (Phase 14) is the mode of this turn (a value of a request that creates the chat
+is also saved as the chat's `settings.webSearch`; an existing chat changes it with `PATCH /chats/:id`): the server
+resolves it with `resolveWebSearch` (section 4.39) against the turn's model, tool mode and tools; an unavailable search
+is not an error (the turn runs without search and gets the notice `web-search-unavailable`).
 
 ### 4.8 Files
 
@@ -1096,9 +1101,10 @@ type McpServer = {                      // mcpServerSchema
   error: HarnessErrorInit | null
   tools: ToolName[]                     // registered tool names
   connectedAt: Timestamp | null
-  auth: McpAuthInfo | null              // Phase 14 (ADR-059): the OAuth sign-in state (section 4.36); null = the
-}                                       // server does not use OAuth (stdio, an Authorization header, or it never
-                                        // asked for a sign-in); never a token
+  auth: McpAuthInfo | null              // Phase 14 (ADR-059): the OAuth sign-in state (section 4.36); null = no
+}                                       // stored sign-in record (never signed in, or signed out; always for stdio
+                                        // and servers with an Authorization header); never a token. Whether to
+                                        // offer Sign in follows status 'needs-auth', not auth
 
 type CommandSummary = {                 // commandSummarySchema (server-side commands only)
   name: SlashCommandName                // a command (<= 32 chars) or, since Phase 11, a user-invocable skill (<= 64);
@@ -1448,7 +1454,9 @@ type ServerEventType = ServerEvent['type']                                      
 
 `chat.created` carries a plain `ChatSummary`; `chat.updated` adds the active leaf (`chatSummarySchema` itself has no
 leaf: chat export v2 extends it). Phase 14 (ADR-060): `chat.updated` also reports `awaitingInput` when an MCP tool call
-of the chat's run starts or stops waiting for an elicitation answer (no new event type: SSE stays 19 types). The leaf is the stored column as it is: it can be `null`, or name a message that no
+of the chat's run starts or stops waiting for an elicitation answer (on each 0 <-> 1+ change of the chat's pending
+requests, with the chat's summary and active leaf; every other `chat.updated` / `chat.created` omits the key, which
+means "unchanged"; the web clears the flag on `run.finished` / `run.aborted`; no new event type: SSE stays 19 types). The leaf is the stored column as it is: it can be `null`, or name a message that no
 longer exists, while the chat has messages; `GET /chats/:id` then shows the path to the most recent message.
 `provider: null` / `plugin: null` mean the provider was unregistered / the plugin was uninstalled.
 `catalog.changed` with `providerId: null` means "many providers changed" (refetch everything). `key.rotated` is the last
@@ -1506,7 +1514,9 @@ the update state of installed plugins also emits `plugin.changed` for each of th
 
 ### 4.16 Bulk data (backup, import, delete-all)
 
-ADR-024. A backup is a zip; every chat in it is exactly its `ChatExport` (version 2, section 4.7).
+ADR-024. A backup is a zip; every chat in it is exactly its `ChatExport` (version 2, section 4.7). Phase 14: messages
+are kept as stored (provider-executed search parts with their `encryptedContent` included; no `awaitingInput`); MCP
+OAuth records, client secrets and web search keys are secrets and never in a backup; v1.8.1 backups restore unchanged.
 
 ```ts
 type DataSummary = {                    // dataSummarySchema (GET /data)
@@ -1740,8 +1750,9 @@ type ShareMessage = {                   // shareMessageSchema; user and assistan
   role: 'user' | 'assistant'
   modelRef?: ModelRef                   // assistant: the model that answered
   command?: { name: CatalogName; kind?: InvocationKind } // user: the slash command or (Phase 11) skill invoked
-                                        // (names up to 64 chars, Phase 12 qualified names up to 128; never its
-                                        // input, expansion or what it inlined)
+                                        // (the schema takes names up to 64 chars and qualified names up to 128;
+                                        // the snapshot keeps only bare slash names, see below; never its input,
+                                        // expansion or what it inlined)
   status?: 'failed' | 'stopped'         // the reply ended with an error (no details) or was stopped
   parts: SharePart[]                    // <= 1000
 }
@@ -1781,6 +1792,21 @@ Phase 10 / 11 (ADR-046, ADR-048; no schema change beyond the command's `kind`): 
 parts are dropped; the user-role carrier messages of background results and of `Stop` continuations are left out of
 the snapshot and of `messageCount`; a call a hook denied shows `denied` (the hook's reason is not copied); a command or
 skill invocation keeps its `kind` (share pages read "Skill").
+
+Phase 14 (ADR-060, ADR-062, ADR-063; no schema change): a `search_web` row keeps its input and, when its output reads
+as a `SearchWebOutput`, the query, the backend and the results copied field by field (invalid results dropped; results
+dropped from the end until the value fits 16384 chars); a provider-executed search call (native web search) becomes an
+ordinary tool row whose input is `{ query }` (the input's query, else the output's `action.query` / `action.queries`)
+and whose output keeps only the result and action fields of the providers' search tools (`type`, `url` (http(s)
+only), `title`, `pageAge`, `query`, `queries`, `action`, `sources`, `pattern`, `name`, `errorCode`), so
+`encryptedContent` and every other provider field never reach a share; an MCP tool row keeps at most 10 elicitation
+records of its output (`elicitations`: id, message, field names, action, reason; never a value; at most half of the
+value cap, the rest of the output capped with what is left, cut as `{ truncated: true, preview, elicitations }`). A
+tool part that still holds a preliminary output (a call that never finished, e.g. an MCP call waiting for input) is
+`stopped` and its progress output is not copied. The `command` of a user message is kept only for a bare slash name
+(`SLASH_NAME_PATTERN`): an MCP prompt command (`mcp__<server>__<prompt>`) and a qualified Claude Code plugin name keep
+none (the typed text stays). The results of `search_web` and of native search are shared as `source-url` parts like
+any source.
 
 ### 4.18 Images
 
@@ -2810,7 +2836,13 @@ type ProjectFileAttachBody = { path: string }   // projectFileAttachBodySchema; 
   mention starts with `@` at the start of the text or after whitespace (`a@b` and e-mail addresses never match);
   `@path` is the run of non-whitespace characters after the `@` (no `"`); `@"path with spaces"` runs to the next `"` on
   the line. At the caret, an `@"` quote that is never closed on the line yields to a later unquoted `@` run that holds
-  the caret (`@"abandoned quote @next|`); a query longer than 256 characters is no token.
+  the caret (`@"abandoned quote @next|`); a query longer than 256 characters is no token. Phase 14 (ADR-061): an
+  unquoted mention with the MCP resource shape `<MCP server id>:<URI scheme>:…` (`isResourceMentionPath`, e.g.
+  `@github:repo://owner/name/README.md`) is never a file mention: `parseMentions` skips it, and `formatMention` quotes a
+  project path of that shape (`@"a:b:c"`; a quoted mention is always a file), so every mentionable path still
+  round-trips. Resource mentions (`formatResourceMention` / `parseResourceMention`, section 4.38) are display text
+  only; `mentionTokenAt` is unchanged (the `@` menu opens on both kinds of token and also lists MCP resources, in every
+  chat with tools on).
 - **Attach**: the path resolves through the workspace path guard (realpath containment, section 4.21), checked on the
   typed path, on the resolved path and again on the path that was read; `.git` paths (`"<path>" is inside a .git
   folder and can't be attached.`), secret-looking paths (`"<path>" looks like a secret file and can't be attached.`),
@@ -2835,7 +2867,7 @@ one folder the first sorted path wins (`duplicate-name`).
 
 | Kind | Project files | Frontmatter (besides `name`, `description`) | Body |
 |---|---|---|---|
-| `agent` | `.harness/agents/<name>.md`, `.claude/agents/<name>.md` (top level) | `tools` (a comma string or a list; Claude Code names map: Read → `read_file`, Write → `write_file`, Edit / MultiEdit → `edit_file`, Grep → `search_files`, Glob → `find_files`, LS → `list_directory`, Bash → `shell`, WebFetch → `web_fetch`; `mcp__*` kept; a pattern such as `Bash(git:*)` keeps the tool with `tool-pattern`; other tool-like names are kept and checked against the registered tools, `unknown-tool` when nothing matches; anything else dropped with `unknown-tool`), `model` (`provider:model` or `inherit`; a Claude model name (`sonnet`, `opus`, `haiku`, `fable`, `opusplan`, a `claude-…` id; `[1m]` dropped) is kept as `modelAlias` with a `model-alias` info, Phase 12: it runs on the model the setting `modelAliases` names, else the default); Phase 12 (ADR-058): `disallowedTools` (removed from the child's tools before `tools` narrows them), `maxTurns` (1..200), `color` (`AGENT_COLORS`, display only), `skills` (<= 5 skill names, bare or qualified, preloaded into the child's instructions; section 4.25) | the child's instructions |
+| `agent` | `.harness/agents/<name>.md`, `.claude/agents/<name>.md` (top level) | `tools` (a comma string or a list; Claude Code names map: Read → `read_file`, Write → `write_file`, Edit / MultiEdit → `edit_file`, Grep → `search_files`, Glob → `find_files`, LS → `list_directory`, Bash → `shell`, WebFetch → `web_fetch`, Phase 14 WebSearch → `search_web`; `mcp__*` kept; a pattern such as `Bash(git:*)` keeps the tool with `tool-pattern`; other tool-like names are kept and checked against the registered tools, `unknown-tool` when nothing matches; anything else dropped with `unknown-tool`), `model` (`provider:model` or `inherit`; a Claude model name (`sonnet`, `opus`, `haiku`, `fable`, `opusplan`, a `claude-…` id; `[1m]` dropped) is kept as `modelAlias` with a `model-alias` info, Phase 12: it runs on the model the setting `modelAliases` names, else the default); Phase 12 (ADR-058): `disallowedTools` (removed from the child's tools before `tools` narrows them), `maxTurns` (1..200), `color` (`AGENT_COLORS`, display only), `skills` (<= 5 skill names, bare or qualified, preloaded into the child's instructions; section 4.25) | the child's instructions |
 | `command` | `.harness/commands/**/<name>.md`, `.claude/commands/**/<name>.md` (up to 3 folders deep, at most 100 subfolders; a folder is a display-only `namespace`) | `argument-hint`, `model` (Phase 12: a Claude model name resolves through `modelAliases`; one that does not runs the chat's model with the notice `command-model-unavailable`), `allowed-tools` (narrows the turn's tools; never a grant); Phase 12 (ADR-058): `when_to_use` (appended to the description in listings: `<description> - <when_to_use>`), `arguments` (<= 9 names, `ARGUMENT_NAME_PATTERN`), `disallowed-tools` (removed from the turn's tools), `context: fork` with `agent` (default `general`; `agent` without `context: fork` is an `ignored-key` info) | the prompt: `$ARGUMENTS`, `$1` … `$9` (quotes group words), `{{input}}`; without a placeholder the input is appended; in Phase 10 `!` lines and `@file` stay text; Phase 11 (ADR-052): the `` !`cmd` `` spans of a trusted command run in the project folder and `@path` references are inlined in project chats (section 6.11); arguments are never substituted inside a span; Phase 12 (ADR-058): `$ARGUMENTS[N]`, `$N` (0-based when the body uses `$0` or `$ARGUMENTS[` or declares `arguments`, else 1-based as before, `argumentBase`; so a legacy body with a literal `$0` next to `$1` counts from 0), `$name` (a declared argument), `\$` (a literal `$`), `${CLAUDE_SESSION_ID}`, `${CLAUDE_PROJECT_DIR}` (an open project folder), `${CLAUDE_SKILL_DIR}` (skills); a fork command's `/name` expands into a directive that asks the main agent to call `task` once with the definition's `agent` type and the expanded body as the prompt (`task` stays in the turn's tools) |
 | `skill` | `.harness/skills/<name>/SKILL.md`, `.claude/skills/<name>/SKILL.md` | Phase 11 (ADR-052): `user-invocable` (default true: `/name [arguments]` in the slash menu), `disable-model-invocation` (default false: true leaves the skill out of the skills listing, the `skill` tool and `loadSkill`), `argument-hint`; Phase 12 (ADR-058): `when_to_use`, `arguments`, `allowed-tools` and `model` (applied to the turn of `/name` like a command's; restrict-only), `disallowed-tools`, `context: fork` with `agent` | the skill content (loaded by `skill`; as `/name` it expands its arguments like a command body (`$ARGUMENTS`, `$1` …, `{{input}}`; Phase 12: the command placeholders above), but its `!` spans and `@path` stay text; Phase 12: a fork skill loaded by `skill` runs a sub-agent and answers its report, as `/name` it expands into the fork directive) |
 | `style` (Phase 11, ADR-051) | `.harness/output-styles/<name>.md`, `.claude/output-styles/<name>.md` (top level) | `keep-coding-instructions` (default false: the workspace tool rules and the todo / task hints are left out while the style is active); `name` may be a display name (`Terse Reviews`): the catalog name is its slug (`terse-reviews`), the original is the `label`; a missing `description` is the first line of the body | the style block (`Output style: <label>` + the body, first in the main agent's instructions) |
@@ -3580,7 +3612,7 @@ type ProjectMcpServer = {               // projectMcpServerSchema
   transport: 'stdio' | 'http' | 'sse'
   state: ProjectMcpState                // section 4.1
   sha256: Sha256Hex                     // the trust hash of the server item
-  error?: HarnessErrorInit              // state 'error': why (redacted)
+  error?: HarnessErrorInit              // state 'error' (Phase 14: also 'needs-auth'): why (redacted)
   tools: string[]                       // <= 1000 registered tool names (mcp__<id>__<tool>), live or last known
   shadows?: McpServerId                 // the global MCP server with the same id that this one replaces in the
                                         // project's chats; only for approved servers (absent while pending or
@@ -3588,7 +3620,9 @@ type ProjectMcpServer = {               // projectMcpServerSchema
   missingVariables: McpVariableName[]   // ${VAR} names without a stored value and without a default
   auth: McpAuthInfo | null              // Phase 14 (ADR-059; section 4.36): the OAuth sign-in state of an approved
 }                                       // http / sse server (tokens: secret scope project:<projectId>, name
-                                        // mcp-oauth.<serverId>); null = no OAuth, or not approved; never a token
+                                        // mcp-oauth.<serverId>); null = no stored sign-in record (never signed in,
+                                        // or signed out), a stdio server or one not approved; never a token. The
+                                        // DTO carries no `oauth` settings (`auth.client` says dynamic / configured)
 type ProjectMcpVariable = {             // projectMcpVariableSchema; values are never answered
   name: McpVariableName
   set: boolean                          // a value is stored for the project
@@ -3632,6 +3666,15 @@ type ProjectMcpChangedData = {          // projectMcpChangedDataSchema: data of 
   global server with the same id in that project's chats only; foreground and background sub-agents use the parent
   run's result (the shadowed global server is hidden from them too, and the project server tools join their tools
   under the sub-agent ceiling: only tools that run without approval in the chat's mode).
+- **Phase 14** (ADR-059, ADR-061): a server in state `needs-auth` is never restarted by a run (only a sign-in, a
+  reconnect, a variables or item change starts it again; the run's notice `project-mcp-unavailable` names it). The
+  prompt and resource listings (`GET /commands?projectId=`, `GET /mcp/resources?projectId=`) never start a server: they
+  list the servers that already run (approved servers that do not run are `unavailable` with their state, e.g. `idle`),
+  so a project server's prompts appear once a run started it (`customization.changed { kind: 'command', projectId }`);
+  running one prompt or attaching one resource starts the server and waits at most 5 s. A remote server's `oauth {
+  clientId, scopes }` of `.mcp.json` is read literally (no `${VAR}`; an unusable value or another key is an
+  `ignored-field` warning; the trust hash of v1.8 items is unchanged); `callbackPort` is ignored with an `info`
+  diagnostic ("The OAuth callback port is ignored; the harness signs in through its own callback page.").
 
 ### 4.33 Marketplaces and Claude Code plugins
 
@@ -3645,7 +3688,11 @@ id is a slug of its name (`claudePluginId`: at most 40 characters, a hashed suff
 id, `plugin-<8 hex>` when empty; another source, format or origin holding the id is `409 exists` at install); its
 entries have qualified names (`catalogNameSchema`, section 4.1); its MCP servers get the id `<pluginId>` (one server) or
 `<pluginId>-<name>` (several; `<pluginId>-<4 hex>` when longer than 32 or taken; a server using `${CLAUDE_PROJECT_DIR}`
-is skipped, plugin servers are global).
+is skipped, plugin servers are global). Phase 14 (ADR-059): the `oauth { clientId, scopes }` of an http / sse server
+is kept (`transport.oauth`): a `${user_config.KEY}` client id of a declared option becomes `{{settings.KEY}}`, any
+other reference or a client id that is not printable ASCII is dropped with a warning (the server then registers its
+client dynamically), `callbackPort` is an `info` diagnostic; such a server signs in like any plugin server (section
+4.36; record in `plugin:<pluginId>` `mcp-oauth.<serverId>`).
 A Claude Code plugin that runs anything (a command hook handler, a stdio MCP server, a `` !`cmd` `` span) requires a
 trust pin over a sha256 of its whole file tree (paths, modes, sizes, contents, the marketplace overlay); pure markdown,
 http MCP servers and prompt-only hooks do not. The tree hash is computed again only on load, reload, trust and hot
@@ -3974,7 +4021,8 @@ type ProjectDefinitionWriteResult = {   // projectDefinitionWriteResultSchema
 Phase 14 (ADR-059): OAuth for remote (http / sse) MCP servers of every origin: personal servers, plugin servers
 (including Claude Code plugin servers) and approved project `.mcp.json` servers. A 401 makes the server `needs-auth`
 (`McpStatus`, `ProjectMcpState`): never retried with backoff, its tools unavailable (also to sub-agents and background
-tasks), nothing prompts. The user signs in with a click: the start answers an authorization URL the browser opens in
+tasks), nothing prompts (upgrade note: a server that answered 401 to a bad header used to be retried; it is now
+`needs-auth` and cannot sign in until the header is fixed). The user signs in with a click: the start answers an authorization URL the browser opens in
 the same tab; the authorization server redirects to the SPA page `/oauth/callback`, which posts the redirect's query
 to `POST /mcp/oauth/callback` with the session cookie (the `SameSite=Strict` cookie is not sent on the cross-site
 redirect itself). Tokens, codes, code verifiers, client secrets and state values never appear in a DTO, a log line, an
@@ -3996,16 +4044,23 @@ type McpOAuthUpdate = McpOAuthConfig & {   // mcpOAuthUpdateSchema (PATCH /mcp/:
 }                                       // omitted `oauth` removes the OAuth settings. Stored tokens survive a change
                                         // of the name, the policy or the scopes; a change of the URL, the transport
                                         // type or the client id drops them (server rule)
-type McpServerOAuth = {                 // mcpServerOAuthSchema: McpServer.transport.oauth (http / sse; null = none)
-  clientId: string | null
-  clientSecret: SecretState             // write-only (never set for plugin and project servers)
+type McpServerOAuth = {                 // mcpServerOAuthSchema: McpServer.transport.oauth (http / sse; null = none
+                                        // configured); ProjectMcpServer has no OAuth settings (auth.client tells
+                                        // dynamic / configured)
+  clientId: string | null               // a plugin server's {{settings.x}} placeholders filled from its non-secret
+                                        // settings (a secret one stays as written; an empty setting gives null)
+  clientSecret: SecretState             // write-only (never set for plugin servers)
   scopes: string | null
 }
-type McpAuthInfo = {                    // mcpAuthInfoSchema: McpServer.auth, ProjectMcpServer.auth (null = no OAuth)
-  signedIn: boolean                     // tokens are stored (they may still be refused: the status says needs-auth)
+type McpAuthInfo = {                    // mcpAuthInfoSchema: McpServer.auth, ProjectMcpServer.auth; those DTOs carry
+                                        // null when no sign-in record is stored (never signed in, or signed out;
+                                        // always for stdio servers and servers with an Authorization header)
+  signedIn: boolean                     // tokens are stored (they may still be refused: the status says
+                                        // needs-auth); false = a record without valid tokens, e.g. after the
+                                        // authorization server refused a refresh (invalid_grant)
   expiresAt: Timestamp | null           // when the access token expires (a refresh token renews it silently)
   scope: string | null                  // the granted scopes, space-separated
-  client: McpAuthClientKind | null      // 'dynamic' | 'configured'; null = not signed in yet
+  client: McpAuthClientKind | null      // 'dynamic' | 'configured'; null = unknown
   issuer: string | null                 // the authorization server's issuer
 }
 type McpAuthStartBody = {               // mcpAuthStartBodySchema (strict; the body may be empty)
@@ -4016,7 +4071,9 @@ type McpAuthStart = {                   // mcpAuthStartSchema
   authorizationUrl: string | null       // the authorize URL (http(s) only) with PKCE S256, state, resource and
                                         // redirect_uri; null = the stored tokens still work (or were refreshed)
                                         // and the server reconnected: nothing to do
-  redirectUri: string                   // '<request Origin>/oauth/callback' (shown with Copy in the server settings)
+  redirectUri: string                   // '<request Origin>/oauth/callback' (without an Origin header: the
+                                        // server's own origin from Host and the trusted proxy's scheme; shown
+                                        // with Copy in the server settings)
   expiresAt: Timestamp                  // when the pending flow expires (10 min, LIMITS.mcpOAuthFlowMs); the answer
 }                                       // time when nothing is pending
 type McpAuthCallbackBody = {            // mcpAuthCallbackBodySchema (strict): exactly one of code / error
@@ -4037,17 +4094,41 @@ type McpAuthCallbackResult = {          // mcpAuthCallbackResultSchema
 }
 ```
 
+- **`auth` and the Sign in action** (Gate P14-A): `auth: null` means no sign-in record is stored (never signed in, or
+  signed out); `{ signedIn: false, … }` means a record without valid tokens (e.g. after `invalid_grant`). Whether a
+  server needs a sign-in is its status `needs-auth`, never `auth`: a never-signed-in server that answers 401 is
+  `needs-auth` with `auth: null`.
+- **The stored record** (secret, never answered): `{ v: 1, resource, clientId, client?: { info, dynamic,
+  redirectUris }, as?, tokens?: { …, obtainedAt } }`; it is used only while `resource` (the MCP URL) and the client id
+  (the configured one, or a dynamically registered client when none is configured) still match the server, so a
+  changed URL or client id needs a new sign-in. A dynamically registered client is reused only for the same redirect
+  URI (another origin registers a new client). A refused refresh (`invalid_grant`) drops the tokens and keeps the
+  client and the authorization-server pin.
 - **Pending flows** are held in memory: one per server (a new start replaces it), at most 20
   (`LIMITS.mcpOAuthFlowsMax`; the oldest is dropped), 10 minutes, single use, keyed by `state`. An unknown, used or
-  expired `state` is `409` `stale`.
-- **Sign-in is refused** (`400`) for stdio servers and for servers whose headers carry an `Authorization` value;
-  `409` `disabled` for a disabled server, `409` `untrusted` for a project server that is not approved. Sign-in never
-  starts in the background: the connect mode of the OAuth provider only uses stored tokens.
+  expired `state`, a callback from another origin than the start's, or a server that was deleted or whose URL or
+  client id changed since the start is `409` `stale`. Flows are dropped on a key rotation, the deletion of their
+  server, plugin or project, and at shutdown.
+- **Sign-in is refused** (`400`) for stdio servers and for servers whose headers carry an `Authorization` value ("This
+  server is set up with its own Authorization header, so it does not sign in."; such a server that answers 401 is
+  `needs-auth` until its header is fixed), for a plugin server whose client id names an empty setting, and for a
+  project server with a missing variable or a URL that is not http(s); `409` `disabled` for a disabled server (every
+  project server in safe mode), `409` `untrusted` for a project server that is not approved or changed since its
+  approval (verify-before-run). Sign-in never starts in the background: the connect mode of the OAuth provider only
+  uses stored tokens (no client registration, no redirect).
+- **The start** sends one unauthenticated request to the MCP URL (an `initialize` POST for Streamable HTTP, the
+  event-stream GET for SSE; the global `fetch`, `redirect: 'error'`, 20 s) and reads `WWW-Authenticate: Bearer
+  resource_metadata, scope`; a 2xx answer means nothing to sign in to (the server reconnects, `authorizationUrl:
+  null`), as does a stored refresh token that still works. Each `auth()` run (discovery, registration, exchange) has
+  30 s. A server without protected-resource metadata cannot sign in (`502 provider_error`, "This server asked for
+  sign-in but does not support OAuth.").
 - **The redirect URI** is `<request Origin>/oauth/callback` (the Origin has passed the origin check); an authorization
   server that is not the MCP server's origin must be public https (loopback only for a loopback MCP server); the
-  authorization URL handed to the browser must be http(s).
-- **Sign-out** deletes the stored record (the client secret of a personal server stays) and revokes the token at the
-  authorization server when it supports RFC 7009 (best effort).
+  authorization URL handed to the browser must be http(s). The authorization server must allow that redirect URI (a
+  pre-registered client with another redirect URI, or a server refusing an `http` LAN origin, fails there).
+- **Sign-out** deletes the stored record (the client secret of a personal server stays), drops a pending flow and,
+  next to the reconnect, revokes the refresh token (else the access token) at the authorization server when it
+  supports RFC 7009 (best effort through `safeFetch`, 10 s; its outcome is only logged at `debug`).
 
 ### 4.37 MCP elicitation
 
@@ -4088,7 +4169,9 @@ type McpElicitation = {                 // mcpElicitationSchema: a pending reque
 }
 type McpToolProgress =                  // mcpToolProgressSchema: preliminary outputs of an MCP tool call
   | { status: 'input-required'; elicitation: McpElicitation }
-  | { status: 'running' }               // after the answer, until the final output
+  | { status: 'running' }               // after the answer, until the final output (preliminary outputs go out
+                                        // at most every 250 ms and the latest wins, so the final output usually
+                                        // supersedes it: clients must not wait for it)
 type McpElicitationRecord = {           // mcpElicitationRecordSchema: what the stored (final) tool output keeps of
   id: ElicitationId                     // each elicitation of the call: the message, the field NAMES, the action
   message: string                       // and the reason; never the values
@@ -4106,16 +4189,27 @@ type McpElicitationAnswerResult = { action: ElicitationAction }   // mcpElicitat
 
 - **Supported subset** (`parseElicitationForm`): a flat object of at most 20 properties: string (min / max length,
   formats `email`, `uri`, `date`, `date-time`), number / integer (minimum / maximum), boolean, single-select enum
-  (`enum` with legacy `enumNames`, or `oneOf` of `{ const, title }`) and multi-select (an array of an enum). Anything
-  else, and URL mode, is declined with reason `unsupported`.
+  (`enum` with legacy `enumNames`, or `oneOf` of `{ const, title }`) and multi-select (an array of an enum). The
+  Pydantic / FastMCP optional shape (`anyOf` / `oneOf` of `[X, { type: 'null' }]`, `type: [T, 'null']`) is an optional
+  field X / T. Ignored: `pattern` (never compiled), other unknown validation keywords, and a `format` outside the four
+  (a plain string). Declined with reason `unsupported`: anything else (`const`, an enum of a type other than `string`,
+  nested objects, `$ref`, unions, bounds no answer can meet, …) and URL mode (any `mode` other than `form`).
 - **Attribution**: each MCP client keeps a registry of its in-flight calls; when every in-flight call belongs to one
   chat's main agent, the oldest call gets the card; calls of several chats (`ambiguous`), a sub-agent or background
-  call, or no call in flight (`not-interactive`) decline at once. A server on protocol `2026-07-28` (which cannot
-  elicit through the AI SDK) is reconnected once without the capability.
+  call, or no call in flight (`not-interactive`) decline at once and leave no record (logged at `debug`). For the
+  attributed call, an unsupported form, a second request while its first one waits (`ambiguous`) and a call already
+  aborted (`cancel`, `stopped`) are recorded. A server on protocol `2026-07-28` (which cannot elicit through the AI SDK)
+  is reconnected once without the capability.
+- **Records**: the final output of an MCP tool call carries `elicitations: McpElicitationRecord[]` only when the call
+  had any (at most 50 per call; `fields: []` for an unsupported form); they are never sent to the model. Answers:
+  empty = absent, `null`, a blank string or an empty list (`false` is a value); a required empty field is a `required`
+  issue.
 - **Budgets**: MCP tools get a 600 s outer timeout and a pausable 60 s active budget (`LIMITS.mcpToolActiveMs`)
-  that excludes the waiting time. Approvals still end the run (ADR-043); an elicitation never does.
+  that excludes the waiting time. Approvals still end the run (ADR-043); an elicitation never does. The test-only
+  `HF_TEST_ELICITATION_WAIT_MS` (1000 – 480000, only with `HF_MOCK_PROVIDER=1`) replaces the 480 s wait.
 - **Side signals**: `ChatSummary.awaitingInput` (live, through `chat.updated`) and a `Notification` hook with
-  `notification_type: 'elicitation_dialog'` (plugin code hooks: `notification` with `type: 'elicitation_dialog'`).
+  `notification_type: 'elicitation_dialog'` (plugin code hooks: `notification` with `type: 'elicitation_dialog'`),
+  once per request of an interactive call; its message is the server's cleaned request, never an answer.
 
 ### 4.38 MCP prompts and resources
 
@@ -4161,16 +4255,24 @@ type McpResourceAttachBody = {          // mcpResourceAttachBodySchema (strict; 
   [optional]` (the prompts of connected global servers, and of the project's servers with `projectId`; at most 200 per
   server, `LIMITS.mcpPromptsMax`; at most 20 arguments, `LIMITS.mcpPromptArgumentsMax`). `/mcp__<server>__<prompt>
   args` binds the words positionally in declared order or as `name=value`; the last argument takes the rest
-  (`bindMcpPromptArguments`). `prompts/get` runs once and its result is frozen into `metadata.command.expansion` (64 KB;
-  user-only text joined; with assistant messages each wrapped `<prompt-message role>`; embedded text resources become
-  `<resource uri mimeType>` blocks; images, blobs and links one-line placeholders); a missing required argument or a
-  server that is not connected answers a `failed` reply; a regenerate never calls the server again. The cache is filled
-  on connect, on `prompts/list_changed` (stdio) and on a listing when older than 60 s; a change emits
-  `customization.changed { kind: 'command' }`.
-- **Resources** (templates are not listed): a pick reads the resource once and stores it as an upload (`FileRef`, at
-  most 5 MiB, `LIMITS.mcpResourceReadBytes`; text as `text/plain` or the server's `text/*`, several text contents
-  joined; binary only images and PDF). The composer text shows `@<serverId>:<uri>` (display only; the attachment is what
-  the model gets). In tool results, `resource` / `resource_link` items become readable text.
+  (`bindMcpPromptArguments`). `prompts/get` runs once (30 s) and its result is frozen into `metadata.command.expansion`
+  (at most 64 KB, `LIMITS.commandExpansionBytes`; a longer one is cut and ends in "[The MCP prompt was cut: it is longer
+  than 64 KB.]"; user-only text joined; with assistant messages each wrapped `<prompt-message role>`; embedded text
+  resources become `<resource uri mimeType>` blocks; images, blobs and links one-line placeholders); a missing required
+  argument ("Missing argument: x. Usage: /mcp__<server>__<prompt> <x> [y]"), a server of the scope that is not
+  connected (`needs-auth`: "Sign in to the MCP server "<id>" first."), a prompt the server does not list, a failing
+  `prompts/get` or an empty result answer a `failed` reply (`metadata.command { name, input, type: 'reply', source:
+  'mcp' }`, never a model call); a name whose server id is no server of the chat's scope (unknown, disabled, another
+  project's) is not a command: the typed text goes to the model. On send the resolution waits at most 5 s for the
+  chat's approved project servers to start (global servers are not waited for); a regenerate never calls the server
+  again. The cache is filled on connect, on `prompts/list_changed` (stdio) and on a listing when older than 60 s (each
+  `prompts/list` page 20 s); a change emits `customization.changed { kind: 'command' }`.
+- **Resources** (templates are not listed): a pick reads the resource once (`resources/read`, 60 s) and stores it as an
+  upload (`FileRef`, at most 5 MiB, `LIMITS.mcpResourceReadBytes`, refused from the listed size before the read when
+  the server names one; text as `text/plain` or the server's `text/*`, several text contents joined; binary only images
+  and PDF). The composer text shows `@<serverId>:<uri>` (display only, `formatResourceMention`, the URI scheme in lower
+  case; the attachment is what the model gets: a text resource reaches it inline like any text upload). In tool
+  results, `resource` / `resource_link` items become readable text.
 
 ### 4.39 Web search
 
@@ -4213,17 +4315,31 @@ type WebSearchTestResult = {            // webSearchTestResultSchema
 ```
 
 - **Native search** comes from `ProviderDefinition.webSearch(model, { functionTools, maxUses })` (plugin API 1.7.0,
-  PLUGINS.md 9): provider-defined tools (`type: 'provider'`) and / or provider options; `exclusive: true` for a search
-  tool that drops function tools (Gemini 2.x). `CatalogModel.webSearch` (section 4.5) is the hook's answer for
-  `{ functionTools: 0 }`. Provider-executed calls are `not-applicable` in the approval function only when
-  `providerExecuted === true` and the name is one of the turn's native tools (no hooks, no records); a native name
-  without `providerExecuted` is denied.
+  PLUGINS.md 9; `maxUses` 5, `WEB_SEARCH_MAX_USES`): provider-defined tools (`type: 'provider'`) and / or provider
+  options; `exclusive: true` for a search tool that drops function tools (Gemini 2.x). The builtin providers' tool
+  names: `web_search` (Anthropic, OpenAI, xAI, OpenRouter), `google_search` (Google), `browser_search` (Groq);
+  OpenRouter models without tools get the `web` plugin through provider options (PROVIDERS.md 14). The host reads an
+  answer defensively: at most 4 provider-defined tools under valid tool names that are neither `mcp__*` nor
+  `search_web` (a key another tool of the turn takes is ignored), provider options that are JSON objects keyed by
+  provider (at most 16 levels), a boolean `exclusive`; a bad answer, or a hook that throws, is ignored (a `warn` line in
+  a turn, `debug` while building the catalog). `CatalogModel.webSearch` (section 4.5) is the hook's answer for `{
+  functionTools: 0 }` (always set by `GET /models` of v1.9: `native`, `exclusive` or null; only chat models are
+  probed). Provider-executed calls are `not-applicable` in the approval function only when `providerExecuted === true`
+  and the name is one of the turn's native tools (no hooks, no records); a native name without `providerExecuted` is
+  denied. In the model history, provider-executed parts are kept only for the replies of the turn's provider (a reply
+  without a `modelRef` loses them).
 - **The builtin `search_web`** (`core-search`, never named `web_search`: Anthropic's server tool uses that wire name)
-  is registered only while the selected backend has a key; its requests go through the plugin source fetch (https
-  only; 10 s, `LIMITS.searchWebTimeoutMs`; 1 MB, `LIMITS.searchWebFetchBytes`; no redirects); 401 / 403 ->
-  `provider_error` "key rejected" (the key is never echoed), 429 -> `rate_limited`, network -> `provider_unreachable`.
-  `HF_OFFLINE` does not block it. Queries and keys are never logged at `info`. Each result URL becomes a `source-url`
-  part of the reply (deduplicated, http(s) only).
+  is registered only while the selected backend has a key (re-checked on every settings change; the backend, the key
+  and `maxResults` are read when a call runs); its requests go through the plugin source fetch (https only; 10 s,
+  `LIMITS.searchWebTimeoutMs`; 1 MB, `LIMITS.searchWebFetchBytes`; no redirects; with `HF_TEST_REMOTE_URL` and
+  `HF_MOCK_PROVIDER=1` rerouted to the loopback fake remote); no key -> `400 provider_not_configured` ("No API key is
+  set for <backend>: add one in Settings → Web search."), 401 / 403 -> `502 provider_error` ("The search key was
+  rejected."; the key is never echoed), 429 -> `rate_limited` (`retryAfterMs` from `Retry-After`), network, timeout
+  or a refused address -> `provider_unreachable`, any other answer -> `provider_error` (messages name the backend,
+  never the key, the query or the vendor's text). `HF_OFFLINE` does not block it. The model gets the `SearchWebOutput`
+  JSON. Queries and keys are never logged (the plugin log line `search_web: searched` carries the backend, the result
+  count, the status and the duration). Each result URL becomes a `source-url` part of the reply (`sourceId` `search-` +
+  24 hex digits of the URL's sha256, the result title; http(s) only, deduplicated by URL within the reply).
 
 ## 5. Endpoints
 
@@ -4380,8 +4496,9 @@ body exceeds its limit; `500 internal_error`.
 - `projectId` (ADR-031): a project id lists only its chats, `none` only chats without a project; omitted = every chat.
   An unknown project id lists nothing (no error). The filter combines with `q`, `archived` and the cursor (the same
   `updatedAt` desc, `id` desc order); search results carry `projectId` too.
-- Phase 14 (ADR-060): a chat whose run waits for an MCP elicitation answer carries `awaitingInput: true` (live; absent
-  otherwise).
+- Phase 14 (ADR-060): every item of this answer and of `GET /chats/:id` carries `awaitingInput` (always a boolean:
+  true while an MCP tool call of the chat's run waits for an elicitation answer; live, from the elicitation broker).
+  The other answers (create, update, branch, version delete) keep the v1.8 shape without it.
 
 **`POST /chats`** — `chats.create`
 - Body `ChatCreate`. Without `messages` it creates an empty chat; with `messages` it imports them (e.g. the
@@ -4456,6 +4573,15 @@ body exceeds its limit; `500 internal_error`.
   (`POST /chats`, `POST /data/import`) validates them with `harnessDataSchemas` and keeps them (a marker is positional,
   so it survives replaced message ids); a `data-activity` part is dropped. The search text (`GET /chats?q=`) includes
   the text of steers, never compaction summaries.
+- Phase 14 (ADR-060, ADR-062, ADR-063): in Markdown a finished `search_web` call reads `Searched the web: <query> (<n>
+  results · <Brave Search | Tavily | Exa>)` followed by one line per result (`- [title](url) (published): snippet`,
+  http(s) URLs only); a provider-executed search call (native web search) reads `Searched the web: <query>` (without
+  a query `Searched the web`, plus its error text when it failed): its output, `encryptedContent` and provider
+  metadata are never written. An MCP tool call writes its output without the `elicitations` key, then one line per
+  elicitation record: `` _Input request (<action>[, <reason>]): `field`, …_ `` (the action, the reason unless the user
+  answered, the field names; never a value or the request message). Search texts are flattened to one line with the
+  Markdown link, code and HTML characters escaped. The JSON export keeps the messages as stored (provider-executed
+  parts with their `encryptedContent` included) and never carries the live `awaitingInput`.
 - Errors: `404 not_found`.
 
 **`POST /chats/:id/branch`** — `chats.switchBranch`
@@ -4606,9 +4732,11 @@ body exceeds its limit; `500 internal_error`.
   the images of the `generate_image` tool are stored first and streamed as `file` chunks with `/api/files/<id>` URLs;
   the stored message equals the streamed one. A generated file that cannot be stored is replaced in place by a
   `data-notice` (`generated-file-dropped`).
-- Phase 14 (ADR-060 … ADR-063): `webSearch` sets the web search mode of the turn (section 4.39; an unavailable search is
-  the notice `web-search-unavailable`, never an error). A typed `/mcp__<server>__<prompt> args` runs the MCP prompt
-  (section 4.38): a missing required argument or a server that is not connected answers a `failed` command reply. An
+- Phase 14 (ADR-060 … ADR-063): `webSearch` sets the web search mode of the turn (section 4.39; saved as the chat's
+  `settings.webSearch` when the request creates the chat; an unavailable search is the notice `web-search-unavailable`,
+  never an error). A typed `/mcp__<server>__<prompt> args` runs the MCP prompt (section 4.38): a missing required
+  argument or a server of the chat's scope that is not connected answers a `failed` command reply; a name whose server
+  is no server of the scope is plain text for the model. An
   MCP tool call may wait for an elicitation answer (section 4.37; `POST /chat/:id/elicitations/:elicitationId`, section
   5.38); the stream stays open while it waits (the card is the tool part's preliminary output, section 6.12).
 
@@ -4678,7 +4806,14 @@ body exceeds its limit; `500 internal_error`.
 
 **`GET /mcp`** — `mcp.list`
 - Response `200 ListResponse<McpServer>`: user-configured servers (`pluginId: 'core-mcp'`, `editable: true`) and
-  plugin-declared servers (read-only here).
+  plugin-declared servers (read-only here). Phase 14 (ADR-059): every answer of this module (and of `DELETE
+  /mcp/:id/oauth`) shows a plugin server's `transport.oauth.clientId` with its `{{settings.x}}` placeholders filled from
+  the plugin's non-secret settings (a placeholder of a secret setting stays as written; an empty setting gives `null`);
+  `auth` is section 4.36's sign-in state. A server that answers 401 (also while a tool call runs) is `needs-auth` with
+  `error` `auth_invalid` (`status: 401`; "The MCP server needs a sign-in.", or "The MCP server rejected its
+  Authorization header." for a server with an `Authorization` header, which cannot sign in: fix the header); its tools
+  are unregistered and nothing retries it. Logs: `[<id>] Needs a sign-in.` / `[<id>] The server rejected its
+  Authorization header.` (`info`, plugin log).
 
 **`POST /mcp`** — `mcp.create` · **fresh** when `transport.type` is `stdio`
 - Body `McpServerInput`. Header / env values are stored as secrets (scope `mcp:<id>`). Phase 14 (ADR-059): an http / sse
@@ -4732,7 +4867,10 @@ body exceeds its limit; `500 internal_error`.
   definition has `when_to_use`. Phase 14 (ADR-061): the prompts of connected MCP servers join the list as
   `mcp__<serverId>__<prompt>` with `source: 'mcp'`, `kind: 'command'`, `mcpServer` and `argumentHint` (the global
   servers' prompts always, a project's servers' prompts with its `projectId`; a project server shadows a global one with
-  the same id); servers that are not connected list none (nothing connects for a listing).
+  the same id); servers that are not connected list none and the route never waits for one: nothing connects or
+  starts for a listing (a project's approved servers start only for a run; their prompts arrive later with
+  `customization.changed { kind: 'command', projectId }`). A cached listing older than 60 s of a connected server is
+  listed again (waited for at most 5 s, then the previous listing answers).
 - Errors: `404 not_found` (unknown project, "Project <id> not found."). An unavailable project folder lists no project
   commands (no error; the catalog reports it).
 
@@ -5073,7 +5211,9 @@ event types: the chat events of section 7 report the changes.
   no chats). Since Phase 10 (ADR-046) the background tasks of every chat are stopped before the runs (their rows go
   with their chats; also tasks of chats that started meanwhile), and the personal agents, commands and skills are kept;
   since Phase 11 also the personal output styles, the personal hooks, the project approvals and the project MCP
-  variables; since Phase 12 also the marketplaces (plugins of both formats were already kept). The hook transcript of
+  variables; since Phase 12 also the marketplaces (plugins of both formats were already kept); since Phase 14 also the
+  MCP sign-ins (OAuth records and client secrets) and the web search keys (`core-search` settings), while the chats'
+  waiting elicitations end with their runs (`cancel`, reason `stopped`). The hook transcript of
   every deleted chat is removed with it (`chat.deleted`); no `SessionEnd` hook runs (only a single chat delete runs
   them, section 5.9).
 - Response `200 DataDeleteResult` (the checkpoint store is not counted in it; the `data deleted` log line carries
@@ -5336,8 +5476,10 @@ confirmation.
   `key.rotated` is emitted, then every event stream closes. Since Phase 9 every steer queue is emptied on `key.rotated`
   (reason `stopped`; also the queues of chats that waited for an approval, which the rotation does not stop). Since
   Phase 10 (ADR-046) `key.rotated` also stops every running background task (`aborted`, "The background task was
-  stopped."); their results are kept and delivered at each chat's next run. There is no downgrade to v1.2 after a
-  rotation.
+  stopped."); their results are kept and delivered at each chat's next run. Since Phase 14 (ADR-059, ADR-060) the
+  rotation re-encrypts the MCP OAuth records and client secrets with every other secret, and `key.rotated` drops every
+  pending MCP sign-in (its callback answers `409 stale`), cancels every waiting MCP elicitation (`cancel`, reason
+  `stopped`) and forgets the once-per-chat notice memory. There is no downgrade to v1.2 after a rotation.
 - Response `200 KeyRotationResult` + exactly one `Set-Cookie: hf_session=...` signed with the new key and keeping the
   caller's login time, so it stays fresh (no cookie when no password is set).
 - Errors: `409 conflict` with `reason: 'env-key'` ("The master key comes from HF_MASTER_KEY and cannot be rotated
@@ -5821,9 +5963,10 @@ deleting the project removes them (at once while the project MCP manager is in u
 - Errors: `404 not_found` (unknown project, or `Unknown project MCP server "<id>".`, also while the folder is
   unavailable); `409 conflict` (`reason: 'disabled'`, "Project MCP servers do not start in safe mode.") in safe mode
   (`HF_SAFE_MODE`).
-- Phase 14 (ADR-059): an approved http / sse server that answers 401 is `needs-auth` (`ProjectMcpServer.auth`); a
-  reconnect never starts a sign-in (sign in with `POST /projects/:id/mcp/:serverId/oauth`, section 5.37). Deleting the
-  project removes the servers' OAuth records (`mcp-oauth.<serverId>` of secret scope `project:<projectId>`).
+- Phase 14 (ADR-059): an approved http / sse server that answers 401 is `needs-auth` (`ProjectMcpServer.auth`,
+  `error`); a reconnect never starts a sign-in (sign in with `POST /projects/:id/mcp/:serverId/oauth`, section 5.37)
+  and runs never restart a `needs-auth` server. Deleting the project removes the servers' OAuth records
+  (`mcp-oauth.<serverId>` of secret scope `project:<projectId>`) and drops its pending sign-ins.
 
 ### 5.34 `marketplaces.ts`
 
@@ -6005,9 +6148,10 @@ MCP sign-in (Phase 14, ADR-059; DTOs in section 4.36) for http / sse servers of 
 session; none needs fresh auth (a sign-in grants a remote server access to the user's account there, never code on the
 host). The callback is posted by the SPA page `/oauth/callback` with the session cookie (it is not public). Starts,
 callbacks and sign-outs emit `plugin.changed` (personal and plugin servers) or `project-mcp.changed` (project servers)
-when the state changes. Never logged or answered: tokens, codes, code verifiers, client secrets, state values; logs
-carry the server id, the authorization server's origin and the outcome. (Between P14-0a and P14-A the routes answered
-`501 not_implemented` after validating their input.)
+when the state changes. Never logged or answered: tokens, codes, code verifiers, client secrets, state values and
+authorization URL queries; the `info` line `MCP sign-in` carries the server id (and project id), the origin kind
+(`user`, `plugin`, `project`), the step, the outcome and the authorization server's host. (Between P14-0a and P14-A the
+routes answered `501 not_implemented` after validating their input.)
 
 **`POST /mcp/:id/oauth`** — `mcpAuth.start`
 - Params `{ id: McpServerId }`. Body `McpAuthStartBody` (strict; may be empty).
@@ -6015,34 +6159,41 @@ carry the server id, the authorization server's origin and the outcome. (Between
   (`resource_metadata`, `scope`), then the authorization server metadata, dynamic client registration (unless a client
   id is configured), PKCE S256, `state`, `resource` and `redirect_uri = <request Origin>/oauth/callback`. The pending
   flow is held in memory (section 4.36).
-- Response `200 McpAuthStart` (`authorizationUrl: null` = the stored tokens still work and the server reconnected).
-- Errors: `400 validation_error` (a stdio server, or one whose headers carry `Authorization`: "This server is set up
-  with its own Authorization header, so it does not sign in."); `404 not_found` (unknown server); `409 conflict`
-  (`reason: 'disabled'`) for a disabled server; `502 provider_unreachable` / `provider_error` when the discovery or the
-  registration fails, and `502 provider_error` when the authorization server is refused (not https on a public
-  address, unless it is the MCP server's own origin or loopback for a loopback server); messages are safe, never a
-  token.
+- Response `200 McpAuthStart` (`authorizationUrl: null` = the stored tokens still work or were refreshed, or the
+  server answers without credentials; the server reconnected either way).
+- Errors: `400 validation_error` (a stdio server, "This server runs on this computer (stdio), so it does not sign
+  in."; one whose headers carry `Authorization`, "This server is set up with its own Authorization header, so it does
+  not sign in."; a plugin server whose client id names an empty setting; no usable Origin or Host); `404 not_found`
+  (unknown server); `409 conflict` (`reason: 'disabled'`) for a disabled server, (`reason: 'busy'`) during shutdown;
+  `502 provider_unreachable` when the MCP server or the authorization server is not reachable (the probe, 20 s; each
+  `auth()` run, 30 s); `502 provider_error` when the discovery or the registration fails, when the server publishes no
+  OAuth metadata ("This server asked for sign-in but does not support OAuth."), when the authorization server is
+  refused (not https on a public address, unless it is the MCP server's own origin or loopback for a loopback server)
+  or answers an authorization URL that is not http(s); messages are safe, never a token or a URL query.
 
 **`DELETE /mcp/:id/oauth`** — `mcpAuth.signOut`
 - Params `{ id: McpServerId }`.
-- Deletes the stored OAuth record (a personal server keeps its configured client secret), revokes the token at the
-  authorization server when it supports RFC 7009 (best effort, through `safeFetch`), closes the connection.
-- Response `200 McpServer` (status `needs-auth` when the server still asks for a sign-in; `auth.signedIn: false`).
-- Errors: `404 not_found`.
+- Deletes the stored OAuth record (a personal server keeps its configured client secret) and a pending flow, revokes
+  the token at the authorization server when it supports RFC 7009 (best effort, through `safeFetch`, 10 s, next to the
+  reconnect), reconnects the server. A plugin server whose client id setting no longer resolves can still sign out.
+- Response `200 McpServer` (status `needs-auth` when the server still asks for a sign-in; `auth: null`: no record is
+  stored any more).
+- Errors: `400 validation_error` (a stdio server); `404 not_found`.
 
 **`POST /projects/:id/mcp/:serverId/oauth`** — `mcpAuth.projectStart`
 - Params `ProjectMcpServerParams`. Body `McpAuthStartBody`.
 - The same for an approved project `.mcp.json` server (its `oauth.clientId` / `scopes`; no client secret); the item is
   verified against its approval first (verify-before-run).
 - Response `200 McpAuthStart`.
-- Errors: `400 validation_error` (a stdio server or one with an `Authorization` header); `404 not_found` (unknown
-  project or server, or the folder is unavailable); `409 conflict` (`reason: 'untrusted'`) while the server is pending
-  approval, (`reason: 'disabled'`) in safe mode.
+- Errors: `400 validation_error` (a stdio server, one with an `Authorization` header, or one with a missing variable
+  or a URL that is not http(s)); `404 not_found` (unknown project or server, or the folder is unavailable); `409
+  conflict` (`reason: 'untrusted'`) while the server is pending approval or changed since (verify-before-run),
+  (`reason: 'disabled'`) in safe mode; `502` as for `mcpAuth.start`.
 
 **`DELETE /projects/:id/mcp/:serverId/oauth`** — `mcpAuth.projectSignOut`
 - Params `ProjectMcpServerParams`.
-- Response `200 ProjectMcpServer` (as for `mcpAuth.signOut`).
-- Errors: `404 not_found`.
+- Response `200 ProjectMcpServer` (as for `mcpAuth.signOut`: `auth: null`).
+- Errors: `400 validation_error` (a stdio server); `404 not_found` (unknown project or server).
 
 **`POST /mcp/oauth/callback`** — `mcpAuth.callback`
 - Body `McpAuthCallbackBody` (strict; exactly one of `code` / `error`). Session and Origin check like every non-GET
@@ -6050,9 +6201,14 @@ carry the server id, the authorization server's origin and the outcome. (Between
 - Finds the pending flow by `state` (single use), checks `iss` when sent, exchanges the code with the flow's verifier,
   client and authorization server, stores the tokens and reconnects the server.
 - Response `200 McpAuthCallbackResult` (`target`, the server's `status` after the reconnect, `returnTo`).
-- Errors: `409 conflict` (`reason: 'stale'`, "This sign-in link was already used or expired.") for an unknown, used or
-  expired `state`; `502 auth_invalid` (a safe message) when the authorization server answered `error` or the exchange
-  failed (the flow is used up either way); `400 validation_error` for an `iss` that does not match.
+- Errors: `400 validation_error` for a body without `state` (or with both or neither of `code` / `error`), and for an
+  `iss` that is not the flow's issuer ("The sign-in answer came from another authorization server.", issue path
+  `['iss']`, `details.target`); `409 conflict` (`reason: 'stale'`, "This sign-in link was already used or expired.")
+  for an unknown, used or expired `state`, a callback from another origin than the start's, or a server deleted or
+  changed (URL, client id) since the start; `502 auth_invalid` with `details.target` (a safe plain-text message of at
+  most 300 characters) when the authorization server answered `error` ("The authorization server refused the sign-in
+  (<error>: <description>).") or the exchange failed (e.g. `invalid_grant`: "The authorization server refused the
+  sign-in code of "<name>" (it may have expired). Try again."); the flow is used up either way.
 
 ### 5.38 `chat-elicitations.ts`
 
@@ -6066,33 +6222,44 @@ preliminary output (section 6.12). The values are never stored or logged. (Betwe
 - Validates `content` against the request's form (`validateElicitationAnswer`), hands the answer to the waiting MCP call
   and emits `chat.updated` (`awaitingInput` false when nothing else waits).
 - Response `200 McpElicitationAnswerResult` (the action the MCP server received).
-- Errors: `400 validation_error` with the field issues (`details.issues[].path` = `['content', '<field>']`); `404
-  not_found` (unknown chat or elicitation); `409 conflict` (`reason: 'stale'`, "This request was already answered or
-  has ended.") when it was already answered, expired (480 s) or its run ended.
+- Errors: `400 validation_error` with the field issues (`details.issues[].path` = `['content', '<field>']`, or
+  `['content']`; an `accept` without `content` is checked as empty, so a required field is a `required` issue); `404
+  not_found` (an unknown elicitation, or one of another chat); `409 conflict` (`reason: 'stale'`, "This request was
+  already answered or has ended.") when it was already answered, expired (480 s) or its run ended (settled ids are
+  remembered, the latest 1000).
 
 ### 5.39 `mcp-resources.ts`
 
 MCP resources for `@` mentions (Phase 14, ADR-061; DTOs in section 4.38). Needs a session; no fresh auth; nothing starts
-a sign-in or a server that is not running (project servers start as for a run only when the chat's project runs).
-Resource contents are untrusted and never logged. (Between P14-0a and P14-A the routes answered `501 not_implemented`
-after validating their input.)
+a sign-in. Resource contents and URIs are untrusted and never logged at `info` (a `debug` line carries the server id,
+the size and the duration). (Between P14-0a and P14-A the routes answered `501 not_implemented` after validating their
+input.)
 
 **`GET /mcp/resources?projectId=&q=&limit=`** — `mcpResources.list`
 - Query `McpResourceQuery`.
 - Response `200 McpResourceList`: the resources (not the templates) of the connected global servers and, with
-  `projectId`, of that project's connected servers (a project server shadows a global one with the same id), ranked by
-  `q`; `unavailable` lists the servers of the scope that are not connected with their status. At most 1000 resources
-  per server are read (`LIMITS.mcpResourcesMax`; `truncated`).
+  `projectId`, of that project's servers that already run (a project server shadows a global one with the same id),
+  ranked by `q` against the name, the title and the URI (the best of the three; ties: the shorter name, the server, the
+  URI; an empty `q` keeps the servers' order); `unavailable` lists the servers of the scope that are not connected
+  with their status. A listing never starts or waits for a server: a project's approved servers start only for a run
+  (or an attach) and appear in a later query (until then `unavailable`, e.g. `idle`). At most 1000 resources per
+  server are read (`LIMITS.mcpResourcesMax`; `truncated`); a resource whose URI cannot be a mention is left out.
 - Errors: `404 not_found` (unknown project).
 
 **`POST /mcp/resources/attach`** — `mcpResources.attach` · `201`
 - Body `McpResourceAttachBody`.
-- Reads the resource once (`resources/read`) and stores it as an upload: text as `text/plain` (or the server's
-  `text/*`), several text contents joined; a binary content only as an image or a PDF.
+- The server is the project's server of that id when the project has an approved one (shadowing, listed or not; it is
+  started and waited for at most 5 s like for a run), else the global server (a pending project server is not the
+  project's). Reads the resource once (`resources/read`, 60 s) and stores it as an upload: text as `text/plain` (or
+  the server's `text/*`), several text contents joined; a binary content only as an image or a PDF. A listed size above
+  5 MiB is refused before the read.
 - Response `201 FileRef` (the same answer as `POST /files` and `POST /projects/:id/files/attach`).
-- Errors: `400 validation_error` (an unsupported binary type, or nothing readable); `404 not_found` (unknown server,
-  project or resource); `409 conflict` (`reason: 'needs-auth'`) when the server must be signed in first; `413
-  payload_too_large` (`details.limitBytes` 5 MiB); `502 provider_unreachable` when the server is not connected.
+- Errors: `400 validation_error` (issue path `['uri']`: an unsupported binary type, or nothing readable); `404
+  not_found` (unknown server, project or resource (MCP error `-32002`), or a server without resources); `409 conflict`
+  (`reason: 'needs-auth'`, "Sign in to the MCP server "<name>" first.") when the server must be signed in first,
+  (`reason: 'disabled'`) for a project server in safe mode; `413 payload_too_large` (`details.limitBytes` 5 MiB, "The
+  resource is larger than 5 MiB and can't be attached."); `502 provider_unreachable` when the server is not connected
+  (or disabled); `502 provider_error` when it fails or does not answer in time.
 
 ### 5.40 `web-search.ts`
 
@@ -6104,11 +6271,15 @@ validating its input.)
 
 **`POST /web-search/test`** — `webSearch.test`
 - Body `WebSearchTestBody` (strict; `backend` defaults to the selected one).
-- Runs one fixed query with the stored key of that backend (https only, 10 s, 1 MB, no redirects; `HF_OFFLINE` does not
-  block it: an explicit user action).
+- Runs one fixed query (`open source software`, 3 results) with the stored key of that backend through the same fetch
+  as the `search_web` tool (https only, 10 s, 1 MB, no redirects; with `HF_TEST_REMOTE_URL` and `HF_MOCK_PROVIDER=1`
+  the loopback fake remote; `HF_OFFLINE` does not block it: an explicit user action). Logs the backend, the result
+  count, the status and the duration only.
 - Response `200 WebSearchTestResult`.
-- Errors: `400 provider_not_configured` (no key for the backend); `502 provider_error` ("The search key was rejected.";
-  the key is never echoed) for a 401 / 403; `429 rate_limited`; `502 provider_unreachable`.
+- Errors: `400 provider_not_configured` ("No API key is set for <backend>: add one in Settings → Web search."; also
+  when `core-search` is not installed); `502 provider_error` ("The search key was rejected."; the key is never echoed)
+  for a 401 / 403, and for any other failed answer; `429 rate_limited` (`retryAfterMs` from the vendor's
+  `Retry-After`); `502 provider_unreachable` (network, timeout, refused address).
 
 ## 6. Chat stream protocol
 
@@ -6573,22 +6744,31 @@ Tool part states (`tool-<name>` and `dynamic-tool`):
 - **Elicitation card**: an MCP tool call whose server asks for input yields the preliminary output `{ status:
   'input-required', elicitation: McpElicitation }` (section 4.37) on its `dynamic-tool` part (`output-available` with
   `preliminary: true`), re-yielded every 25 s while it waits (a proxy keeps the stream alive; a resume replays it), then
-  `{ status: 'running' }` after the answer, then the final output. The web answers with `POST
+  `{ status: 'running' }` after the answer, then the final output (preliminary outputs go out at most every 250 ms and
+  only the latest one is sent, so `running` is usually superseded by the final output; the card ends when the part's
+  output is no longer `input-required`). The web answers with `POST
   /chat/:id/elicitations/:elicitationId` (section 5.38); the request message, titles and descriptions are plain text
   (no Markdown, no HTML). The stored final output keeps `McpElicitationRecord`s (names, action, reason), never the
   values. No data part and no SSE event is added; `run.finished` is not emitted while a call waits.
 - **MCP prompts** (`/mcp__<server>__<prompt>`) are user messages with `metadata.command` `{ name, input, type:
-  'prompt', expansion, source: 'mcp' }`; the frozen expansion is what the model sees (section 4.38).
+  'prompt', expansion, source: 'mcp' }`; the frozen expansion is what the model sees (section 4.38). A prompt that
+  cannot run is a `failed` reply (`type: 'reply'`, `source: 'mcp'`, no model call).
 - **Native web search** (section 4.39): the provider-executed search calls stream as tool parts of the native tool's
-  name (`tool-web_search`, `tool-google_search`, `tool-browser_search`, …) with `providerExecuted: true`; they never ask
-  (no approval card, no hook records); their results come as `source-url` parts (`sendSources`). Provider-specific
+  name (e.g. `tool-web_search` of Anthropic, OpenAI and xAI) with `providerExecuted: true`; they never ask (no approval
+  card, no hook records); their results come as `source-url` parts (`sendSources`). OpenRouter and Groq stream no tool
+  parts (OpenRouter only `url_citation` sources; Groq no citations). A reply cut by Anthropic's `pause_turn` ends as
+  `stop`. Provider-specific
   fields of a result (e.g. Anthropic `encryptedContent`) are kept in the stored message for the same provider's next
   turn and removed from the model history when the next turn runs on another provider; shares and exports never carry
   them.
 - **Builtin search**: a `search_web` tool part (`tool-search_web`, output `SearchWebOutput`) is followed by one
   `source-url` part per distinct http(s) result URL (stored, shared and exported like any source).
 - **Notice** `web-search-unavailable` (info) when the turn's search mode is `auto` but it cannot search (once per chat,
-  model and reason).
+  model and reason, remembered in memory and found in the stored history after a restart; no `details`): "Web search is
+  off for this reply: " + "tools are off in this chat." (`tool-mode-off`), "<model> can't search while tools are on. Add
+  a search key in Settings → Web search to search with tools." (`tools-conflict`), "<model> can't use tools."
+  (`tools-unsupported`), "<model> has no web search of its own. Add a search key in Settings → Web search."
+  (`no-backend`). Sub-agents write no notice.
 
 ## 7. Server events (`GET /api/events`)
 

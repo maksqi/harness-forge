@@ -308,6 +308,7 @@ A tool is matched under its harness name and its Claude Code names:
 | `find_files` | `Glob` |
 | `list_directory` | `LS` |
 | `web_fetch` | `WebFetch` |
+| `search_web` (v1.9, the builtin web search tool) | `WebSearch` |
 | `task` | `Task`, `Agent` (v1.8) |
 | `todo_write` | `TodoWrite` |
 | `exit_plan_mode` | `ExitPlanMode` |
@@ -459,7 +460,9 @@ Put a `.mcp.json` at the project root (Claude Code's format):
   server "<name>" is not ready, so its tools were not sent."), stops after 10 idle minutes (not while a reply of the
   project or one of its tool calls runs), restarts when its variables change, and stops at once when you revoke it,
   change or remove its entry, delete the project or stop the server. A server that crashed starts again with the next
-  reply. A stdio server runs in the project folder, in its own process group, with the minimal environment plus its
+  reply. v1.9: the composer's slash menu and `@` menu never start a project server; its MCP prompts and resources are
+  listed once a reply has started it. A server that answered 401 (`needs-auth`) is never restarted by a reply: only
+  **Sign in**, **Reconnect**, a variables change or a change of its entry try again. A stdio server runs in the project folder, in its own process group, with the minimal environment plus its
   own `env`.
 - **Tools**: named `mcp__<id>__<tool>`, where the id comes from the server's name (lower case, spaces, `_` and `.`
   become `-`, other characters are dropped, at most 32 characters, `server` when nothing is left, `-2`, `-3` … when

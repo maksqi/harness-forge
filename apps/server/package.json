@@ -1,7 +1,7 @@
 {
   "name": "@harness-forge/server",
   "type": "module",
-  "version": "1.8.1",
+  "version": "1.9.0",
   "private": true,
   "description": "harness-forge API server (Hono) that also serves the built web app.",
   "license": "MIT",

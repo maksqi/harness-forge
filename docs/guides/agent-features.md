@@ -94,6 +94,10 @@ In a project chat, type `@` (or use **+** → **Mention a file**) and start typi
   the attachment; ask the agent to `read_file` it for the current version.
 - Limits: text files, images and PDFs up to **5 MB**; `.git` content and secret-looking files cannot be attached.
 - The chip and the `@path` text are independent: remove either one on its own.
+- v1.9: in every chat with tools on (a project or not), `@` also lists the **resources** of your connected MCP servers
+  in a second section, "MCP resources" (the listbox is then "Files and MCP resources", and **+** reads **Mention a file
+  or resource**); a pick inserts `@<serverId>:<uri>` and attaches the resource ([adding an MCP
+  server](adding-an-mcp-server.md#6-resources-in--mentions-v19)).
 
 ## 5. Steering: talk to the agent while it works
 
@@ -180,7 +184,8 @@ searches or file contents at the `info` level.
 - **Shift+Tab moves focus instead of switching modes**: the setting is off, a menu is open, the composer is not focused,
   the model cannot call tools, or there is nothing to switch to (outside a project chat Ask is the only mode in the
   cycle).
-- **`@` opens no menu**: the chat has no project, or `@` is inside a word (`a@b`).
+- **`@` opens no menu**: the chat has no project (v1.9: and no connected MCP server offers resources, or tools are off),
+  or `@` is inside a word (`a@b`).
 - **A sub-agent "skipped" a step**: that call needed your approval in the current mode. Switch to Accept edits (file
   edits, and shell commands that match a shell rule; add the rule first), then ask again.
 - **A queued message disappeared after a restart**: the queue lives in memory; send it again.

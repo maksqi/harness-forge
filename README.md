@@ -9,19 +9,22 @@ output styles, either from a JSON manifest, from code you edit in the browser or
 a zip, a GitHub repository or a marketplace). The interface is a simplified take on the Claude Code desktop app, and it
 starts in dark mode.
 
-> **In progress:** v1.9 ("MCP 2.0 and web search", Phase 14 of the [roadmap](docs/ROADMAP.md)). Planned: **sign-in
-> (OAuth)** for remote MCP servers of every origin (your servers, plugins, Claude Code plugins and a project's
-> `.mcp.json`: press **Sign in**, sign in on the server's page, come back connected; tokens stored encrypted), a
-> server's **prompts** as slash commands (`/mcp__<server>__<prompt>`), its **resources** in `@` mentions (attached like
-> a file), **elicitation** (a server asks you for details in a form card while its tool runs; the values are never
-> stored), and **web search** per chat: a **Search** toggle in the composer that uses the model's own search (Anthropic,
-> OpenAI, Google, xAI, OpenRouter, Groq gpt-oss) or the builtin `search_web` tool with your Brave Search, Tavily or Exa
-> key, with the sources saved as citations; plugin API 1.7.0. Until the release, the items marked v1.9 below describe
-> the planned behavior; guides: [Signing in to remote MCP servers](docs/guides/mcp-oauth.md) and
-> [Web search](docs/guides/web-search.md).
->
-> **Status:** v1.8.1, a maintenance release of v1.8 (dependency updates, CI and backlog fixes; plugin API stays
-> 1.6.0). v1.8 ("Claude Code ecosystem"): what you already have in Claude Code works here too. Claude Code plugins
+> **Status:** v1.9 ("MCP 2.0 and web search"): MCP servers do more and chats can search the web. **MCP sign-in** for
+> remote servers of every origin (your servers, plugins, Claude Code plugins and a project's approved `.mcp.json`
+> servers): a server that answers "401" shows **Sign in required**; press **Sign in**, sign in on the server's own page
+> in the same tab and come back connected (OAuth with discovery, dynamic client registration or your pre-registered
+> client id, PKCE; tokens stored encrypted, refreshed by themselves and never in a backup). A server's **prompts** are
+> slash commands (`/mcp__<server>__<prompt>`), its **resources** are `@` mentions attached like a file, and with
+> **elicitation** a server asks you for details in a form card under its running tool (Submit, Decline, an 8-minute
+> countdown, "Needs your input" in the sidebar; the values are never stored). **Web search** per chat: a **Search**
+> toggle in the composer (Alt+W) that uses the model's own search (Anthropic, OpenAI, Google, xAI, OpenRouter, Groq
+> gpt-oss) or the builtin `search_web` tool with your Brave Search, Tavily or Exa key (Settings → Web search, with
+> **Test search**), with the sources saved under the answer. Plugin API 1.7.0 lets a code provider offer its native
+> search and a plugin's MCP server name an OAuth client. No new dependency and no database migration: a v1.8.1 data
+> folder, its approvals included, works as it is. Guides: [Signing in to remote MCP servers](docs/guides/mcp-oauth.md),
+> [Web search](docs/guides/web-search.md) and [adding an MCP server](docs/guides/adding-an-mcp-server.md).
+> v1.8.1 was a maintenance release of v1.8 (dependency updates, CI and backlog fixes; plugin API 1.6.0).
+> v1.8 ("Claude Code ecosystem"): what you already have in Claude Code works here too. Claude Code plugins
 > install in their own format from a folder, a zip, a GitHub repository or a marketplace entry; their commands, agents,
 > skills and output styles keep the plugin's prefix (`/review-kit:review`; a bare name works when nothing else has it),
 > their `userConfig` becomes the plugin's settings form, and a plugin that runs programs needs your trust over a
@@ -76,6 +79,12 @@ starts in dark mode.
 ![Plugins -> Marketplaces: the suggestion for Anthropic's official marketplace, a marketplace with its plugins (Install…), entries whose sources are not supported, search and category filter (dark theme)](docs/assets/screenshots/marketplaces-dark.png)
 
 ![Import from Claude Code, step 2: the agents, commands and skills found in a .claude folder with their status (New, Replaces yours); a command with shell lines comes in turned off (dark theme)](docs/assets/screenshots/claude-import-dark.png)
+
+![The MCP servers of the Plugins tab: Issue tracker connected and signed in with its tools, Docs search waiting with Sign in required and a Sign in button (dark theme)](docs/assets/screenshots/mcp-sign-in-dark.png)
+
+![An MCP server asks for input while its tool runs: a form card with text, email, number, checkbox and choice fields under the running tool row, with Submit and Decline (dark theme)](docs/assets/screenshots/elicitation-dark.png)
+
+![Web search: the composer's Search toggle is on, the reply shows a Searched the web row with five results and a sources row with domain chips (dark theme)](docs/assets/screenshots/web-search-dark.png)
 
 | Plugins | Provider wizard |
 |---|---|
@@ -205,7 +214,7 @@ starts in dark mode.
     in Settings → General → Agent.
   - Claude Code's newer frontmatter: agents with `disallowedTools`, `maxTurns`, `color` and preloaded `skills`; skills
     and commands with `when_to_use`, named arguments, `$ARGUMENTS[0]`, `context: fork`; plugin API 1.6.0.
-- **MCP 2.0 and web search** (v1.9, in progress; guides: [Signing in to remote MCP servers](docs/guides/mcp-oauth.md),
+- **MCP 2.0 and web search** (v1.9; guides: [Signing in to remote MCP servers](docs/guides/mcp-oauth.md),
   [Web search](docs/guides/web-search.md), [adding an MCP server](docs/guides/adding-an-mcp-server.md)):
   - MCP sign-in (OAuth) for remote servers: a server that answers "401" shows **Sign in required** and **Sign in**
     instead of retrying; the sign-in opens the server's page in the same tab and comes back through `/oauth/callback`
@@ -215,7 +224,8 @@ starts in dark mode.
   - MCP prompts as slash commands: `/mcp__<server>__<prompt>` in the slash menu's **MCP** group, with arguments in
     order or as `name=value`; the prompt's text is fetched once and kept with the message.
   - MCP resources in `@` mentions: in every chat with tools on, the mention menu lists the resources of your connected
-    servers ("MCP resources"); picking one attaches it like a file (up to 5 MB).
+    servers ("MCP resources"; a project's servers once a reply has started them); picking one attaches it like a file
+    (up to 5 MB).
   - MCP elicitation: a server asks you for details while its tool runs; a form card under the tool row (with a
     countdown of 8 minutes, **Submit**, **Decline**) and "Needs your input" in the sidebar. Sub-agents and background
     agents never ask (declined automatically), and the values you enter are never stored.
@@ -286,7 +296,7 @@ starts in dark mode.
     plugins.
     Plugin API 1.6.0 (v1.8) adds Claude Code's frontmatter fields to commands, skills and agents, prompt hooks, five
     hook events and the `args` / `async` / `if` / `statusMessage` handler fields, and the `github` / `marketplace`
-    install sources. Plugin API 1.7.0 (v1.9, in progress) lets a code provider offer its native web search
+    install sources. Plugin API 1.7.0 (v1.9) lets a code provider offer its native web search
     (`ProviderDefinition.webSearch`), lets an MCP server declaration name an OAuth client (`transport.oauth`) and adds
     the `elicitation_dialog` notification type.
   - Install from a zip, npm, a URL with an integrity hash, or a local folder (v1.8: also a GitHub repository or a
@@ -295,8 +305,8 @@ starts in dark mode.
   `web_fetch` (SSRF-guarded) and `generate_image`, plus the seven workspace tools of project chats and (v1.5) the agent
   tools `todo_write`, `exit_plan_mode` and `task` (v1.6: and `skill`). Every tool has an approval policy and a per-tool
   override. v1.7: a project's `.mcp.json` servers add their tools to that project's chats after you approve them.
-  v1.9 (in progress): remote MCP servers sign in with OAuth, their prompts and resources reach the composer, a server
-  can ask you for details while its tool runs, and the builtin `search_web` tool searches the web with your key.
+  v1.9: remote MCP servers sign in with OAuth, their prompts and resources reach the composer, a server can ask you
+  for details while its tool runs, and the builtin `search_web` tool searches the web with your key.
 - **Self-hosting**: SQLite storage, one port, an optional password, a loopback-only bind unless you secure it,
   trusted reverse proxies (`HF_TRUST_PROXY`) so rate limits and Secure cookies see the real clients, and a Docker image
   with a `/data` volume.
@@ -381,8 +391,10 @@ it. v1.8: the image sets `HF_CLAUDE_HOME=0`, so **Import from Claude Code** work
 folder instead, mount it and your `~/.claude.json` read-only (readable by uid 1000) and name the folder:
 `-v ~/.claude:/home/node/.claude:ro -v ~/.claude.json:/home/node/.claude.json:ro -e HF_CLAUDE_HOME=/home/node/.claude`
 (the one-mount form `-v ~/.claude:/claude:ro -e HF_CLAUDE_HOME=/claude` imports everything except the MCP servers of
-`~/.claude.json`). Put a TLS reverse proxy in front before exposing it beyond your machine or LAN (see
-[Behind a reverse proxy](#behind-a-reverse-proxy)).
+`~/.claude.json`). v1.9: the redirect URI of an MCP sign-in is the address the browser uses for the published port
+(`http://localhost:8793/oauth/callback` with `-p 8793:8787`), and an MCP server must be reachable from the container at
+the address its sign-in metadata names ([MCP sign-in](docs/guides/mcp-oauth.md#6-troubleshooting)). Put a TLS reverse
+proxy in front before exposing it beyond your machine or LAN (see [Behind a reverse proxy](#behind-a-reverse-proxy)).
 
 ### Projects (agent workspace)
 
@@ -431,8 +443,9 @@ A key saved in Settings wins over its environment variable; the key dialog shows
 Flags accept `1` / `true` / `yes` / `on` and `0` / `false` / `no` / `off`; an empty value counts as unset, and any
 other invalid value stops the start with a message naming the variable. Test-only variables (`HF_LIVE_PROVIDERS`,
 `HF_LIVE_MAX_COST_USD`, `HF_LIVE_MEDIA`, `HF_TEST_REQUIRE_WEB_BUILD`, `HF_TEST_FILE_SWEEP_DELAY_MS` (only with
-`HF_MOCK_PROVIDER=1`), `HF_TEST_REMOTE_URL` (v1.8, only with `HF_MOCK_PROVIDER=1`), `E2E_SCREENSHOTS`, `E2E_BASE_URL`,
-`E2E_FAKE_REMOTE_PORT` (v1.9))
+`HF_MOCK_PROVIDER=1`), `HF_TEST_REMOTE_URL` (v1.8, only with `HF_MOCK_PROVIDER=1`), `HF_TEST_ELICITATION_WAIT_MS` (v1.9,
+only with `HF_MOCK_PROVIDER=1`), `E2E_SCREENSHOTS`, `E2E_BASE_URL`, `E2E_MOCK_OPENAI_PORT`, `E2E_FAKE_REMOTE_PORT` (v1.9,
+default 8889), and the live suite's `BRAVE_SEARCH_API_KEY`, `TAVILY_API_KEY`, `EXA_API_KEY` (v1.9))
 are described in [`.env.example`](.env.example),
 [`docs/PROVIDERS.md`](docs/PROVIDERS.md#12-live-provider-suite), [`e2e/README.md`](e2e/README.md) and
 [`docs/DECISIONS.md`](docs/DECISIONS.md).
@@ -481,7 +494,7 @@ Or develop in your own editor with a linked folder that reloads on save.
 - v1.8: Claude Code plugins install as they are, and **Plugins → Marketplaces** browses Claude Code marketplaces
   ([Claude Code plugins](docs/guides/claude-code-plugins.md); format reference: PLUGINS.md section 17; example:
   [`examples/plugins/claude-review-kit`](examples/plugins/claude-review-kit/)).
-- v1.9 (in progress): plugin API 1.7.0 — a code provider can offer its native web search (`webSearch`), a plugin's
+- v1.9: plugin API 1.7.0 — a code provider can offer its native web search (`webSearch`), a plugin's
   remote MCP server can name an OAuth client (`transport.oauth`, `{{settings.*}}` allowed in the client id), and a
   Claude Code plugin's MCP servers keep their `oauth` settings ([Signing in to remote MCP
   servers](docs/guides/mcp-oauth.md); reference: [`docs/PLUGINS.md`](docs/PLUGINS.md)).
@@ -562,7 +575,7 @@ harness-forge is built for **one user** on their own machine or server.
   needs your password to scan or apply, and imports hooks and commands that run shell lines turned off. Saving a
   project file from the app never approves what it runs. Prompt-hook answers can block or continue the agent but never
   approve a call.
-- **MCP sign-in, elicitation and web search (v1.9, in progress).** A sign-in starts only from your click and finishes
+- **MCP sign-in, elicitation and web search (v1.9).** A sign-in starts only from your click and finishes
   on the app's own `/oauth/callback` page, which posts the code with your session (PKCE, a one-time state valid for 10
   minutes); an authorization server on a private address or over plain HTTP is refused unless it is on the MCP
   server's own address. Tokens, client secrets and codes are stored only encrypted, never returned by the API, logged
@@ -599,7 +612,10 @@ Terminate TLS at a proxy, keep harness-forge on `127.0.0.1` (or on an internal n
 trust with `HF_TRUST_PROXY`. The proxy must pass the original `Host` header (harness-forge never reads
 `X-Forwarded-Host`, which a DNS-rebinding page could forge), set `X-Forwarded-For` and `X-Forwarded-Proto`, accept
 request bodies of at least 256 MB (backup imports) and stream responses without buffering. HTTPS through the proxy is
-also what enables the microphone for dictation on other machines.
+also what enables the microphone for dictation on other machines. v1.9: the redirect URI of an MCP sign-in is the
+address the browser uses plus `/oauth/callback` (`https://chat.example.com/oauth/callback`), read from each request, so
+the forwarded `Host` and `X-Forwarded-Proto` decide it; register that address with an OAuth provider
+([MCP sign-in](docs/guides/mcp-oauth.md#2-pre-registered-clients-and-the-redirect-uri)).
 
 `HF_TRUST_PROXY` takes `loopback`, `private`, exact IP addresses and CIDR ranges, comma separated (for example
 `HF_TRUST_PROXY=10.0.0.2,192.168.1.0/24`). Only a request whose TCP peer is in that list may set `X-Forwarded-For` and
@@ -685,7 +701,7 @@ Set `HF_PASSWORD` before exposing the server; share links need it.
 | [`docs/UI.md`](docs/UI.md) | layout, design tokens, components, routes, shortcuts, test ids |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | phases, tasks and progress |
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | architecture decision records and the contract seed |
-| [`docs/phases/`](docs/phases/) | per-phase task lists: [0 foundation](docs/phases/phase-0-foundation.md), [1 core services](docs/phases/phase-1-core-services.md), [2 chat](docs/phases/phase-2-chat.md), [3 plugins](docs/phases/phase-3-plugins.md), [4 hardening](docs/phases/phase-4-hardening.md), [5 v1.1](docs/phases/phase-5-v1-1.md), [6 v1.2](docs/phases/phase-6-v1-2.md), [7 v1.3](docs/phases/phase-7-v1-3.md), [8 v1.4](docs/phases/phase-8-v1-4.md), [9 v1.5](docs/phases/phase-9-v1-5.md), [10 v1.6](docs/phases/phase-10-v1-6.md), [11 v1.7](docs/phases/phase-11-v1-7.md), [12 v1.8](docs/phases/phase-12-v1-8.md) |
+| [`docs/phases/`](docs/phases/) | per-phase task lists: [0 foundation](docs/phases/phase-0-foundation.md), [1 core services](docs/phases/phase-1-core-services.md), [2 chat](docs/phases/phase-2-chat.md), [3 plugins](docs/phases/phase-3-plugins.md), [4 hardening](docs/phases/phase-4-hardening.md), [5 v1.1](docs/phases/phase-5-v1-1.md), [6 v1.2](docs/phases/phase-6-v1-2.md), [7 v1.3](docs/phases/phase-7-v1-3.md), [8 v1.4](docs/phases/phase-8-v1-4.md), [9 v1.5](docs/phases/phase-9-v1-5.md), [10 v1.6](docs/phases/phase-10-v1-6.md), [11 v1.7](docs/phases/phase-11-v1-7.md), [12 v1.8](docs/phases/phase-12-v1-8.md), [14 v1.9](docs/phases/phase-14-v1-9.md) |
 | [`AGENT.md`](AGENT.md) | rules for AI agents working on this repository |
 
 ## Development
@@ -699,9 +715,9 @@ on SQLite), and the TypeScript-only packages `packages/shared` (schemas, DTOs, r
 | `pnpm dev` | server (`tsx watch`, :8787) + web (`nuxt dev`, :3000, proxies `/api`) |
 | `pnpm build` | `nuxt generate` (web) + `tsdown` (server) |
 | `pnpm start` | production server on :8787 serving the API and the web app |
-| `pnpm start:e2e` | production server with `HF_MOCK_PROVIDER=1 HF_OFFLINE=1 HF_CLAUDE_HOME=0 HF_PORT=8899 HF_DATA_DIR=.tmp/e2e` |
+| `pnpm start:e2e` | production server with `HF_MOCK_PROVIDER=1 HF_OFFLINE=1 HF_CLAUDE_HOME=0 HF_TEST_REMOTE_URL=http://127.0.0.1:${E2E_FAKE_REMOTE_PORT:-8889} HF_PORT=8899 HF_DATA_DIR=.tmp/e2e` (v1.9: the search APIs go to the e2e fake remote) |
 | `pnpm test` | Vitest (all projects); `pnpm -F <pkg> test` for one package; `pnpm exec vitest run --project examples` for the example plugins |
-| `pnpm test:live` | opt-in live provider suite: **paid** calls with the provider keys in your environment or `.env` (`ANTHROPIC_API_KEY=… pnpm test:live`); never part of `pnpm test` ([details](docs/PROVIDERS.md#12-live-provider-suite)) |
+| `pnpm test:live` | opt-in live provider suite: **paid** calls with the provider keys in your environment or `.env` (`ANTHROPIC_API_KEY=… pnpm test:live`; v1.9: also one search per key of `BRAVE_SEARCH_API_KEY`, `TAVILY_API_KEY`, `EXA_API_KEY`); never part of `pnpm test` ([details](docs/PROVIDERS.md#12-live-provider-suite)) |
 | `pnpm test:e2e` | Playwright (projects `chromium`, `mobile` and `tablet`) |
 | `pnpm lint` | ESLint |
 | `pnpm typecheck` | `tsc --noEmit` for packages and server + `nuxi typecheck` for web |

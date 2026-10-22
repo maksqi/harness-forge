@@ -818,7 +818,7 @@ describe.skipIf(!gitPresent)('runGit with a real git (C21-T1)', () => {
 /** Hooks that commit, checkout and index changes would run (none reads stdin). */
 const HOOKS = ['pre-commit', 'prepare-commit-msg', 'commit-msg', 'post-commit', 'post-checkout', 'post-index-change', 'post-merge', 'pre-auto-gc']
 
-describe.skipIf(!gitPresent || !posix)('sentinel suite: no program configured by the repository runs (C21-T5)', () => {
+describe.skipIf(!gitPresent || !posix)('sentinel suite: no program configured by the repository runs (C21-T5)', { timeout: 30_000 }, () => {
   it('runs none of them in gitRepoInfo, gitStatus, gitHeadBlob, gitFilterAttr and runGit', async () => {
     const repo = await tempRepo()
     const sentinels = join(repo.base, 'sentinels')

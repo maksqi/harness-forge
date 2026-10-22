@@ -18,6 +18,9 @@
 // wizard's source radios, Select all and item checkboxes and a conflict's resolution select; the project file editor's
 // Copy path, Cancel, Save and × Close; the hook editor's Type toggle (Command, Prompt) are 40 px targets (the × Close
 // fixed by W12.19 at Gate P12-B).
+// Phase 14 (W14.11, docs/UI.md 7.35, 8.14, 9.15, 14.5): the composer's Search toggle, an elicitation card's Submit,
+// Decline and × Dismiss, Sign in of a `needs-auth` MCP server, Settings -> Web search's two switches, its search API
+// select, a key row's input and Save and Test search are 40 px targets (Web search is in the settings rail).
 import type { Locator, Page } from '@playwright/test'
 import type { CleanupTask, HarnessApi } from '../../helpers/index.ts'
 import {
@@ -31,6 +34,7 @@ import {
   seedFakeClaudeHome,
 } from '../../helpers/claude-home.ts'
 import {
+  addHttpMcpServer,
   approveProjectItems,
   backgroundAgents,
   boxOf,
@@ -50,14 +54,19 @@ import {
   hookGroup,
   hookRow,
   lastAssistantMessage,
+  mcpServerRow,
+  mcpToolName,
   mcpVariable,
   MOCK_BACKGROUND_MODEL,
   MOCK_CHECKPOINT_DONE,
   MOCK_CHECKPOINT_FILE,
+  MOCK_HOOKS_MODEL,
+  MOCK_SEARCH_MODEL,
   seedHookProjectChat,
   seedProject,
   seedProjectChat,
   seedTempTree,
+  startOAuthFixture,
   stubClaudeHome,
   test,
   testIds,
@@ -65,7 +74,10 @@ import {
   uniqueId,
   useAgentSettings,
   userMessages,
+  useWebSearchConfig,
   waitForChatTask,
+  waitForMcpStatus,
+  webSearchToggle,
   writeHookScript,
   writeProjectFile,
 } from '../../helpers/index.ts'
@@ -106,7 +118,7 @@ const MODES: readonly RailMode[] = [
   {
     path: '/settings/providers',
     ready: page => page.getByTestId(testIds.pageHeader),
-    buttons: [testIds.sidebarTrigger, testIds.backToApp, testIds.settingsNavProviders, testIds.settingsNavModels, testIds.settingsNavMedia, testIds.settingsNavProjects, testIds.settingsNavGeneral, testIds.settingsNavAppearance, testIds.settingsNavData, testIds.settingsNavAbout, testIds.themeToggle],
+    buttons: [testIds.sidebarTrigger, testIds.backToApp, testIds.settingsNavProviders, testIds.settingsNavModels, testIds.settingsNavMedia, testIds.settingsNavSearch, testIds.settingsNavProjects, testIds.settingsNavGeneral, testIds.settingsNavAppearance, testIds.settingsNavData, testIds.settingsNavAbout, testIds.themeToggle],
   },
 ]
 
@@ -512,5 +524,60 @@ test.describe('tablet touch targets of the Claude Code ecosystem (Phase 12)', ()
     await page.goto(`/settings/customize?tab=agents&project=${project.id}`)
     const editor = await openProjectFileEditor(page, projectRow(page, 'agent', 'tablet-close'), path, 'Close it.')
     await expectTouchTarget(editor.getByRole('button', { name: 'Close' }).last(), 'Close')
+  })
+})
+
+test.describe('tablet touch targets of MCP sign-in, questions and web search (Phase 14)', () => {
+  test('the Search toggle, an elicitation card\'s buttons and Sign in are at least 40 px', async ({ page, api, cleanup }) => {
+    await useWebSearchConfig(api, cleanup)
+    // The composer's Search toggle.
+    const searchChat = await api.createChat({ title: `Tablet search ${uniqueId('tablet')}`, modelRef: MOCK_SEARCH_MODEL })
+    cleanup(api => api.removeChat(searchChat.id))
+    await page.goto(`/chat/${searchChat.id}`)
+    await expectTouchTarget(webSearchToggle(page), 'the Search toggle')
+
+    // An MCP question's card: Submit, Decline and × Dismiss.
+    const noAuth = await startOAuthFixture({ noAuth: true }, cleanup)
+    const askId = uniqueId('ask')
+    await addHttpMcpServer(api, cleanup, { id: askId, name: `Issues ${askId}`, url: noAuth.url, policy: 'safe' })
+    await waitForMcpStatus(api, askId, 'connected')
+    const askChat = await api.createChat({ title: `Tablet questions ${askId}`, modelRef: MOCK_HOOKS_MODEL })
+    cleanup(api => api.removeChat(askChat.id))
+    await page.goto(`/chat/${askChat.id}`)
+    await page.getByTestId(testIds.composerInput).fill(`call ${mcpToolName(askId, 'ask')} {}`)
+    await page.getByTestId(testIds.composerSend).tap()
+    const card = byTestId(page, testIds.elicitationCard, { 'data-server-id': askId })
+    await expect(card).toHaveAttribute('data-state', 'pending')
+    await card.scrollIntoViewIfNeeded()
+    await expectTouchTarget(card.getByTestId(testIds.elicitationSubmit), 'Submit')
+    await expectTouchTarget(card.getByTestId(testIds.elicitationDecline), 'Decline')
+    await expectTouchTarget(card.getByTestId(testIds.elicitationDismiss), '× Dismiss')
+    await card.getByTestId(testIds.elicitationDecline).tap()
+    await expect(card).toHaveCount(0)
+
+    // Sign in of a server that needs it.
+    const oauth = await startOAuthFixture({}, cleanup)
+    const signInId = uniqueId('oauth')
+    await addHttpMcpServer(api, cleanup, { id: signInId, name: `Docs ${signInId}`, url: oauth.url })
+    await waitForMcpStatus(api, signInId, 'needs-auth')
+    await page.goto('/plugins/core-mcp')
+    await expectTouchTarget(mcpServerRow(page, signInId).getByTestId(testIds.mcpSignIn), 'Sign in')
+  })
+
+  test('Settings -> Web search: the switches, the search API select, a key row and Test search are at least 40 px', async ({ page, api, cleanup }) => {
+    await useWebSearchConfig(api, cleanup)
+    await page.goto('/settings/search')
+    await expect(page.getByTestId(testIds.webSearchSettings)).toBeVisible()
+    await expectTouchTarget(page.getByTestId(testIds.settingsSearchNative), 'the native search switch')
+    await expectTouchTarget(page.getByTestId(testIds.settingsSearchDefault), 'the new chats switch')
+    await expectTouchTarget(page.getByTestId(testIds.settingsSearchBackend), 'the search API select')
+    const brave = byTestId(page, testIds.settingsSearchKey, { 'data-backend': 'brave' })
+    await expectTouchTarget(brave.getByTestId(testIds.settingsSearchKeyInput), 'the key input')
+    await brave.getByTestId(testIds.settingsSearchKeyInput).fill(`tablet-${uniqueId('key')}`)
+    await expectTouchTarget(brave.getByTestId(testIds.settingsSearchKeySave), 'Save')
+    await brave.getByTestId(testIds.settingsSearchKeySave).tap()
+    await expect(brave).toHaveAttribute('data-state', 'set')
+    await expectTouchTarget(brave.getByTestId(testIds.settingsSearchKeyRemove), 'Remove')
+    await expectTouchTarget(page.getByTestId(testIds.settingsSearchTest), 'Test search')
   })
 })

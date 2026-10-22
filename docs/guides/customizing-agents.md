@@ -349,7 +349,7 @@ unchanged; these are the differences:
 
 | In the file | harness-forge | Why |
 |---|---|---|
-| tool names `Read`, `Write`, `Edit`, `MultiEdit`, `Grep`, `Glob`, `LS`, `Bash`, `WebFetch` | mapped to `read_file`, `write_file`, `edit_file`, `edit_file`, `search_files`, `find_files`, `list_directory`, `shell`, `web_fetch`; `mcp__…` names kept | same tools, other names |
+| tool names `Read`, `Write`, `Edit`, `MultiEdit`, `Grep`, `Glob`, `LS`, `Bash`, `WebFetch` (v1.9: and `WebSearch`) | mapped to `read_file`, `write_file`, `edit_file`, `edit_file`, `search_files`, `find_files`, `list_directory`, `shell`, `web_fetch` (v1.9: `search_web`, the builtin web search tool); `mcp__…` names kept | same tools, other names |
 | other tool names (`Task`, `TodoWrite`, `NotebookEdit`, …) | match nothing, with a warning ("Unknown tool: Task; it matches nothing.") | there is no such tool, and a sub-agent never gets the agent tools |
 | `Bash(git:*)`-style patterns | the tool (`shell`) is kept, the pattern is ignored with a warning; every shell call still asks unless your shell rules allow it (v1.8: in `disallowedTools` / `disallowed-tools` the whole tool is removed) | harness-forge has its own shell rules (Settings → Projects) |
 | a `tools` value that is neither text nor a list | **no tools** at all, with a warning (v1.8: a broken `disallowedTools` / `disallowed-tools` removes nothing) | a broken list must not grant everything |

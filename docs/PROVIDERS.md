@@ -656,59 +656,102 @@ them).
 
 Two chat models, a `webSearch` hook on the mock provider, an OAuth MCP fixture and the search fakes drive MCP sign-in,
 elicitation, MCP prompts and resources, native search and the builtin `search_web` (ADR-059 … ADR-063) without any real
-MCP, OAuth or search host. C53 implements them in P14-0b; they are complete and frozen from Gate P14-0b; **this
-subsection is the contract of the Phase 14 gate probes and e2e specs** (with `mock:hooks` and `mock:echo` above). Mock
-language models: 18 → 20. Model info as in "Common behavior" (`kind: 'chat'`, the `tools` capability only). Details the
-plan leaves open (the two source URLs and titles, the wording of the result list, the fixture's prompt and resource
-names) are fixed by C53 in P14-0b and recorded here by W14.12.
+MCP, OAuth or search host. They were built in P14-0b and are frozen since Gate P14-0b; **this subsection is the
+contract of the Phase 14 gate probes and e2e specs** (with `mock:hooks` and `mock:echo` above). Mock language models:
+18 → 20. Model info as in "Common behavior" (`kind: 'chat'`, the `tools` capability only). The code is the reference
+for every detail (`builtin-plugins/mock/search{,-tool}.ts` and the fixture's header comment).
 
 **The mock provider's `webSearch` hook** (plugin API 1.7.0, [PLUGINS.md](./PLUGINS.md#providerdefinition)): for
 `mock:search` it returns the provider-executed tool `web_search` = `{ type: 'provider', id: 'mock.web_search',
-isProviderExecuted: true, args: {} }` (no `exclusive`), so the catalog reports `webSearch: 'native'` for `mock:search`;
-for every other mock model it returns `undefined` (`webSearch: null`).
+isProviderExecuted: true, args: {} }` (with an input schema `{ query }` and an output of `{ type: 'web_search_result',
+url, title }` entries; no `exclusive`, no provider options), so the catalog reports `webSearch: 'native'` for
+`mock:search`; for every other mock model it returns `undefined` (`webSearch: null`). The `mock` manifest keeps
+`engines.harness` `"^1.1.0"` (PLUGINS.md 1).
 
 | Model ref | Behavior |
 |---|---|
-| `mock:search` | When the call offers the native tool `web_search` (the chat's web search mode resolved to native): streams a **provider-executed** `tool-call` `web_search` (input `{ query: <user text> }`), its `tool-result`, two `source` parts (`sourceType: 'url'`, http(s)) and then the text `Search done: 2 sources`. Otherwise (search off, tool mode `off`, the setting `webSearchNative` off, or the builtin `search_web` offered instead) the text `Search off`. It never calls a function tool. |
-| `mock:search-tool` | When the call offers `search_web` (the builtin of `core-search`, a backend key set): one tool call `search_web` with input `{ query: <user text> }` (id `mock_call_<n>`, `finishReason: 'tool-calls'`); after its result, a text that lists the result titles of the output. |
+| `mock:search` | When the call offers a provider tool named `web_search` (the chat's web search resolved to native): one step that streams a **provider-executed** `tool-call` `web_search` (id `mock_call_<n>`, input `{ "query": <q> }`), its `tool-result` (the two results below), two `source` parts (`sourceType: 'url'`, ids `mock_source_<n>_1` / `_2`: `https://example.com/mock-search-1` "Mock result one" and `https://example.org/mock-search-2` "Mock result two") and then the text `Search done: 2 sources` (`finishReason: 'stop'`). Otherwise (search off, tool mode `off`, the setting `webSearchNative` off, the builtin `search_web` offered instead, any function tools) the text `Search off`. It never calls a function tool. `<q>` = the text of the last user message, trimmed and cut to 200 code points (`(empty message)` when empty); `n` = the assistant messages of the prompt + 1. |
+| `mock:search-tool` | Checked in order: (1) the turn holds a `search_web` result (the last one counts): a denied one → `The tool call was denied.`, an error → `Search failed: <error text>` (one line, 120 code points), else `Results: <title 1> \| <title 2> \| …` (the `results[].title` of the output's JSON, joined with ` \| `) or `Results: none`; (2) `search_web` is not offered (no backend key, search off, tools off) → `Tools are disabled.`; (3) one call `search_web` with `{ "query": <q> }` (id `mock_call_<n>`, `finishReason: 'tool-calls'`; `<q>` cut to 400 code points). |
 
-**The OAuth MCP fixture** (`apps/server/src/mcp/__fixtures__/oauth-mcp-server.mjs`; a script and an importable ESM
-module built on `@modelcontextprotocol/sdk` (root dev dependency) and `node:http`, listening on a loopback port 0):
+Both answer at once (no waits; the text one word per chunk), ignore the reasoning setting and the output-token cap, and
+report a fixed usage of 10 input and 5 output tokens.
 
-- **MCP endpoint**: stateful Streamable HTTP with SSE responses (needed for a server-to-client request); it answers 401
-  with `WWW-Authenticate` (`resource_metadata`, `scope`) until a request carries a valid Bearer token.
-- **Authorization server**: protected-resource and authorization-server metadata, dynamic client registration,
-  `/authorize` (auto-approve, or an HTML page with an **Approve** button for the e2e specs), `/token` (checks PKCE S256,
-  issues expiring access tokens and refresh tokens, answers `invalid_grant` for a revoked or bad refresh token) and
-  `/revoke` (RFC 7009).
-- **Tools**: `ask` (asks for input through `elicitation/create` with a variable schema and returns the action and the
-  field names, never the values), `ask_echo` (returns the accepted content, for the answer-validation tests), `slow_ask`
-  (waits 2 s, then asks).
-- **Prompts** (with required and optional arguments, one with an assistant message, one with an embedded resource) and
-  **resources** (text, a large one over 5 MiB for the 413 path, an image).
-- **Counters** (connects, `initialize` requests, token, refresh and revoke calls, `prompts/get` and `resources/read`) and
-  **toggles**: a pre-registered client (no registration endpoint), a foreign authorization server (another origin, for
-  the URL guard), no OAuth metadata (a plain 401), a short token life (for the refresh path). A **stdio variant** sends
-  the `list_changed` notifications (prompts, resources).
+**The OAuth MCP fixture** (`apps/server/src/mcp/__fixtures__/oauth-mcp-server.mjs` with its types in
+`oauth-mcp-server.d.mts`; a script and an importable ESM module built on `@modelcontextprotocol/sdk` (root dev
+dependency) and Node built-ins; loopback only, memory only):
+
+- **Run**: `node apps/server/src/mcp/__fixtures__/oauth-mcp-server.mjs --port <n> [--host 127.0.0.1] [--name <name>]
+  [--clients <id>,<id>,…] [toggles]` prints `{"url":"<origin>/mcp","origin":"<origin>"}` as its first stdout line
+  (port 0 = a free port; the host must be loopback: `127.0.0.1`, `::1` or `localhost`). Imported:
+  `startOAuthMcpServer({ port?, host?, name?, clients?, toggles? })` → `{ url, origin, port, counters(),
+  resetCounters(), toggles(), setToggle(name, value), issueToken(options?), revokeAll(), stop() }`.
+- **Pre-registered public clients** (`--clients` replaces the list): `fixture-client`, `seed-client` and
+  `seed-plugin-client` (the client ids the v1.8.1 upgrade seed configures) always exist, accept any http(s) redirect
+  URI and need PKCE; `fixture-client` also knows the secret `fixture-secret` (a request that presents a secret for it
+  must present exactly that one).
+- **MCP endpoint** `<origin>/mcp`: stateful Streamable HTTP with SSE responses (a server-to-client request needs a
+  session); every request without a valid Bearer token answers 401 with `WWW-Authenticate: Bearer
+  resource_metadata="<origin>/.well-known/oauth-protected-resource/mcp", scope="mcp:read mcp:write"`. A
+  `server/discover` request (the AI SDK's `2026-07-28` probe) answers "method not found", so the client falls back to
+  `initialize`.
+- **Authorization server** (same origin, issuer `<origin>`): protected-resource and authorization-server metadata
+  (`/.well-known/openid-configuration` is always 404), `POST /register` (RFC 7591), `GET /authorize` (auto-approve with
+  a 302 to `redirect_uri?code&state&iss`, or with `approvePage` an HTML page with **Approve** and **Deny**; Deny
+  redirects with `error=access_denied`; codes live 60 s, single use), `POST /token` (`authorization_code` with PKCE
+  S256 and `resource` checked; `refresh_token` rotated; access tokens live `tokenLifeSec`, 3600 by default; a used,
+  unknown, expired or revoked code or refresh token answers 400 `invalid_grant`) and `POST /revoke` (RFC 7009).
+- **Tools**: `ask` (`{ form?: 'basic' | 'all-types' | 'sensitive' | 'multi' | 'unsupported' | 'url' }`: sends
+  `elicitation/create` and answers `{"action":…,"fields":[…]}`, never the values; `url` is a URL-mode request, with an
+  empty `requestedSchema` because `@ai-sdk/mcp` 2.0.81 rejects one without it before any handler runs), `ask_echo`
+  (answers the accepted content, to prove it arrived), `slow_ask` (waits 2 s, then asks), `whoami` (the token's subject
+  `fixture-user`, client id and scope); the stdio variant adds `__touch`.
+- **Prompts**: `greet` (`name` required, `greeting` optional: one user message `<greeting|Hello>, <name>!`), `review`
+  (`topic` optional: an assistant message, then a user message), `with_resource` (a user text, then the embedded text
+  resource `fixture://notes/readme.md`), `with_image` (a user text, then a PNG image); a missing required argument or an
+  unknown prompt is a JSON-RPC `-32602` error. **Resources**: `fixture://notes/readme.md` (`text/markdown`),
+  `fixture://notes/large.txt` (`text/plain`, exactly 6 MiB: the 413 path), `fixture://images/pixel.png` (`image/png`);
+  the template `fixture://notes/{name}` (templates are never listed by the harness); an unknown URI is `-32002`.
+- **Counters** (`GET /__counters`; `POST /__reset` zeroes them): `connects` (`initialize` requests, counted before the
+  auth check, so a refused connect counts once although it makes three 401 requests), `discovers`, `unauthorized`,
+  `registrations`, `authorizations`, `tokens`, `refreshes`, `revocations`, `promptsGet`, `resourcesRead`,
+  `elicitations`, `toolCalls`. `POST /__revoke-all` revokes every token (the `invalid_grant` path of a refresh).
+- **Toggles** (flags, `setToggle` or `POST /__toggle { name, value }`): `--preRegistered` (only turns dynamic
+  registration off: no `registration_endpoint`, `POST /register` refused; the pre-registered clients still sign in),
+  `--foreignAs <url>` (the protected-resource metadata names another authorization server, for the URL guard),
+  `--noMetadata` (a plain 401 `Bearer realm="mcp"` and 404 for both well-known documents), `--tokenLifeSec <n>` (short
+  tokens for the refresh path), `--approvePage`, `--noAuth` (`/mcp` answers without a token) and `--protocol2026` (the
+  server negotiates `2026-07-28`, statelessly; an eliciting tool answers `input_required`, which the AI SDK cannot
+  follow yet).
+- **stdio variant** (`--stdio`): the same tools, prompts and resources over stdio without OAuth; `__touch` sends
+  `notifications/prompts/list_changed` and `notifications/resources/list_changed` and from then on lists one more prompt
+  (`touched`) and one more resource (`fixture://notes/touched.md`).
 - `apps/server/src/mcp/__fixtures__/harness.ts` `callTool` drains async-generator `execute`s (every MCP tool streams
-  since Phase 14).
+  since Phase 14). The e2e specs start the fixture themselves on `127.0.0.1` while the app runs on `localhost` (a
+  genuinely cross-site redirect).
 
 **Search fakes**: `createFakeSearchFetch()` (`apps/server/src/testing/fake-search.ts`) answers the Brave, Tavily and Exa
-endpoints of section 14 with canned results and has modes for 401, 429, 500, a timeout and an oversized body, plus a
-request log (method, URL, headers without the key value, body); unit tests inject it into `core-search`. The server's
-fake remote (`apps/server/src/testing/fake-remote.ts`) serves POST for its routes and records the bodies. The e2e
-fake remote `e2e/fixtures/fake-remote.mjs` serves the same three backends behind `HF_TEST_REMOTE_URL` (only with
-`HF_MOCK_PROVIDER=1`; `createPluginSourceFetch` reroutes the https backend hosts to it) on the port
-`E2E_FAKE_REMOTE_PORT` (default set in `playwright.config.ts`; see `e2e/README.md`).
+endpoints of section 14 in each vendor's shape with the results `Result one` `https://example.com/a`, `Result two`
+`https://example.org/b`, … (cut to the requested count; without one the vendor default: Brave 20, Tavily 5, Exa 10);
+a missing key or the key `invalid-key` answers 401 and the key `rate-limited` 429; modes per backend `ok`, `401`, `403`,
+`429`, `500`, `timeout`, `oversize`, `bad-json` and `redirect`; a request log (method, URL, headers with the key values
+replaced by `<redacted>`, the JSON body, the status). Unit tests inject it into `core-search`. The server's fake remote
+(`apps/server/src/testing/fake-remote.ts`) serves POST for its routes and records the bodies. The e2e fake remote
+`e2e/fixtures/fake-remote.mjs` (Node built-ins only) serves the same three backends and the same results behind
+`HF_TEST_REMOTE_URL` (only with `HF_MOCK_PROVIDER=1`; `createPluginSourceFetch` reroutes `https://<host>/<path>` to
+`<base>/<host>/<path>`), with `GET /__log` and `POST /__reset`; it listens on `--port`, else `E2E_FAKE_REMOTE_PORT`,
+else a free port. Playwright's `webServer` starts it before the app on `E2E_FAKE_REMOTE_PORT` (default **8889**), and
+`pnpm start:e2e` sets `HF_TEST_REMOTE_URL=http://127.0.0.1:${E2E_FAKE_REMOTE_PORT:-8889}` (`e2e/README.md`).
 
-**How the probes use them** (ARCHITECTURE.md, Phase 14 flows): `mock:hooks` with `call mcp__<server>__ask {}` in a chat
-with the fixture connected drives an elicitation (accept, decline, cancel, timeout, Stop, a reload replaying the card,
-a second answer 409, an invalid one 400; a sub-agent's call declined); `/mcp__<server>__<prompt> Ada` sent to
-`mock:echo` echoes the frozen expansion (`[files: N]` after a resource attachment); `mock:search` with the chat's web
-search on in Ask and Plan mode gives a provider-executed `tool-web_search` part, at least 2 `source-url` parts, no
-`awaitingApproval` and no `PreToolUse` record, and with search off `Search off`; `mock:search-tool` with Brave on the
-fake remote gives a `search_web` part and `source-url` parts in the stored message, the share snapshot and the Markdown
-export, and the Tavily / Exa backends show a POST with a JSON body in the fake's log.
+**How the probes use them** (ARCHITECTURE.md 6.39 – 6.44): `mock:hooks` with `call mcp__<server>__ask {}` in a chat
+with the fixture connected drives an elicitation (accept, decline, cancel, timeout with the test-only
+`HF_TEST_ELICITATION_WAIT_MS`, Stop, a reload replaying the card, a second answer 409, an invalid one 400; a
+sub-agent's call declined without a record); `/mcp__<server>__greet Ada` sent to `mock:echo` echoes the frozen
+expansion (`Hello, Ada!`); an attached text resource is inlined into the message (`mock:echo` shows no `[files: N]`);
+`mock:search` with the chat's web search on in Ask and Plan mode gives a
+provider-executed `tool-web_search` part, 2 `source-url` parts, no `awaitingApproval` and no `PreToolUse` record, and
+with search off `Search off`; `mock:search-tool` with Brave on the fake remote gives a `search_web` part and
+`source-url` parts in the stored message, the share snapshot and the Markdown export, and the Tavily / Exa backends
+show a POST with a JSON body in the fake's log.
 
 ## 9. Declarative provider templates (wizard)
 
@@ -954,13 +997,23 @@ Record the results of a run in [section 11](#11-verification-log).
 
 ### Web search checks (Phase 14)
 
-W14.4 and W14.5 add live checks for web search (`*.live.test.ts`, run only by `pnpm test:live`, paid, never by agents or
-`pnpm test`): one native search per provider with a key (section 14; for Google one Gemini 3 model and one Gemini 2.5
-model on a turn without function tools), a two-turn replay on Anthropic and OpenAI (the second turn carries the first
-turn's provider-executed parts), a provider switch in one chat (Anthropic → OpenAI → Anthropic), and one `search_web`
-call per builtin backend whose key is set: `BRAVE_SEARCH_API_KEY`, `TAVILY_API_KEY`, `EXA_API_KEY`. These three
-variables are **test-only**: the server never reads them (users store search keys in Settings → Web search). How the
-checks are switched on and budgeted is fixed by W14.4 / W14.5 and recorded here.
+Two live files check web search (run only by `pnpm test:live`, paid, never by agents or `pnpm test`; each check is a
+SKIP without its key; not yet run, so the matrix of section 14 stays **(unverified)** until the user runs them):
+
+- `core-providers/providers/web-search.live.test.ts` (native search, through `createTestApp` with `webSearch: 'auto'`,
+  tool mode `ask` and every tool off except `current_time`): one native search per provider with a key (Anthropic
+  `claude-haiku-4-5`, OpenAI `gpt-6-luna`, Google `gemini-3.5-flash-lite` next to a function tool and
+  `gemini-2.5-flash` on a turn without function tools (`exclusive`), xAI `grok-4.3`, OpenRouter `openai/gpt-6-luna`,
+  Groq `openai/gpt-oss-20b`): the reply finishes without an error or a pending approval and holds a provider-executed
+  part or a source (Groq: only the text, by design); a two-turn replay on Anthropic and OpenAI (the second turn carries
+  the first turn's provider-executed parts); a provider switch in one chat (Anthropic → OpenAI → Anthropic). It honors
+  `HF_LIVE_PROVIDERS` (the provider filter of the suite) and is skipped with `HF_LIVE_MAX_COST_USD=0` (its search fees
+  are not tracked); the suite's `chat.params` caps apply (about a dozen searches in a full run).
+- `core-search/search.live.test.ts` (the builtin backends): one search per backend whose key is set
+  (`BRAVE_SEARCH_API_KEY`, `TAVILY_API_KEY`, `EXA_API_KEY`, from the environment or the repository `.env`) through the
+  real plugin-source fetch with the production limits; the output must parse as a `search_web` output with http(s)
+  results. These three variables are **test-only**: the server never reads them (users store search keys in Settings →
+  Web search).
 
 ## 13. Image and voice models
 
@@ -1132,16 +1185,18 @@ need them for the next turn) and are removed before a turn on another provider.
 Read from the installed packages (`@ai-sdk/anthropic` 4.0.85, `@ai-sdk/openai` 4.0.99, `@ai-sdk/google` 4.0.102,
 `@ai-sdk/xai` 5.0.27, `@ai-sdk/groq` 4.0.67, `@openrouter/ai-sdk-provider` 3.1.0) on 2026-10-22; the live behavior is
 **(unverified)** until the live suite runs it (section 12). The model lists are deny-lists: an unknown new model id
-counts as supported. W14.4 implements the hooks in `core-providers`.
+counts as supported. The hooks live in `core-providers/providers/<id>.ts` (shared pieces in `lib/web-search.ts`); every
+model id is read lowercase and without a fine-tune prefix `ft:`, and `maxUses` is passed on as a whole number 1 – 20
+(default `WEB_SEARCH_MAX_USES`, 5).
 
 | Provider | ToolSet key | Tool (package factory) | Models | Citations | Caveats |
 |---|---|---|---|---|---|
-| `anthropic` | `web_search` | `anthropic.tools.webSearch_20250305({ maxUses: 5 })` | `claude-*` models except the oldest families (no `claude-2*`, `claude-instant*`, plain `claude-3-*`; W14.4 fixes the list) | a `source` part per result and citation | the wire name is always `web_search` (never offer a function tool of that name next to it); results carry `encryptedContent`, kept in the stored message for the next turn, never shown and stripped from share snapshots; `pause_turn` is mapped to `stop`, so a very long server-tool loop ends the turn early; the dynamic-filtering versions (`webSearch_20260209`, `webSearch_20260318`, which add hidden `code_execution` calls) are in the backlog |
-| `openai` | `web_search` | `openai.tools.webSearch({})` (Responses API, the provider's default) | every model except a deny-list of old ids (`o1*`, `o3-mini*`, `*-nano`, `gpt-3.5*`, `gpt-4` / `gpt-4-*` without `o` or `.1`) | `url_citation` annotations → sources | `webSearchPreview` is deprecated and not used |
-| `google` | `google_search` | `google.tools.googleSearch({})` | Gemini 3 and later: native; **Gemini 2.x: `exclusive`**; other models: none | grounding metadata (`groundingChunks`) → sources | before Gemini 3 the API **silently drops function tools** sent next to Google Search (the package only warns), so a 2.x model searches natively only on a turn that sends no function tool; with tools it uses the builtin `search_web`, or search is unavailable (`tools-conflict`) without a backend key |
-| `xai` | `web_search` | `xai.tools.webSearch({})` (Responses API) | every model except `grok-2*` and `grok-3*` | sources from the response | `xSearch` (posts on X) is not offered |
-| `openrouter` | `web_search` | `openrouter.tools.webSearch({ maxResults: 5 })` (sent as `openrouter:web_search`) | models with the `tools` capability; a model without tools gets `providerOptions.openrouter.plugins: [{ id: 'web', max_results: 5 }]` instead (no tool) | `url_citation` annotations → sources | the stream has no tool-call parts for it (only sources); the cost OpenRouter reports (`usage.include`) already includes the search fee |
-| `groq` | `browser_search` | `groq.tools.browserSearch({})` | gpt-oss models only (`openai/gpt-oss-20b`, `openai/gpt-oss-120b`; the provider's `GPT_OSS` pattern) | **none** (no tool-call or source parts) | whether it works next to function tools is **(unverified)** |
+| `anthropic` | `web_search` | `anthropic.tools.webSearch_20250305({ maxUses: 5 })` | every id containing `claude-` except the oldest families: `claude-instant*`, `claude-1*`, `claude-2*` and plain Claude 3 (`claude-3-opus*`, `claude-3-sonnet*`, `claude-3-haiku*`); Claude 3.5, 3.7 and later have it | a `source` part per result and citation | the wire name is always `web_search` (never offer a function tool of that name next to it); results carry `encryptedContent`, kept in the stored message for the next turn, never shown and stripped from share snapshots; `pause_turn` is mapped to `stop`, so a very long server-tool loop ends the turn early; the dynamic-filtering versions (`webSearch_20260209`, `webSearch_20260318`, which add hidden `code_execution` calls) are in the backlog |
+| `openai` | `web_search` | `openai.tools.webSearch({})` (Responses API, the provider's default) | every model except a deny-list of old ids (`o1*`, `o3-mini*`, `*-nano`, `gpt-3.5*`, `gpt-4` / `gpt-4-*`; `gpt-4o*`, `gpt-4.1*` and `gpt-4.5*` are allowed; a fine-tune `ft:<base>` follows its base) | `url_citation` annotations → sources | `webSearchPreview` is deprecated and not used |
+| `google` | `google_search` | `google.tools.googleSearch({})` | Gemini 3 and later and unknown Gemini ids (the package treats them as the newest generation): native; **Gemini 2.x: `exclusive`**; none for non-Gemini models, Gemini 1.x, `gemini-pro(-vision)`, Robotics-ER 1.5, embedding, `tts`, `live` and `native-audio` models, the 2.x image models and 2.0 Flash-Lite | grounding metadata (`groundingChunks`) → sources | before Gemini 3 the API **silently drops function tools** sent next to Google Search (the package only warns), so a 2.x model searches natively only on a turn that sends no function tool; with tools it uses the builtin `search_web`, or search is unavailable (`tools-conflict`) without a backend key |
+| `xai` | `web_search` | `xai.tools.webSearch({})` (Responses API) | every model except `grok-2*` and `grok-3*` (`grok-3.5` included) | sources from the response | `xSearch` (posts on X) is not offered |
+| `openrouter` | `web_search` | `openrouter.tools.webSearch({ maxResults: 5 })` (sent as `openrouter:web_search`; the tool object is not marked provider-executed) | every model: models with the `tools` capability get the server tool, a model without tools gets `providerOptions.openrouter.plugins: [{ id: 'web', max_results: 5 }]` instead (no tool) | `url_citation` annotations → sources | the stream has no tool-call parts for it (only sources), so no "Searched the web" row shows; the cost OpenRouter reports (`usage.include`) already includes the search fee |
+| `groq` | `browser_search` | `browserSearch({})` of `@ai-sdk/groq` | gpt-oss models only (`openai/gpt-oss-20b`, `openai/gpt-oss-120b`; the provider's `GPT_OSS` pattern) | **none** (no tool-call or source parts) | whether it works next to function tools is **(unverified)** |
 | `mistral`, `deepseek`, `moonshotai`, `alibaba`, `zai`, `minimax`, `ollama`, declarative providers | — | none | — | — | chats on these models use the builtin `search_web`. Mistral's own `webSearch` tools work only with its conversation API (`.conversation()`), and the builtin provider uses the chat API (backlog) |
 
 - **Fees**: native search is billed by the provider per search (on top of tokens) and is **not** in harness-forge's cost
@@ -1155,14 +1210,15 @@ counts as supported. W14.4 implements the hooks in `core-providers`.
 
 The user picks one backend and stores its key in Settings → Web search (secret settings of `core-search`, scope
 `plugin:core-search`, write-only). Keys are BYOK: get one from the vendor (verify the current plans, free tiers and
-prices on the vendor site). The request shapes below are the design's reading of the vendor docs and are **verified
-against the vendor docs at implementation time (W14.5)**; the fake remote mirrors them.
+prices on the vendor site). The request shapes below were checked against the vendors' API references on 2026-10-22;
+the fakes mirror them (their small differences, such as Tavily's default of 5 results instead of 10 or Exa's
+`resolvedSearchType`, do not matter to the harness).
 
 | Backend (`backend`) | Request | Key goes in | Get a key | Read from the answer |
 |---|---|---|---|---|
-| Brave Search (`brave`, default) | `GET https://api.search.brave.com/res/v1/web/search?q=…&count=…&freshness=pd\|pw\|pm\|py` | header `X-Subscription-Token` | https://brave.com/search/api/ | `web.results[].{ title, url, description, page_age }` |
-| Tavily (`tavily`) | `POST https://api.tavily.com/search`, JSON `{ query, max_results, search_depth: 'basic', time_range? }` | header `Authorization: Bearer <key>` | https://tavily.com | `results[].{ title, url, content, published_date }` |
-| Exa (`exa`) | `POST https://api.exa.ai/search`, JSON `{ query, numResults, type: 'auto', contents: { highlights: true }, startPublishedDate? }` | header `x-api-key` | https://exa.ai | `results[].{ title, url, highlights \| text, publishedDate }` |
+| Brave Search (`brave`, default) | `GET https://api.search.brave.com/res/v1/web/search?q=…&count=…&freshness=pd\|pw\|pm\|py&text_decorations=false` | header `X-Subscription-Token` | https://brave.com/search/api/ | `web.results[].{ title, url, description, page_age }` (HTML entities and `<strong>` markers removed) |
+| Tavily (`tavily`) | `POST https://api.tavily.com/search`, JSON `{ query, max_results, search_depth: 'basic', include_published_date: true, time_range? }` | header `Authorization: Bearer <key>` | https://tavily.com | `results[].{ title, url, content, published_date }` |
+| Exa (`exa`) | `POST https://api.exa.ai/search`, JSON `{ query, numResults, type: 'auto', contents: { highlights: true }, startPublishedDate? }` (`startPublishedDate` = now minus 1, 7, 31 or 365 days) | header `x-api-key` | https://exa.ai | `results[].{ title, url, highlights \| summary \| text, publishedDate }` |
 
 - **What is sent**: only the query the model wrote, the result count, the freshness and the key. Never chat messages,
   files, the model's name or anything about the user.
@@ -1172,9 +1228,12 @@ against the vendor docs at implementation time (W14.5)**; the fake remote mirror
 - **Output** (normalized for every backend): `{ query, backend, results: [{ title, url, snippet, published }] }`, at most
   `count` results (default the setting `maxResults`, 5), titles ≤ 300 and snippets ≤ 800 characters of plain text,
   http(s) URLs only (≤ 2048), the whole output ≤ 32 KB. Snippets are untrusted text: the UI renders them as plain text.
-- **Errors**: 401 / 403 → `provider_error` saying the key was rejected (the key is never echoed or logged); 429 →
-  `rate_limited`; a network failure or timeout → `provider_unreachable`; any other failure → `provider_error`.
+- **Errors**: no key for the backend → 400 `provider_not_configured` ("No API key is set for <backend>: add one in
+  Settings → Web search."); 401 / 403 → 502 `provider_error` "The search key was rejected." (the key is never echoed or
+  logged); 429 → `rate_limited` (with `retryAfterMs`); a network failure or timeout → 502 `provider_unreachable`; any
+  other failure (another status, a body over 1 MB or not the vendor's JSON) → 502 `provider_error`.
 - **Not blocked by `HF_OFFLINE`** (like `web_fetch`: the search runs only when the user turned search on). Queries and
   keys are never logged at `info`.
-- **Test search** (Settings → Web search): `POST /api/web-search/test { backend? }` runs one test search with the stored
-  key and answers `{ ok, backend, results, ms }` (the number of results and the time), or the error above.
+- **Test search** (Settings → Web search): `POST /api/web-search/test { backend? }` runs one test search (the query
+  "open source software", 3 results) with the stored key and answers `{ ok, backend, results, ms }` (the number of
+  results and the time), or the error above.
