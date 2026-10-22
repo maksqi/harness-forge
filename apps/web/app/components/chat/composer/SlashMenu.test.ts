@@ -3,8 +3,9 @@ import { mount } from '@vue/test-utils'
 import { describe, expect, it, vi } from 'vitest'
 import { nextTick } from 'vue'
 import { testIds } from '~/utils/testids'
+import { mcpPromptCommand } from '~/utils/testing/fixtures'
 import { byTestId } from './composer-test-utils'
-import { clientSlashItems } from './slash-commands'
+import { clientSlashItems, serverSlashItems } from './slash-commands'
 import SlashMenu from './SlashMenu.vue'
 
 // The shared test helpers import the stores, which import useApi ('#imports' does not resolve in Vitest).
@@ -246,5 +247,33 @@ describe('slashMenu: qualified names (Phase 12, W12.13-T4)', () => {
     expect(name.text().endsWith('b'.repeat(10))).toBe(true)
     expect(name.attributes('title')).toBe(`/${long}`)
     expect(wrapper.get(byTestId(testIds.slashMenuItem)).attributes('data-value')).toBe(long)
+  })
+
+  it('lists the prompts of MCP servers in the MCP group with the server\'s name and the argument hint (Phase 14)', async () => {
+    const mcp = serverSlashItems([
+      mcpPromptCommand(),
+      mcpPromptCommand({ name: 'mcp__github__review_pr', description: 'Review a pull request', argumentHint: '<pr> [base]', mcpServer: { id: 'github', name: 'GitHub' } }),
+    ])
+    const skill: SlashItem = { name: 'pdf', description: 'Read PDFs', kind: 'server', source: 'PDF kit', group: 'skill', skill: true }
+    const wrapper = mount(SlashMenu, { props: { open: true, query: '', items: [...items, skill, ...mcp] } })
+    expect(groupLabels(wrapper)).toEqual(['App', 'Plugins', 'MCP', 'Skills'])
+    const rows = wrapper.findAll(byTestId(testIds.slashMenuItem, '[data-group="mcp"]'))
+    expect(rows.map(row => [row.attributes('data-value'), row.attributes('data-kind')])).toEqual([
+      ['mcp__fixture__greet', 'server'],
+      ['mcp__github__review_pr', 'server'],
+    ])
+    expect(rows[1]!.get('[data-slot="slash-menu-name"]').text()).toBe('/mcp__github__review_pr')
+    expect(rows[1]!.get('[data-slot="slash-menu-hint"]').text()).toBe('<pr> [base]')
+    expect(rows[1]!.get('[data-slot="slash-menu-detail"]').text()).toBe('GitHub')
+    expect(rows[1]!.attributes('aria-label')).toBe('/mcp__github__review_pr, Review a pull request, arguments <pr> [base]')
+    expect(rows[0]!.get('[data-slot="slash-menu-detail"]').text()).toBe('Fixture')
+
+    // Typing a segment of the name finds it; the typed full name is picked first.
+    await wrapper.setProps({ query: 'review' })
+    expect(wrapper.findAll(byTestId(testIds.slashMenuItem)).map(row => row.attributes('data-value'))).toEqual(['mcp__github__review_pr'])
+    await wrapper.setProps({ query: 'mcp__fixture__greet' })
+    const vm = wrapper.vm as unknown as { handleKeydown: (event: KeyboardEvent) => boolean }
+    vm.handleKeydown(key('Enter'))
+    expect(wrapper.emitted('select')?.[0]?.[0]).toMatchObject({ name: 'mcp__fixture__greet', group: 'mcp' })
   })
 })

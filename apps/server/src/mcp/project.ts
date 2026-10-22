@@ -36,7 +36,8 @@
 // - Elicitation: `capabilities: { elicitation: {} }`, the broker's handler per client (runtime key
 //   `project:<projectId>/<serverId>#<generation>`), the `2026-07-28` fallback remembered per server and item hash.
 // - Prompts and resources: the caches (keys `<projectId>/<serverId>`) are filled after connecting and on a stdio
-//   `list_changed`; `prompts` / `resources` start the approved servers like `toolsFor` (waiting at most `waitMs`);
+//   `list_changed`; `prompts` / `resources` list only servers that already run (a listing never starts one: project
+//   servers start lazily for a run, ADR-050; Gate P14-A);
 //   `getPrompt` / `readResource` wait up to `LIMITS.projectMcpConnectWaitMs` for a server that is not connected yet.
 import type { MCPClient, MCPClientConfig, MCPTransport } from '@ai-sdk/mcp'
 import type { Disposable, ToolCallContext } from '@harness-forge/plugin-sdk'
@@ -1123,11 +1124,12 @@ export function createProjectMcpManagerCore(deps: AppDeps, options: ProjectMcpMa
 
   /**
    * Starts the approved servers of a project that may start and are not running (never one that is `needs-auth`: only a
-   * sign-in, a reconnect or a change restarts it) and waits at most `waitMs` for them (`toolsFor`, the prompt and
-   * resource listings). Null when nothing is approved or the project has no servers (the folder is then not read at
-   * all), in safe mode, and after the project was deleted. Rejects for an abort of `signal` and for read errors.
+   * sign-in, a reconnect or a change restarts it) and waits at most `waitMs` for them (`toolsFor`, a prompt or resource
+   * request on send). With `start: false` (the prompt and resource listings) nothing is started: the plan is only
+   * decided. Null when nothing is approved or the project has no servers (the folder is then not read at all), in safe
+   * mode, and after the project was deleted. Rejects for an abort of `signal` and for read errors.
    */
-  async function readyServers(projectId: string, signal: AbortSignal, waitMs: number): Promise<ReadyProject | null> {
+  async function readyServers(projectId: string, signal: AbortSignal, waitMs: number, start = true): Promise<ReadyProject | null> {
     signal.throwIfAborted()
     if (stopped || deleted.has(projectId) || deps.env.safeMode)
       return null
@@ -1142,6 +1144,8 @@ export function createProjectMcpManagerCore(deps: AppDeps, options: ProjectMcpMa
     const stored = await variables.names(projectId)
     retire(projectId, snapshot, approved, stored)
     let decided = plan(projectId, snapshot, approved, stored)
+    if (!start)
+      return { decided, stored }
     if (decided.toStart.length > 0 && snapshot.root !== null) {
       // Right before a start the folder is read again: a changed `.mcp.json` item is a new hash (pending).
       snapshot = await deps.projectConfig.snapshot(projectId, { signal, refresh: true })
@@ -1210,9 +1214,9 @@ export function createProjectMcpManagerCore(deps: AppDeps, options: ProjectMcpMa
   // ---------- prompts and resources (Phase 14, ADR-061) ----------
 
   /**
-   * The cached entries of a project's approved servers (started like `toolsFor`, waiting at most `options.waitMs`):
-   * connected servers with the capability list through `read`; the others are `unavailable` with their state (pending
-   * servers and safe mode name nothing). `not_found` for an unknown project; never rejects for a server problem.
+   * The cached entries of a project's approved servers that already run (a listing never starts a server; project
+   * servers start lazily for a run, ADR-050): connected servers with the capability list through `read`; the others are
+   * `unavailable` with their state (pending servers and safe mode name nothing). `not_found` for an unknown project; never rejects for a server problem.
    */
   async function projectListing<T>(
     projectId: string,
@@ -1225,7 +1229,7 @@ export function createProjectMcpManagerCore(deps: AppDeps, options: ProjectMcpMa
     await deps.projects.get(projectId)
     let ready: ReadyProject | null
     try {
-      ready = await readyServers(projectId, signal ?? new AbortController().signal, listingOptions.waitMs ?? 0)
+      ready = await readyServers(projectId, signal ?? new AbortController().signal, listingOptions.waitMs ?? 0, false)
     }
     catch (error) {
       signal?.throwIfAborted()

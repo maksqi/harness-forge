@@ -60,15 +60,22 @@
 // question of a running call, the posting state and the answer reach `ToolPart` through it, like TOOL_APPROVAL_CONTEXT;
 // ChatTranscript has no session) and passes the chat's web search mode to the composer (`session.webSearch`, v-model
 // `webSearch`). A chat that waits for an answer (`input`) still counts as running.
+// W14.9 (P14-A; docs/UI.md 7.35, 14): the polite region announces "{server} needs your input" once per request and tab,
+// and "{server}'s request expires in 1 minute" once a minute before it expires (`announcedElicitations`). While the oldest
+// pending request's card is outside the visible transcript (an IntersectionObserver; the docked composer's height is
+// cut from the bottom), the jump pill "{server} needs your input · Show" (`elicitation-jump`, named "{server} needs your
+// input, show the request") floats above the scroll-to-bottom pill; it scrolls the card into view and focuses its first
+// field (Submit when it has none).
 import type { HarnessError, HookData, MessageBranch, ReasoningEffort, RestoreResult, ToolMode, WebSearchMode } from '@harness-forge/shared'
 import type { FileUIPart } from 'ai'
 import type { ComposerRefusalData } from '~/components/chat/composer/output-style'
 import type { ChatComposerExposed, ComposerSubmitInput } from '~/components/chat/composer/types'
 import type { ToolApprovalDecision } from '~/composables/useChatSession'
 import { compactionMarkers } from '@harness-forge/shared'
-import { useElementSize } from '@vueuse/core'
+import { MessageCircleQuestionIcon } from '@lucide/vue'
+import { useElementSize, useIntersectionObserver, usePreferredReducedMotion } from '@vueuse/core'
 import { isToolUIPart } from 'ai'
-import { computed, nextTick, onMounted, provide, ref, useTemplateRef, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, provide, ref, shallowRef, useTemplateRef, watch } from 'vue'
 import { toast } from 'vue-sonner'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
@@ -110,6 +117,15 @@ import { imageFileParts, isTaskResultMessage, messageText, PLAN_TOOL_NAME, taskR
 import ChatNotFound from './ChatNotFound.vue'
 import ChatTranscript from './ChatTranscript.vue'
 import { hookAnnouncement, hookDataOf, isHookCarrierMessage } from './hooks/hook-notes'
+import {
+  announcedElicitations,
+  ELICITATION_MINUTE_MS,
+  elicitationAnnouncement,
+  elicitationFocusTarget,
+  elicitationJumpLabel,
+  elicitationJumpText,
+  elicitationMinuteAnnouncement,
+} from './parts/elicitation'
 import { TOOL_APPROVAL_CONTEXT } from './parts/tool-approval-context'
 import { createToolElicitationContext, TOOL_ELICITATIONS } from './parts/tool-elicitation-context'
 import { toolApprovalLabel } from './parts/tool-row'
@@ -381,6 +397,78 @@ watch(pendingApprovals, (pending, previous) => {
   if (added)
     void announce(added.label)
 })
+
+// ---------- MCP questions (Phase 14, ADR-060; W14.9) ----------
+
+/** The pending requests of the streaming reply, oldest first. */
+const pendingElicitations = session.elicitations
+/** Timers of the "expires in 1 minute" announcements, by request id. */
+const minuteTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+function scheduleMinuteWarning(id: string, server: string, expiresAt: number) {
+  const left = expiresAt - Date.now()
+  if (left <= 0)
+    return
+  minuteTimers.set(id, setTimeout(() => {
+    if (pendingElicitations.value.some(request => request.id === id) && announcedElicitations.add(`${id}:minute`))
+      void announce(elicitationMinuteAnnouncement(server))
+  }, Math.max(0, left - ELICITATION_MINUTE_MS)))
+}
+
+watch(pendingElicitations, (pending) => {
+  for (const request of pending) {
+    if (announcedElicitations.add(request.id))
+      void announce(elicitationAnnouncement(request.serverName))
+    if (!minuteTimers.has(request.id))
+      scheduleMinuteWarning(request.id, request.serverName, request.expiresAt)
+  }
+  for (const [id, timer] of minuteTimers) {
+    if (!pending.some(request => request.id === id)) {
+      clearTimeout(timer)
+      minuteTimers.delete(id)
+    }
+  }
+}, { immediate: true })
+onBeforeUnmount(() => {
+  for (const timer of minuteTimers.values())
+    clearTimeout(timer)
+  minuteTimers.clear()
+})
+
+/** The request the jump pill points at: the oldest pending one. */
+const jumpRequest = computed(() => pendingElicitations.value[0] ?? null)
+/** Its card in the transcript (found after each render: the card belongs to its tool row). */
+const jumpCard = shallowRef<HTMLElement | null>(null)
+/** The card is inside the visible transcript (above the docked composer). */
+const jumpCardVisible = ref(true)
+
+watch([() => jumpRequest.value?.id ?? null, messages], ([id]) => {
+  const card = id
+    ? view.value?.querySelector<HTMLElement>(`[data-testid="${testIds.elicitationCard}"][data-elicitation-id="${id}"]`) ?? null
+    : null
+  if (card !== jumpCard.value) {
+    jumpCard.value = card
+    jumpCardVisible.value = true
+  }
+}, { flush: 'post', immediate: true })
+
+useIntersectionObserver(jumpCard, (entries) => {
+  const entry = entries.at(-1)
+  if (entry)
+    jumpCardVisible.value = entry.isIntersecting
+}, { rootMargin: () => `0px 0px -${Math.round(dockHeight.value)}px 0px` })
+
+const showJump = computed(() => jumpRequest.value !== null && jumpCard.value !== null && !jumpCardVisible.value)
+const reducedMotion = usePreferredReducedMotion()
+
+/** The jump pill: the card into view, focus on its first field (else Submit). */
+function onJump() {
+  const card = jumpCard.value
+  if (!card)
+    return
+  card.scrollIntoView?.({ block: 'center', behavior: reducedMotion.value === 'reduce' ? 'auto' : 'smooth' })
+  elicitationFocusTarget(card)?.focus({ preventScroll: true })
+}
 
 /**
  * + Phase 9 (ADR-040): compaction markers this view has seen (`<message>:<part>:<createdAt>`). A marker is announced once,
@@ -992,6 +1080,19 @@ function setProject(value: string | null) {
         @delete-version="onDeleteVersion"
         @rewind="onRewind"
       />
+      <Button
+        v-if="showJump && jumpRequest"
+        type="button"
+        variant="outline"
+        size="sm"
+        :data-testid="testIds.elicitationJump"
+        :aria-label="elicitationJumpLabel(jumpRequest.serverName)"
+        class="absolute bottom-[calc(var(--hf-composer-h,8rem)+3.75rem)] left-1/2 z-20 max-w-[calc(100%-2rem)] -translate-x-1/2 rounded-full bg-background shadow-sm dark:bg-background dark:hover:bg-muted pointer-coarse:h-10"
+        @click="onJump"
+      >
+        <MessageCircleQuestionIcon aria-hidden="true" class="text-warning" />
+        <span class="min-w-0 truncate">{{ elicitationJumpText(jumpRequest.serverName) }}</span>
+      </Button>
       <div
         v-if="loadError && !loaded"
         class="pointer-events-none absolute inset-x-0 top-6 z-10 mx-auto w-full max-w-3xl px-4 md:px-6"

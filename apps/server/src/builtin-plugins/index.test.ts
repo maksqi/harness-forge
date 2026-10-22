@@ -59,7 +59,7 @@ async function registeredTools(): Promise<Record<string, string[]>> {
       } },
       providers: ignore,
       commands: ignore,
-      settings: { get: () => ({}) },
+      settings: { get: () => ({}), onChange: () => ({ dispose() {} }) },
       images: { generate: async () => ({ images: [] }) },
       logger: { debug() {}, info() {}, warn() {}, error() {} },
     } as unknown as PluginContext
@@ -88,13 +88,13 @@ describe('builtin plugins', () => {
     expect(getBuiltinPlugins({ mockProvider: true }).map(plugin => plugin.id)).toEqual([...LOAD_ORDER])
   })
 
-  it('registers 15 builtin tools (14 on Windows, without shell): core-tools 3, core-workspace 7, core-agent 4 (with skill), mock 1; core-search none yet', async () => {
+  it('registers 15 builtin tools (14 on Windows, without shell): core-tools 3, core-workspace 7, core-agent 4 (with skill), mock 1; core-search none without a key', async () => {
     const tools = await registeredTools()
     const shell = process.platform !== 'win32'
     expect(tools).toEqual({
       'core-providers': [],
       'core-tools': ['current_time', 'web_fetch', 'generate_image'],
-      // Phase 14 (C50): the stub registers no tool; W14.5 registers search_web while the selected backend has a key.
+      // Phase 14 (W14.5): search_web is registered only while the selected backend has a key (none here).
       'core-search': [],
       'core-commands': [],
       'core-mcp': [],

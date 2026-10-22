@@ -1,8 +1,9 @@
 // Groq: `@ai-sdk/groq` (PROVIDERS.md sections 1-6). Reasoning models other than gpt-oss always get
 // `reasoningFormat: 'parsed'` (Groq defaults to `raw`, which puts `<think>` text into the answer). Whisper models serve
-// transcription (PROVIDERS.md section 13); the package has no speech models.
+// transcription (PROVIDERS.md section 13); the package has no speech models. The gpt-oss models search the web with
+// Groq's `browser_search` (the `webSearch` hook, plugin API 1.7.0, PROVIDERS.md 14).
 import type { ModelInfo, ProviderDefinition, ProviderRuntime, ReasoningEffort } from '@harness-forge/plugin-sdk'
-import { createGroq } from '@ai-sdk/groq'
+import { browserSearch, createGroq } from '@ai-sdk/groq'
 import { apiKeyField, apiKeyOf, baseUrlField, baseUrlOf } from '../lib/credentials.ts'
 import { mapProviderError } from '../lib/errors.ts'
 import { requestJson, unexpectedListing } from '../lib/http.ts'
@@ -24,6 +25,11 @@ const GPT_OSS = /(?:^|\/)gpt-oss/i
 const THINK_TAG_MODELS = /(?:^|\/)(?:qwen3|qwen-qwq|qwq|deepseek-r1)/i
 /** Qwen models that accept `reasoning_effort: 'none'`. */
 const QWEN_WITH_NONE = /^qwen\/qwen3\.\d+/i
+
+/** Native web search (`groq.tools.browserSearch`) for a model id: the gpt-oss models only (no citations). */
+export function supportsGroqBrowserSearch(modelId: string): boolean {
+  return GPT_OSS.test(modelId)
+}
 
 /** True when every request to the model gets `providerOptions.groq.reasoningFormat = 'parsed'`. */
 export function usesParsedReasoningFormat(modelId: string): boolean {
@@ -128,5 +134,9 @@ export const groqProvider: ProviderDefinition = {
   transcriptionOptions(hints) {
     const language = transcriptionLanguage(hints)
     return language === undefined ? undefined : { groq: { language } }
+  },
+  webSearch(model) {
+    // Groq streams no tool-call or source parts for it (the answer carries no citations).
+    return supportsGroqBrowserSearch(model.id) ? { tools: { browser_search: browserSearch({}) } } : undefined
   },
 }

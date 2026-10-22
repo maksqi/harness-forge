@@ -20,7 +20,18 @@
 // context); the user-role carrier message of a Stop continuation (only hook records) shows its records without a
 // "## User" heading, after the reply that ran the hook. Invalid record data is left out; the hooks that ran, their
 // errors and a rewritten input are not rendered. JSON exports keep the parts as stored.
-import type { ChatDetail, ChatExport, ChatExportFormat, CompactionData, HarnessUIMessage, HookData, TaskOutput } from '@harness-forge/shared'
+//
+// Phase 14 (ADR-060, ADR-062, ADR-063, W14.6-T2; readers in ./records.ts): in Markdown a finished `search_web` call reads
+// "Searched the web: <query> (<n> results · <search API>)" followed by one line per result ("- [title](url) (published):
+// snippet", http(s) URLs only); a provider-executed search call (native web search) reads "Searched the web: <query>"
+// ("Searched the web" without a query, plus its error text when it failed): its output, `encryptedContent` and provider
+// metadata are never written (coordinator decision C); the "Source:" lines of the reply's `source-url` parts are
+// unchanged. An MCP tool call writes its output without the `elicitations` key, then one line per elicitation record:
+// "_Input request (<action>[, <reason>]): `field`, …_" (the field names and the action, never a value or the request
+// message). Search texts (queries, titles, snippets) are untrusted: flattened to one line, Markdown link and HTML
+// characters escaped. The JSON export keeps the messages as stored (provider-executed parts included) and never
+// carries the live `awaitingInput` flag.
+import type { ChatDetail, ChatExport, ChatExportFormat, CompactionData, HarnessUIMessage, HookData, McpElicitationRecord, SearchWebOutput, TaskOutput } from '@harness-forge/shared'
 import type { ChatExportFile } from './types.ts'
 import { Buffer } from 'node:buffer'
 import {
@@ -29,10 +40,13 @@ import {
   HOOK_PART_TYPE,
   hookDataSchema,
   isHookCarrier,
+  isProviderExecutedPart,
+  SEARCH_WEB_TOOL_NAME,
   splitSteers,
   TASK_RESULT_PART_TYPE,
   taskResultDataSchema,
 } from '@harness-forge/shared'
+import { elicitationRecordsOf, isMcpToolName, searchQueryOf, searchWebOutputOf, WEB_SEARCH_BACKEND_LABELS } from './records.ts'
 
 /** Tool outputs longer than this (UTF-8 bytes) are truncated in Markdown exports. */
 export const EXPORT_TOOL_OUTPUT_BYTES = 4096
@@ -130,19 +144,75 @@ function compactionBlocks(part: Record<string, unknown>): string[] {
   return summary === '' ? [compactionLine(parsed.data)] : [compactionLine(parsed.data), quote(summary)]
 }
 
+/**
+ * Phase 14: untrusted search text (a query, a result title or snippet) on one line, with the characters of Markdown
+ * links, code spans and inline HTML escaped.
+ */
+function inlineText(text: string): string {
+  return text.replace(/\s+/g, ' ').trim().replace(/[\\[\]<>`]/g, '\\$&')
+}
+
+/** Phase 14: the line of a search call (`search_web` or native): "Searched the web: <query>", or without a query. */
+export function searchLine(query: string | null): string {
+  return query === null || query === '' ? 'Searched the web' : `Searched the web: ${inlineText(query)}`
+}
+
+/** Phase 14: a finished `search_web` call: its line with the result count and the search API, then one line per result. */
+function searchWebBlocks(output: SearchWebOutput, input: unknown): string[] {
+  const count = output.results.length
+  const summary = count === 0 ? 'no results' : count === 1 ? '1 result' : `${count} results`
+  const query = output.query === '' ? searchQueryOf(input, undefined) : output.query
+  const head = `${searchLine(query)} (${summary} · ${WEB_SEARCH_BACKEND_LABELS[output.backend]})`
+  if (count === 0)
+    return [head]
+  const lines = output.results.map((result) => {
+    const title = inlineText(result.title)
+    const published = result.published === null ? '' : inlineText(result.published)
+    const snippet = inlineText(result.snippet)
+    return `- [${title === '' ? inlineText(result.url) : title}](${linkTarget(result.url)})${published === '' ? '' : ` (${published})`}${snippet === '' ? '' : `: ${snippet}`}`
+  })
+  return [head, lines.join('\n')]
+}
+
+/** Phase 14: the line of an elicitation record (ADR-060): its action, its reason unless the user answered, its fields. */
+export function elicitationLine(record: Pick<McpElicitationRecord, 'action' | 'reason' | 'fields'>): string {
+  const outcome = record.reason === 'user' ? record.action : `${record.action}, ${record.reason}`
+  const fields = record.fields.map(field => `\`${field.replace(/`/g, '')}\``).join(', ')
+  return `_Input request (${outcome})${fields === '' ? '' : `: ${fields}`}_`
+}
+
 function toolBlocks(part: Record<string, unknown>): string[] {
   const type = String(part.type)
   const name = type === 'dynamic-tool' ? String(part.toolName ?? 'tool') : type.slice('tool-'.length)
   const state = typeof part.state === 'string' ? part.state : 'unknown'
+  // Phase 14: native web search: the query only (never its output or `encryptedContent`).
+  if (isProviderExecutedPart(part)) {
+    const line = searchLine(searchQueryOf(part.input, part.output))
+    return state === 'output-error' && typeof part.errorText === 'string' ? [line, fenced(part.errorText, 'text')] : [line]
+  }
+  if (name === SEARCH_WEB_TOOL_NAME && state === 'output-available' && part.preliminary !== true) {
+    const output = searchWebOutputOf(part.output)
+    if (output !== null)
+      return searchWebBlocks(output, part.input)
+  }
   const blocks = [`**Tool** \`${name.replace(/`/g, '')}\` (${state})`]
   if (part.input !== undefined)
     blocks.push(fenced(json(part.input), 'json'))
+  let records: McpElicitationRecord[] = []
   if (state === 'output-available') {
-    const output = truncateUtf8(json(part.output), EXPORT_TOOL_OUTPUT_BYTES)
+    let value = part.output
+    // Phase 14: the elicitation records of an MCP call become lines of their own.
+    const split = isMcpToolName(name) ? elicitationRecordsOf(part.output) : null
+    if (split !== null) {
+      value = split.rest
+      records = split.records
+    }
+    const output = truncateUtf8(json(value), EXPORT_TOOL_OUTPUT_BYTES)
     blocks.push(fenced(`${output.text}${output.truncated ? TRUNCATED_MARKER : ''}`, 'json'))
   }
   if (state === 'output-error' && typeof part.errorText === 'string')
     blocks.push(fenced(part.errorText, 'text'))
+  blocks.push(...records.map(elicitationLine))
   return blocks
 }
 
@@ -288,8 +358,8 @@ export function linearTree(messages: readonly HarnessUIMessage[]): ChatExportTre
  * chat).
  */
 export function renderChatJson(chat: ChatDetail, at: number, tree: ChatExportTree = linearTree(chat.messages)): string {
-  // Exports never carry the project (ADR-031): projects are host-specific.
-  const { branches: _branches, messages: _path, settings, totals, projectId: _projectId, ...summary } = chat
+  // Exports never carry the project (ADR-031): projects are host-specific; nor (Phase 14) the live `awaitingInput`.
+  const { branches: _branches, messages: _path, settings, totals, projectId: _projectId, awaitingInput: _awaitingInput, ...summary } = chat
   const body: ChatExport = {
     format: 'harness-forge.chat',
     version: 2,

@@ -4,6 +4,9 @@
 // Phase 9 (ADR-042; UI.md 7.26, 10.6): every chip carries `data-kind`: `upload`, or `project` for a file attached
 // through an `@` mention, which also carries `data-path` and shows `FileCode`, the base name and the full path in a
 // tooltip. A project chip and its `@path` text are independent (removing one keeps the other).
+// Phase 14 (ADR-061; W14.8): an MCP resource picked in the `@` menu is a file chip like an upload (`data-kind="resource"`,
+// `data-server-id`), with its upload state while the server reads it and Retry when that failed; it and its
+// `@server:uri` text are independent too.
 import type { ComposerAttachment } from '~/composables/useComposerAttachments'
 import { CircleAlertIcon, FileCodeIcon, TriangleAlertIcon, XIcon } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
@@ -77,8 +80,9 @@ const emit = defineEmits<{
         <FileChip
           v-else
           :data-testid="testIds.composerAttachment"
-          :data-mime="item.mime"
-          data-kind="upload"
+          :data-mime="item.mime || undefined"
+          :data-kind="item.source === 'resource' ? 'resource' : 'upload'"
+          :data-server-id="item.source === 'resource' ? item.serverId : undefined"
           :name="item.name"
           :size="item.size > 0 ? item.size : undefined"
           :mime="item.mime"

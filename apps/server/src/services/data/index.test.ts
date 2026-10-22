@@ -4,7 +4,8 @@
 // Phase 8 (W8.7): `DataSummary.checkpoints`, the checkpoint purge of delete-all, the plugin data in the manual cleanup
 // (the automatic sweep has its own file, ./auto-sweep.test.ts). Phase 11 (W11.7-T6): delete-all keeps the personal hooks,
 // the project approvals and the project MCP variables (configuration, like projects and settings). Phase 12 (W12.3-T7):
-// delete-all keeps the marketplaces and the Claude Code plugins.
+// delete-all keeps the marketplaces and the Claude Code plugins. Phase 14 (W14.6-T3): delete-all keeps the MCP OAuth
+// records and client secrets, the `core-search` keys, the MCP servers and the web search settings.
 import type { MaintenanceOperation } from '../maintenance/types.ts'
 import type { DataTestApp } from './fixtures.test-util.ts'
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs'
@@ -12,14 +13,14 @@ import { join } from 'node:path'
 import { dataCleanupPreviewSchema, dataCleanupResultSchema, dataDeleteResultSchema, DEFAULT_SETTINGS, HarnessError } from '@harness-forge/shared'
 import { eq } from 'drizzle-orm'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { chatShares, files, hooks, marketplaces, messages, pluginKv, plugins, projects, projectTrust, secrets, usage } from '../../db/schema.ts'
+import { chatShares, files, hooks, marketplaces, mcpServers, messages, pluginKv, plugins, projects, projectTrust, secrets, usage } from '../../db/schema.ts'
 import { freshAuthRequiredError } from '../../http/middleware/fresh-auth.ts'
 import { createFakeCheckpointService } from '../../testing/fake-checkpoints.ts'
 import { GIF, JPEG, PNG, TEXT } from '../files/fixtures.test-util.ts'
 import { fileUrl } from '../files/index.ts'
 import { DAY_MS, HOUR_MS, seedStoredFile, sha256Of } from '../files/store.test-util.ts'
 import { MAINTENANCE_BUSY_MESSAGE } from '../maintenance/index.ts'
-import { closeCustomizedApps, PHASE11_SENTINELS, PHASE12_PLUGIN_ID, PHASE12_SENTINELS, realDataApp, seedPhase11, seedPhase12 } from './backup-fixtures.test-util.ts'
+import { closeCustomizedApps, PHASE11_SENTINELS, PHASE12_PLUGIN_ID, PHASE12_SENTINELS, PHASE14_SECRET_ROWS, PHASE14_SENTINELS, realDataApp, seedPhase11, seedPhase12, seedPhase14 } from './backup-fixtures.test-util.ts'
 import { FILE_STATE_SETTING } from './cleanup.ts'
 import { assistant, chatId, checkpointsOf, closeDataApps, dataApp, filePart, mid, treeChat, user } from './fixtures.test-util.ts'
 
@@ -192,6 +193,21 @@ describe('delete-all keeps the Phase 12 configuration', () => {
     expect(await t.deps.data.deleteAll({ confirm: 'DELETE', files: true, usage: true })).toMatchObject({ chats: 1 })
     expect((await t.deps.db.select().from(marketplaces)).map(row => [row.id, row.name])).toEqual([[phase12.marketplaceId, 'acme-tools']])
     expect((await t.deps.db.select().from(plugins)).map(row => [row.id, row.format, row.trustedHash])).toEqual([[PHASE12_PLUGIN_ID, 'claude', PHASE12_SENTINELS.pluginTrust]])
+  })
+})
+
+describe('delete-all keeps the Phase 14 configuration', () => {
+  it('keeps the MCP OAuth records and client secrets, the core-search keys, the MCP server and the web search settings', async () => {
+    const t = await realDataApp()
+    const seeded = await seedPhase14(t)
+    expect(await t.deps.data.deleteAll({ confirm: 'DELETE', files: true, usage: true })).toMatchObject({ chats: 1, messages: 2 })
+    expect((await t.deps.chats.list({})).items).toEqual([])
+    const rows = await t.deps.db.select({ scope: secrets.scope, name: secrets.name }).from(secrets)
+    expect(rows.map(row => [row.scope, row.name]).sort()).toEqual(PHASE14_SECRET_ROWS.map(([scope, name]) => [scope, name]).sort())
+    expect((await t.deps.db.select().from(mcpServers)).map(row => [row.id, row.transport])).toEqual([
+      [seeded.serverId, { type: 'http', url: PHASE14_SENTINELS.serverUrl, headerNames: [], oauth: { clientId: 'public-client', scopes: 'docs.read' } }],
+    ])
+    expect(await t.deps.settings.get()).toMatchObject({ webSearchDefault: 'auto', webSearchNative: false })
   })
 })
 

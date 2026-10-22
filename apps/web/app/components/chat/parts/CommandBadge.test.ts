@@ -6,7 +6,7 @@ import { h } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { MODEL_LABEL_RESOLVER } from '~/components/providers/model-label'
 import { usePluginsStore } from '~/stores/plugins'
-import { commandSummary, pluginSummary } from '~/utils/testing/fixtures'
+import { commandSummary, mcpPromptCommand, mcpServer, pluginSummary } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import CommandBadge from './CommandBadge.vue'
 
@@ -145,5 +145,25 @@ describe('commandBadge: qualified names (Phase 12, W12.13-T4)', () => {
     // A plugin that is gone: its id.
     const gone = badge(invocation({ name: 'old-kit:review', source: 'plugin' }))
     expect(gone.get('[data-slot="command-badge"]').text()).toContain(', From old-kit')
+  })
+})
+
+describe('commandBadge: MCP prompts (Phase 14, W14.9)', () => {
+  it('reads "MCP · {server}" with the server\'s listed name and marks data-source="mcp"', () => {
+    const plugins = usePluginsStore()
+    plugins.commands = [mcpPromptCommand()]
+    const wrapper = badge(invocation({ name: 'mcp__fixture__greet', input: 'Ada', source: 'mcp' }))
+    const root = wrapper.get('[data-slot="command-badge"]')
+    expect(root.attributes('data-source')).toBe('mcp')
+    expect(root.attributes('aria-label')).toBe('Command /mcp__fixture__greet, MCP · Fixture')
+  })
+
+  it('falls back to the MCP server list, then to the server id in the name', () => {
+    const plugins = usePluginsStore()
+    plugins.mcp = [mcpServer({ id: 'docs', name: 'Docs Server' })]
+    expect(badge(invocation({ name: 'mcp__docs__summarize', source: 'mcp' })).get('[data-slot="command-badge"]').attributes('aria-label'))
+      .toBe('Command /mcp__docs__summarize, MCP · Docs Server')
+    expect(badge(invocation({ name: 'mcp__linear__triage', source: 'mcp' })).get('[data-slot="command-badge"]').attributes('aria-label'))
+      .toBe('Command /mcp__linear__triage, MCP · linear')
   })
 })

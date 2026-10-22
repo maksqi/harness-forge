@@ -11,6 +11,9 @@
 // Phase 12 (W12.3-T7): `seedPhase12()` adds what a v1.8 server holds besides that: a marketplace row, a Claude Code
 // plugin row (format `claude`, a trust pin and an origin), a hook transcript of the chat and a home-folder import plan
 // kept in memory, each carrying a `*-SENTINEL` marker of `PHASE12_SENTINELS`.
+// Phase 14 (W14.6-T3): `seedPhase14()` adds what a v1.9 server holds besides chats: the web search settings, a personal
+// http MCP server with `oauth` settings, the MCP OAuth records and client secret of every origin and the `core-search`
+// keys (each a `*-SENTINEL` of `PHASE14_SENTINELS`), and a chat whose reply holds the Phase 14 records.
 import type { CustomizationKind, HarnessUIMessage } from '@harness-forge/shared'
 import type { TestApp } from '../../testing/create-test-app.ts'
 import type { FakeCustomizationService } from '../../testing/fake-customizations.ts'
@@ -22,11 +25,12 @@ import { Buffer } from 'node:buffer'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { createHookId, createMarketplaceId } from '@harness-forge/shared'
-import { hooks, marketplaces, plugins, projectTrust, secrets } from '../../db/schema.ts'
+import { hooks, marketplaces, mcpServers, plugins, projectTrust, secrets } from '../../db/schema.ts'
 import { createTestApp } from '../../testing/create-test-app.ts'
 import { createFakeCheckpointService } from '../../testing/fake-checkpoints.ts'
 import { createFakeCustomizationService } from '../../testing/fake-customizations.ts'
 import { createFakeChatRunner, createFakeChatsService, createRecordingEventBus } from '../../testing/fakes.ts'
+import { recordMessages } from '../chats/records.test-util.ts'
 import { createFilesService } from '../files/index.ts'
 import { createDataService } from './index.ts'
 
@@ -209,4 +213,66 @@ export async function seedPhase12(t: TestApp, chatId: string): Promise<Phase12Se
     files: [{ path: 'agents/sentinel.md', file: new Blob([`---\nname: sentinel\ndescription: Kept in the plan.\n---\n${PHASE12_SENTINELS.importPlan}\n`]) }],
   })
   return { marketplaceId, transcript, planId: plan.id }
+}
+
+// ---------- Phase 14 (W14.6-T3) ----------
+
+/** Values of the Phase 14 state that must never reach a backup (OAuth records, client secrets, search keys). */
+export const PHASE14_SENTINELS = {
+  accessToken: 'ACCESS-TOKEN-SENTINEL',
+  refreshToken: 'REFRESH-TOKEN-SENTINEL',
+  clientSecret: 'CLIENT-SECRET-SENTINEL',
+  pluginRecord: 'PLUGIN-OAUTH-RECORD-SENTINEL',
+  projectRecord: 'PROJECT-OAUTH-RECORD-SENTINEL',
+  braveKey: 'BRAVE-KEY-SENTINEL',
+  tavilyKey: 'TAVILY-KEY-SENTINEL',
+  exaKey: 'EXA-KEY-SENTINEL',
+  serverUrl: 'https://mcp-sentinel.example/mcp',
+} as const
+
+/** The OAuth and search secret rows `seedPhase14` writes, as `[scope, name]`. */
+export const PHASE14_SECRET_ROWS: readonly (readonly [string, string])[] = [
+  ['mcp:remote-docs', 'oauth.record'],
+  ['mcp:remote-docs', 'oauth.clientSecret'],
+  ['plugin:acme-mcp', 'mcp-oauth.docs'],
+  ['project:prj_phase14project01', 'mcp-oauth.remote'],
+  ['plugin:core-search', 'settings.braveApiKey'],
+  ['plugin:core-search', 'settings.tavilyApiKey'],
+  ['plugin:core-search', 'settings.exaApiKey'],
+]
+
+export interface Phase14Seed {
+  chatId: string
+  /** The personal http MCP server with an OAuth client (`transport.oauth`). */
+  serverId: string
+}
+
+/**
+ * Writes the Phase 14 state of a v1.9 server: the settings `webSearchDefault` / `webSearchNative`, a personal http MCP
+ * server with `oauth` settings, its OAuth record and client secret, a plugin's and a project's OAuth records, the three
+ * `core-search` keys (raw `secrets` rows whose ciphertext and hint hold the sentinels: the backup must never read the
+ * table, whatever it holds) and a chat with web search on whose reply holds every Phase 14 record.
+ */
+export async function seedPhase14(t: TestApp): Promise<Phase14Seed> {
+  const { deps } = t
+  const at = Date.now()
+  await deps.settings.update({ webSearchDefault: 'auto', webSearchNative: false })
+  const serverId = 'remote-docs'
+  await deps.db.insert(mcpServers).values({
+    id: serverId,
+    name: 'Remote docs',
+    transport: { type: 'http', url: PHASE14_SENTINELS.serverUrl, headerNames: [], oauth: { clientId: 'public-client', scopes: 'docs.read' } },
+    policy: 'ask',
+    enabled: false,
+    createdAt: at,
+    updatedAt: at,
+  })
+  const record = JSON.stringify({ v: 1, resource: PHASE14_SENTINELS.serverUrl, clientId: 'public-client', tokens: { access_token: PHASE14_SENTINELS.accessToken, refresh_token: PHASE14_SENTINELS.refreshToken, token_type: 'Bearer', obtainedAt: at } })
+  const values = [record, PHASE14_SENTINELS.clientSecret, PHASE14_SENTINELS.pluginRecord, PHASE14_SENTINELS.projectRecord, PHASE14_SENTINELS.braveKey, PHASE14_SENTINELS.tavilyKey, PHASE14_SENTINELS.exaKey]
+  for (const [index, [scope, name]] of PHASE14_SECRET_ROWS.entries()) {
+    const value = values[index]!
+    await deps.db.insert(secrets).values({ scope, name, ciphertext: Buffer.from(value), hint: value.slice(0, 64), keyVersion: 1, updatedAt: at })
+  }
+  const chat = await deps.chats.create({ title: 'Web search', settings: { toolMode: 'ask', webSearch: 'auto' }, messages: recordMessages() })
+  return { chatId: chat.id, serverId }
 }

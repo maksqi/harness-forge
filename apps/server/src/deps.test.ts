@@ -1185,11 +1185,12 @@ describe('phase 14 skeleton (MCP OAuth, the elicitation broker, the stop order)'
       expect(isMcpAuthRequired(thrown)).toBe(true)
       expect((thrown as McpAuthRequired).target).toEqual(GLOBAL)
     }
+    // W14.1: the start and callback providers exist only for a pending flow; unknown servers, projects and states.
     for (const mode of ['start', 'callback'] as const)
-      expect(() => auth.provider(PROJECT, mode)).toThrow(expect.objectContaining({ code: 'not_implemented' }))
-    await expect(auth.start(GLOBAL, { origin: 'http://127.0.0.1:8787', returnTo: null })).rejects.toMatchObject({ code: 'not_implemented' })
-    await expect(auth.complete({ state: 's'.repeat(16), code: 'c' }, { origin: 'http://127.0.0.1:8787' })).rejects.toMatchObject({ code: 'not_implemented' })
-    await expect(auth.signOut(PROJECT)).rejects.toMatchObject({ code: 'not_implemented' })
+      expect(() => auth.provider(PROJECT, mode)).toThrow(McpAuthRequired)
+    await expect(auth.start(GLOBAL, { origin: 'http://127.0.0.1:8787', returnTo: null })).rejects.toMatchObject({ code: 'not_found' })
+    await expect(auth.complete({ state: 's'.repeat(16), code: 'c' }, { origin: 'http://127.0.0.1:8787' })).rejects.toMatchObject({ code: 'conflict', details: { reason: 'stale' } })
+    await expect(auth.signOut(PROJECT)).rejects.toMatchObject({ code: 'not_found' })
     await expect(auth.stop()).resolves.toBeUndefined()
     // isMcpAuthRequired also recognizes a copy by name, and nothing else.
     expect(isMcpAuthRequired(Object.assign(new Error('x'), { name: 'McpAuthRequired' }))).toBe(true)

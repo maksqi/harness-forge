@@ -29,22 +29,43 @@
 // to 32 or a user-invocable skill of up to 64 characters, ADR-052) and its `kind` (`command` / `skill`, so the page can
 // say "Skill"); never its input, expansion or what its `!` / `@` lines inlined.
 //
+// Phase 14 (ADR-060, ADR-062, ADR-063, W14.6-T1; no `sharePartSchema` change; readers in ../chats/records.ts):
+// - a `search_web` row (the builtin of `core-search`) keeps its input and, when its output reads as a `SearchWebOutput`,
+//   the query, the backend and the results copied field by field (title, http(s) URL, snippet, published; invalid
+//   results dropped), results dropped from the end until the value fits `LIMITS.shareToolValueChars`;
+// - a provider-executed search call (native web search, `providerExecuted: true`) becomes a "searched the web" row: the
+//   input is `{ query }` (the input's query, else the output's `action.query` / `action.queries`; no input when there
+//   is none) and the output keeps only the result and action fields of the providers' search tools (`type`, `url`
+//   (http(s) only), `title`, `pageAge`, `query`, `queries`, `action`, `sources`, `pattern`, `name`, `errorCode`), so
+//   `encryptedContent` and any other provider data never reach a share (coordinator decision C); provider metadata
+//   was never copied;
+// - an MCP tool row keeps the elicitation records of its output (`elicitations`: id, message, field names, action,
+//   reason; never a value): at most `SHARE_ELICITATION_RECORDS_MAX`, dropped from the end while they take more than half
+//   of the value cap, and the rest of the output is capped with what is left (cut, it becomes `{ truncated: true,
+//   preview, elicitations }`);
+// - a tool part that still holds a preliminary output (a call that never finished: an MCP call waiting for input, a
+//   running sub-agent) is `stopped` and its progress output is not copied.
+// Sources (`source-url`) are unchanged: http(s) only, at most 2048 characters.
+//
 // `renderShareMessages` applies the options when the view is served: reasoning parts, tool inputs / outputs / error
 // texts and file parts are left out when disabled, and app file URLs become `/api/share/<token>/files/<id>` (only for
 // ids of the share's `file_ids`).
-import type { HarnessUIMessage, ShareMessage, ShareOptions, SharePart, ShareSnapshot, ShareToolStatus } from '@harness-forge/shared'
+import type { HarnessUIMessage, McpElicitationRecord, ShareMessage, ShareOptions, SharePart, ShareSnapshot, ShareToolStatus } from '@harness-forge/shared'
 import { Buffer } from 'node:buffer'
 import {
   HOOK_PART_TYPE,
   invocationKindSchema,
   isContentPart,
+  isProviderExecutedPart,
   LIMITS,
   safeParseModelRef,
+  SEARCH_WEB_TOOL_NAME,
   SLASH_NAME_PATTERN,
   splitSteers,
   TASK_RESULT_PART_TYPE,
   TOOL_NAME_PATTERN,
 } from '@harness-forge/shared'
+import { elicitationRecordsOf, isMcpToolName, searchQueryOf, searchWebOutputOf } from '../chats/records.ts'
 
 /** The file id of an app file URL (`/api/files/<id>`), else null: `FilesService.idFromUrl`. */
 export type FileIdOf = (url: string) => string | null
@@ -65,6 +86,27 @@ export const SHARE_FIELD_LIMITS = Object.freeze({
 
 /** Appended to a tool value cut at `LIMITS.shareToolValueChars` (the web recognizes the trailing marker). */
 export const SHARE_TRUNCATION_MARKER = '\n[truncated]'
+
+/** Phase 14: elicitation records an MCP tool row keeps at most (they also take at most half of the value cap). */
+export const SHARE_ELICITATION_RECORDS_MAX = 10
+
+/** Phase 14: the keys a provider-executed search output keeps (the results and actions of the providers' tools). */
+export const NATIVE_SEARCH_OUTPUT_KEYS: ReadonlySet<string> = new Set([
+  'type',
+  'url',
+  'title',
+  'pageAge',
+  'query',
+  'queries',
+  'action',
+  'sources',
+  'pattern',
+  'name',
+  'errorCode',
+])
+/** Nesting levels and array items of a provider-executed search output that a share copies at most. */
+const NATIVE_SEARCH_DEPTH_MAX = 4
+const NATIVE_SEARCH_ITEMS_MAX = 50
 
 /** Data URL types a share may carry: raster images only (never SVG, which can hold scripts). */
 const RASTER_IMAGE_TYPES: ReadonlySet<string> = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/avif'])
@@ -190,17 +232,128 @@ function sanitizeFile(part: UnknownRecord, context: SanitizeContext): FileShareP
   return { type: 'file', mediaType, ...(filename === '' ? {} : { filename }), url: part.url }
 }
 
+/** Serialized length (UTF-16 code units) of a JSON value, as `capToolValue` measures it. */
+function jsonChars(value: unknown): number {
+  return JSON.stringify(value)?.length ?? 0
+}
+
+/**
+ * Phase 14: a `search_web` output as a share keeps it: the query, the backend and the results copied field by field
+ * (`searchWebOutputOf`), results dropped from the end until it fits `LIMITS.shareToolValueChars`. A value that does not
+ * read as a search output is capped like any tool value.
+ */
+export function shareSearchWebOutput(output: unknown): unknown {
+  const parsed = searchWebOutputOf(output)
+  if (parsed === null)
+    return capToolValue(output)
+  const results = [...parsed.results]
+  const value = { query: parsed.query, backend: parsed.backend, results }
+  while (results.length > 0 && jsonChars(value) > LIMITS.shareToolValueChars)
+    results.pop()
+  return value
+}
+
+/**
+ * Phase 14: a copy of a provider-executed search value with only the `NATIVE_SEARCH_OUTPUT_KEYS` (at any depth),
+ * strings cut at 2048 characters, `url` only as an http(s) URL (or null), arrays cut at 50 items and 4 levels deep.
+ * `encryptedContent` and every other provider field are dropped. `undefined` for a value with nothing to keep.
+ */
+export function nativeSearchValue(value: unknown, depth = 0): unknown {
+  if (typeof value === 'string')
+    return clipText(value, SHARE_FIELD_LIMITS.sourceUrl)
+  if (value === null || typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value)))
+    return value
+  if (depth >= NATIVE_SEARCH_DEPTH_MAX)
+    return undefined
+  if (Array.isArray(value)) {
+    return value.slice(0, NATIVE_SEARCH_ITEMS_MAX)
+      .map(item => nativeSearchValue(item, depth + 1))
+      .filter(item => item !== undefined)
+  }
+  const record = asRecord(value)
+  if (record === null)
+    return undefined
+  const kept: UnknownRecord = {}
+  for (const [key, item] of Object.entries(record)) {
+    if (!NATIVE_SEARCH_OUTPUT_KEYS.has(key))
+      continue
+    if (key === 'url' && item !== null && (typeof item !== 'string' || item.length > SHARE_FIELD_LIMITS.sourceUrl || !isHttpUrl(item)))
+      continue
+    const copy = nativeSearchValue(item, depth + 1)
+    if (copy !== undefined)
+      kept[key] = copy
+  }
+  return kept
+}
+
+/**
+ * Phase 14: an MCP tool output with its elicitation records kept (see the module comment); an output without records
+ * is capped like any tool value.
+ */
+export function shareMcpOutput(output: unknown): unknown {
+  const split = elicitationRecordsOf(output)
+  if (split === null)
+    return capToolValue(output)
+  const records: McpElicitationRecord[] = split.records.slice(0, SHARE_ELICITATION_RECORDS_MAX)
+  while (records.length > 0 && jsonChars(records) > LIMITS.shareToolValueChars / 2)
+    records.pop()
+  if (records.length === 0)
+    return capToolValue(split.rest)
+  // The rest of the output gets what the records and the wrapping leave of the cap; a cut preview is measured again
+  // as JSON (escaped quotes and line breaks grow it) and cut shorter by the overflow.
+  const minimum = SHARE_TRUNCATION_MARKER.length + 1
+  let budget = LIMITS.shareToolValueChars - jsonChars({ truncated: true, preview: '', elicitations: records })
+  let value: UnknownRecord = { truncated: true, preview: SHARE_TRUNCATION_MARKER.trim(), elicitations: records }
+  for (let attempt = 0; attempt < 3 && budget >= minimum; attempt++) {
+    const rest = capToolValue(split.rest, budget)
+    const restRecord = asRecord(rest)
+    const candidate = restRecord !== null ? { ...restRecord, elicitations: records } : { truncated: true, preview: typeof rest === 'string' ? rest : '', elicitations: records }
+    const overflow = jsonChars(candidate) - LIMITS.shareToolValueChars
+    if (overflow <= 0) {
+      value = candidate
+      break
+    }
+    budget -= overflow
+  }
+  return value
+}
+
+/** The output of a finished tool call as a share keeps it (Phase 14: `search_web` and MCP outputs, see above). */
+function shareToolOutput(toolName: string, output: unknown): unknown {
+  if (toolName === SEARCH_WEB_TOOL_NAME)
+    return shareSearchWebOutput(output)
+  if (isMcpToolName(toolName))
+    return shareMcpOutput(output)
+  return capToolValue(output)
+}
+
 function sanitizeTool(part: UnknownRecord, toolName: unknown, context: SanitizeContext): ToolSharePart | null {
   if (typeof toolName !== 'string' || !TOOL_NAME_PATTERN.test(toolName))
     return null
-  const tool: ToolSharePart = { type: 'tool', toolName, status: toolStatus(part.state, part.approval, context.superseded) }
-  const input = capToolValue(part.input)
-  if (input !== undefined)
-    tool.input = input
-  if (part.state === 'output-available') {
-    const output = capToolValue(part.output)
-    if (output !== undefined)
-      tool.output = output
+  // Phase 14: a part that still holds a preliminary output never finished (its progress is not copied).
+  const preliminary = part.state === 'output-available' && part.preliminary === true
+  const status = preliminary ? 'stopped' : toolStatus(part.state, part.approval, context.superseded)
+  const tool: ToolSharePart = { type: 'tool', toolName, status }
+  if (isProviderExecutedPart(part)) {
+    // Phase 14: native web search, a "searched the web" row (see the module comment).
+    const query = searchQueryOf(part.input, part.output)
+    if (query !== null)
+      tool.input = { query }
+    if (part.state === 'output-available' && !preliminary) {
+      const output = capToolValue(nativeSearchValue(part.output))
+      if (output !== undefined)
+        tool.output = output
+    }
+  }
+  else {
+    const input = capToolValue(part.input)
+    if (input !== undefined)
+      tool.input = input
+    if (part.state === 'output-available' && !preliminary) {
+      const output = shareToolOutput(toolName, part.output)
+      if (output !== undefined)
+        tool.output = output
+    }
   }
   if (part.state === 'output-error' && typeof part.errorText === 'string')
     tool.errorText = clipText(part.errorText, SHARE_FIELD_LIMITS.toolErrorText)

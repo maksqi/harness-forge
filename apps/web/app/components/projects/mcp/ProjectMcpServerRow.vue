@@ -7,15 +7,22 @@
 // and idle servers) and Review… while pending (`project-mcp-review`, `review`). Store-free. Props, emits and the root
 // test id are frozen from Gate P11-0b (C39); W11.9.
 // Phase 14 (ADR-059; C54 declares, W14.7 implements; frozen from Gate P14-0b): + emits `signIn` / `signOut`: a
-// `needs-auth` remote server shows **Sign in** (`project-mcp-sign-in`, named "Sign in to {name}"), a signed-in one **Sign
-// out…** (`project-mcp-sign-out`, named "Sign out of {name}"); pending rows keep Review… and never show Sign in. W14.7 adds
-// the `.mcp.json` OAuth values (`data-slot="project-mcp-oauth"`).
+// `needs-auth` remote server shows **Sign in** (`project-mcp-sign-in`, named "Sign in to {name}"; "Signing in…" while
+// `busy`: a `needs-auth` row has no Reconnect, so its busy state is the sign-in), a signed-in one reads "Connected · {n}
+// tools · Signed in" (tooltip "Signed in · expires {time}" / "Signed in · token renews automatically") with **Sign out…**
+// (`project-mcp-sign-out`, ghost, named "Sign out of {name}"; the dialog confirms); pending rows keep Review… and never
+// show Sign in. A `needs-auth` server whose `.mcp.json` entry sends an `Authorization` header (its trust item's header
+// names) cannot sign in: it reads "The server rejected its Authorization header." (`data-slot="project-mcp-auth-header"`;
+// Edit .mcp.json… is in the dialog's footer). The `.mcp.json` `oauth` values (`data-slot="project-mcp-oauth"`) need a
+// contract member first (W14.7 CCR: neither `ProjectMcpServer` nor the trust item carries them).
 import type { ProjectMcpServer, TrustItem } from '@harness-forge/shared'
 import { ChevronRightIcon, LogInIcon, LogOutIcon, RotateCwIcon, ServerCogIcon, ShieldQuestionMarkIcon } from '@lucide/vue'
 import { computed, useId } from 'vue'
 import { Button } from '@/components/ui/button'
+import { Spinner } from '@/components/ui/spinner'
 import { cn } from '@/lib/utils'
 import { statusDotClasses } from '~/components/common/status'
+import { AUTHORIZATION_REJECTED_TEXT, signedInTooltip } from '~/components/plugins/mcp/mcp-form'
 import McpTransportBadge from '~/components/plugins/mcp/McpTransportBadge.vue'
 import { testIds } from '~/utils/testids'
 import { canReconnect, mcpServerCommand, mcpStatusDot, mcpStatusText } from '../trust/project-trust'
@@ -26,12 +33,22 @@ const emit = defineEmits<{ toggle: [], reconnect: [], review: [], signIn: [], si
 
 const toolsId = useId()
 
-const status = computed(() => mcpStatusText(props.server))
+/** + Phase 14: " · Signed in" after a connected server's tools while it holds OAuth tokens. */
+const status = computed(() => {
+  const text = mcpStatusText(props.server)
+  return props.server.state === 'connected' && props.server.auth?.signedIn === true ? `${text} · Signed in` : text
+})
+/** + Phase 14: how long a signed-in server's token lasts (the status line's tooltip). */
+const statusTitle = computed(() => (props.server.state === 'connected' ? signedInTooltip(props.server.auth) ?? undefined : undefined))
 const dot = computed(() => mcpStatusDot(props.server))
 const command = computed(() => mcpServerCommand(props.trust))
 const reconnectable = computed(() => canReconnect(props.server))
+/** + Phase 14: the `.mcp.json` entry sends its own `Authorization` header (the server refuses to sign it in: 400). */
+const sendsAuthorization = computed(() => props.trust?.kind === 'mcp' && props.trust.detail.headerNames.some(name => name.toLowerCase() === 'authorization'))
 /** + Phase 14: an approved remote server asks for a sign-in. */
-const canSignIn = computed(() => props.server.state === 'needs-auth' && props.server.transport !== 'stdio')
+const canSignIn = computed(() => props.server.state === 'needs-auth' && props.server.transport !== 'stdio' && !sendsAuthorization.value)
+/** + Phase 14: a `needs-auth` server whose own Authorization header was refused. */
+const headerRejected = computed(() => props.server.state === 'needs-auth' && sendsAuthorization.value)
 /** + Phase 14: an approved server holds OAuth tokens. */
 const signedIn = computed(() => props.server.state !== 'pending' && props.server.auth?.signedIn === true)
 </script>
@@ -65,6 +82,7 @@ const signedIn = computed(() => props.server.state !== 'pending' && props.server
       <McpTransportBadge :type="server.transport" />
       <span
         data-slot="project-mcp-status"
+        :title="statusTitle"
         :class="cn('min-w-0 break-words text-xs', server.state === 'error' ? 'text-destructive' : 'text-muted-foreground')"
       >{{ status }}</span>
       <Button
@@ -87,13 +105,15 @@ const signedIn = computed(() => props.server.state !== 'pending' && props.server
         variant="outline"
         size="xs"
         :disabled="busy"
+        :aria-busy="busy || undefined"
         :aria-label="`Sign in to ${server.name}`"
         :data-testid="testIds.projectMcpSignIn"
         class="ml-auto pointer-coarse:h-10 pointer-coarse:px-3"
         @click="emit('signIn')"
       >
-        <LogInIcon aria-hidden="true" data-icon="inline-start" />
-        Sign in
+        <Spinner v-if="busy" data-icon="inline-start" />
+        <LogInIcon v-else aria-hidden="true" data-icon="inline-start" />
+        {{ busy ? 'Signing in…' : 'Sign in' }}
       </Button>
       <Button
         v-if="signedIn"
@@ -127,6 +147,9 @@ const signedIn = computed(() => props.server.state !== 'pending' && props.server
 
     <p v-if="command" data-slot="project-mcp-command" class="min-w-0 pl-6 font-mono text-xs break-all text-foreground/90">
       {{ command }}
+    </p>
+    <p v-if="headerRejected" data-slot="project-mcp-auth-header" class="pl-6 text-xs text-muted-foreground">
+      {{ AUTHORIZATION_REJECTED_TEXT }}
     </p>
     <p v-if="server.shadows" data-slot="project-mcp-shadows" class="pl-6 text-xs text-muted-foreground">
       Replaces your server {{ server.shadows }} in this project's chats.

@@ -72,8 +72,19 @@
 // connected server resolves to a prompt invocation with source `mcp` (the expansion frozen, `prompts/get` once) or a
 // `failed` reply; null = not an MCP prompt, and the name falls through (it matches nothing else). `isServerCommandFor`
 // asks `isMcpPromptCommandFor` for such names, and `listServerCommands` takes the MCP prompt listings
-// (`McpPromptListings`) as its third parameter. P14-0b stubs: no MCP prompt resolves, none is a server command, none is
-// listed.
+// (`McpPromptListings`) as its third parameter. W14.2 (behind those signatures):
+// - scope: the chat's project servers first (a project server shadows a global server of the same id, as for tools),
+//   then the global servers; a name whose server the scope does not know is null (the text goes to the model as typed);
+// - a prompt of a connected server: the text after the name binds with `bindMcpPromptArguments` (a missing required
+//   argument is a `failed` reply "Missing argument: …" with the usage); `prompts/get` runs once and its result
+//   (`mcpPromptExpansion`, `mcp/content.ts`) is frozen into the invocation (`source: 'mcp'`, ≤ 64 KB), so a regenerate
+//   or a continuation never calls the server again;
+// - a server of the scope that is not connected (`needs-auth`, connecting, error, …), a prompt the connected server does
+//   not list, a failing `prompts/get` or an empty result: a `failed` reply (`source: 'mcp'`), never a model call;
+// - `listServerCommands` lists the prompts as `kind: 'command'`, `source: 'mcp'`, `mcpServer { id, name }`, the prompt's
+//   description (else its title) and `argumentHint` (`mcpPromptArgumentHint`); `mcpPromptListingsFor` reads the listings
+//   (`GET /commands`: nothing waits for a server that is not connected).
+// Prompt arguments and expansions are never logged (a `debug` line carries the server id, the size and the duration).
 import type { CommandDefinition, CommandRunResult } from '@harness-forge/plugin-sdk'
 import type {
   CommandInvocation,
@@ -83,6 +94,7 @@ import type {
   CustomizationSource,
   ExpandArgumentsOptions,
   HarnessUIMessage,
+  McpServerStateAny,
   ModelAliases,
 } from '@harness-forge/shared'
 import type { DataPaths } from '../env.ts'
@@ -100,6 +112,7 @@ import { Buffer } from 'node:buffer'
 import { join, posix } from 'node:path'
 import {
   argumentBase,
+  bindMcpPromptArguments,
   CATALOG_NAME_PATTERN,
   claudeModelAlias,
   COMMAND_NAME_PATTERN,
@@ -113,12 +126,16 @@ import {
   LIMITS,
   matchToolAllowlist,
   MCP_PROMPT_NAME_PATTERN,
+  MCP_SERVER_ID_PATTERN,
   MCP_TOOL_PREFIX,
+  mcpPromptArgumentHint,
+  mcpPromptServerId,
   modelRefSchema,
   planCommandExpansion,
   skillInvocation,
 } from '@harness-forge/shared'
 import { createSilentLogger } from '../logger.ts'
+import { mcpPromptExpansion } from '../mcp/content.ts'
 import { claudeSpanTrust } from '../plugins/claude/trust.ts'
 import { GUARD_TIMEOUTS } from '../plugins/guard.ts'
 import { bareAliasNames, isQualifiedName } from '../services/customizations/qualified.ts'
@@ -885,26 +902,203 @@ export async function resolveCommand(
   return registeredResolution(services, registered, parsed, context)
 }
 
-// ---------- Phase 14: MCP prompts (C52 stubs, W14.2) ----------
+// ---------- Phase 14: MCP prompts (W14.2) ----------
+
+/** Where the MCP prompt listings of a scope come from (`CommandServices` or `AppDeps`). */
+interface McpPromptSources {
+  readonly mcp?: Pick<McpManager, 'prompts'> | undefined
+  readonly projectMcp?: Pick<ProjectMcpManager, 'prompts'> | undefined
+}
+
+/** What an MCP prompt command name stands for in a scope (`lookupMcpPrompt`). */
+type McpPromptLookup
+  = | { readonly kind: 'prompt', readonly scope: 'global' | 'project', readonly prompt: McpPromptInfo }
+    | { readonly kind: 'unavailable', readonly serverId: string, readonly status: McpServerStateAny }
+    | { readonly kind: 'unknown-prompt', readonly serverId: string, readonly serverName: string }
+
+/** Options of `mcpPromptListingsFor`. */
+export interface McpPromptListingsOptions {
+  /** An abort rejects with its reason (the listings never reject for a server problem). */
+  readonly signal?: AbortSignal
+  /** How long the project's approved servers that are not connected yet are waited for (default 0). */
+  readonly waitMs?: number
+  /** `debug` lines of listings that failed. */
+  readonly logger?: Logger
+}
+
+/**
+ * The MCP prompt listings of a scope (`GET /commands`, `listServerCommands`): the global servers' prompts and, with a
+ * project, the project's (its `shadowed` servers replace the global servers of the same id). A listing that fails is
+ * null (logged at `debug`); only an abort of `options.signal` rejects.
+ */
+export async function mcpPromptListingsFor(sources: McpPromptSources, projectId: string | null, options: McpPromptListingsOptions = {}): Promise<McpPromptListings> {
+  const signal = options.signal
+  let global: McpListing<McpPromptInfo> | null = null
+  let project: ProjectMcpListing<McpPromptInfo> | null = null
+  if (sources.mcp !== undefined) {
+    try {
+      global = await sources.mcp.prompts()
+    }
+    catch (error) {
+      options.logger?.debug('MCP prompts are not available', { err: isHarnessError(error) ? error.code : error })
+    }
+  }
+  signal?.throwIfAborted()
+  if (projectId !== null && sources.projectMcp !== undefined) {
+    try {
+      project = await sources.projectMcp.prompts(projectId, { ...(signal === undefined ? {} : { signal }), waitMs: options.waitMs ?? 0 })
+    }
+    catch (error) {
+      signal?.throwIfAborted()
+      options.logger?.debug('project MCP prompts are not available', { projectId, err: isHarnessError(error) ? error.code : error })
+    }
+  }
+  return { global, project }
+}
+
+/** The lookup of `name` in one listing (null = the listing does not know the name's server). */
+function lookupIn(listing: McpListing<McpPromptInfo>, scope: 'global' | 'project', name: string, serverId: string): McpPromptLookup | null {
+  const prompt = listing.items.find(item => item.commandName === name && item.serverId === serverId)
+  if (prompt !== undefined)
+    return { kind: 'prompt', scope, prompt }
+  const unavailable = listing.unavailable.find(item => item.serverId === serverId)
+  if (unavailable !== undefined)
+    return { kind: 'unavailable', serverId, status: unavailable.status }
+  const other = listing.items.find(item => item.serverId === serverId)
+  if (other !== undefined)
+    return { kind: 'unknown-prompt', serverId, serverName: other.serverName }
+  return null
+}
+
+/**
+ * What the MCP prompt command `name` stands for in a scope: the project's servers first (a server the project shadows
+ * is never looked up globally), then the global ones; null when no server of the scope has the name's server id.
+ */
+function lookupMcpPrompt(listings: McpPromptListings, name: string): McpPromptLookup | null {
+  const serverId = mcpPromptServerId(name)
+  if (serverId === null)
+    return null
+  const project = listings.project
+  if (project !== null) {
+    const found = lookupIn(project, 'project', name, serverId)
+    if (found !== null)
+      return found
+    if (project.shadowed.has(serverId))
+      return { kind: 'unknown-prompt', serverId, serverName: serverId }
+  }
+  return listings.global === null ? null : lookupIn(listings.global, 'global', name, serverId)
+}
+
+/** The `failed` error of a server of the scope that is not connected. */
+function mcpServerUnavailable(serverId: string, status: McpServerStateAny): HarnessError {
+  if (status === 'needs-auth')
+    return new HarnessError({ code: 'conflict', message: `Sign in to the MCP server "${serverId}" first.`, details: { reason: 'needs-auth' } })
+  if (status === 'needs-variables')
+    return new HarnessError({ code: 'provider_unreachable', message: `The MCP server "${serverId}" needs its variables before it can run.` })
+  return new HarnessError({ code: 'provider_unreachable', message: `The MCP server "${serverId}" is not connected.`, action: 'retry' })
+}
+
+/** The usage text of a prompt command: `/name <required> [optional]`. */
+function mcpPromptUsage(prompt: McpPromptInfo): string {
+  const hint = mcpPromptArgumentHint(prompt.arguments)
+  return hint === null ? `/${prompt.commandName}` : `/${prompt.commandName} ${hint}`
+}
+
+/** The `failed` error of missing required arguments ("Missing argument: …" with the usage). */
+function missingArguments(prompt: McpPromptInfo, missing: readonly string[]): HarnessError {
+  const names = missing.map(name => (name.length > 64 ? `${name.slice(0, 63)}…` : name)).join(', ')
+  const message = `Missing ${missing.length === 1 ? 'argument' : 'arguments'}: ${names}. Usage: ${mcpPromptUsage(prompt)}`.slice(0, 1000)
+  return new HarnessError({ code: 'validation_error', message, details: { issues: [{ path: ['message', 'parts'], message, code: 'custom' }] } })
+}
 
 /**
  * The MCP prompt a typed `/mcp__<serverId>__<prompt> input` names (Phase 14, ADR-061): a prompt of a connected server of
  * the chat's scope (`context.projectId`: a project server shadows a global one) → `prompts/get` once with the bound
  * arguments (`bindMcpPromptArguments`) and a prompt invocation with source `mcp` whose expansion is frozen (≤ 64 KB,
- * `mcp/content.ts`); a missing required argument or a server that is not connected → a `failed` reply. Null = not an MCP
- * prompt of the scope (no such server or prompt, no MCP services). Throws only the abort of `context.signal`.
- * P14-0b stub: null (no MCP prompt resolves).
+ * `mcp/content.ts`); a missing required argument, a server of the scope that is not connected, a prompt the connected
+ * server does not list, a failing `prompts/get` or an empty result → a `failed` reply. Null = not an MCP prompt of the
+ * scope (no server of the scope has the name's server id, no MCP services). Throws only the abort of `context.signal`.
+ * Approved project servers that are not connected yet are waited for like a run waits
+ * (`LIMITS.projectMcpConnectWaitMs`).
  */
-export async function mcpPromptResolution(_services: CommandServices, _parsed: ParsedCommand, _context: CommandContext): Promise<CommandResolution | null> {
-  return null
+export async function mcpPromptResolution(services: CommandServices, parsed: ParsedCommand, context: CommandContext): Promise<CommandResolution | null> {
+  if (services.mcp === undefined && services.projectMcp === undefined)
+    return null
+  const projectId = context.projectId ?? null
+  const listings = await mcpPromptListingsFor(services, projectId, {
+    signal: context.signal,
+    waitMs: LIMITS.projectMcpConnectWaitMs,
+    ...(context.logger === undefined ? {} : { logger: context.logger }),
+  })
+  context.signal.throwIfAborted()
+  const lookup = lookupMcpPrompt(listings, parsed.name)
+  if (lookup === null)
+    return null
+  const { name, input } = parsed
+  const failed = (error: HarnessError): CommandResolution => ({ kind: 'failed', invocation: { name, input, type: 'reply', source: 'mcp' }, error })
+  if (lookup.kind === 'unavailable')
+    return failed(mcpServerUnavailable(lookup.serverId, lookup.status))
+  if (lookup.kind === 'unknown-prompt')
+    return failed(new HarnessError({ code: 'not_found', message: `The MCP server "${lookup.serverName}" has no prompt /${name}.` }))
+  const { prompt, scope } = lookup
+  const binding = bindMcpPromptArguments(prompt.arguments, input)
+  if (!binding.ok)
+    return failed(missingArguments(prompt, binding.missing))
+  const startedAt = Date.now()
+  let result: unknown
+  try {
+    if (scope === 'project' && projectId !== null && services.projectMcp !== undefined)
+      result = await services.projectMcp.getPrompt(projectId, prompt.serverId, prompt.name, binding.values, context.signal)
+    else if (scope === 'global' && services.mcp !== undefined)
+      result = await services.mcp.getPrompt(prompt.serverId, prompt.name, binding.values, context.signal)
+    else
+      return null
+  }
+  catch (error) {
+    if (context.signal.aborted)
+      throw error
+    return failed(isHarnessError(error)
+      ? HarnessError.from(error)
+      : new HarnessError({ code: 'provider_error', message: `The MCP server "${prompt.serverName}" could not run the prompt /${name}.` }, { cause: error }))
+  }
+  const expansion = mcpPromptExpansion(result)
+  context.logger?.debug('MCP prompt expanded', { serverId: prompt.serverId, scope, bytes: Buffer.byteLength(expansion, 'utf8'), ms: Date.now() - startedAt })
+  if (expansion.trim() === '')
+    return failed(new HarnessError({ code: 'provider_error', message: `The MCP prompt /${name} returned no text.` }))
+  return promptResolution(name, input, expansion, { source: 'mcp' })
 }
 
 /**
  * True when the MCP-shaped name `name` is a prompt command of a connected server in a chat of `projectId` (Phase 14,
- * `isServerCommandFor`: the queue keeps such an item `turnOnly`). Never rejects. P14-0b stub: false.
+ * `isServerCommandFor`: the queue keeps such an item `turnOnly`). Reads the cached listings (no wait for a server that
+ * is not connected). Never rejects.
  */
-export async function isMcpPromptCommandFor(_deps: Partial<Pick<AppDeps, 'mcp' | 'projectMcp'>>, _projectId: string | null, _name: string): Promise<boolean> {
-  return false
+export async function isMcpPromptCommandFor(deps: Partial<Pick<AppDeps, 'mcp' | 'projectMcp'>>, projectId: string | null, name: string): Promise<boolean> {
+  try {
+    if (!isMcpPromptCommandName(name))
+      return false
+    const listings = await mcpPromptListingsFor(deps, projectId)
+    return lookupMcpPrompt(listings, name)?.kind === 'prompt'
+  }
+  catch {
+    return false
+  }
+}
+
+/** The `GET /commands` item of an MCP prompt, or null when its names do not fit the contract. */
+function mcpPromptSummary(prompt: McpPromptInfo): CommandSummary | null {
+  if (!isMcpPromptCommandName(prompt.commandName) || !MCP_SERVER_ID_PATTERN.test(prompt.serverId))
+    return null
+  const hint = mcpPromptArgumentHint(prompt.arguments)
+  const serverName = prompt.serverName.length > 256 ? `${prompt.serverName.slice(0, 255)}…` : prompt.serverName
+  return {
+    name: prompt.commandName,
+    kind: 'command',
+    description: prompt.description ?? prompt.title ?? '',
+    source: 'mcp',
+    mcpServer: { id: prompt.serverId, name: serverName },
+    ...(hint === null ? {} : { argumentHint: hint }),
+  }
 }
 
 /** A command of the plugin registry: a template, a markdown body (Phase 12) or a guarded `run`. */
@@ -971,11 +1165,21 @@ function pluginCommandEntry(catalog: CustomizationCatalog | null, name: string, 
  * listed as they are (a bare alias is not an item of its own); plugin commands carry their `argumentHint` and model ref;
  * a definition's `when_to_use` is appended to its description.
  * Phase 14 (ADR-061, W14.2): `mcp` adds the prompts of the connected MCP servers as `kind: 'command'`, `source: 'mcp'`
- * with `mcpServer` and their argument hint (project servers shadow global servers of the same id). P14-0b stub: `mcp`
- * adds nothing.
+ * with `mcpServer`, the prompt's description (else its title) and its argument hint; the project's servers come first
+ * and shadow the global servers of the same id (`shadowed`), and of two prompts with one command name the first wins
+ * (MCP names never meet catalog names: those hold no `_`).
  */
-export function listServerCommands(registry: Pick<Registry, 'commands'>, catalog: CustomizationCatalog | null, _mcp: McpPromptListings | null = null): CommandSummary[] {
+export function listServerCommands(registry: Pick<Registry, 'commands'>, catalog: CustomizationCatalog | null, mcp: McpPromptListings | null = null): CommandSummary[] {
   const byName = new Map<string, CommandSummary>()
+  if (mcp !== null) {
+    const shadowed = mcp.project?.shadowed ?? new Set<string>()
+    const prompts = [...(mcp.project?.items ?? []), ...(mcp.global?.items ?? []).filter(prompt => !shadowed.has(prompt.serverId))]
+    for (const prompt of prompts) {
+      const summary = byName.has(prompt.commandName) ? null : mcpPromptSummary(prompt)
+      if (summary !== null)
+        byName.set(summary.name, summary)
+    }
+  }
   for (const entry of registry.commands.list()) {
     const name = entry.definition.name
     if (isClientCommand(name) || isHarnessCommand(name) || byName.has(name) || !CATALOG_NAME_PATTERN.test(name))

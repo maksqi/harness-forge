@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { h } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { testIds } from '~/utils/testids'
-import { backgroundLaunchOutput, skillOutput, taskInput, taskOutput, taskStep, todoItem } from '~/utils/testing/fixtures'
+import { backgroundLaunchOutput, elicitationId, mcpElicitationRecord, searchWebOutput, skillOutput, taskInput, taskOutput, taskStep, todoItem } from '~/utils/testing/fixtures'
 import ShareToolRow from './ShareToolRow.vue'
 import { allByTestId, byTestId, settle } from './testing'
 
@@ -504,5 +504,68 @@ describe('shareToolRow: qualified names and skill files (Phase 12, W12.13-T5)', 
     expect(body.dataset.mode).toBe('file')
     expect(body.querySelector('[data-slot="skill-file-path"]')?.textContent?.trim()).toBe('scripts/fill.sh')
     expect(body.querySelector('[data-slot="skill-file-content"]')?.textContent).toBe('#!/bin/sh\necho fill')
+  })
+})
+
+describe('shareToolRow: web search and MCP questions (Phase 14, W14.9)', () => {
+  it('a shared search_web row: "Searched the web", its query, "{n} results" and the result list behind the row', async () => {
+    mountRow({ type: 'tool', toolName: 'search_web', status: 'done', input: { query: 'harness forge' }, output: searchWebOutput() })
+    const row = byTestId(testIds.shareToolRow)!
+    expect(row.querySelector('[data-slot="web-search-row-label"]')?.textContent).toBe('Searched the web')
+    expect(row.textContent).toContain('"harness forge"')
+    expect(row.querySelector('[data-slot="web-search-row-count"]')?.textContent).toBe('2 results')
+    expect(row.textContent).not.toContain('search_web')
+    row.querySelector<HTMLElement>('button')!.click()
+    await settle()
+    const body = byTestId(testIds.shareToolRowOutput)!
+    expect(byTestId(testIds.webSearchTool, body)?.dataset.mode).toBe('builtin')
+    expect(allByTestId(testIds.webSearchResult, body)).toHaveLength(2)
+    expect(body.querySelector('[data-slot="tool-value"]')).toBeNull()
+  })
+
+  it('a shared provider-executed search (known by name): the native body without encryptedContent', async () => {
+    mountRow({
+      type: 'tool',
+      toolName: 'web_search',
+      status: 'done',
+      input: { query: 'weather in Lisbon' },
+      output: [{ type: 'web_search_result', url: 'https://weather.example.com/lisbon', title: 'Lisbon weather', pageAge: null, encryptedContent: 'ENCRYPTED-PAGE' }],
+    })
+    const row = byTestId(testIds.shareToolRow)!
+    expect(row.querySelector('[data-slot="web-search-row-label"]')?.textContent).toBe('Searched the web')
+    expect(row.querySelector('[data-slot="web-search-row-count"]')).toBeNull()
+    row.querySelector<HTMLElement>('button')!.click()
+    await settle()
+    const body = byTestId(testIds.shareToolRowOutput)!
+    expect(byTestId(testIds.webSearchTool, body)?.dataset.mode).toBe('native')
+    expect(body.textContent).toContain('The model\'s provider ran this search.')
+    byTestId(testIds.toolRawToggle, body)!.click()
+    await settle()
+    expect(document.body.innerHTML).not.toContain('ENCRYPTED-PAGE')
+  })
+
+  it('a shared search row without tool details is a static "Searched the web" row', () => {
+    mountRow({ type: 'tool', toolName: 'search_web', status: 'done' })
+    const row = byTestId(testIds.shareToolRow)!
+    expect(row.querySelector('button')).toBeNull()
+    expect(row.textContent).toContain('Searched the web')
+  })
+
+  it('a shared MCP call shows the result lines of its records, also when its output was cut', async () => {
+    mountRow({
+      type: 'tool',
+      toolName: 'mcp__linear__create_issue',
+      status: 'done',
+      input: {},
+      output: { truncated: true, preview: '…', elicitations: [mcpElicitationRecord(), mcpElicitationRecord({ id: elicitationId(2), action: 'decline', reason: 'ambiguous', fields: [] })] },
+    })
+    byTestId(testIds.shareToolRow)!.querySelector<HTMLElement>('button')!.click()
+    await settle()
+    const lines = allByTestId(testIds.elicitationResult, byTestId(testIds.shareToolRowOutput)!)
+    expect(lines.map(line => [line.dataset.action, line.textContent?.trim()])).toEqual([
+      ['accept', 'You answered linear\'s request.'],
+      ['decline', 'Declined automatically: more than one chat was using linear.'],
+    ])
+    expect(document.querySelector('[data-slot="elicitation-record-fields"]')?.textContent?.trim()).toBe('Asked for: email, count, notify, priority')
   })
 })

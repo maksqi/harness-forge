@@ -191,16 +191,129 @@ describe('mentionMenu', () => {
   })
 })
 
-describe('mentionMenu: MCP resources (Phase 14, C54 declares)', () => {
-  it('accepts the resources, their state and the select-resource emit; the files stay as they were', () => {
-    const wrapper = mount(MentionMenu, { props: { ...props, resources: [mcpResourceEntry()], resourcesState: 'ready' as const } })
-    expect(wrapper.props('resources')).toEqual([mcpResourceEntry()])
-    expect(wrapper.props('resourcesState')).toBe('ready')
-    expect(wrapper.findAll(item)).toHaveLength(3)
-    wrapper.vm.$emit('select-resource', mcpResourceEntry())
-    expect(wrapper.emitted('select-resource')).toEqual([[mcpResourceEntry()]])
+describe('mentionMenu: MCP resources (Phase 14)', () => {
+  const resources = [
+    mcpResourceEntry(),
+    mcpResourceEntry({ serverId: 'fs', serverName: 'Files', uri: 'file:///shot.png', name: 'shot.png', title: 'Screenshot', mimeType: 'image/png' }),
+  ]
+  const section = `[data-testid="${testIds.mentionMenuSection}"]`
+  const resourceRow = `[data-testid="${testIds.mentionMenuResource}"]`
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('keeps the files-only menu as it was while the resources are idle', () => {
+    const wrapper = mount(MentionMenu, { props: { ...props, resources, resourcesState: 'idle' as const } })
+    expect(wrapper.get(menu).attributes()).toMatchObject({ 'aria-label': 'Files in harness-forge', 'data-count': '3' })
+    expect(wrapper.findAll(section).map(group => group.attributes('data-value'))).toEqual(['files'])
+    expect(wrapper.findAll(resourceRow)).toHaveLength(0)
     const plain = mount(MentionMenu, { props })
     expect(plain.props('resources')).toEqual([])
     expect(plain.props('resourcesState')).toBe('idle')
+  })
+
+  it('renders one listbox with two labelled groups, files first, and resource rows with server and MIME type', () => {
+    const wrapper = mount(MentionMenu, { props: { ...props, resources, resourcesState: 'ready' as const } })
+    const root = wrapper.get(menu)
+    expect(root.attributes()).toMatchObject({ 'role': 'listbox', 'aria-label': 'Files and MCP resources', 'data-state': 'ready', 'data-count': '5' })
+    const groups = wrapper.findAll(section)
+    expect(groups.map(group => [group.attributes('role'), group.attributes('data-value'), wrapper.get(`#${group.attributes('aria-labelledby')}`).text()]))
+      .toEqual([['group', 'files', 'Files in harness-forge'], ['group', 'resources', 'MCP resources']])
+    const rows = wrapper.findAll(resourceRow)
+    expect(rows.map(row => [row.attributes('role'), row.attributes('data-server-id'), row.attributes('data-uri'), row.attributes('aria-label')])).toEqual([
+      ['option', 'github', 'repo://owner/name/README.md', 'README.md, GitHub, text/markdown'],
+      ['option', 'fs', 'file:///shot.png', 'Screenshot, Files, image/png'],
+    ])
+    expect(rows[1]!.get('[data-slot="mention-resource-title"]').text()).toBe('Screenshot')
+    expect(rows[1]!.get('[data-slot="mention-resource-server"]').text()).toBe('Files')
+    expect(rows[1]!.get('[data-slot="mention-resource-mime"]').text()).toBe('image/png')
+    expect(rows[0]!.classes()).toContain('pointer-coarse:min-h-10')
+    // The option ids run on after the files' ones.
+    expect(rows[0]!.attributes('id')).toBe(`${wrapper.vm.listId}-option-3`)
+  })
+
+  it('a chat without a project shows only the resources', () => {
+    const wrapper = mount(MentionMenu, { props: { ...props, items: [], files: false, projectName: null, resources, resourcesState: 'loading' as const } })
+    expect(wrapper.get(menu).attributes()).toMatchObject({ 'aria-label': 'MCP resources', 'data-state': 'loading', 'aria-busy': 'true', 'data-count': '2' })
+    expect(wrapper.findAll(section).map(group => group.attributes('data-value'))).toEqual(['resources'])
+    expect(wrapper.findAll(item)).toHaveLength(0)
+    expect(wrapper.text()).not.toContain('No matching files')
+  })
+
+  it('moves across both sections with the arrows and picks a resource with Enter, Tab or a click', async () => {
+    const wrapper = mount(MentionMenu, { props: { ...props, resources, resourcesState: 'ready' as const } })
+    for (let index = 0; index < 3; index++)
+      wrapper.vm.handleKeydown(key({ key: 'ArrowDown' }))
+    await nextTick()
+    const rows = wrapper.findAll(resourceRow)
+    expect(wrapper.vm.activeId).toBe(rows[0]!.attributes('id'))
+    expect(rows[0]!.attributes('aria-selected')).toBe('true')
+    expect(wrapper.vm.handleKeydown(key({ key: 'Enter' }))).toBe(true)
+    expect(wrapper.emitted('select-resource')).toEqual([[resources[0]]])
+    expect(wrapper.emitted('select')).toBeUndefined()
+    wrapper.vm.handleKeydown(key({ key: 'ArrowDown' }))
+    wrapper.vm.handleKeydown(key({ key: 'Tab' }))
+    expect(wrapper.emitted('select-resource')).toEqual([[resources[0]], [resources[1]]])
+    // Wrapping around from the last resource reaches the first file.
+    wrapper.vm.handleKeydown(key({ key: 'ArrowDown' }))
+    wrapper.vm.handleKeydown(key({ key: 'Enter' }))
+    expect(wrapper.emitted('select')).toEqual([[items[0]]])
+
+    const mousedown = new MouseEvent('mousedown', { bubbles: true, cancelable: true })
+    rows[1]!.element.dispatchEvent(mousedown)
+    expect(mousedown.defaultPrevented).toBe(true)
+    await rows[1]!.trigger('click')
+    expect(wrapper.emitted('select-resource')).toHaveLength(3)
+
+    // Resources alone: Enter picks the first one.
+    const only = mount(MentionMenu, { props: { ...props, items: [], files: false, resources, resourcesState: 'ready' as const } })
+    expect(only.vm.handleKeydown(key({ key: 'Enter' }))).toBe(true)
+    expect(only.emitted('select-resource')).toEqual([[resources[0]]])
+  })
+
+  it('says "Searching resources…" after 150 ms, "No matching resources" and the error line', async () => {
+    vi.useFakeTimers()
+    const wrapper = mount(MentionMenu, { props: { ...props, resources: [], resourcesState: 'loading' as const } })
+    const status = () => wrapper.find('[data-slot="mention-resources-status"]')
+    expect(status().exists()).toBe(false)
+    vi.advanceTimersByTime(150)
+    await nextTick()
+    expect(status().text()).toBe('Searching resources…')
+    await wrapper.setProps({ resourcesState: 'ready' })
+    expect(status().text()).toBe('No matching resources')
+    await wrapper.setProps({ resourcesState: 'error' })
+    expect(status().text()).toBe('Couldn\'t list MCP resources.')
+    expect(status().classes()).toContain('text-destructive')
+    // The files keep their own state.
+    expect(wrapper.get(menu).attributes('data-state')).toBe('ready')
+  })
+
+  it('shows the truncation line and the servers that are not connected', () => {
+    const wrapper = mount(MentionMenu, {
+      props: { ...props, resources, resourcesState: 'ready' as const, resourcesTruncated: true, resourcesUnavailable: ['Linear', 'docs'] },
+    })
+    expect(wrapper.get('[data-slot="mention-resources-truncated"]').text()).toBe('Showing the first 50 resources. Type more to narrow it down.')
+    expect(wrapper.get('[data-slot="mention-resources-unavailable"]').text()).toBe('Not listed: Linear, docs (not connected).')
+    const plain = mount(MentionMenu, { props: { ...props, resources, resourcesState: 'ready' as const } })
+    expect(plain.find('[data-slot="mention-resources-truncated"]').exists()).toBe(false)
+    expect(plain.find('[data-slot="mention-resources-unavailable"]').exists()).toBe(false)
+  })
+
+  it('announces the files and the resources once both settled', async () => {
+    vi.useFakeTimers()
+    const wrapper = mount(MentionMenu, { props: { ...props, resources: [], resourcesState: 'loading' as const } })
+    const announcer = () => wrapper.get('[data-slot="mention-announcer"]')
+    vi.advanceTimersByTime(1000)
+    await nextTick()
+    expect(announcer().text()).toBe('')
+    await wrapper.setProps({ resources: [resources[0]!], resourcesState: 'ready' })
+    vi.advanceTimersByTime(500)
+    await nextTick()
+    expect(announcer().text()).toBe('3 files, 1 resource')
+    await wrapper.setProps({ items: [], files: false })
+    vi.advanceTimersByTime(500)
+    await nextTick()
+    expect(announcer().text()).toBe('1 resource')
   })
 })

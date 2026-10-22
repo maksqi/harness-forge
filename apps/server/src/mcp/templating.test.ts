@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { applySettings, resolveDeclTransport, settingText } from './templating.ts'
+import { applySettings, displayDeclOAuthClientId, resolveDeclOAuth, resolveDeclTransport, settingText } from './templating.ts'
 
 describe('settingText', () => {
   it.each([
@@ -64,5 +64,30 @@ describe('resolveDeclTransport', () => {
     })
     expect(() => resolveDeclTransport('tool', { type: 'stdio', command: 'npx', args: ['--root={{settings.root}}'] }, {}))
       .toThrow(/needs the setting "root" \(argument 1\)/)
+  })
+})
+
+describe('oAuth settings of a declaration (phase 14)', () => {
+  it('resolves the client id placeholders; an empty setting is named and leaves the client unresolved', () => {
+    expect(resolveDeclOAuth('acme', { clientId: 'app-{{settings.clientId}}', scopes: ' read   write ' }, { clientId: 'x1' })).toEqual({ clientId: 'app-x1', scopes: 'read write', missing: [] })
+    expect(resolveDeclOAuth('acme', { clientId: '{{settings.clientId}}' }, {})).toEqual({ clientId: null, scopes: null, missing: ['clientId'] })
+    expect(resolveDeclOAuth('acme', { scopes: 'read' }, {})).toEqual({ clientId: null, scopes: 'read', missing: [] })
+    expect(resolveDeclOAuth('acme', undefined, {})).toEqual({ clientId: null, scopes: null, missing: [] })
+    // A value that is no client id (control characters) is not used.
+    expect(resolveDeclOAuth('acme', { clientId: '{{settings.clientId}}' }, { clientId: 'a\nb' }).clientId).toBeNull()
+  })
+
+  it('carries the resolved settings in the transport; an empty client id setting never fails a connection', () => {
+    const transport = resolveDeclTransport('acme', { type: 'http', url: 'https://mcp.example.com/mcp', oauth: { clientId: '{{settings.clientId}}', scopes: 'read' } }, {})
+    expect(transport).toEqual({ type: 'http', url: 'https://mcp.example.com/mcp', headers: {}, oauth: { clientId: null, scopes: 'read' } })
+    expect(resolveDeclTransport('acme', { type: 'http', url: 'https://mcp.example.com/mcp' }, {})).not.toHaveProperty('oauth')
+  })
+
+  it('shows a declaration\'s client id from the non-secret values only', () => {
+    expect(displayDeclOAuthClientId('app-{{settings.clientId}}', { clientId: 'x1' })).toBe('app-x1')
+    expect(displayDeclOAuthClientId('{{settings.token}}', { token: 'never-shown' }, new Set(['token']))).toBe('{{settings.token}}')
+    expect(displayDeclOAuthClientId('{{settings.clientId}}', {})).toBeNull()
+    expect(displayDeclOAuthClientId('plain-client', {})).toBe('plain-client')
+    expect(displayDeclOAuthClientId(null, {})).toBeNull()
   })
 })

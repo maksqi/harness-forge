@@ -1,20 +1,24 @@
 import type { McpServer } from '@harness-forge/shared'
+import type { Ref } from 'vue'
 import type { MockApi } from '~/utils/testing/mock-api'
 import { HarnessError } from '@harness-forge/shared'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, disposePinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { defineComponent, h, nextTick } from 'vue'
+import { defineComponent, h, nextTick, ref } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { usePluginsStore } from '~/stores/plugins'
 import { testIds } from '~/utils/testids'
 import { createMockApi } from '~/utils/testing/mock-api'
 import McpServersPanel from './McpServersPanel.vue'
 
-const mock = vi.hoisted(() => ({ api: null as unknown, start: vi.fn(), signOut: vi.fn() }))
+const mock = vi.hoisted(() => ({ api: null as unknown, start: vi.fn(), signOut: vi.fn(), busyKey: null as unknown as Ref<string | null> }))
 vi.mock('~/composables/useApi', () => ({ useApi: () => mock.api }))
-// + Phase 14: Sign in / Sign out go through useMcpSignIn (W14.7 implements it).
-vi.mock('~/composables/useMcpSignIn', () => ({ useMcpSignIn: () => ({ start: mock.start, signOut: mock.signOut, complete: vi.fn(), busyKey: { value: null } }) }))
+// + Phase 14: Sign in / Sign out go through useMcpSignIn (its own tests cover the requests and the navigation).
+vi.mock('~/composables/useMcpSignIn', async importOriginal => ({
+  ...await importOriginal<typeof import('~/composables/useMcpSignIn')>(),
+  useMcpSignIn: () => ({ start: mock.start, signOut: mock.signOut, complete: vi.fn(), busyKey: mock.busyKey }),
+}))
 
 const toasts = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), plain: vi.fn() }))
 vi.mock('vue-sonner', () => ({ toast: Object.assign(toasts.plain, toasts) }))
@@ -59,6 +63,7 @@ beforeEach(() => {
   mock.api = api
   mock.start.mockReset()
   mock.signOut.mockReset()
+  mock.busyKey = ref(null)
   pinia = createPinia()
   setActivePinia(pinia)
   for (const fn of Object.values(toasts))
@@ -273,7 +278,7 @@ describe('mcpServersPanel', () => {
   })
 })
 
-describe('mcpServersPanel: sign-in (Phase 14, C54 mounts)', () => {
+describe('mcpServersPanel: sign-in (Phase 14, W14.7)', () => {
   const linear = mcpServer({ id: 'linear', name: 'Linear', transport: { type: 'http', url: 'https://mcp.linear.app/mcp', headers: {}, oauth: null }, status: 'needs-auth', tools: [], connectedAt: null })
   const signedIn = mcpServer({ id: 'wiki', name: 'Wiki', transport: { type: 'http', url: 'https://wiki.example.com/mcp', headers: {}, oauth: null }, auth: { signedIn: true, expiresAt: null, scope: null, client: 'dynamic', issuer: null } })
 
@@ -285,28 +290,83 @@ describe('mcpServersPanel: sign-in (Phase 14, C54 mounts)', () => {
     const buttons = all(`[data-testid="${testIds.mcpSignIn}"]`)
     expect(buttons.map(button => button.dataset.serverId)).toEqual(['linear'])
     expect(buttons[0]!.getAttribute('aria-label')).toBe('Sign in to Linear')
+    expect(buttons[0]!.textContent?.trim()).toBe('Sign in')
     expect(byTestId(testIds.mcpStatus, row('linear'))?.dataset.status).toBe('needs-auth')
+    expect(byTestId(testIds.mcpStatus, row('linear'))?.textContent?.trim()).toBe('Sign in required')
+    expect(one('[data-slot="status-dot"]', row('linear'))!.dataset.status).toBe('warning')
     buttons[0]!.click()
     await settle()
     expect(mock.start).toHaveBeenCalledWith({ kind: 'global', serverId: 'linear' }, { name: 'Linear' })
   })
 
-  it('a refused sign-in shows an error toast', async () => {
+  it('shows "Signing in…" and stays busy while the start runs for that row', async () => {
     api.mcp.list.mockResolvedValue({ items: [linear] })
-    mock.start.mockRejectedValue(new HarnessError({ code: 'not_implemented', message: 'Not available yet.' }))
+    mountPanel()
+    await settle()
+    mock.busyKey.value = 'global:linear'
+    await settle()
+    const button = byTestId(testIds.mcpSignIn, row('linear')) as HTMLButtonElement
+    expect(button.textContent?.trim()).toBe('Signing in…')
+    expect(button.disabled).toBe(true)
+    expect(button.getAttribute('aria-busy')).toBe('true')
+    button.click()
+    await settle()
+    expect(mock.start).not.toHaveBeenCalled()
+  })
+
+  it('a refused sign-in shows an inline error under the row; Retry and a new attempt clear it', async () => {
+    api.mcp.list.mockResolvedValue({ items: [linear] })
+    mock.start.mockRejectedValueOnce(new HarnessError({ code: 'provider_error', message: 'Linear can\'t sign in: the server sent no sign-in information.' }))
     mountPanel()
     await settle()
     byTestId(testIds.mcpSignIn)!.click()
     await settle()
-    expect(toasts.error).toHaveBeenCalledWith('Could not sign in to Linear', { description: 'Not available yet.' })
+    const alert = byTestId(testIds.mcpSignInError, row('linear'))!
+    expect(alert.dataset.code).toBe('provider_error')
+    expect(alert.dataset.serverId).toBe('linear')
+    expect(alert.textContent).toContain('Linear can\'t sign in: the server sent no sign-in information.')
+    expect(toasts.error).not.toHaveBeenCalled()
+    mock.start.mockResolvedValueOnce('redirected')
+    one('[data-action="retry"]', alert)!.click()
+    await settle()
+    expect(mock.start).toHaveBeenCalledTimes(2)
+    expect(byTestId(testIds.mcpSignInError)).toBeNull()
   })
 
-  it('a signed-in row reads "Signed in" and its menu offers Sign out…', async () => {
+  it('a disabled server answer reads "Turn the server on first." without a Retry', async () => {
+    api.mcp.list.mockResolvedValue({ items: [linear] })
+    mock.start.mockRejectedValue(new HarnessError({ code: 'conflict', message: 'The server is disabled.', details: { reason: 'disabled' } }))
+    mountPanel()
+    await settle()
+    byTestId(testIds.mcpSignIn)!.click()
+    await settle()
+    const alert = byTestId(testIds.mcpSignInError)!
+    expect(alert.dataset.code).toBe('conflict')
+    expect(alert.textContent).toContain('Turn the server on first.')
+    expect(one('[data-action="retry"]', alert)).toBeNull()
+  })
+
+  it('a needs-auth server with an Authorization header names the header and offers Edit…', async () => {
+    const header = mcpServer({ status: 'needs-auth', tools: [], connectedAt: null })
+    api.mcp.list.mockResolvedValue({ items: [header] })
+    mountPanel()
+    await settle()
+    expect(byTestId(testIds.mcpSignIn)).toBeNull()
+    expect(byTestId(testIds.mcpStatus, row('github'))!.textContent?.trim()).toBe('The server rejected its Authorization header.')
+    one('[data-action="mcp-edit-header"]', row('github'))!.click()
+    await settle(5)
+    expect(byTestId(testIds.mcpDialog)!.dataset.mode).toBe('edit')
+  })
+
+  it('a signed-in row reads "Signed in" with its token tooltip; Sign out… asks first, then signs out', async () => {
     api.mcp.list.mockResolvedValue({ items: [signedIn, github] })
     mock.signOut.mockResolvedValue(undefined)
     mountPanel()
     await settle()
-    expect(byTestId(testIds.mcpStatus, row('wiki'))?.textContent?.trim()).toBe('Connected · 12 tools · Signed in')
+    const status = byTestId(testIds.mcpStatus, row('wiki'))!
+    expect(status.textContent?.trim()).toBe('Connected · 12 tools · Signed in')
+    expect(status.getAttribute('title')).toBe('Signed in · token renews automatically')
+    expect(byTestId(testIds.mcpStatus, row('github'))!.getAttribute('title')).toBeNull()
     await openMenu('github')
     expect(byTestId(testIds.mcpSignOut)).toBeNull()
     document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
@@ -315,7 +375,43 @@ describe('mcpServersPanel: sign-in (Phase 14, C54 mounts)', () => {
     const item = byTestId(testIds.mcpSignOut)!
     expect(item.textContent?.trim()).toBe('Sign out…')
     item.click()
-    await settle()
+    await settle(5)
+    const confirm = one('[data-slot="confirm-dialog"]')!
+    expect(confirm.textContent).toContain('Sign out of Wiki?')
+    expect(confirm.textContent).toContain('harness-forge forgets the tokens; the server stays configured.')
+    expect(mock.signOut).not.toHaveBeenCalled()
+    one('[data-action="mcp-sign-out-confirm"]')!.click()
+    await settle(5)
     expect(mock.signOut).toHaveBeenCalledWith({ kind: 'global', serverId: 'wiki' }, 'Wiki')
+    expect(one('[data-slot="confirm-dialog"]')).toBeNull()
+  })
+
+  it('a failed sign-out shows the inline error', async () => {
+    api.mcp.list.mockResolvedValue({ items: [signedIn] })
+    mock.signOut.mockRejectedValue(new HarnessError({ code: 'not_found', message: 'The MCP server "wiki" does not exist.' }))
+    mountPanel()
+    await settle()
+    await openMenu('wiki')
+    byTestId(testIds.mcpSignOut)!.click()
+    await settle(5)
+    one('[data-action="mcp-sign-out-confirm"]')!.click()
+    await settle(5)
+    const alert = byTestId(testIds.mcpSignInError, row('wiki'))!
+    expect(alert.dataset.code).toBe('not_found')
+    expect(alert.textContent).toContain('The MCP server "wiki" does not exist.')
+  })
+
+  it('a signed-in plugin server gets a menu with only Sign out…; a needs-auth one Sign in', async () => {
+    const pluginSigned = mcpServer({ id: 'docs', name: 'Docs', pluginId: 'acme-docs', editable: false, transport: { type: 'http', url: 'https://docs.example.com/mcp', headers: {}, oauth: null }, auth: { signedIn: true, expiresAt: 1_759_003_600_000, scope: 'read', client: 'configured', issuer: null } })
+    const pluginWaiting = mcpServer({ id: 'kb', name: 'KB', pluginId: 'acme-docs', editable: false, transport: { type: 'sse', url: 'https://kb.example.com/sse', headers: {}, oauth: null }, status: 'needs-auth', tools: [] })
+    api.mcp.list.mockResolvedValue({ items: [pluginSigned, pluginWaiting] })
+    mountPanel('acme-docs')
+    await settle()
+    expect(byTestId(testIds.mcpSignIn, row('kb'))).not.toBeNull()
+    expect(one('[data-action="mcp-menu"]', row('kb'))).toBeNull()
+    await openMenu('docs')
+    expect(byTestId(testIds.mcpSignOut)).not.toBeNull()
+    expect(byTestId(testIds.mcpEdit)).toBeNull()
+    expect(byTestId(testIds.mcpDelete)).toBeNull()
   })
 })

@@ -505,13 +505,13 @@ describe('mCP prompt commands: the P14-0b seams (C52-T3)', () => {
 
   it('resolveCommand: an MCP prompt name that names no prompt resolves to nothing (plain text), with or without MCP services', async () => {
     const mcp = { prompts: async () => ({ items: [], truncated: false, unavailable: [] }), getPrompt: async () => {
-      throw new Error('never called by the stub')
+      throw new Error('never called: no server of the scope has the id')
     } }
     expect(await resolveCommand(services({}), '/mcp__fake__greet Ada', context)).toBeNull()
     expect(await resolveCommand({ ...services({}), mcp } as CommandServices, '/mcp__fake__greet Ada', { ...context, projectId: 'prj_0123456789abcdef' })).toBeNull()
   })
 
-  it('isServerCommandFor: an MCP prompt name is no server command yet; listServerCommands takes the MCP listings', async () => {
+  it('isServerCommandFor: an MCP prompt name is no server command without MCP managers; empty MCP listings add nothing', async () => {
     const deps = { registry: services({}).registry, customizations: createFakeCustomizationService() } as unknown as Parameters<typeof isServerCommandFor>[0]
     expect(await isServerCommandFor(deps, null, '/mcp__fake__greet Ada')).toBe(false)
     const listings = { global: { items: [], truncated: false, unavailable: [] }, project: null }

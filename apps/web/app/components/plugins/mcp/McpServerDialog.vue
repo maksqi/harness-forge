@@ -7,8 +7,11 @@
 // `required` for such a request): with a password set and a stale session the password is asked first, and a
 // `403 forbidden` + `action: 'login'` answer is followed by one prompt and one more run.
 // Phase 14 (ADR-059; C54 mounts, W14.7 implements; frozen from Gate P14-0b): the HTTP and SSE tabs render McpOAuthFields
-// (client ID, write-only client secret, scopes, the redirect URI built in script) under the header rows; W14.7 sends the
-// draft with the save (`oauthInputOf` / `oauthUpdateOf`) and shows "Saving signs you out of {name}." (`signsOut`).
+// (client ID, write-only client secret, scopes, the redirect URI built in script) under the header rows; the draft goes
+// with the save (`buildCreateInput` / `buildUpdatePatch` with the draft: `oauthInputOf` / `oauthUpdateOf`; a change of
+// the OAuth fields alone sends the transport), and a save that drops the tokens of a signed-in server says so under the
+// footer: "Saving signs you out of {name}." (`signsOut`). An Authorization header row disables the fields (the server
+// refuses to sign such a server in); the section's fields are inside the form's busy fieldset.
 import type { McpServer, SecretState } from '@harness-forge/shared'
 import type { McpFormErrors, McpFormState, McpOAuthDraft, McpSaveRequest, McpTransportType } from './mcp-form'
 import { TerminalIcon } from '@lucide/vue'
@@ -46,6 +49,7 @@ import {
   requiresFreshAuth,
   saveErrorFields,
   schemaErrors,
+  signsOut,
   slugify,
   TRANSPORT_OPTIONS,
   validateForm,
@@ -109,7 +113,7 @@ const busy = computed(() => phase.value !== 'idle')
 const saving = computed(() => phase.value === 'saving' && !freshAuth.open.value)
 const clientErrors = computed<McpFormErrors>(() => (attempted.value ? validateForm(form, mode.value) : {}))
 const errors = computed<McpFormErrors>(() => ({ ...serverErrors.value, ...clientErrors.value }))
-const dirty = computed(() => (props.server ? Object.keys(buildUpdatePatch(props.server, form)).length > 0 : true))
+const dirty = computed(() => (props.server ? Object.keys(buildUpdatePatch(props.server, form, oauthDraft.value)).length > 0 : true))
 const canSave = computed(() => !busy.value && dirty.value)
 const title = computed(() => (props.server ? `Edit ${props.server.name}` : 'Add MCP server'))
 
@@ -130,7 +134,7 @@ watch(() => [props.open, props.server?.id ?? null] as const, ([open]) => {
 }, { immediate: true })
 
 // A changed form invalidates the messages of the last request.
-watch(form, () => {
+watch([form, oauthDraft], () => {
   if (Object.keys(serverErrors.value).length > 0)
     serverErrors.value = {}
 }, { deep: true })
@@ -188,8 +192,8 @@ function onOpenChange(value: boolean) {
 
 function currentRequest(): McpSaveRequest {
   if (props.server)
-    return { kind: 'update', id: props.server.id, patch: buildUpdatePatch(props.server, form) }
-  return { kind: 'create', input: buildCreateInput(form) }
+    return { kind: 'update', id: props.server.id, patch: buildUpdatePatch(props.server, form, oauthDraft.value) }
+  return { kind: 'create', input: buildCreateInput(form, oauthDraft.value) }
 }
 
 async function send(request: McpSaveRequest): Promise<void> {
@@ -242,6 +246,8 @@ const oauthSecretState = computed<SecretState | null>(() => {
 })
 /** + Phase 14: an Authorization header row is set: the server does not sign in. */
 const hasAuthorizationHeader = computed(() => form.headers.some(row => row.name.trim().toLowerCase() === 'authorization'))
+/** + Phase 14: saving drops the tokens of the signed-in server (a new URL, transport type or client ID). */
+const willSignOut = computed(() => props.server !== null && signsOut(props.server, { url: form.url, type: form.type, clientId: oauthDraft.value.clientId }))
 </script>
 
 <template>
@@ -415,14 +421,15 @@ const hasAuthorizationHeader = computed(() => form.headers.some(row => row.name.
                 @update="(uid, field, value) => updateRow(secretListOf(option.value), uid, field, value)"
               />
 
-              <McpOAuthFields
-                v-if="option.value !== 'stdio'"
-                v-model="oauthDraft"
-                :secret-state="oauthSecretState"
-                :redirect-uri="redirectUri"
-                :disabled="busy || hasAuthorizationHeader"
-                :signed-in="server?.auth?.signedIn === true"
-              />
+              <fieldset v-if="option.value !== 'stdio'" :disabled="busy" class="min-w-0">
+                <McpOAuthFields
+                  v-model="oauthDraft"
+                  :secret-state="oauthSecretState"
+                  :redirect-uri="redirectUri"
+                  :disabled="hasAuthorizationHeader"
+                  :signed-in="server?.auth?.signedIn === true"
+                />
+              </fieldset>
             </TabsContent>
           </Tabs>
         </div>
@@ -476,6 +483,14 @@ const hasAuthorizationHeader = computed(() => form.headers.some(row => row.name.
             {{ editing ? 'Save' : 'Add server' }}
           </Button>
         </DialogFooter>
+        <p
+          v-if="willSignOut"
+          role="status"
+          data-slot="mcp-signs-out"
+          class="-mt-2 text-right text-xs text-muted-foreground"
+        >
+          Saving signs you out of {{ server?.name }}.
+        </p>
       </form>
     </DialogContent>
   </Dialog>

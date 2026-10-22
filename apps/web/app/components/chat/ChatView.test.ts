@@ -29,6 +29,8 @@ import {
   hookCarrier,
   hookData,
   hookPart,
+  mcpElicitation,
+  mcpToolProgress,
   messageBranch,
   projectId,
   projectSummary,
@@ -49,6 +51,7 @@ import { announcedTasks } from './background/background-agents'
 import { AGENT_TASK_CONTEXT, CHAT_VIEW_ACTIONS, HOOK_ACTIVITY } from './chat-context'
 import ChatTranscript from './ChatTranscript.vue'
 import ChatView from './ChatView.vue'
+import { announcedElicitations } from './parts/elicitation'
 import { TOOL_APPROVAL_CONTEXT } from './parts/tool-approval-context'
 import QueuedMessages from './queue/QueuedMessages.vue'
 
@@ -1906,5 +1909,121 @@ describe('chatView: refused messages, hook turns and announcements (Phase 11, W1
     await until(() => announced(wrapper) === 'A hook blocked write_file')
     gate.resolve()
     await until(() => announced(wrapper) === 'Response finished')
+  })
+})
+
+describe('chatView: MCP questions (Phase 14, W14.9)', () => {
+  /** A controllable IntersectionObserver: `report(visible)` tells every observer whether its targets are visible. */
+  class FakeObserver {
+    static instances: FakeObserver[] = []
+    readonly targets = new Set<Element>()
+    constructor(readonly callback: IntersectionObserverCallback, readonly options: IntersectionObserverInit = {}) {
+      FakeObserver.instances.push(this)
+    }
+
+    observe(target: Element) {
+      this.targets.add(target)
+    }
+
+    unobserve(target: Element) {
+      this.targets.delete(target)
+    }
+
+    disconnect() {
+      this.targets.clear()
+    }
+
+    takeRecords(): IntersectionObserverEntry[] {
+      return []
+    }
+
+    static report(isIntersecting: boolean) {
+      for (const observer of FakeObserver.instances) {
+        const entries = [...observer.targets].map(target => ({ target, isIntersecting }) as IntersectionObserverEntry)
+        if (entries.length > 0)
+          observer.callback(entries, observer as unknown as IntersectionObserver)
+      }
+    }
+  }
+
+  beforeEach(() => {
+    announcedElicitations.clear()
+    FakeObserver.instances = []
+    vi.stubGlobal('IntersectionObserver', FakeObserver)
+    api.chatQueue.list.mockResolvedValue({ items: [] })
+    api.chats.get.mockResolvedValue(chatDetail({
+      id: chatId(2),
+      modelRef: MODEL,
+      messages: [
+        { id: 'msg_user000000000001', role: 'user', parts: [{ type: 'text', text: 'First question' }] },
+        { id: 'msg_asst000000000009', role: 'assistant', metadata: { modelRef: MODEL, startedAt: 1 }, parts: [{ type: 'text', text: 'Answer', state: 'done' }] },
+      ],
+    }))
+  })
+
+  /** A reply whose MCP call waits on `request` until `gate` opens. */
+  function waitingReply(request: ReturnType<typeof mcpElicitation>, gate: Promise<void>): () => Response {
+    return streamReply(async (write) => {
+      write({ type: 'start', messageId: 'msg_asst000000000001', messageMetadata: { modelRef: MODEL, startedAt: 1 } })
+      write({ type: 'start-step' })
+      write({ type: 'tool-input-available', toolCallId: 'call_mcp', toolName: 'mcp__fixture__ask', input: {} })
+      write({ type: 'tool-output-available', toolCallId: 'call_mcp', output: mcpToolProgress(request), preliminary: true })
+      await gate
+      write({ type: 'tool-output-available', toolCallId: 'call_mcp', output: { content: [] } })
+      write({ type: 'finish', messageMetadata: { modelRef: MODEL, startedAt: 1, durationMs: 2000 } })
+    })
+  }
+
+  async function waitingView(request: ReturnType<typeof mcpElicitation>) {
+    const view = mountView({ chatId: chatId(2) })
+    await until(() => view.wrapper.findAll(`[data-testid="${testIds.messageUser}"]`).length === 1)
+    const gate = deferred()
+    replies.push(waitingReply(request, gate.promise))
+    await view.wrapper.get('[data-testid="composer"]').trigger('submit')
+    await until(() => view.wrapper.find(`[data-testid="${testIds.elicitationCard}"]`).exists())
+    return { ...view, gate }
+  }
+
+  it('announces the request once, shows the card and the jump pill while the card is off-screen', async () => {
+    const request = mcpElicitation({ expiresAt: Date.now() + 480_000 })
+    const scrolled = vi.spyOn(Element.prototype, 'scrollIntoView').mockImplementation(() => {})
+    const { wrapper, gate } = await waitingView(request)
+    await until(() => announced(wrapper).includes('Fixture needs your input'))
+    const card = wrapper.get(`[data-testid="${testIds.elicitationCard}"]`)
+    expect(card.attributes('data-elicitation-id')).toBe(request.id)
+    // The card never takes the focus by itself.
+    expect(card.element.contains(document.activeElement)).toBe(false)
+    expect(wrapper.find(`[data-testid="${testIds.elicitationJump}"]`).exists()).toBe(false)
+
+    FakeObserver.report(false)
+    await flushPromises()
+    const pill = wrapper.get(`[data-testid="${testIds.elicitationJump}"]`)
+    expect(pill.attributes('aria-label')).toBe('Fixture needs your input, show the request')
+    expect(pill.text()).toBe('Fixture needs your input · Show')
+    await pill.trigger('click')
+    expect(scrolled).toHaveBeenCalledOnce()
+    expect(scrolled.mock.contexts[0]).toBe(card.element)
+    expect(document.activeElement).toBe(card.get('input').element)
+
+    FakeObserver.report(true)
+    await flushPromises()
+    expect(wrapper.find(`[data-testid="${testIds.elicitationJump}"]`).exists()).toBe(false)
+
+    gate.resolve()
+    await until(() => wrapper.get('[data-testid="composer"]').attributes('data-status') === 'ready')
+    expect(wrapper.find(`[data-testid="${testIds.elicitationCard}"]`).exists()).toBe(false)
+    FakeObserver.report(false)
+    await flushPromises()
+    expect(wrapper.find(`[data-testid="${testIds.elicitationJump}"]`).exists()).toBe(false)
+    // One announcement per request and tab.
+    expect(announced(wrapper)).not.toContain('Fixture needs your input')
+  })
+
+  it('announces "{server}\'s request expires in 1 minute" once, a minute before it expires', async () => {
+    const request = mcpElicitation({ expiresAt: Date.now() + 60_000 + 150 })
+    const { wrapper, gate } = await waitingView(request)
+    await until(() => announced(wrapper).includes('Fixture\'s request expires in 1 minute'))
+    gate.resolve()
+    await until(() => wrapper.get('[data-testid="composer"]').attributes('data-status') === 'ready')
   })
 })

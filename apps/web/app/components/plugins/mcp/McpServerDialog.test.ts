@@ -422,7 +422,7 @@ describe('mcpServerDialog: edit', () => {
   })
 })
 
-describe('mcpServerDialog: OAuth fields (Phase 14, C54 mounts)', () => {
+describe('mcpServerDialog: OAuth fields (Phase 14, W14.7)', () => {
   it('the HTTP and SSE tabs render McpOAuthFields with the redirect URI built in script; stdio does not', async () => {
     const { wrapper } = mountDialog()
     await settle()
@@ -458,5 +458,103 @@ describe('mcpServerDialog: OAuth fields (Phase 14, C54 mounts)', () => {
       signedIn: true,
     })
     wrapper.unmount()
+  })
+
+  async function openOAuth() {
+    const section = one(`[data-testid="${testIds.mcpOauthSection}"]`, dialog())!
+    if (section.dataset.state !== 'open') {
+      section.querySelector<HTMLButtonElement>('button[aria-expanded]')!.click()
+      await settle()
+    }
+  }
+
+  function oauthInput(id: string): HTMLInputElement {
+    return one<HTMLInputElement>(`[data-testid="${id}"]`, dialog())!
+  }
+
+  it('creates an HTTP server with a client id, its secret and scopes', async () => {
+    api.mcp.create.mockImplementation(async ({ body }: { body: McpServerInput }) => created(body))
+    mountDialog()
+    await settle()
+    await type(field('name'), 'Linear')
+    await chooseTransport('http')
+    await type(field('url'), 'https://mcp.linear.app/mcp')
+    await openOAuth()
+    await type(oauthInput(testIds.mcpOauthClientId), 'hf-linear')
+    await type(oauthInput(testIds.mcpOauthClientSecret), 's3cret')
+    await type(oauthInput(testIds.mcpOauthScopes), 'read write')
+    await save()
+    expect(api.mcp.create).toHaveBeenCalledWith({
+      body: {
+        id: 'linear',
+        name: 'Linear',
+        transport: { type: 'http', url: 'https://mcp.linear.app/mcp', oauth: { clientId: 'hf-linear', scopes: 'read write', clientSecret: 's3cret' } },
+        policy: 'ask',
+        enabled: true,
+      },
+    })
+  })
+
+  it('a change of the OAuth fields alone sends the transport with them; a stored secret is kept with null', async () => {
+    const server = mcpServer({
+      transport: { type: 'http', url: 'https://mcp.example.com/mcp', headers: {}, oauth: { clientId: 'hf-github', clientSecret: { set: true, hint: null, source: 'stored' }, scopes: 'repo' } },
+    })
+    api.mcp.update.mockResolvedValue(server)
+    mountDialog(server)
+    await settle()
+    const saveButton = one<HTMLButtonElement>(`[data-testid="${testIds.mcpSave}"]`, dialog())!
+    expect(saveButton.disabled).toBe(true)
+    await type(oauthInput(testIds.mcpOauthScopes), 'repo read:org')
+    expect(saveButton.disabled).toBe(false)
+    await save()
+    expect(api.mcp.update).toHaveBeenCalledWith({
+      params: { id: 'github' },
+      body: { transport: { type: 'http', url: 'https://mcp.example.com/mcp', oauth: { clientId: 'hf-github', scopes: 'repo read:org', clientSecret: null } } },
+    })
+  })
+
+  it('remove drops the stored client secret: the update omits it', async () => {
+    const server = mcpServer({
+      transport: { type: 'sse', url: 'https://mcp.example.com/sse', headers: {}, oauth: { clientId: 'hf-github', clientSecret: { set: true, hint: null, source: 'stored' }, scopes: null } },
+    })
+    api.mcp.update.mockResolvedValue(server)
+    mountDialog(server)
+    await settle()
+    one<HTMLButtonElement>('[data-action="remove-secret"]', dialog())!.click()
+    await settle()
+    await save()
+    expect(api.mcp.update).toHaveBeenLastCalledWith({
+      params: { id: 'github' },
+      body: { transport: { type: 'sse', url: 'https://mcp.example.com/sse', oauth: { clientId: 'hf-github' } } },
+    })
+  })
+
+  it('a signed-in server warns that a new URL or client ID signs it out', async () => {
+    const server = mcpServer({
+      transport: { type: 'http', url: 'https://mcp.example.com/mcp', headers: {}, oauth: null },
+      auth: { signedIn: true, expiresAt: null, scope: null, client: 'dynamic', issuer: null },
+    })
+    mountDialog(server)
+    await settle()
+    expect(one('[data-slot="mcp-signs-out"]', dialog())).toBeNull()
+    await type(field('url'), 'https://other.example.com/mcp')
+    expect(one('[data-slot="mcp-signs-out"]', dialog())!.textContent?.trim()).toBe('Saving signs you out of GitHub.')
+    await type(field('url'), 'https://mcp.example.com/mcp')
+    expect(one('[data-slot="mcp-signs-out"]', dialog())).toBeNull()
+    await openOAuth()
+    await type(oauthInput(testIds.mcpOauthClientId), 'hf-new')
+    expect(one('[data-slot="mcp-signs-out"]', dialog())).not.toBeNull()
+  })
+
+  it('an Authorization header row added in the dialog disables the OAuth fields', async () => {
+    mountDialog()
+    await settle()
+    await chooseTransport('http')
+    await openOAuth()
+    expect(oauthInput(testIds.mcpOauthClientId).disabled).toBe(false)
+    await addRow('headers')
+    await type(one<HTMLInputElement>('[data-field="row-name"]', rows('headers')[0])!, 'Authorization')
+    expect(oauthInput(testIds.mcpOauthClientId).disabled).toBe(true)
+    expect(one(`[data-testid="${testIds.mcpOauthSection}"]`, dialog())!.textContent).toContain('Servers with an Authorization header don\'t sign in.')
   })
 })

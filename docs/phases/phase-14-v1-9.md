@@ -493,6 +493,28 @@ reconciled docs (W14.12) follow these, not the task text further down.
   - G14B "spec differs" accepted: a v1.8.1 cached mock listing hides the two new mocks until `POST
     /providers/mock/models/refresh` (the upgrade probe refreshes); an out-of-range `HF_TEST_ELICITATION_WAIT_MS` fails
     the boot (like an invalid `HF_TEST_REMOTE_URL`); without `HF_MOCK_PROVIDER=1` it is ignored with a warning.
+- **Gate P14-A** (coordinator):
+  - **Project MCP prompt / resource listings never start a project server** (ADR-050 lazy start for a run; the plan's
+    first cut 3): the first e2e run found that opening a project chat (the composer's slash and `@` listings) started
+    every approved project server. `S/mcp/project.ts` `readyServers(…, start = false)` for the listings; `getPrompt` /
+    `readResource` on send still start and wait; prompts of a project server appear once a run started it
+    (`customization.changed {kind: 'command'}`).
+  - **`auth: null`** means "no stored sign-in record" (never signed in, or signed out); `{ signedIn: false, … }` means a
+    record without valid tokens (e.g. after `invalid_grant`); the Sign in action follows `status: 'needs-auth'`
+    (API.md 4.36 / 5.37 amended by W14.12; the probes accept both for a never-signed-in server).
+  - CCRs: the stdio transport catches an exception of `onmessage` (`@ai-sdk/mcp` "unknown message ID" after an aborted
+    request) and reports it through `onerror` (coordinator, + test); `PluginMcpServerList.vue` released to W14.7 (plugin
+    and Claude plugin server rows sign in); the project MCP DTO gets **no** `oauth` values (declined; `auth.client`
+    says dynamic / configured); `mcp/index.ts` `pluginDto` keeps the unresolved client-id template (W14.1's
+    `presentMcpServer` adapter in `routes/mcp.ts` resolves it for every route); the `tool-elicitation-context.ts`
+    `path` → `field` mapping declined (the card reads both shapes); W14.8's additive props / members accepted
+    (`MentionMenu` `files?` / `resourcesTruncated?` / `resourcesUnavailable?`, `useResourceMentions().available`,
+    `useComposerAttachments.attachResource`, `composer-attachment[data-kind=resource]`); the forced edit
+    `S/plugins/claude/register.ts` (`loadedMcpDecl` keeps `transport.oauth`) accepted.
+  - Answers that follow API.md over the task text: a callback `error` → 502 `auth_invalid` with `details.target`; an
+    `iss` mismatch → 400; a refused authorization server or a server without OAuth metadata → 502 `provider_error`.
+  - The frozen `chat/tools.ts` keeps only the latest preliminary value, so no `{ status: 'running' }` is seen after an
+    answer; ambiguous and sub-agent elicitation declines store no record (behavior-checked).
 
 ## Rules for every Phase 14 agent
 

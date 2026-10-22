@@ -12,6 +12,9 @@
 // "Command" and the source "Project skill" / "Personal skill" / "From {plugin}" / "Built-in skill" (a plugin skill's
 // plugin from the plugins store); the tooltip (and the screen reader text) adds "Ran {n} shell commands" / "Included
 // {paths}" from `metadata.command.inlined` (`data-slot="command-badge-inlined"`).
+// Phase 14 (ADR-061; W14.9, open point 14): an MCP prompt (`source: 'mcp'`) names its server: "MCP · {server}" (the
+// server's name from the plugins store's command list or MCP server list, else the id in the command name); the badge
+// carries `data-source` (the command's source).
 import type { CommandInvocation } from '@harness-forge/shared'
 import { safeParseModelRef, splitQualifiedName } from '@harness-forge/shared'
 import { BookOpenIcon, SquareTerminalIcon } from '@lucide/vue'
@@ -20,7 +23,7 @@ import { computed, inject } from 'vue'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { MODEL_LABEL_RESOLVER } from '~/components/providers/model-label'
 import { usePluginsStore } from '~/stores/plugins'
-import { commandBadgeLines } from './command-badge'
+import { commandBadgeLines, mcpCommandServerName } from './command-badge'
 
 // Attributes (class) go to the badge, not to the renderless tooltip root.
 defineOptions({ inheritAttrs: false })
@@ -42,8 +45,9 @@ const invocationKind = computed<'command' | 'skill'>(() => props.kind ?? props.c
 /** + Phase 11: "Skill" for a skill invocation, else "Command". */
 const kindLabel = computed(() => (invocationKind.value === 'skill' ? 'Skill' : 'Command'))
 const kindIcon = computed(() => (invocationKind.value === 'skill' ? BookOpenIcon : SquareTerminalIcon))
-// Only a plugin command needs the plugins store (the plugin's name); the source is absent on share pages.
-const plugins = props.command?.source === 'plugin' && getActivePinia() ? usePluginsStore() : null
+// Only a plugin command (the plugin's name) and an MCP prompt (the server's name) need the plugins store; the source is
+// absent on share pages.
+const plugins = (props.command?.source === 'plugin' || props.command?.source === 'mcp') && getActivePinia() ? usePluginsStore() : null
 
 const pluginName = computed(() => {
   if (!plugins || props.command?.source !== 'plugin')
@@ -58,6 +62,11 @@ const pluginName = computed(() => {
   return plugin?.name ?? pluginId ?? null
 })
 
+/** + Phase 14: the MCP server of an MCP prompt ("MCP · {server}"). */
+const serverName = computed(() => (props.command?.source === 'mcp'
+  ? mcpCommandServerName(props.name, { commands: plugins?.commands ?? [], servers: plugins?.mcp ?? [] })
+  : null))
+
 const modelName = computed(() => {
   const ref = props.command?.modelRef
   if (!ref)
@@ -66,7 +75,7 @@ const modelName = computed(() => {
 })
 
 const lines = computed(() => (props.command
-  ? commandBadgeLines(props.command, { plugin: pluginName.value, model: modelName.value }, invocationKind.value)
+  ? commandBadgeLines(props.command, { plugin: pluginName.value, model: modelName.value, server: serverName.value }, invocationKind.value)
   : { source: null, model: null, tools: null, inlined: [] as string[] }))
 const hasDetails = computed(() => lines.value.source !== null || lines.value.model !== null || lines.value.tools !== null
   || lines.value.inlined.length > 0)
@@ -81,6 +90,7 @@ const srDetails = computed(() => [lines.value.source, lines.value.model, lines.v
         tabindex="0"
         role="note"
         :aria-label="srDetails ? `${kindLabel} /${name}, ${srDetails}` : `${kindLabel} /${name}`"
+        :data-source="command?.source"
         v-bind="$attrs"
         class="inline-flex h-6 max-w-full min-w-0 items-center gap-1.5 rounded-md border bg-card px-2 font-mono text-xs text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
       >
@@ -101,6 +111,7 @@ const srDetails = computed(() => [lines.value.source, lines.value.model, lines.v
   <span
     v-else
     data-slot="command-badge"
+    :data-source="command?.source"
     v-bind="$attrs"
     class="inline-flex h-6 items-center gap-1.5 rounded-md border bg-card px-2 font-mono text-xs text-muted-foreground"
   >

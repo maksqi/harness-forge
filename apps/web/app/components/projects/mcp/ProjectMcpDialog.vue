@@ -20,8 +20,9 @@
 // save (`saved`) the dialog refetches its rows and their trust items quietly (W12.13), so a new or changed server shows
 // "Needs approval" with Review… at once (`project-mcp.changed` / `project-trust.changed` update them too).
 // Phase 14 (ADR-059; C54 mounts, W14.7 implements; frozen from Gate P14-0b): a row's `signIn` / `signOut` go through
-// `useMcpSignIn` (`{ kind: 'project', projectId, serverId }`); a failure shows in the dialog's error. W14.7 adds the
-// sign-out confirmation and the "Signing in…" state.
+// `useMcpSignIn` (`{ kind: 'project', projectId, serverId }`); a failure shows in the dialog's error. Sign out asks first
+// (ConfirmDialog "Sign out of {name}?" · "harness-forge forgets the tokens; the server stays configured."); a row whose
+// start runs is `busy` ("Signing in…" until the page leaves for the authorization server).
 import type { ProjectMcpList, ProjectMcpServer, TrustItem } from '@harness-forge/shared'
 import type { ProjectFileTarget } from '~/components/settings/customize/customize'
 import { LIMITS, PROJECT_MCP_JSON_PATH } from '@harness-forge/shared'
@@ -35,10 +36,11 @@ import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Spinner } from '@/components/ui/spinner'
 import { cn } from '@/lib/utils'
+import ConfirmDialog from '~/components/common/ConfirmDialog.vue'
 import ConfirmPasswordDialog from '~/components/common/ConfirmPasswordDialog.vue'
 import ProjectFileEditor from '~/components/settings/customize/ProjectFileEditor.vue'
 import { isFreshAuthCancelled, useFreshAuth } from '~/composables/useFreshAuth'
-import { useMcpSignIn } from '~/composables/useMcpSignIn'
+import { mcpSignInKey, useMcpSignIn } from '~/composables/useMcpSignIn'
 import { useProjectMcpStore } from '~/stores/project-mcp'
 import { useProjectTrustStore } from '~/stores/project-trust'
 import { useProjectsStore } from '~/stores/projects'
@@ -254,6 +256,41 @@ async function signInOut(server: ProjectMcpServer, action: 'in' | 'out'): Promis
   }
 }
 
+/** + Phase 14: the server whose Sign out waits for the confirmation. */
+const signOutTarget = ref<ProjectMcpServer | null>(null)
+const signOutOpen = ref(false)
+const signingOut = ref(false)
+
+function askSignOut(server: ProjectMcpServer): void {
+  signOutTarget.value = server
+  signOutOpen.value = true
+}
+
+async function confirmSignOut(): Promise<void> {
+  const server = signOutTarget.value
+  if (!server || signingOut.value)
+    return
+  signingOut.value = true
+  try {
+    await signInOut(server, 'out')
+  }
+  finally {
+    signingOut.value = false
+    signOutOpen.value = false
+  }
+}
+
+function onSignOutOpenChange(value: boolean): void {
+  signOutOpen.value = value
+}
+
+/** + Phase 14: the row's action runs (a reconnect, or a sign-in start until the page leaves). */
+function rowBusy(server: ProjectMcpServer): boolean {
+  if (reconnecting.value === server.id)
+    return true
+  return props.projectId !== null && mcpSignIn.busyKey.value === mcpSignInKey({ kind: 'project', projectId: props.projectId, serverId: server.id })
+}
+
 function openReview(server: ProjectMcpServer): void {
   review.value = { open: true, focusKey: server.sha256 }
 }
@@ -386,12 +423,12 @@ function onOpenChange(value: boolean): void {
                   :server="server"
                   :trust="trustOf(server)"
                   :expanded="expanded.has(server.id)"
-                  :busy="reconnecting === server.id"
+                  :busy="rowBusy(server)"
                   @toggle="toggleRow(server.id)"
                   @reconnect="reconnect(server)"
                   @review="openReview(server)"
                   @sign-in="signInOut(server, 'in')"
-                  @sign-out="signInOut(server, 'out')"
+                  @sign-out="askSignOut(server)"
                 />
               </div>
             </div>
@@ -525,6 +562,18 @@ function onOpenChange(value: boolean): void {
     :entry="fileTarget"
     @saved="onFileSaved"
     @review="onFileReview"
+  />
+
+  <ConfirmDialog
+    :open="signOutOpen"
+    :title="`Sign out of ${signOutTarget?.name ?? 'server'}?`"
+    description="harness-forge forgets the tokens; the server stays configured."
+    confirm-label="Sign out"
+    :destructive="false"
+    :pending="signingOut"
+    data-action="project-mcp-sign-out-confirm"
+    @update:open="onSignOutOpenChange"
+    @confirm="confirmSignOut"
   />
 
   <ConfirmPasswordDialog

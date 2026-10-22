@@ -1,7 +1,8 @@
 // xAI (Grok): `@ai-sdk/xai` 5.x, Responses API only for chat (PROVIDERS.md sections 1-6); image, transcription and
-// speech models (PROVIDERS.md section 13).
+// speech models (PROVIDERS.md section 13); native web search through the `webSearch` hook (plugin API 1.7.0,
+// PROVIDERS.md 14).
 import type { ModelInfo, ProviderDefinition, ProviderRuntime, ReasoningEffort } from '@harness-forge/plugin-sdk'
-import { createXai } from '@ai-sdk/xai'
+import { createXai, xaiTools } from '@ai-sdk/xai'
 import { apiKeyField, apiKeyOf, baseUrlField, baseUrlOf } from '../lib/credentials.ts'
 import { mapProviderError } from '../lib/errors.ts'
 import { requestJson, unexpectedListing } from '../lib/http.ts'
@@ -9,6 +10,7 @@ import { recordOf, stringOf } from '../lib/json.ts'
 import { imageSeed, speechSeed, transcriptionLanguage, transcriptionSeed } from '../lib/media.ts'
 import { finalizeListing, modelInfo } from '../lib/models.ts'
 import { topLevelReasoning } from '../lib/reasoning.ts'
+import { baseModelId } from '../lib/web-search.ts'
 
 const PROVIDER = { id: 'xai', name: 'xAI' }
 export const XAI_BASE_URL = 'https://api.x.ai/v1'
@@ -18,6 +20,15 @@ const IMAGE_IDS = /^grok-imagine-image/i
 const NON_CHAT_IDS = /^grok-imagine/i
 /** Variants without an effort parameter (`supportsReasoningEffort` of `@ai-sdk/xai` 5.0.10). */
 const WITHOUT_EFFORT = /^grok-4\.20(?:-\d{4})?-(non-)?reasoning$/
+
+/** Grok 2 and Grok 3 models: no `web_search` server tool (a deny-list: an unknown new id counts as supported). */
+const WITHOUT_WEB_SEARCH = /^grok-[23](?:[.-]|$)/
+
+/** Native web search (`xai.tools.webSearch`, Responses API) for a model id (every model except Grok 2 and Grok 3). */
+export function supportsXaiWebSearch(modelId: string): boolean {
+  const id = baseModelId(modelId)
+  return id !== '' && !WITHOUT_WEB_SEARCH.test(id)
+}
 
 /** Catalog key of the speech-to-text model: `.transcription()` takes no model id (one `/stt` endpoint). */
 export const XAI_TRANSCRIPTION_MODEL_ID = 'stt'
@@ -123,5 +134,9 @@ export const xaiProvider: ProviderDefinition = {
   transcriptionOptions(hints) {
     const language = transcriptionLanguage(hints)
     return language === undefined ? undefined : { xai: { language } }
+  },
+  webSearch(model) {
+    // `xSearch` (posts on X) is not offered.
+    return supportsXaiWebSearch(model.id) ? { tools: { web_search: xaiTools.webSearch({}) } } : undefined
   },
 }

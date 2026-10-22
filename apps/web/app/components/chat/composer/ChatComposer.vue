@@ -51,14 +51,23 @@
 // The slash menu's Skills group comes from `GET /commands` (`kind: 'skill'`); in a project chat with project commands,
 // opening the menu fetches the project's trust list (15 s max age), and its pending `command` items mark their
 // commands "Needs approval".
-// Phase 14 (ADR-062, ADR-063; C54 mounts, W14.8 implements; frozen from Gate P14-0b): `webSearch` = the chat's web search
-// mode (`session.webSearch`) with `update:webSearch`; WebSearchToggle sits after OutputStyleMenu (hidden for image
-// models and while the model is unknown), on = `auto`, its availability from `webSearchAvailability` (the selected
-// model's `webSearch`, `capabilities.tools`, the setting `webSearchNative`, the web-search store's `builtinAvailable`, the
-// permission mode, one function tool while tools are on; docs/UI.md 7.35, open point 5). Until W14.8 fits the unavailable
-// toggle into the 390 px toolbar (the model picker keeps its 40 px touch target), the C54 mount shows it only while
-// search is available or the chat's mode is `auto`.
-import type { ClientCommand, ImageOptions, MessageUsage, ProjectFileEntry, QueueItem, ReasoningEffort, ToolMode, WebSearchMode } from '@harness-forge/shared'
+// Phase 14 (ADR-061 – ADR-063; C54 mounts, W14.8 implements; frozen from Gate P14-0b): `webSearch` = the chat's web
+// search mode (`session.webSearch`) with `update:webSearch`; WebSearchToggle sits after OutputStyleMenu for every chat
+// model (hidden for image models and while the model is unknown), on = `auto`, its availability from
+// `webSearchAvailability` (the selected model's `webSearch`, `capabilities.tools`, the setting `webSearchNative`, the
+// web-search store's `builtinAvailable`, the permission mode, one function tool while tools are on; docs/UI.md 7.35, open
+// point 5); the web-search store is read on mount and on a chat or model change (15 s max age). A toggle is announced
+// ("Web search on" / "Web search off"); Alt+W (`composer-web-search`, obeys `altShortcuts`) calls its `activate()`. The
+// toolbar's narrow-screen rule (`toolbar-layout.ts`): the model name truncates first, down to 40 px, then the left tools
+// wrap onto a second line, so the toggle shows in every state (unavailable included) without shrinking a touch target.
+// MCP resources (ADR-061): in a chat with tools on (any chat, a project or not), `@` also lists the resources of the
+// connected MCP servers (`useResourceMentions`) as the mention menu's second section "MCP resources" (shown once the
+// scope has something to mention, or for an `@` inserted from the `+` menu); picking one inserts `@<server>:<uri>` and a
+// blank and attaches it as a chip (`attachments.attachResource` → `POST /mcp/resources/attach`); 413, 409 `needs-auth` and
+// other refusals are toasts ("This resource is larger than 5 MB.", "Sign in to {server} first.", "Couldn't attach
+// {name}."). The `+` menu then reads "Mention a file or resource" in any chat with tools on. The slash menu's MCP group
+// comes from `GET /commands` like every server command (`slash-commands.ts`).
+import type { ClientCommand, ImageOptions, McpResourceEntry, MessageUsage, ProjectFileEntry, QueueItem, ReasoningEffort, ToolMode, WebSearchMode } from '@harness-forge/shared'
 import type { ChatStatus } from 'ai'
 import type { DictationRange } from './dictation'
 import type { ComposerRefusalData, OutputStyleScope } from './output-style'
@@ -82,6 +91,7 @@ import { loadComposerCatalog, useComposerModel } from '~/composables/useComposer
 import { focusInOverlay, useComposerShortcuts } from '~/composables/useComposerShortcuts'
 import { useFileMentions } from '~/composables/useFileMentions'
 import { useImageOptions } from '~/composables/useImageOptions'
+import { useResourceMentions } from '~/composables/useResourceMentions'
 import { useShortcuts } from '~/composables/useShortcuts'
 import { useSpeechPlayer } from '~/composables/useSpeechPlayer'
 import { useVoiceInput } from '~/composables/useVoiceInput'
@@ -89,6 +99,7 @@ import { useChatsStore } from '~/stores/chats'
 import { useCustomizationsStore } from '~/stores/customizations'
 import { useModelsStore } from '~/stores/models'
 import { usePluginsStore } from '~/stores/plugins'
+import { useProjectMcpStore } from '~/stores/project-mcp'
 import { useProjectTrustStore } from '~/stores/project-trust'
 import { useProjectsStore } from '~/stores/projects'
 import { useProvidersStore } from '~/stores/providers'
@@ -107,7 +118,7 @@ import { DICTATION_SHORTCUT, dictationErrorToast, insertDictation } from './dict
 import DropOverlay from './DropOverlay.vue'
 import EffortMenu from './EffortMenu.vue'
 import ImageOptionsMenu from './ImageOptionsMenu.vue'
-import { mentionErrorMessage, projectAttachErrorText } from './mention-menu'
+import { mentionErrorMessage, projectAttachErrorText, replaceResourceToken, resourceAttachErrorText, resourceTitle } from './mention-menu'
 import MentionMenu from './MentionMenu.vue'
 import MicButton from './MicButton.vue'
 import { useModeCycle } from './mode-cycle'
@@ -136,7 +147,8 @@ import {
 } from './slash-commands'
 import SlashArgumentHint from './SlashArgumentHint.vue'
 import SlashMenu from './SlashMenu.vue'
-import { webSearchAvailability, webSearchVia } from './web-search'
+import { TOOLBAR_END_CLASS, TOOLBAR_PICKER_CLASS, TOOLBAR_START_CLASS } from './toolbar-layout'
+import { composerWebSearchInput, WEB_SEARCH_SHORTCUT_KEYS, webSearchAnnouncement, webSearchAvailability, webSearchVia } from './web-search'
 import WebSearchToggle from './WebSearchToggle.vue'
 
 const props = withDefaults(defineProps<{
@@ -210,6 +222,7 @@ const fileInput = useTemplateRef<HTMLInputElement>('fileInput')
 const slashMenu = useTemplateRef<InstanceType<typeof SlashMenu>>('slashMenu')
 const mentionMenu = useTemplateRef<InstanceType<typeof MentionMenu>>('mentionMenu')
 const micButton = useTemplateRef<InstanceType<typeof MicButton>>('micButton')
+const webSearchToggle = useTemplateRef<InstanceType<typeof WebSearchToggle>>('webSearchToggle')
 const textarea = computed(() => (textareaComponent.value?.$el as HTMLTextAreaElement | undefined) ?? null)
 
 const isTouch = useMediaQuery('(pointer: coarse)')
@@ -217,7 +230,12 @@ const draft = useComposerDraft(() => props.chatId)
 const text = draft.text
 const current = useComposerModel(() => props.modelRef)
 const attachments = useComposerAttachments({
-  onReject: ({ name, reason, message, source, path, error }) => {
+  onReject: ({ name, reason, message, source, path, error, serverName }) => {
+    // + Phase 14: an MCP resource of an `@` mention (docs/UI.md 7.35).
+    if (source === 'resource') {
+      toast.error(resourceAttachErrorText(error, name, serverName ?? name))
+      return
+    }
     // A project file of an `@` mention (docs/UI.md 7.26).
     if (source === 'project') {
       const title = `${path ?? name} can't be attached`
@@ -272,21 +290,30 @@ function onImageOptionsChange(value: ImageOptions) {
 
 const webSearchStore = useWebSearchStore()
 /** What turning web search on would do (the server's rule, open point 5). */
-const webSearchState = computed(() => webSearchAvailability({
+const webSearchState = computed(() => webSearchAvailability(composerWebSearchInput({
   toolMode: props.toolMode,
-  native: current.model.value?.webSearch ?? null,
+  modelWebSearch: current.model.value?.webSearch,
+  modelTools: current.model.value?.capabilities.tools === true,
   preferNative: settings.resolved.webSearchNative,
   builtinAvailable: webSearchStore.builtinAvailable,
-  modelTools: current.model.value?.capabilities.tools === true,
-  functionTools: props.toolMode === 'off' ? 0 : 1,
-}))
+})))
 const webSearchBy = computed(() => webSearchVia(webSearchState.value, current.provider.value?.name ?? null, webSearchStore.config?.backend ?? null))
-/** A chat model is selected, and search is available or on (W14.8 settles the unavailable toggle). */
-const showWebSearch = computed(() => !isImageModel.value && current.model.value !== undefined
-  && (webSearchState.value.kind !== 'unavailable' || props.webSearch === 'auto'))
+/**
+ * A chat model is selected (not an image model, not unknown): the toggle shows in every state, unavailable included
+ * (the toolbar wraps instead of squeezing the model picker, `toolbar-layout.ts`).
+ */
+const showWebSearch = computed(() => !isImageModel.value && current.model.value !== undefined)
+
+/** The search API configuration of `core-search` (whether the builtin can search), read with a 15 s max age. */
+const WEB_SEARCH_CONFIG_MAX_AGE_MS = 15_000
+function refreshWebSearchConfig() {
+  webSearchStore.fetch({ maxAgeMs: WEB_SEARCH_CONFIG_MAX_AGE_MS }).catch(() => {})
+}
+watch(() => [props.chatId, props.modelRef], () => refreshWebSearchConfig())
 
 function onWebSearchToggle(on: boolean) {
   emit('update:webSearch', on ? 'auto' : 'off')
+  announce(webSearchAnnouncement(on))
 }
 
 // ---------- output style (Phase 11, ADR-051; W11.10) ----------
@@ -483,12 +510,81 @@ watch(rememberOpen, (open) => {
     void nextTick(() => focusTextarea())
 })
 
-// ---------- file mentions (Phase 9, ADR-042; W9.8) ----------
+// ---------- file mentions (Phase 9, ADR-042; W9.8) and MCP resources (Phase 14, ADR-061; W14.8) ----------
 
 const mentions = useFileMentions({ projectId: computed(() => props.projectId), text, caret })
-const mentionOpen = mentions.open
 const mentionProjectName = computed(() => (props.projectId ? projects.byId(props.projectId)?.name ?? null : null))
 const mentionError = computed(() => (mentions.state.value === 'error' ? mentionErrorMessage(mentions.error.value) : null))
+
+/** Tools are on in this chat: `@` also lists MCP resources (any chat, docs/UI.md 7.35). */
+const resourcesEnabled = computed(() => current.toolsAvailable.value && props.toolMode !== 'off')
+const resources = useResourceMentions({ projectId: () => props.projectId, text, caret, enabled: resourcesEnabled })
+const projectMcp = useProjectMcpStore()
+
+/** The `@` token under the caret and its text (Esc dismisses it until it changes, like the file part). */
+const mentionTokenKey = computed(() => {
+  const token = mentions.token.value
+  return token ? `${token.start}:${text.value.slice(token.start, token.end)}` : null
+})
+const resourcesDismissedKey = ref<string | null>(null)
+/**
+ * Where the `@` that `+` → "Mention a file or resource" inserted starts: while the caret stays in that token, its
+ * resource section shows even when the scope has nothing (yet) to mention.
+ */
+const resourcesForcedStart = ref<number | null>(null)
+watch(mentionTokenKey, (key) => {
+  if (resourcesDismissedKey.value !== null && key !== resourcesDismissedKey.value)
+    resourcesDismissedKey.value = null
+  if (resourcesForcedStart.value !== null && mentions.token.value?.start !== resourcesForcedStart.value)
+    resourcesForcedStart.value = null
+})
+/**
+ * The resource section shows while the scope has something to mention (resources, or servers that are not connected),
+ * or in the `@` token the `+` menu inserted; never for a dismissed token.
+ */
+const resourcesShown = computed(() => resources.state.value !== 'idle'
+  && mentionTokenKey.value !== resourcesDismissedKey.value
+  && (resources.available.value === true || (resourcesForcedStart.value !== null && mentions.token.value?.start === resourcesForcedStart.value)))
+const mentionOpen = computed(() => mentions.open.value || resourcesShown.value)
+
+/** The names of the servers whose resources are missing (a turned-off server is left out). */
+const resourcesUnavailable = computed(() => resources.unavailable.value
+  .filter(server => server.status !== 'disabled')
+  .map((server) => {
+    const project = props.projectId ? projectMcp.byId(props.projectId, server.serverId) : null
+    return project?.name ?? plugins.mcp.find(entry => entry.id === server.serverId)?.name ?? server.serverId
+  }))
+
+// A new `@` token (the menu opens): the resource listing is refreshed (an answer younger than 15 s is reused).
+watch(() => (resourcesEnabled.value ? mentionTokenKey.value !== null : false), (typing) => {
+  if (typing)
+    resources.refresh().catch(() => {})
+})
+
+/** Esc: the menu stays closed for this token until it changes (files and resources). */
+function dismissMention() {
+  mentions.dismiss()
+  resourcesDismissedKey.value = mentionTokenKey.value
+}
+
+/** A picked resource replaces the `@` token with its mention and a blank and is attached as a chip. */
+function onResourceSelect(entry: McpResourceEntry) {
+  const token = mentions.token.value
+  if (!token)
+    return
+  const next = replaceResourceToken(text.value, token, entry)
+  setTextAndCaret(next.text, next.caret, { force: true })
+  attachments.attachResource(
+    {
+      serverId: entry.serverId,
+      uri: entry.uri,
+      name: resourceTitle(entry),
+      serverName: entry.serverName.trim() || entry.serverId,
+      ...(entry.mimeType ? { mime: entry.mimeType } : {}),
+    },
+    () => resources.attach(entry),
+  )
+}
 
 /** A picked file replaces the `@` token with its mention and is attached as a project chip; a folder opens it. */
 function onMentionSelect(entry: ProjectFileEntry) {
@@ -510,6 +606,8 @@ function startMention() {
   const head = before === '' || /\s$/.test(before) ? '@' : ' @'
   // A word right after the caret would become the query: keep it apart.
   const tail = after === '' || /^\s/.test(after) ? after : ` ${after}`
+  // + Phase 14: the inserted `@` shows the resource section at once (while the caret stays in its token).
+  resourcesForcedStart.value = resourcesEnabled.value ? before.length + head.length - 1 : null
   setTextAndCaret(`${before}${head}${tail}`, before.length + head.length, { force: true })
 }
 
@@ -917,6 +1015,17 @@ watch(voiceState, (next, previous) => {
 // Registered after the composer shortcuts: for Esc the latest registration whose `when` passes wins, so a running
 // dictation is canceled before a response is stopped (docs/UI.md 12).
 useShortcuts().register([
+  // + Phase 14: Alt+W does what a click on the web search toggle does (docs/UI.md 12); it obeys `altShortcuts`.
+  {
+    id: 'composer-web-search',
+    keys: WEB_SEARCH_SHORTCUT_KEYS,
+    description: 'Turn web search on or off',
+    group: 'Composer',
+    alt: true,
+    allowInInputs: true,
+    when: () => showWebSearch.value && !voiceIndicator.value && !focusInOverlay(),
+    handler: () => webSearchToggle.value?.activate(),
+  },
   {
     id: 'composer-dictate',
     keys: DICTATION_SHORTCUT,
@@ -958,6 +1067,7 @@ onMounted(() => {
   loadComposerCatalog()
   refreshCommands()
   refreshStyles(STYLES_MAX_AGE_MS)
+  refreshWebSearchConfig()
   syncCaret()
   autosize()
   focusTextarea()
@@ -1049,8 +1159,14 @@ const TEXTAREA_CLASS = [
       :error-message="mentionError"
       :truncated="mentions.truncated.value"
       :project-name="mentionProjectName"
+      :files="projectChat"
+      :resources="resources.items.value"
+      :resources-state="resourcesShown ? resources.state.value : 'idle'"
+      :resources-truncated="resources.truncated.value"
+      :resources-unavailable="resourcesUnavailable"
       @select="onMentionSelect"
-      @close="mentions.dismiss()"
+      @select-resource="onResourceSelect"
+      @close="dismissMention"
     />
 
     <input
@@ -1113,7 +1229,7 @@ const TEXTAREA_CLASS = [
       </div>
 
       <AiPromptInputFooter class="cursor-default gap-2 px-2 pt-1 pb-2">
-        <AiPromptInputTools class="min-w-0 flex-1 gap-0.5">
+        <AiPromptInputTools :class="TOOLBAR_START_CLASS">
           <RecordingIndicator
             v-if="voiceIndicator"
             :elapsed-ms="voice.elapsedMs.value"
@@ -1124,6 +1240,7 @@ const TEXTAREA_CLASS = [
             <ComposerAddMenu
               :return-focus-to="focusTarget"
               :project-chat="projectChat"
+              :mention-resources="resourcesEnabled"
               @attach="openFilePicker"
               @commands="startCommand"
               @mention="startMention"
@@ -1132,7 +1249,7 @@ const TEXTAREA_CLASS = [
               v-model:open="pickerOpen"
               :model-value="modelRef"
               :return-focus-to="focusTarget"
-              class="min-w-0"
+              :class="TOOLBAR_PICKER_CLASS"
               @update:model-value="onModelPicked"
             />
             <EffortMenu
@@ -1153,6 +1270,7 @@ const TEXTAREA_CLASS = [
             />
             <WebSearchToggle
               v-if="showWebSearch"
+              ref="webSearchToggle"
               :model-value="webSearch === 'auto'"
               :availability="webSearchState"
               :via="webSearchBy"
@@ -1170,7 +1288,7 @@ const TEXTAREA_CLASS = [
             />
           </template>
         </AiPromptInputTools>
-        <AiPromptInputTools class="shrink-0 gap-1">
+        <AiPromptInputTools :class="TOOLBAR_END_CLASS">
           <PermissionMenu
             v-if="current.toolsAvailable.value && !voiceIndicator"
             v-model:open="permissionOpen"

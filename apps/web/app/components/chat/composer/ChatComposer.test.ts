@@ -1,4 +1,4 @@
-import type { AudioTranscription, FileRef, MessageUsage, ProjectFileEntry, ProjectFileSearch, ReasoningEffort, ToolMode } from '@harness-forge/shared'
+import type { AudioTranscription, FileRef, McpResourceList, MessageUsage, ProjectFileEntry, ProjectFileSearch, ReasoningEffort, ToolMode, WebSearchMode } from '@harness-forge/shared'
 import type { ChatStatus } from 'ai'
 import type { Mock } from 'vitest'
 import type { ChatComposerExposed } from './types'
@@ -25,7 +25,7 @@ import { useUiStore } from '~/stores/ui'
 import { useWebSearchStore } from '~/stores/web-search'
 import { testIds } from '~/utils/testids'
 import { installFakeMedia } from '~/utils/testing/fake-media'
-import { catalogModel, chatId, chatSummary, customizationList, messageId, pluginSummary, projectFileEntry, projectId, projectSummary, projectTrustList, queueItem, rememberResult, styleEntry, trustCommandItem } from '~/utils/testing/fixtures'
+import { catalogModel, chatId, chatSummary, customizationList, mcpPromptCommand, mcpResourceEntry, mcpResourceList, messageId, pluginSummary, projectFileEntry, projectId, projectSummary, projectTrustList, queueItem, rememberResult, styleEntry, trustCommandItem } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { stubLocalStorage } from '~/utils/testing/storage'
 import { CHAT_VIEW_ACTIONS } from '../chat-context'
@@ -65,6 +65,8 @@ interface HarnessState {
   previousImages: number
   projectId: string | null
   outputStyle: string | null
+  /** + Phase 14: the chat's web search mode. */
+  webSearch: WebSearchMode
 }
 
 let pinia: ReturnType<typeof createPinia>
@@ -85,6 +87,7 @@ function mountComposer(overrides: Partial<HarnessState> = {}) {
     previousImages: 0,
     projectId: null,
     outputStyle: null,
+    webSearch: 'off',
     ...overrides,
   })
   const wrapper = mount({
@@ -102,6 +105,9 @@ function mountComposer(overrides: Partial<HarnessState> = {}) {
         },
         'onUpdate:outputStyle': (value: string | null) => {
           state.outputStyle = value
+        },
+        'onUpdate:webSearch': (value: WebSearchMode) => {
+          state.webSearch = value
         },
       }),
     }),
@@ -1545,12 +1551,21 @@ describe('chatComposer', () => {
       expect(wrapper.find(byTestId(testIds.mentionMenu)).exists()).toBe(true)
       wrapper.unmount()
 
+      // + Phase 14: a chat without a project lists MCP resources while tools are on ("Mention a file or resource"); a model
+      // without tools offers no mention at all.
       const other = mountComposer()
-      expect(other.wrapper.getComponent(ComposerAddMenu).props('projectChat')).toBe(false)
+      expect(other.wrapper.getComponent(ComposerAddMenu).props()).toMatchObject({ projectChat: false, mentionResources: true })
       await openAddMenu(other.wrapper)
+      expect(bodyAll(byTestId(testIds.composerMention)).map(entry => entry.textContent?.trim())).toEqual(['Mention a file or resource'])
+      other.wrapper.unmount()
+      document.body.replaceChildren()
+
+      const noTools = mountComposer({ modelRef: llama.ref })
+      expect(noTools.wrapper.getComponent(ComposerAddMenu).props()).toMatchObject({ projectChat: false, mentionResources: false })
+      await openAddMenu(noTools.wrapper)
       expect(bodyAll(byTestId(testIds.composerMention))).toHaveLength(0)
       expect(bodyAll('[role="menuitem"]').map(entry => entry.textContent?.trim())).toEqual(['Attach files', 'Commands'])
-      other.wrapper.unmount()
+      noTools.wrapper.unmount()
     })
 
     it('shows "Queue message" left of Stop while a run is active and the composer has content', async () => {
@@ -1998,51 +2013,334 @@ describe('chatComposer', () => {
     })
   })
 
-  describe('web search toggle (Phase 14, C54 mount)', () => {
-    it('mounts WebSearchToggle right after OutputStyleMenu while search is available; hidden for image models', async () => {
-      seedStores()
-      // No native search and no search API key (the resolver's `no-backend`) and the chat's mode is off: not shown yet.
-      const unavailable = mountComposer()
-      expect(unavailable.wrapper.find(byTestId(testIds.composerWebSearch)).exists()).toBe(false)
-      unavailable.wrapper.unmount()
+  describe('web search toggle (Phase 14, W14.8-T4)', () => {
+    const KEYS_NONE = { brave: { set: false, hint: null, source: null }, tavily: { set: false, hint: null, source: null }, exa: { set: false, hint: null, source: null } }
 
-      useWebSearchStore().config = { backend: 'brave', keys: { brave: { set: true, hint: null, source: 'stored' }, tavily: { set: false, hint: null, source: null }, exa: { set: false, hint: null, source: null } }, maxResults: 5, pluginActive: true }
-      const { wrapper } = mountComposer()
-      const toggle = wrapper.get(byTestId(testIds.composerWebSearch))
-      expect(toggle.attributes()).toMatchObject({ 'data-state': 'off', 'data-mode': 'builtin', 'aria-pressed': 'false' })
+    /** Settings → Web search has a Brave Search key (the builtin `search_web` can run). */
+    function setSearchKey() {
+      useWebSearchStore().config = { backend: 'brave', keys: { ...KEYS_NONE, brave: { set: true, hint: null, source: 'stored' } }, maxResults: 5, pluginActive: true }
+    }
+
+    function toggle(wrapper: ReturnType<typeof mountComposer>['wrapper']) {
+      return wrapper.get(byTestId(testIds.composerWebSearch))
+    }
+
+    it('shows the toggle right after OutputStyleMenu for every chat model, also unavailable; never for image models', async () => {
+      seedStores({ models: [sonnet, haiku, llama, gptImage] })
+      const { wrapper, state } = mountComposer()
+      // No native search and no search API key: unavailable, and still shown (the toolbar wraps instead).
+      expect(toggle(wrapper).attributes()).toMatchObject({ 'data-state': 'unavailable', 'aria-pressed': 'false', 'aria-disabled': 'true' })
       const order = [...wrapper.element.querySelectorAll('[data-testid]')].map(node => node.getAttribute('data-testid'))
       expect(order.indexOf(testIds.outputStyleTrigger)).toBeLessThan(order.indexOf(testIds.composerWebSearch))
+      state.modelRef = gptImage.ref
+      await flushPromises()
+      expect(wrapper.find(byTestId(testIds.composerWebSearch)).exists()).toBe(false)
+      // An unknown model (removed from the catalog) shows no toggle either.
+      state.modelRef = 'gone:model'
+      await flushPromises()
+      expect(wrapper.find(byTestId(testIds.composerWebSearch)).exists()).toBe(false)
       wrapper.unmount()
-
-      seedStores({ models: [sonnet, gptImage] })
-      const image = mountComposer({ modelRef: gptImage.ref })
-      expect(image.wrapper.find(byTestId(testIds.composerWebSearch)).exists()).toBe(false)
-      image.wrapper.unmount()
     })
 
     it('a chat whose mode is auto shows the toggle pressed even while search is unavailable', async () => {
-      seedStores()
-      const wrapper = mount({
-        render: () => h(TooltipProvider, null, { default: () => h(ChatComposer, { chatId: chatId(1), status: 'ready', modelRef: sonnet.ref, reasoningEffort: 'auto', toolMode: 'ask', webSearch: 'auto' }) }),
-      }, { attachTo: document.body, global: { plugins: [pinia], stubs: { NuxtLink: NuxtLinkStub }, provide: { [CHAT_VIEW_ACTIONS as symbol]: chatViewActions } } })
-      expect(wrapper.get(byTestId(testIds.composerWebSearch)).attributes()).toMatchObject({ 'data-state': 'unavailable', 'aria-pressed': 'true', 'aria-disabled': 'true' })
+      const { wrapper } = mountComposer({ webSearch: 'auto' })
+      expect(toggle(wrapper).attributes()).toMatchObject({ 'data-state': 'unavailable', 'aria-pressed': 'true', 'aria-disabled': 'true' })
       wrapper.unmount()
     })
 
-    it('feeds the resolver and re-emits a toggle as update:webSearch', async () => {
-      seedStores()
-      useWebSearchStore().config = { backend: 'brave', keys: { brave: { set: true, hint: null, source: 'stored' }, tavily: { set: false, hint: null, source: null }, exa: { set: false, hint: null, source: null } }, maxResults: 5, pluginActive: true }
-      const { wrapper, composer } = mountComposer()
-      const toggle = wrapper.getComponent(WebSearchToggle)
-      expect(toggle.props()).toMatchObject({ modelValue: false, availability: { kind: 'builtin' }, via: 'Brave Search' })
-      await wrapper.get(byTestId(testIds.composerWebSearch)).trigger('click')
-      expect(composer().emitted('update:webSearch')).toEqual([['auto']])
+    it.each([
+      ['no-backend', {}],
+      ['tools-unsupported', { modelRef: llama.ref }],
+      ['tool-mode-off', { toolMode: 'off' as ToolMode }],
+      ['tools-conflict', { modelRef: 'google:gemini-2.5-flash' }],
+    ] as const)('feeds the resolver: %s', async (reason, overrides) => {
+      const gemini = catalogModel({ providerId: 'google', id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', webSearch: 'exclusive' })
+      seedStores({ models: [sonnet, llama, gemini] })
+      const { wrapper, composer } = mountComposer(overrides)
+      expect(wrapper.getComponent(WebSearchToggle).props()).toMatchObject({ availability: { kind: 'unavailable', reason }, via: null })
+      await toggle(wrapper).trigger('click')
+      await flushPromises()
+      expect(bodyAll(byTestId(testIds.webSearchUnavailable)).map(node => node.getAttribute('data-reason'))).toEqual([reason])
+      expect(composer().emitted('update:webSearch')).toBeUndefined()
       wrapper.unmount()
+    })
 
-      seedStores({ models: [catalogModel({ id: 'claude-sonnet-5', name: 'Claude Sonnet 5', webSearch: 'native' })] })
+    it('says who searches (the provider, or the search API) and toggles on → auto, off → off with an announcement', async () => {
+      seedStores({ models: [catalogModel({ id: 'claude-sonnet-5', name: 'Claude Sonnet 5', webSearch: 'native' }), llama] })
       const native = mountComposer()
       expect(native.wrapper.getComponent(WebSearchToggle).props()).toMatchObject({ availability: { kind: 'native', exclusive: false }, via: anthropic.name })
+      expect(toggle(native.wrapper).attributes()).toMatchObject({ 'data-state': 'off', 'data-mode': 'native' })
       native.wrapper.unmount()
+
+      seedStores()
+      setSearchKey()
+      const { wrapper, state, composer, announcer } = mountComposer()
+      expect(wrapper.getComponent(WebSearchToggle).props()).toMatchObject({ modelValue: false, availability: { kind: 'builtin' }, via: 'Brave Search' })
+      await toggle(wrapper).trigger('click')
+      await flushPromises()
+      expect(composer().emitted('update:webSearch')).toEqual([['auto']])
+      expect(state.webSearch).toBe('auto')
+      expect(toggle(wrapper).attributes()).toMatchObject({ 'data-state': 'on', 'data-mode': 'builtin', 'aria-pressed': 'true' })
+      expect(announcer().text()).toBe('Web search on')
+      await toggle(wrapper).trigger('click')
+      await flushPromises()
+      expect(composer().emitted('update:webSearch')).toEqual([['auto'], ['off']])
+      expect(announcer().text()).toBe('Web search off')
+      wrapper.unmount()
+    })
+
+    it('reads the search API configuration on mount and on a model change', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] })
+      const { wrapper, state } = mountComposer()
+      await flushPromises()
+      expect(api.plugins.getSettings).toHaveBeenCalledWith({ params: { id: 'core-search' } })
+      const calls = api.plugins.getSettings.mock.calls.length
+      state.modelRef = haiku.ref
+      await flushPromises()
+      expect(api.plugins.getSettings.mock.calls.length).toBeGreaterThan(calls)
+      wrapper.unmount()
+    })
+
+    it('alt+W toggles it from the textarea (the focus stays there), opens the reason when unavailable, and is off with altShortcuts', async () => {
+      setSearchKey()
+      const { wrapper, state, composer, textarea } = mountComposer()
+      expect(shortcuts.list().find(def => def.id === 'composer-web-search')).toMatchObject({ keys: 'alt+code:KeyW', group: 'Composer', description: 'Turn web search on or off' })
+      textarea().element.focus()
+      const altW = press(textarea().element, { key: '∑', code: 'KeyW', altKey: true })
+      await flushPromises()
+      expect(altW.defaultPrevented).toBe(true)
+      expect(composer().emitted('update:webSearch')).toEqual([['auto']])
+      expect(document.activeElement).toBe(textarea().element)
+      // With Ctrl or Meta it is not the shortcut.
+      press(textarea().element, { key: 'w', code: 'KeyW', altKey: true, ctrlKey: true })
+      await flushPromises()
+      expect(composer().emitted('update:webSearch')).toHaveLength(1)
+
+      // Unavailable (tools off): Alt+W opens the popover with the reason.
+      state.toolMode = 'off'
+      await flushPromises()
+      press(textarea().element, { key: '∑', code: 'KeyW', altKey: true })
+      await flushPromises()
+      expect(bodyAll(byTestId(testIds.webSearchUnavailable)).map(node => node.getAttribute('data-reason'))).toEqual(['tool-mode-off'])
+      expect(composer().emitted('update:webSearch')).toHaveLength(1)
+      ;(wrapper.getComponent(WebSearchToggle).vm as unknown as { activate: () => void }).activate()
+      await flushPromises()
+      expect(bodyAll(byTestId(testIds.webSearchUnavailable))).toHaveLength(0)
+      expect(document.activeElement).toBe(textarea().element)
+
+      state.toolMode = 'ask'
+      const settings = useSettingsStore()
+      shortcuts.setAltEnabled(() => settings.resolved.altShortcuts)
+      settings.settings = { ...settings.settings!, altShortcuts: false }
+      await flushPromises()
+      const off = press(textarea().element, { key: '∑', code: 'KeyW', altKey: true })
+      await flushPromises()
+      expect(off.defaultPrevented).toBe(false)
+      expect(composer().emitted('update:webSearch')).toHaveLength(1)
+      wrapper.unmount()
+      expect(shortcuts.list().some(def => def.id === 'composer-web-search')).toBe(false)
+    })
+
+    it('alt+W does nothing for image models (no toggle)', async () => {
+      seedStores({ models: [sonnet, gptImage] })
+      setSearchKey()
+      const { wrapper, composer, textarea } = mountComposer({ modelRef: gptImage.ref })
+      const altW = press(textarea().element, { key: '∑', code: 'KeyW', altKey: true })
+      await flushPromises()
+      expect(altW.defaultPrevented).toBe(false)
+      expect(composer().emitted('update:webSearch')).toBeUndefined()
+      wrapper.unmount()
+    })
+
+    it('layout rule: the left tools wrap, the model picker never truncates below 40 px, the right tools stay on the bottom line', () => {
+      const { wrapper, send } = mountComposer()
+      const picker = wrapper.get(byTestId(testIds.modelPickerTrigger))
+      // The toolbar's picker class is merged over the trigger's own `min-w-0 max-w-full`.
+      expect(picker.classes()).toEqual(expect.arrayContaining(['min-w-10', 'basis-10', 'grow', 'max-w-max', 'pointer-coarse:h-10']))
+      expect(picker.classes()).not.toContain('min-w-0')
+      expect(picker.classes()).not.toContain('max-w-full')
+      const start = picker.element.parentElement!
+      expect([...start.classList]).toEqual(expect.arrayContaining(['flex-wrap', 'flex-1', 'min-w-0']))
+      // The web search toggle (unavailable here) is one of the left tools and never shrinks.
+      const webSearch = toggle(wrapper).element
+      expect(start.contains(webSearch)).toBe(true)
+      expect(webSearch.parentElement!.classList.contains('shrink-0')).toBe(true)
+      expect(webSearch.classList.contains('pointer-coarse:min-w-10')).toBe(true)
+      const end = send().element.closest('.self-end')!
+      expect([...end.classList]).toEqual(expect.arrayContaining(['shrink-0', 'self-end']))
+      expect(end.contains(webSearch)).toBe(false)
+      wrapper.unmount()
+    })
+  })
+
+  describe('mCP prompts in the slash menu (Phase 14, W14.8-T1)', () => {
+    it('lists the prompts of connected MCP servers in the MCP group; a pick inserts the name and shows the hint', async () => {
+      const greet = mcpPromptCommand()
+      const { customizations } = seedStores()
+      customizations.commands = { '': [...customizations.commands['']!, greet] }
+      const { wrapper, textarea } = mountComposer()
+      await type(textarea(), '/gr')
+      const rows = wrapper.findAll(byTestId(testIds.slashMenuItem, '[data-group="mcp"]'))
+      expect(rows.map(row => row.attributes('data-value'))).toEqual(['mcp__fixture__greet'])
+      expect(rows[0]!.get('[data-slot="slash-menu-detail"]').text()).toBe('Fixture')
+      press(textarea().element, { key: 'Enter' })
+      await flushPromises()
+      expect(textarea().element.value).toBe('/mcp__fixture__greet ')
+      expect(wrapper.get(byTestId(testIds.slashArgumentHint)).text()).toContain('<name> [style]')
+      wrapper.unmount()
+    })
+  })
+
+  describe('mCP resources in @ mentions (Phase 14, W14.8-T2 / T3)', () => {
+    const readme = mcpResourceEntry()
+    const shot = mcpResourceEntry({ serverId: 'fs', serverName: 'Files', uri: 'file:///shot.png', name: 'shot.png', mimeType: 'image/png' })
+
+    function answerFiles(items: ProjectFileEntry[]): ProjectFileSearch {
+      return { items, truncated: false, indexedAt: 1_759_000_000_000 }
+    }
+
+    function list(overrides: Partial<McpResourceList> = {}): McpResourceList {
+      return mcpResourceList({ items: [readme, shot], unavailable: [], ...overrides })
+    }
+
+    function mountProjectChat(overrides: Partial<HarnessState> = {}) {
+      useProjectsStore().items = [projectSummary({ id: projectId(1), name: 'harness-forge' })]
+      return mountComposer({ projectId: projectId(1), ...overrides })
+    }
+
+    async function settle() {
+      vi.advanceTimersByTime(MENTION_SEARCH_DEBOUNCE_MS)
+      await flushPromises()
+    }
+
+    const menu = (wrapper: ReturnType<typeof mountComposer>['wrapper']) => wrapper.find(byTestId(testIds.mentionMenu))
+    const resourceRows = (wrapper: ReturnType<typeof mountComposer>['wrapper']) => wrapper.findAll(byTestId(testIds.mentionMenuResource))
+
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    })
+
+    it('a project chat lists its files and the MCP resources in one listbox; Enter on a resource inserts its mention and attaches it', async () => {
+      api.projectFiles.search.mockResolvedValue(answerFiles([projectFileEntry('README.md')]))
+      api.mcpResources.list.mockResolvedValue(list())
+      let finish!: (ref: FileRef) => void
+      api.mcpResources.attach.mockReturnValueOnce(new Promise<FileRef>((resolve) => {
+        finish = resolve
+      }))
+      const { wrapper, composer, textarea } = mountProjectChat()
+      await type(textarea(), 'Read @rea')
+      await settle()
+      expect(api.mcpResources.list).toHaveBeenCalledWith(expect.objectContaining({ query: { q: 'rea', limit: 50, projectId: projectId(1) } }))
+      expect(menu(wrapper).attributes()).toMatchObject({ 'aria-label': 'Files and MCP resources', 'data-count': '3' })
+      expect(wrapper.findAll(byTestId(testIds.mentionMenuSection)).map(group => group.attributes('data-value'))).toEqual(['files', 'resources'])
+      expect(resourceRows(wrapper).map(row => row.attributes('data-uri'))).toEqual([readme.uri, shot.uri])
+
+      press(textarea().element, { key: 'ArrowDown' })
+      await flushPromises()
+      expect(textarea().attributes('aria-activedescendant')).toBe(resourceRows(wrapper)[0]!.attributes('id'))
+      press(textarea().element, { key: 'Enter' })
+      await flushPromises()
+      expect(textarea().element.value).toBe('Read @github:repo://owner/name/README.md ')
+      expect(menu(wrapper).exists()).toBe(false)
+      expect(api.mcpResources.attach).toHaveBeenCalledWith({ body: { serverId: 'github', uri: readme.uri, projectId: projectId(1) } })
+      const chip = wrapper.get(byTestId(testIds.composerAttachment))
+      expect(chip.attributes()).toMatchObject({ 'data-kind': 'resource', 'data-server-id': 'github', 'data-state': 'uploading' })
+      expect(chip.text()).toContain('README.md')
+
+      // Send waits for the attach.
+      press(textarea().element, { key: 'Enter' })
+      await flushPromises()
+      expect(composer().emitted('submit')).toBeUndefined()
+      finish(fileRef('README.md', 'text/markdown'))
+      await flushPromises()
+      expect(composer().emitted('submit')).toEqual([[{ text: 'Read @github:repo://owner/name/README.md', files: [fileRef('README.md', 'text/markdown')] }]])
+      wrapper.unmount()
+    })
+
+    it('a chat without a project opens the menu only once its scope has resources', async () => {
+      api.mcpResources.list.mockResolvedValueOnce({ items: [], truncated: false, unavailable: [] }).mockResolvedValue(list({ unavailable: [{ serverId: 'linear', status: 'needs-auth' }] }))
+      const empty = mountComposer()
+      await type(empty.textarea(), 'Hi @')
+      await settle()
+      expect(api.mcpResources.list).toHaveBeenCalledTimes(1)
+      expect(api.mcpResources.list).toHaveBeenCalledWith(expect.objectContaining({ query: { q: '', limit: 50 } }))
+      expect(menu(empty.wrapper).exists()).toBe(false)
+      expect(api.projectFiles.search).not.toHaveBeenCalled()
+      empty.wrapper.unmount()
+
+      const { wrapper, textarea } = mountComposer()
+      await type(textarea(), '@sh')
+      await settle()
+      expect(menu(wrapper).attributes()).toMatchObject({ 'aria-label': 'MCP resources', 'data-state': 'ready', 'data-count': '2' })
+      expect(wrapper.findAll(byTestId(testIds.mentionMenuSection)).map(group => group.attributes('data-value'))).toEqual(['resources'])
+      expect(wrapper.get('[data-slot="mention-resources-unavailable"]').text()).toBe('Not listed: linear (not connected).')
+
+      // Esc closes it for this token; it comes back when the token changes.
+      press(textarea().element, { key: 'Escape' })
+      await flushPromises()
+      expect(menu(wrapper).exists()).toBe(false)
+      await type(textarea(), '@sho')
+      await settle()
+      expect(menu(wrapper).exists()).toBe(true)
+      wrapper.unmount()
+    })
+
+    it('"Mention a file or resource" in the + menu opens the resource section at once', async () => {
+      api.mcpResources.list.mockResolvedValue({ items: [], truncated: false, unavailable: [] })
+      const { wrapper, textarea } = mountComposer()
+      await wrapper.get(byTestId(testIds.composerAdd)).trigger('keydown', { key: 'Enter' })
+      await flushPromises()
+      bodyAll(byTestId(testIds.composerMention))[0]!.click()
+      await flushPromises()
+      expect(textarea().element.value).toBe('@')
+      await settle()
+      expect(menu(wrapper).exists()).toBe(true)
+      expect(menu(wrapper).text()).toContain('No matching resources')
+      // Typing in that token keeps it open.
+      await type(textarea(), '@x')
+      await settle()
+      expect(menu(wrapper).exists()).toBe(true)
+      wrapper.unmount()
+    })
+
+    it('lists nothing while tools are off or the model has no tools', async () => {
+      api.mcpResources.list.mockResolvedValue(list())
+      const off = mountComposer({ toolMode: 'off' })
+      await type(off.textarea(), '@rea')
+      await settle()
+      expect(menu(off.wrapper).exists()).toBe(false)
+      off.wrapper.unmount()
+      const noTools = mountComposer({ modelRef: llama.ref })
+      await type(noTools.textarea(), '@rea')
+      await settle()
+      expect(menu(noTools.wrapper).exists()).toBe(false)
+      noTools.wrapper.unmount()
+      expect(api.mcpResources.list).not.toHaveBeenCalled()
+    })
+
+    it('reports a resource that cannot be attached: 413 and 409 needs-auth as toasts, other failures as an error chip', async () => {
+      api.mcpResources.list.mockResolvedValue(list())
+      api.mcpResources.attach
+        .mockRejectedValueOnce(new HarnessError({ code: 'payload_too_large', message: 'Too large.', details: { limitBytes: 5_242_880 } }))
+        .mockRejectedValueOnce(new HarnessError({ code: 'conflict', message: 'Sign in first.', details: { reason: 'needs-auth' } }))
+        .mockRejectedValueOnce(new HarnessError({ code: 'not_found', message: 'Unknown resource.' }))
+        .mockRejectedValueOnce(new HarnessError({ code: 'provider_unreachable', message: 'The MCP server is not connected.' }))
+      const { wrapper, textarea, send } = mountComposer()
+      for (let round = 0; round < 4; round++) {
+        await type(textarea(), '@re')
+        await settle()
+        press(textarea().element, { key: 'Enter' })
+        await flushPromises()
+      }
+      expect(mock.toastError.mock.calls).toEqual([
+        ['This resource is larger than 5 MB.'],
+        ['Sign in to GitHub first.'],
+        ['Couldn\'t attach README.md.'],
+      ])
+      const chip = wrapper.get(byTestId(testIds.composerAttachment))
+      expect(chip.attributes()).toMatchObject({ 'data-kind': 'resource', 'data-state': 'error' })
+      expect(send().attributes('aria-disabled')).toBe('true')
+      wrapper.unmount()
     })
   })
 })

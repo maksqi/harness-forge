@@ -5,6 +5,13 @@
 // Phase 6: `capabilities.imageOutput` (chat models only; models.dev sets it from a text + image output), `voices`
 // (`ModelInfo.voices` -> `CatalogModel.voices`, <= 100 unique names) and the default visibility: chat models are
 // visible, image models only when their provider defines `createImageModel`, every other kind is hidden.
+//
+// Phase 14 (ADR-062, W14.4): `webSearch` (`native`, `exclusive` or null; always set) from probing the provider's
+// `webSearch` hook (plugin API 1.7.0) with `{ functionTools: 0, maxUses: WEB_SEARCH_MAX_USES }` and the entry's own
+// `ModelInfo` (`catalogModelInfo`, what a turn passes too); the answer is read like a turn reads it
+// (`checkWebSearchParams`): something usable to add -> `native`, `exclusive` when the answer says so; nothing, a throw or
+// an invalid answer -> null. Only chat models are probed (every other kind is null). Not a `capabilities` flag.
+import type { WebSearchParams, WebSearchRequest } from '@harness-forge/plugin-sdk'
 import type {
   CatalogModel,
   ModelCapabilities,
@@ -12,10 +19,13 @@ import type {
   ModelInfo,
   ModelKind,
   ModelSource,
+  ModelWebSearchKind,
   ReasoningEffort,
 } from '@harness-forge/shared'
 import type { ModalityHints } from './classify.ts'
 import type { ModelsDevModel } from './models-dev.ts'
+import { WEB_SEARCH_MAX_USES } from '@harness-forge/shared'
+import { checkWebSearchParams } from '../registry/validate.ts'
 import { classify } from './classify.ts'
 
 /** Display order of the effort menu. */
@@ -58,7 +68,20 @@ export interface CatalogEntryInput {
    * group). Default false (image models are hidden).
    */
   imageModels?: boolean
+  /**
+   * Phase 14 (ADR-062): the provider's `webSearch` hook (`ProviderDefinition.webSearch`, called with the provider as
+   * `this` by the caller), probed for chat models (`modelWebSearch`); absent = no native search (`webSearch: null`).
+   */
+  webSearch?: WebSearchHook
+  /** Called when the probe throws or the hook's answer is ignored in part (never with a value of the answer). */
+  onWebSearchProblem?: (problem: { modelId: string, problems: readonly string[], error?: unknown }) => void
 }
+
+/** A provider's `webSearch` hook as the catalog calls it (`ProviderDefinition.webSearch`, plugin API 1.7.0). */
+export type WebSearchHook = (model: ModelInfo, request: WebSearchRequest) => WebSearchParams | undefined
+
+/** The request of the catalog's probe: a turn without function tools. */
+export const WEB_SEARCH_PROBE: WebSearchRequest = Object.freeze({ functionTools: 0, maxUses: WEB_SEARCH_MAX_USES })
 
 /**
  * models.dev metadata as a layer: `vision` / `pdf` from the input modalities, `imageOutput` from the output modalities
@@ -223,7 +246,35 @@ export function buildCatalogModel(entry: CatalogEntryInput): CatalogModel {
   }
   if (info.voices !== undefined)
     model.voices = info.voices
+  model.webSearch = kind === 'chat' && entry.webSearch !== undefined
+    ? modelWebSearch(entry.webSearch, catalogModelInfo(model), problem => entry.onWebSearchProblem?.({ modelId: entry.id, ...problem }))
+    : null
   return model
+}
+
+/**
+ * `CatalogModel.webSearch` of a model (see the module comment): the hook's answer to `WEB_SEARCH_PROBE`, read with
+ * `checkWebSearchParams`. Never throws.
+ */
+export function modelWebSearch(
+  hook: WebSearchHook,
+  info: ModelInfo,
+  onProblem?: (problem: { problems: readonly string[], error?: unknown }) => void,
+): ModelWebSearchKind | null {
+  let answer: unknown
+  try {
+    answer = hook(info, WEB_SEARCH_PROBE)
+  }
+  catch (error) {
+    onProblem?.({ problems: ['the hook threw'], error })
+    return null
+  }
+  const checked = checkWebSearchParams(answer)
+  if (checked.problems.length > 0)
+    onProblem?.({ problems: checked.problems })
+  if (checked.params === undefined)
+    return null
+  return checked.params.exclusive === true ? 'exclusive' : 'native'
 }
 
 /** The effective metadata of a catalog entry as `ModelInfo` (`ResolvedModel.info`, input of `reasoning()`). */

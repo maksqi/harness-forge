@@ -1,5 +1,7 @@
+import type { Mock } from 'vitest'
 import type { ToolPartLike } from '../chat-format'
 import type { MockApi } from '~/utils/testing/mock-api'
+import { HarnessError } from '@harness-forge/shared'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -9,7 +11,7 @@ import { useCustomizationsStore } from '~/stores/customizations'
 import { usePluginsStore } from '~/stores/plugins'
 import { useProjectMcpStore } from '~/stores/project-mcp'
 import { testIds } from '~/utils/testids'
-import { customizationEntry, customizationList, hookData, hookRecordId, mcpElicitation, mcpToolProgress, planApprovalPart, pluginSummary, projectMcpList, projectMcpServer, searchWebOutput, shellOutput, skillOutput, skillPart, taskPart, todoItem, todoWritePart, toolSummary } from '~/utils/testing/fixtures'
+import { customizationEntry, customizationList, elicitationId, hookData, hookRecordId, mcpElicitation, mcpElicitationRecord, mcpToolProgress, planApprovalPart, pluginSummary, projectMcpList, projectMcpServer, searchWebOutput, shellOutput, skillOutput, skillPart, taskPart, todoItem, todoWritePart, toolSummary } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import PlanApprovalCard from '../agent/PlanApprovalCard.vue'
 import { HOOK_ACTIVITY } from '../chat-context'
@@ -20,8 +22,11 @@ import { TOOL_ELICITATIONS } from './tool-elicitation-context'
 import ToolApprovalCard from './ToolApprovalCard.vue'
 import ToolPart from './ToolPart.vue'
 
-const mock = vi.hoisted(() => ({ api: null as unknown }))
+const mock = vi.hoisted(() => ({ api: null as unknown, toast: null as unknown as Mock<(...args: unknown[]) => void> }))
 vi.mock('~/composables/useApi', () => ({ useApi: () => mock.api, useApiFetch: () => vi.fn() }))
+vi.mock('vue-sonner', () => ({
+  toast: Object.assign((...args: unknown[]) => mock.toast(...args), { error: (...args: unknown[]) => mock.toast(...args), success: vi.fn(), dismiss: vi.fn() }),
+}))
 vi.mock('~/components/chat/nuxt-imports', () => ({
   useColorMode: () => ({ value: 'dark' }),
   useRoute: () => ({ path: '/', fullPath: '/', params: {}, query: {} }),
@@ -45,6 +50,7 @@ function row(wrapper: ReturnType<typeof mountPart>) {
 
 beforeEach(() => {
   mock.api = createMockApi()
+  mock.toast = vi.fn()
   setActivePinia(createPinia())
 })
 
@@ -1162,5 +1168,191 @@ describe('toolPart: MCP questions and web search rows (Phase 14, C54 mounts)', (
     const plain = await opened({ type: 'tool-web_search', state: 'output-available', input: {}, output: {} } as Partial<ToolPartLike> & Pick<ToolPartLike, 'state'>)
     expect(plain.find(`[data-testid="${testIds.toolRowOutput}"]`).exists()).toBe(true)
     expect(plain.find(`[data-testid="${testIds.webSearchTool}"]`).exists()).toBe(false)
+  })
+})
+
+describe('toolPart: MCP questions (Phase 14, W14.9)', () => {
+  const request = mcpElicitation({ expiresAt: Date.now() + 480_000 })
+  const waitingPart = { type: 'tool-mcp__fixture__ask', toolCallId: 'call_mcp', state: 'output-available', input: {}, output: mcpToolProgress(request), preliminary: true } as ToolPartLike
+
+  /** A context like the session's: the request stays open until an answer the server took. */
+  function context(respond: (id: string, answer: unknown) => Promise<'answered' | 'gone'>) {
+    const open = ref(true)
+    return {
+      open,
+      value: {
+        forCall: (toolCallId: string) => (open.value && toolCallId === 'call_mcp' ? request : null),
+        busy: () => false,
+        issues: () => [],
+        gone: () => false,
+        respond: vi.fn(async (id: string, answer: unknown) => {
+          const result = await respond(id, answer)
+          if (result === 'answered')
+            open.value = false
+          return result
+        }),
+      },
+    }
+  }
+
+  function mountWaiting(provided: ReturnType<typeof context>['value'], toolPart = ref(waitingPart)) {
+    const wrapper = mount({
+      render: () => h(TooltipProvider, null, { default: () => h(ToolPart, { part: toolPart.value, streaming: true }) }),
+    }, { attachTo: document.body, global: { provide: { [TOOL_ELICITATIONS as symbol]: provided } } })
+    return { wrapper, toolPart }
+  }
+
+  it('the status cell reads "Waiting for your input" instead of the spinner', () => {
+    const { wrapper } = mountWaiting(context(async () => 'answered').value)
+    const cell = row(wrapper)
+    expect(cell.attributes('data-status')).toBe('running')
+    expect(cell.get('[data-slot="tool-row-waiting"]').text()).toBe('Waiting for your input')
+    expect(cell.get('[data-slot="tool-row-waiting"]').attributes('aria-hidden')).toBe('true')
+    expect(cell.find('.bg-warning').exists()).toBe(true)
+    expect(cell.find('[role="status"]').exists()).toBe(false)
+    expect(cell.get('button').text()).toContain(', waiting for your input')
+    expect(cell.get('button').text()).not.toContain('Running')
+    // Without a request the call shows the spinner as before.
+    expect(row(mountPart(waitingPart)).find('[data-slot="tool-row-waiting"]').exists()).toBe(false)
+  })
+
+  it('an answer the server took becomes the result line (focus moves there) until the call\'s next output', async () => {
+    const provided = context(async () => 'answered')
+    const { wrapper, toolPart } = mountWaiting(provided.value)
+    const card = wrapper.get(`[data-testid="${testIds.elicitationCard}"]`)
+    card.get<HTMLInputElement>('input').element.focus()
+    await wrapper.get(`[data-testid="${testIds.elicitationDecline}"]`).trigger('click')
+    await flushPromises()
+    expect(provided.value.respond).toHaveBeenCalledWith(request.id, { action: 'decline' })
+    expect(wrapper.find(`[data-testid="${testIds.elicitationCard}"]`).exists()).toBe(false)
+    const line = wrapper.get(`[data-testid="${testIds.elicitationResult}"]`)
+    expect(line.attributes()).toMatchObject({ 'data-action': 'decline', 'role': 'status', 'tabindex': '-1' })
+    expect(line.text()).toBe('You declined Fixture\'s request.')
+    expect(document.activeElement).toBe(line.element)
+    // The call's next output (running again) ends the line.
+    toolPart.value = { ...waitingPart, output: mcpToolProgress(null) } as ToolPartLike
+    await flushPromises()
+    expect(wrapper.find(`[data-testid="${testIds.elicitationResult}"]`).exists()).toBe(false)
+  })
+
+  it('leaves the focus where it was when it was outside the card', async () => {
+    const outside = document.createElement('button')
+    document.body.append(outside)
+    outside.focus()
+    const { wrapper } = mountWaiting(context(async () => 'answered').value)
+    wrapper.getComponent(ElicitationCard).vm.$emit('respond', { action: 'accept', content: { email: 'ada@example.com', priority: 'low' } })
+    await flushPromises()
+    expect(wrapper.get(`[data-testid="${testIds.elicitationResult}"]`).text()).toBe('You answered Fixture\'s request.')
+    expect(document.activeElement).toBe(outside)
+  })
+
+  it('a failed answer: a toast, except for a 400 (the card shows its issues)', async () => {
+    const failing = context(async () => {
+      throw new HarnessError({ code: 'internal_error', message: 'Something went wrong.' })
+    })
+    const { wrapper } = mountWaiting(failing.value)
+    wrapper.getComponent(ElicitationCard).vm.$emit('respond', { action: 'cancel' })
+    await flushPromises()
+    expect(mock.toast).toHaveBeenCalledWith('Could not send your answer', { description: 'Something went wrong.' })
+    expect(wrapper.find(`[data-testid="${testIds.elicitationCard}"]`).exists()).toBe(true)
+    mock.toast.mockClear()
+    const invalid = context(async () => {
+      throw new HarnessError({ code: 'validation_error', message: 'Invalid answer.', details: { issues: [] } })
+    })
+    mountWaiting(invalid.value).wrapper.getComponent(ElicitationCard).vm.$emit('respond', { action: 'accept', content: {} })
+    await flushPromises()
+    expect(mock.toast).not.toHaveBeenCalled()
+  })
+
+  it('the body of a finished MCP call lists the result lines of its records (field names, never values)', async () => {
+    const output = {
+      content: [{ type: 'text', text: 'done' }],
+      elicitations: [
+        mcpElicitationRecord(),
+        mcpElicitationRecord({ id: elicitationId(2), action: 'cancel', reason: 'timeout', fields: ['team'] }),
+        mcpElicitationRecord({ id: elicitationId(3), action: 'decline', reason: 'not-interactive', fields: [] }),
+      ],
+    }
+    const wrapper = mountPart({ type: 'tool-mcp__fixture__ask', toolCallId: 'call_done', state: 'output-available', input: {}, output } as ToolPartLike)
+    await row(wrapper).get('button').trigger('click')
+    await flushPromises()
+    const lines = wrapper.findAll(`[data-testid="${testIds.toolRowOutput}"] [data-testid="${testIds.elicitationResult}"]`)
+    expect(lines.map(line => [line.attributes('data-action'), line.text()])).toEqual([
+      ['accept', 'You answered fixture\'s request.'],
+      ['timeout', 'fixture\'s request expired.'],
+      ['decline', 'Declined automatically: sub-agents can\'t ask you.'],
+    ])
+    expect(wrapper.findAll('[data-slot="elicitation-record-fields"]').map(item => item.text())).toEqual([
+      'Asked for: email, count, notify, priority',
+      'Asked for: team',
+    ])
+    // A progress output (waiting, running) has no records; a final output streamed as a preliminary chunk shows them.
+    const running = mountPart(waitingPart)
+    await row(running).get('button').trigger('click')
+    await flushPromises()
+    expect(running.find('[data-slot="elicitation-records"]').exists()).toBe(false)
+    const early = mountPart({ ...waitingPart, toolCallId: 'call_early', output } as ToolPartLike)
+    await row(early).get('button').trigger('click')
+    await flushPromises()
+    expect(early.findAll(`[data-testid="${testIds.toolRowOutput}"] [data-testid="${testIds.elicitationResult}"]`)).toHaveLength(3)
+  })
+})
+
+describe('toolPart: web search rows (Phase 14, W14.9)', () => {
+  function searchPart(overrides: Partial<ToolPartLike> & Pick<ToolPartLike, 'state'>): ToolPartLike {
+    return { type: 'tool-search_web', toolCallId: 'call_search', input: { query: 'harness forge' }, ...overrides } as ToolPartLike
+  }
+
+  it('a running search_web row reads "Searching the web…" with its query; a finished one "Searched the web" and "{n} results"', async () => {
+    const running = mountPart(searchPart({ state: 'input-available' }))
+    expect(row(running).get('[data-slot="web-search-row-label"]').text()).toBe('Searching the web…')
+    expect(row(running).get('[data-slot="web-search-row-label"]').classes()).toContain('hf-shimmer-text')
+    expect(row(running).get('[data-slot="web-search-row-query"]').text()).toBe('"harness forge"')
+    expect(row(running).find('[data-slot="web-search-row-count"]').exists()).toBe(false)
+    expect(row(running).findAll('svg')[1]!.classes().join(' ')).toMatch(/globe/)
+
+    const done = mountPart(searchPart({ state: 'output-available', output: searchWebOutput() }))
+    expect(row(done).get('[data-slot="web-search-row-label"]').text()).toBe('Searched the web')
+    expect(row(done).get('[data-slot="web-search-row-count"]').text()).toBe('2 results')
+    expect(row(done).text()).not.toContain('search_web')
+    await row(done).get('button').trigger('click')
+    await flushPromises()
+    const body = done.get(`[data-testid="${testIds.toolRowOutput}"]`)
+    expect(body.get(`[data-testid="${testIds.webSearchTool}"]`).attributes('data-state')).toBe('done')
+    expect(body.findAll(`[data-testid="${testIds.webSearchResult}"]`)).toHaveLength(2)
+    // The generic blocks wait behind "Raw input and output".
+    expect(body.find('[data-slot="tool-value"]').exists()).toBe(false)
+    await body.get(`[data-testid="${testIds.toolRawToggle}"]`).trigger('click')
+    expect(body.find('[data-slot="tool-value"][data-label="output"]').exists()).toBe(true)
+  })
+
+  it('a provider-executed search: named "Searched the web, {query}", never an approval card, hook badge or encryptedContent', async () => {
+    const native = searchPart({
+      type: 'tool-web_search',
+      state: 'output-available',
+      providerExecuted: true,
+      input: { query: 'weather in Lisbon' },
+      output: [{ type: 'web_search_result', url: 'https://weather.example.com/lisbon', title: 'Lisbon weather', pageAge: null, encryptedContent: 'ENCRYPTED-PAGE' }],
+    } as Partial<ToolPartLike> & Pick<ToolPartLike, 'state'>)
+    const wrapper = mount({
+      render: () => h(TooltipProvider, null, { default: () => h(ToolPart, { part: native, streaming: false, hooks: [hookData({ toolCallId: 'call_search', outcome: 'allowed' })] }) }),
+    }, { attachTo: document.body })
+    const trigger = row(wrapper).get('button')
+    expect(trigger.attributes('aria-label')).toBe('Searched the web, weather in Lisbon')
+    expect(row(wrapper).find('[data-slot="web-search-row-count"]').exists()).toBe(false)
+    expect(row(wrapper).find(`[data-testid="${testIds.toolRowHook}"]`).exists()).toBe(false)
+    await trigger.trigger('click')
+    await flushPromises()
+    const body = wrapper.get(`[data-testid="${testIds.toolRowOutput}"]`)
+    expect(body.get(`[data-testid="${testIds.webSearchTool}"]`).attributes('data-mode')).toBe('native')
+    expect(body.find('[data-slot="tool-hook-notes"]').exists()).toBe(false)
+    await body.get(`[data-testid="${testIds.toolRawToggle}"]`).trigger('click')
+    expect(wrapper.html()).not.toContain('ENCRYPTED-PAGE')
+    expect(body.get('[data-slot="tool-value"][data-label="output"]').text()).toContain('Lisbon weather')
+
+    // Even a part that claims to wait for approval never shows a card or "Needs approval".
+    const asking = mountPart({ ...native, state: 'approval-requested', approval: { id: 'approval_1' } } as ToolPartLike)
+    expect(asking.findComponent(ToolApprovalCard).exists()).toBe(false)
+    expect(row(asking).text()).not.toContain('Needs approval')
   })
 })

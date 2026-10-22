@@ -265,7 +265,7 @@ describe('plugins store: Claude Code plugins (Phase 12, W12.9)', () => {
   })
 })
 
-describe('plugins store: MCP sign-in (Phase 14, C54)', () => {
+describe('plugins store: MCP sign-in (Phase 14, W14.7)', () => {
   it('signInMcp starts a sign-in with the return path; signOutMcp replaces the row', async () => {
     api.mcp.list.mockResolvedValue({ items: [mcpServerNeedsAuth({ auth: { signedIn: true, expiresAt: null, scope: null, client: 'dynamic', issuer: null } })] })
     const plugins = usePluginsStore()
@@ -286,5 +286,30 @@ describe('plugins store: MCP sign-in (Phase 14, C54)', () => {
   it('a refused sign-in throws the HarnessError', async () => {
     api.mcpAuth.start.mockRejectedValue(new HarnessError({ code: 'conflict', message: 'Turn the server on first.', details: { reason: 'disabled' } }))
     await expect(usePluginsStore().signInMcp(mcpServer().id)).rejects.toMatchObject({ code: 'conflict' })
+  })
+
+  it('an answer without an authorization URL refetches a loaded list; a sign-out asks a list in flight again', async () => {
+    vi.useFakeTimers()
+    const plugins = usePluginsStore()
+    api.mcp.list.mockResolvedValue({ items: [mcpServerNeedsAuth()] })
+    await plugins.fetchMcp()
+    api.mcpAuth.start.mockResolvedValue(mcpAuthStart({ authorizationUrl: null }))
+    await plugins.signInMcp('linear')
+    await vi.advanceTimersByTimeAsync(500)
+    expect(api.mcp.list).toHaveBeenCalledTimes(2)
+
+    let finish: (value: unknown) => void = () => {}
+    api.mcp.list.mockImplementationOnce(() => new Promise((resolve) => {
+      finish = resolve
+    }))
+    const inFlight = plugins.fetchMcp()
+    const signedOut = mcpServerNeedsAuth()
+    api.mcpAuth.signOut.mockResolvedValue(signedOut)
+    await plugins.signOutMcp('linear')
+    finish({ items: [mcpServerNeedsAuth({ auth: { signedIn: true, expiresAt: null, scope: null, client: 'dynamic', issuer: null } })] })
+    await inFlight
+    await vi.advanceTimersByTimeAsync(500)
+    expect(api.mcp.list).toHaveBeenCalledTimes(4)
+    expect(plugins.mcp).toEqual([signedOut])
   })
 })

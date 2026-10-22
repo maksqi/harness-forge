@@ -1,8 +1,9 @@
 // Google (Gemini): `@ai-sdk/google` Generative Language API (PROVIDERS.md sections 1-6); image output of chat models,
-// transcription and speech models (PROVIDERS.md section 13).
+// transcription and speech models (PROVIDERS.md section 13); native web search (Google Search grounding) through the
+// `webSearch` hook (plugin API 1.7.0, PROVIDERS.md 14).
 import type { ModelInfo, ProviderDefinition, ProviderRuntime, ReasoningEffort } from '@harness-forge/plugin-sdk'
 import type { ErrorRule } from '../lib/errors.ts'
-import { createGoogleGenerativeAI } from '@ai-sdk/google'
+import { createGoogleGenerativeAI, google } from '@ai-sdk/google'
 import { apiKeyField, apiKeyOf, baseUrlField, baseUrlOf } from '../lib/credentials.ts'
 import { mapped, mapProviderError } from '../lib/errors.ts'
 import { requestJson, unexpectedListing } from '../lib/http.ts'
@@ -10,6 +11,7 @@ import { booleanOf, positiveIntOf, recordOf, stringOf, stringsOf } from '../lib/
 import { speechSeed, transcriptionLanguage } from '../lib/media.ts'
 import { finalizeListing, modelInfo } from '../lib/models.ts'
 import { TOP_LEVEL_REASONING } from '../lib/reasoning.ts'
+import { baseModelId } from '../lib/web-search.ts'
 
 const PROVIDER = { id: 'google', name: 'Google' }
 export const GOOGLE_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta'
@@ -65,6 +67,27 @@ const GEMINI_25 = /(?:^|\/)gemini-2\.5(?:[.-]|$)/i
 const GEMINI_25_PRO = /(?:^|\/)gemini-2\.5-pro(?:-|$)/i
 const GEMINI = /(?:^|\/)gemini-/i
 const PRE_GEMINI_3 = /(?:^|\/)gemini-(?:1|2)(?:[.-]|$)|(?:^|\/)gemini-pro(?:-vision)?$/i
+
+/** Gemini ids (the model families of `getGoogleModelCapabilities`, `@ai-sdk/google` 4.0.102). */
+const SEARCH_GEMINI = /(?:^|[/.])gemini-/
+/** Before Gemini 2 (no Google Search tool): Gemini 1.x, `gemini-pro(-vision)`, Gemini Robotics-ER 1.5. */
+const SEARCH_PRE_GEMINI_2 = /(?:^|[/.])gemini-1(?:[.-]|$)|(?:^|[/.])gemini-pro(?:-vision)?$|(?:^|[/.])gemini-robotics-er-1\.5(?:[.-]|$)/
+/** Gemini 2.x: Google Search drops the function tools sent next to it (`exclusive`). */
+const SEARCH_GEMINI_2 = /(?:^|[/.])gemini-2(?:[.-]|$)/
+/** Gemini variants without Google Search: embeddings, speech and live audio models, the 2.x image models, 2.0 Flash-Lite. */
+const WITHOUT_GOOGLE_SEARCH = /embedding|tts|live|native-audio|(?:^|[/.])gemini-2[.-].*image|(?:^|[/.])gemini-2\.0-flash-lite/
+
+/**
+ * Google Search for a model id: `combined` (Gemini 3 and later, and unknown Gemini ids, which the package treats as
+ * the newest generation: search next to function tools), `exclusive` (Gemini 2.x: only on a turn without function
+ * tools) or null (not a Gemini model, before Gemini 2, or a variant without search).
+ */
+export function googleSearchSupport(modelId: string): 'combined' | 'exclusive' | null {
+  const id = baseModelId(modelId)
+  if (!SEARCH_GEMINI.test(id) || SEARCH_PRE_GEMINI_2.test(id) || WITHOUT_GOOGLE_SEARCH.test(id))
+    return null
+  return SEARCH_GEMINI_2.test(id) ? 'exclusive' : 'combined'
+}
 
 /**
  * Efforts offered for a thinking model id (same model families as `@ai-sdk/google` 4.0.82): Gemini 3 and later cannot
@@ -195,5 +218,13 @@ export const googleProvider: ProviderDefinition = {
   transcriptionOptions(hints) {
     const language = transcriptionLanguage(hints)
     return language === undefined ? undefined : { google: { languageCodes: [language] } }
+  },
+  webSearch(model) {
+    // The tool key must be `google_search`; before Gemini 3 the package drops function tools next to it (it only
+    // warns), so 2.x answers `exclusive` and is used only on turns without function tools.
+    const support = googleSearchSupport(model.id)
+    if (support === null)
+      return undefined
+    return { tools: { google_search: google.tools.googleSearch({}) }, ...(support === 'exclusive' ? { exclusive: true } : {}) }
   },
 }

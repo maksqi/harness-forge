@@ -2,13 +2,16 @@
 import type { HttpEchoServer, McpTestApp } from '../../mcp/__fixtures__/harness.ts'
 // MCP servers of Claude Code plugins (W12.1-T4): the merge of `.mcp.json` (wrapper or flat map) and `plugin.json`, the
 // id table, the Claude names, the variable mapping and the skipped servers; end to end, the `userConfig` secret reaches
-// an http MCP fixture as a header and never appears in a body, a DTO or a log.
+// an http MCP fixture as a header and never appears in a body, a DTO or a log. Phase 14 (W14.1-T8): the `oauth` object
+// is kept (client id, scopes; `callbackPort` an info) and such a server signs in through the OAuth MCP fixture.
 import type { FixtureTree } from '../../testing/claude-fixtures.ts'
 import { mkdtemp, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { createMcpTestApp, startHttpEchoServer, waitFor } from '../../mcp/__fixtures__/harness.ts'
+import { callTool, createMcpTestApp, outputJson, startHttpEchoServer, waitFor } from '../../mcp/__fixtures__/harness.ts'
+import { startOAuthMcpServer } from '../../mcp/__fixtures__/oauth-mcp-server.mjs'
+import { signIn } from '../../mcp/oauth/sign-in.test-util.ts'
 import { writeFileTree } from '../../testing/claude-fixtures.ts'
 import { claudeMcpName, readClaudeMcpServers } from './mcp.ts'
 
@@ -149,5 +152,56 @@ describe('a Claude Code plugin MCP server end to end', () => {
     const dtos = JSON.stringify([await t.deps.plugins.get('header-kit'), await t.deps.plugins.getSettings('header-kit'), await t.deps.mcp.list(), await t.deps.plugins.logs('header-kit')])
     expect(dtos).not.toContain(secret)
     expect(JSON.stringify(t.logs.records)).not.toContain(secret)
+  })
+})
+
+describe('oAuth of Claude Code plugin servers (phase 14)', () => {
+  it('keeps the client id and the scopes; callbackPort is an info; a user_config client id becomes a setting', async () => {
+    const read = await readServers({ '.mcp.json': file(JSON.stringify({ mcpServers: {
+      linear: { type: 'sse', url: 'https://mcp.example.com/linear/sse', oauth: { clientId: 'lin_123', scopes: ['read', 'write'], callbackPort: 8080 } },
+      option: { type: 'http', url: 'https://mcp.example.com/mcp', oauth: { clientId: '${user_config.CLIENT_ID}' } },
+      undeclared: { type: 'http', url: 'https://mcp.example.com/other', oauth: { clientId: '${user_config.NOPE}', scopes: 'read' } },
+      harness: { type: 'http', url: 'https://mcp.example.com/h', oauth: { clientId: '{{settings.x}}' } },
+      local: { command: 'node', args: ['server.mjs'], oauth: { clientId: 'x' } },
+    } })) }, { userConfig: [{ key: 'CLIENT_ID', default: 'client-from-option' }] })
+    const byName = new Map(read.servers.map(server => [server.name, server.decl.transport]))
+    expect(byName.get('linear')).toEqual({ type: 'sse', url: 'https://mcp.example.com/linear/sse', oauth: { clientId: 'lin_123', scopes: 'read write' } })
+    expect(byName.get('option')).toEqual({ type: 'http', url: 'https://mcp.example.com/mcp', oauth: { clientId: '{{settings.CLIENT_ID}}' } })
+    expect(byName.get('undeclared')).toEqual({ type: 'http', url: 'https://mcp.example.com/other', oauth: { scopes: 'read' } })
+    expect(byName.get('harness')).toEqual({ type: 'http', url: 'https://mcp.example.com/h' })
+    expect(byName.get('local')).not.toHaveProperty('oauth')
+    const messages = read.diagnostics.map(item => `${item.level}:${item.component}:${item.message}`)
+    expect(messages).toContain('info:mcpServers.linear:The OAuth callback port is ignored; the harness signs in through its own callback page.')
+    expect(messages.some(message => message.includes('not supported'))).toBe(false)
+    expect(read.diagnostics.filter(item => item.level === 'warning' && item.message.startsWith('The OAuth client id')).map(item => item.component)).toEqual(['mcpServers.undeclared', 'mcpServers.harness'])
+  })
+
+  it('a .mcp.json server with oauth signs in (record in plugin:<id> mcp-oauth.<serverId>)', async () => {
+    const fixture = await startOAuthMcpServer({ toggles: { preRegistered: true } })
+    closers.push(() => fixture.stop())
+    const h: McpTestApp = await createMcpTestApp({
+      beforeStart: async (t) => {
+        const dir = join(t.env.paths.plugins, 'seed-oauth-kit')
+        await writeFileTree(dir, {
+          '.claude-plugin/plugin.json': file(JSON.stringify({ name: 'seed-oauth-kit' })),
+          '.mcp.json': file(JSON.stringify({ mcpServers: { remote: { type: 'http', url: fixture.url, oauth: { clientId: 'seed-plugin-client', callbackPort: 33418 } } } })),
+        })
+        const inspection = await t.deps.plugins.inspectDirectory(dir, { format: 'claude' })
+        expect(inspection.requiresTrust).toBe(false)
+        await t.deps.plugins.saveRecord({ id: 'seed-oauth-kit', source: 'copy', format: 'claude', version: inspection.manifest.version })
+      },
+    })
+    closers.push(() => h.close())
+    const { t } = h
+    expect(t.deps.plugins.state('seed-oauth-kit')).toBe('active')
+    await waitFor(async () => (await t.deps.mcp.get('seed-oauth-kit')).status === 'needs-auth')
+    const detail = JSON.stringify(await t.deps.plugins.get('seed-oauth-kit'))
+    expect(detail).not.toContain('OAuth settings of MCP servers are not supported')
+    const { result, authorizationUrl } = await signIn(t, { kind: 'global', serverId: 'seed-oauth-kit' })
+    expect(new URL(authorizationUrl).searchParams.get('client_id')).toBe('seed-plugin-client')
+    expect(result.status).toBe('connected')
+    expect(await t.deps.secrets.get('plugin:seed-oauth-kit', 'mcp-oauth.seed-oauth-kit')).toEqual(expect.any(String))
+    expect(outputJson(await callTool(t, 'mcp__seed-oauth-kit__whoami'))).toMatchObject({ clientId: 'seed-plugin-client' })
+    expect((await t.deps.mcp.get('seed-oauth-kit')).auth).toMatchObject({ signedIn: true, client: 'configured' })
   })
 })

@@ -100,6 +100,24 @@ describe('childProcessMcpTransport', () => {
     await client.close()
   })
 
+  it('reports an exception thrown by the message handler through onerror instead of throwing from the stdout listener', async () => {
+    const transport = new ChildProcessMcpTransport({ command: process.execPath, args: [ECHO_SERVER_PATH], env: {} })
+    const errors: Error[] = []
+    transport.onmessage = () => {
+      throw new Error('unknown message ID')
+    }
+    transport.onerror = error => errors.push(error)
+    await transport.start()
+    try {
+      await transport.send({ jsonrpc: '2.0', id: 1, method: 'ping' })
+      await waitFor(() => errors.length > 0)
+      expect(errors[0]?.message).toBe('unknown message ID')
+    }
+    finally {
+      await transport.close()
+    }
+  })
+
   it('rejects start() when the command does not exist', async () => {
     const transport = new ChildProcessMcpTransport({ command: '/nonexistent/harness-forge-binary', args: [], env: {} })
     await expect(transport.start()).rejects.toMatchObject({ code: 'ENOENT' })

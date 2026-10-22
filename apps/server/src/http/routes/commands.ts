@@ -15,33 +15,41 @@
 // Phase 12 (ADR-053 / ADR-058; W12.7): the names of Claude Code plugin entries are qualified (`review-kit:review`,
 // `review-kit:db:migrate`) and listed as they are (a bare alias is not an item); plugin commands carry their
 // `argumentHint` and model ref; a definition's `when_to_use` is appended to its description (`<description> - <when>`).
+// Phase 14 (ADR-061, W14.2): the prompts of connected MCP servers join the list as `mcp__<serverId>__<prompt>` (`kind:
+// 'command'`, `source: 'mcp'`, `mcpServer`, `argumentHint`): the global servers' prompts always, the project's servers'
+// prompts with its `projectId` (a project server shadows a global server of the same id). Servers that are not connected
+// (`needs-auth`, pending, failed) list none, and the route never waits for one (the project's approved servers start as
+// for a run; their prompts arrive with `customization.changed { kind: 'command', projectId }`).
 import type { CommandSummary, ListResponse } from '@harness-forge/shared'
+import type { McpPromptListings } from '../../chat/commands.ts'
 import type { CustomizationCatalog } from '../../services/customizations/types.ts'
 import type { AppDeps } from '../../types.ts'
 import type { AppEnv } from '../types.ts'
 import { apiRoutes, commandsQuerySchema } from '@harness-forge/shared'
 import { Hono } from 'hono'
-import { listServerCommands } from '../../chat/commands.ts'
+import { listServerCommands, mcpPromptListingsFor } from '../../chat/commands.ts'
 import { validate } from '../validate.ts'
 
 /**
  * The effective server-side commands of a scope, sorted by name: `/compact`, the plugin commands and, with a catalog,
- * its project and personal commands (by precedence) and its user-invocable skills. Without a catalog: the harness
- * command and the plugin commands.
+ * its project and personal commands (by precedence) and its user-invocable skills; Phase 14: with `mcp`, the MCP
+ * prompts of the scope. Without a catalog: the harness command and the plugin commands.
  */
-export function listCommands(deps: Pick<AppDeps, 'registry'>, catalog: CustomizationCatalog | null = null): CommandSummary[] {
-  return listServerCommands(deps.registry, catalog)
+export function listCommands(deps: Pick<AppDeps, 'registry'>, catalog: CustomizationCatalog | null = null, mcp: McpPromptListings | null = null): CommandSummary[] {
+  return listServerCommands(deps.registry, catalog, mcp)
 }
 
 export function createCommandsRoutes(deps: AppDeps): Hono<AppEnv> {
   const app = new Hono<AppEnv>()
   app.get(apiRoutes['commands.list'].path, validate('query', commandsQuerySchema), async (c) => {
     const { projectId } = c.req.valid('query')
+    const signal = c.req.raw.signal
     // An unknown project is `404 not_found` ("Project <id> not found.").
     if (projectId !== undefined)
       await deps.projects.get(projectId)
-    const catalog = await deps.customizations.catalog(projectId ?? null, { signal: c.req.raw.signal })
-    const body: ListResponse<CommandSummary> = { items: listCommands(deps, catalog) }
+    const catalog = await deps.customizations.catalog(projectId ?? null, { signal })
+    const mcp = await mcpPromptListingsFor(deps, projectId ?? null, { signal, waitMs: 0, logger: c.get('logger') })
+    const body: ListResponse<CommandSummary> = { items: listCommands(deps, catalog, mcp) }
     return c.json(body)
   })
   return app

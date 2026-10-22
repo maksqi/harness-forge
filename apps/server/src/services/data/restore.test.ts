@@ -5,14 +5,18 @@
 // Phase 11 (W11.7-T6): a v1.7 backup round-trips into a fresh server with the real services: the settings `outputStyle`
 // / `hooksEnabled`, the personal output style, a personal command with `!` spans restored turned off (the customization
 // store's rule, W11.6), the chat with its hook records; no personal hook, project approval or project MCP variable.
+// Phase 14 (W14.6-T3): a chat with web search records and the web search settings round-trip (no secret or MCP server
+// comes back), and a v1.8.1 backup restores (its 32 settings, the two new ones keep their defaults; its definitions
+// and chats).
 import type { BackupFileEntry, BackupManifest, ChatExportV1, ChatExportV2, DataImportResult, FileRef, HarnessUIMessage } from '@harness-forge/shared'
 import type { DataTestApp } from './fixtures.test-util.ts'
 import { chatExportSchema, dataImportResultSchema, DEFAULT_SETTINGS, HarnessError, LIMITS } from '@harness-forge/shared'
 import { eq } from 'drizzle-orm'
 import { zipSync } from 'fflate'
 import { afterEach, describe, expect, it } from 'vitest'
-import { chats, files, hooks, projects, projectTrust, secrets } from '../../db/schema.ts'
+import { chats, files, hooks, mcpServers, projects, projectTrust, secrets } from '../../db/schema.ts'
 import { patchZip, unixMode, zipOf } from '../../plugins/install/testing.ts'
+import { recordMessages } from '../chats/records.test-util.ts'
 import { PNG, TEXT } from '../files/fixtures.test-util.ts'
 import {
   closeCustomizedApps,
@@ -22,6 +26,7 @@ import {
   PLAIN_COMMAND_CONTENT,
   realDataApp,
   seedPhase11,
+  seedPhase14,
   SPAN_COMMAND_CONTENT,
   STYLE_CONTENT,
 } from './backup-fixtures.test-util.ts'
@@ -669,5 +674,69 @@ describe('import: Phase 11 round trip into a fresh server (settings, styles, com
     // Importing the same backup again keeps what is there (the commands stay as they are).
     const again = dataImportResultSchema.parse(await target.deps.data.importData(new Blob([new Uint8Array(zip)]), { restoreCustomizations: true }))
     expect(again.customizations).toEqual({ imported: 0, skipped: 3, failed: 0, turnedOff: 0 })
+  })
+})
+
+describe('import: Phase 14 (web search records; never OAuth records or search keys; v1.8.1 backups)', () => {
+  it('round-trips a chat with web search records and the web search settings; no secret or MCP server comes back', async () => {
+    const source = await realDataApp()
+    const seeded = await seedPhase14(source)
+    const zip = await exportBytes(source.deps, { files: false })
+
+    const target = await realDataApp()
+    const result = dataImportResultSchema.parse(await target.deps.data.importData(new Blob([new Uint8Array(zip)]), { restoreSettings: true }))
+    expect(result).toMatchObject({ counts: { imported: 1, failed: 0 }, settingsRestored: true })
+    expect(result.warnings).toEqual([])
+    expect(await target.deps.settings.get()).toMatchObject({ webSearchDefault: 'auto', webSearchNative: false })
+    const chat = await target.deps.chats.get(seeded.chatId)
+    expect(chat.messages).toEqual(recordMessages())
+    expect(chat.settings).toEqual({ toolMode: 'ask', webSearch: 'auto' })
+    expect(chat).not.toHaveProperty('awaitingInput')
+    expect(await target.deps.db.select().from(secrets)).toEqual([])
+    expect(await target.deps.db.select().from(mcpServers)).toEqual([])
+  })
+
+  it('restores a v1.8.1 backup: its settings (the web search settings keep their defaults), definitions and chats', async () => {
+    const { webSearchDefault: _default, webSearchNative: _native, ...current } = DEFAULT_SETTINGS
+    const v181Settings = { ...current, displayName: 'Upgraded', defaultToolMode: 'edits', planDirectory: '.harness/plans', hooksEnabled: true }
+    expect(Object.keys(v181Settings)).toHaveLength(32)
+    const v181Messages = [
+      { id: mid(1), role: 'user', metadata: { modelRef: 'mock:echo', startedAt: 1 }, parts: [{ type: 'text', text: 'What changed in v1.8.1?' }] },
+      {
+        id: mid(2),
+        role: 'assistant',
+        metadata: { modelRef: 'mock:echo', startedAt: 2, finishedAt: 3, durationMs: 1, usage: { inputTokens: 9, outputTokens: 9, reasoningTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 18, contextTokens: 18 }, costUsd: 0.000027, finishReason: 'stop' },
+        parts: [
+          { type: 'data-notice', data: { level: 'warning', code: 'tools-unsupported', message: 'This model does not support tools, so no tools were sent.' } },
+          { type: 'step-start' },
+          { type: 'tool-web_fetch', toolCallId: 'call_1', state: 'output-available', input: { url: 'https://example.com/changelog' }, output: { status: 200, body: 'notes' } },
+          { type: 'source-url', sourceId: 'src_1', url: 'https://example.com/changelog', title: 'Changelog' },
+          { type: 'text', text: 'Dependency updates.', state: 'done' },
+        ],
+      },
+    ] as HarnessUIMessage[]
+    const zip = backupZip({
+      'settings.json': v181Settings,
+      [`chats/${chatId(1)}.json`]: exportOf(chatId(1), v181Messages, { title: 'v1.8.1 chat', settings: { toolMode: 'ask', reasoningEffort: 'auto' } }),
+      'customizations.json': { items: [{ kind: 'command', name: 'review', content: PLAIN_COMMAND_CONTENT, enabled: true }] },
+      'manifest.json': manifestOf(1, {
+        appVersion: '1.8.1',
+        includes: { files: false, settings: true, customizations: true },
+        counts: { chats: 1, messages: 2, files: 0, fileBytes: 0, customizations: 1 },
+      }),
+    })
+
+    const target = await realDataApp()
+    const result = dataImportResultSchema.parse(await target.deps.data.importData(new Blob([new Uint8Array(zip)]), { restoreSettings: true, restoreCustomizations: true }))
+    expect(result).toMatchObject({ counts: { imported: 1, failed: 0 }, settingsRestored: true, customizations: { imported: 1, skipped: 0, failed: 0, turnedOff: 0 } })
+    expect(result.warnings).toEqual([])
+    expect(await target.deps.settings.get()).toEqual({ ...v181Settings, webSearchDefault: 'off', webSearchNative: true })
+    const chat = await target.deps.chats.get(chatId(1))
+    expect(chat.messages).toEqual(v181Messages)
+    expect(chat.settings).toEqual({ toolMode: 'ask', reasoningEffort: 'auto' })
+    expect((await target.deps.customizations.exportBackup()).items.map(item => [item.kind, item.name, item.enabled])).toEqual([['command', 'review', true]])
+    // Exported again by this version, the chat keeps its v2 shape and its messages.
+    const again = chatExportSchema.parse(JSON.parse((await target.deps.chats.export(chatId(1), 'json')).body))
+    expect(again.chat.messages).toEqual(v181Messages)
   })
 })

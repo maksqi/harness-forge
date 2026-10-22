@@ -298,6 +298,62 @@ describe('media models (Phase 6)', () => {
   })
 })
 
+describe('web search (Phase 14, ADR-062)', () => {
+  it('reports mock:search as native and every other mock model as null (the mock provider\'s hook)', async () => {
+    const t = await createProvidersTestApp({ env: { HF_MOCK_PROVIDER: '1' } })
+    app = t
+    const all = await t.deps.catalog.list({ providerId: 'mock', includeHidden: true })
+    expect(all.filter(model => model.webSearch !== null).map(model => [model.id, model.webSearch])).toEqual([['search', 'native']])
+    for (const model of all)
+      expect(catalogModelSchema.parse(model).webSearch, model.id).toBeDefined()
+    expect((await t.deps.catalog.get('mock', 'search'))?.webSearch).toBe('native')
+    expect((await t.deps.catalog.get('mock', 'search-tool'))?.webSearch).toBeNull()
+  })
+
+  it('probes a plugin provider\'s hook per chat model; a throwing or invalid hook means null (logged at debug only)', async () => {
+    const { t } = await setup()
+    const tool = { type: 'provider', id: 'websearchkit.web_search', args: {}, isProviderExecuted: true }
+    t.registry.providers.register('websearchkit-plugin', {
+      id: 'websearchkit',
+      name: 'Search kit',
+      credentials: [],
+      seedModels: [
+        { id: 'native', name: 'Native' },
+        { id: 'exclusive', name: 'Exclusive' },
+        { id: 'plain', name: 'Plain' },
+        { id: 'broken', name: 'Broken' },
+        { id: 'invalid', name: 'Invalid' },
+      ],
+      createLanguageModel: modelId => new MockLanguageModelV4({ provider: 'websearchkit', modelId }),
+      webSearch(model, request) {
+        expect(request).toEqual({ functionTools: 0, maxUses: 5 })
+        switch (model.id) {
+          case 'native':
+            return { tools: { web_search: tool as never } }
+          case 'exclusive':
+            return { tools: { web_search: tool as never }, exclusive: true }
+          case 'broken':
+            throw new Error('boom')
+          case 'invalid':
+            return { tools: { web_search: { type: 'function' } as never } }
+          default:
+            return undefined
+        }
+      },
+    })
+    const models = await t.deps.catalog.list({ providerId: 'websearchkit', includeHidden: true })
+    expect(models.map(model => [model.id, model.webSearch])).toEqual([
+      ['broken', null],
+      ['exclusive', 'exclusive'],
+      ['invalid', null],
+      ['native', 'native'],
+      ['plain', null],
+    ])
+    const acme = await t.deps.catalog.list({ providerId: 'acme' })
+    expect(acme.every(model => model.webSearch === null)).toBe(true)
+  })
+})
+
 describe('live listings', () => {
   it('keeps the last good listing on failure and records the error', async () => {
     const { t, control } = await setup()

@@ -166,16 +166,28 @@ export const useProjectMcpStore = defineStore('project-mcp', () => {
 
   /**
    * + Phase 14 (ADR-059): `POST /projects/:id/mcp/:serverId/oauth { returnTo }`: starts a sign-in (`authorizationUrl`
-   * null = the stored tokens still work). Throws `HarnessError` (409 `untrusted` / `disabled`, 400 stdio).
+   * null = the stored tokens still work: a loaded project refetches quietly, besides the `project-mcp.changed` the
+   * server emits). Throws `HarnessError` (409 `untrusted` / `disabled`, 400 stdio).
    */
   async function signIn(projectId: string, serverId: string, returnTo?: string): Promise<McpAuthStart> {
-    return withHarnessErrors(api.mcpAuth.projectStart({ params: { id: projectId, serverId }, body: returnTo === undefined ? {} : { returnTo } }))
+    const answer = await withHarnessErrors(api.mcpAuth.projectStart({ params: { id: projectId, serverId }, body: returnTo === undefined ? {} : { returnTo } }))
+    if (answer.authorizationUrl === null)
+      refetchTracked(projectId)
+    return answer
   }
 
-  /** + Phase 14 (ADR-059): `DELETE /projects/:id/mcp/:serverId/oauth`: forgets the tokens; the server replaces its row. */
+  /**
+   * + Phase 14 (ADR-059): `DELETE /projects/:id/mcp/:serverId/oauth`: forgets the tokens; the server replaces its row (a
+   * fetch in flight may predate the sign-out: it is not cached and asked again).
+   */
   async function signOut(projectId: string, serverId: string): Promise<ProjectMcpServer> {
     const server = await withHarnessErrors(api.mcpAuth.projectSignOut({ params: { id: projectId, serverId } }))
+    const retry = inFlight.has(projectId)
+    bump(projectId)
+    inFlight.delete(projectId)
     replaceServer(projectId, server)
+    if (retry)
+      void load(projectId).catch(() => {})
     return server
   }
 

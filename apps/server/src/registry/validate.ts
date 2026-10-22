@@ -23,10 +23,13 @@ import type {
   ModelInfo,
   OutputStyleDefinition,
   ProviderDefinition,
+  ProviderOptions,
   SkillDefinition,
   ToolDefinition,
+  WebSearchParams,
 } from '@harness-forge/plugin-sdk'
 import type { HookDiagnostic, HookSpec, PromptHookSpec } from '@harness-forge/shared'
+import type { Tool } from 'ai'
 import type { HookCommandsRegistration, McpServerRegisterOptions, ToolRegisterOptions } from './types.ts'
 import { Buffer } from 'node:buffer'
 import { isAbsolute } from 'node:path'
@@ -57,6 +60,7 @@ import {
   providerIdSchema,
   readHooksConfig,
   safeParseModelRef,
+  SEARCH_WEB_TOOL_NAME,
   splitQualifiedName,
   TOOL_ALLOWLIST_ENTRY_PATTERN,
   TOOL_NAME_PATTERN,
@@ -159,8 +163,8 @@ const providerDataSchema = z.object({
 })
 
 /**
- * Optional functions of `ProviderDefinition`: the members of plugin API 1.0 and the media members of 1.1.0 (ADR-028,
- * ADR-029). The record makes the compiler check that every name is a member.
+ * Optional functions of `ProviderDefinition`: the members of plugin API 1.0, the media members of 1.1.0 (ADR-028,
+ * ADR-029) and the web search hook of 1.7.0 (ADR-062). The record makes the compiler check that every name is a member.
  */
 const OPTIONAL_PROVIDER_FUNCTIONS = {
   listModels: true,
@@ -172,13 +176,14 @@ const OPTIONAL_PROVIDER_FUNCTIONS = {
   createTranscriptionModel: true,
   createSpeechModel: true,
   transcriptionOptions: true,
+  webSearch: true,
 } as const satisfies Partial<Record<keyof ProviderDefinition, true>>
 
 /**
  * Checks a provider definition: data fields, functions (`createLanguageModel` is required; `listModels`, `validate`,
- * `reasoning`, `mapError`, `createImageModel`, `imageParams`, `createTranscriptionModel`, `createSpeechModel` and
- * `transcriptionOptions` must be functions when present), and for plugins other than builtins the id namespace
- * (`<pluginId>` or `<pluginId>-<suffix>`).
+ * `reasoning`, `mapError`, `createImageModel`, `imageParams`, `createTranscriptionModel`, `createSpeechModel`,
+ * `transcriptionOptions` and `webSearch` must be functions when present), and for plugins other than builtins the id
+ * namespace (`<pluginId>` or `<pluginId>-<suffix>`).
  */
 export function validateProviderDefinition(pluginId: string, definition: ProviderDefinition): void {
   if (!isObject(definition))
@@ -193,6 +198,186 @@ export function validateProviderDefinition(pluginId: string, definition: Provide
     checkFunction(label, record, key, false)
   if (!isBuiltinPluginId(pluginId) && !isPluginNamespacedId(pluginId, definition.id))
     throw invalid(`Provider id "${definition.id}" must be "${pluginId}" or start with "${pluginId}-".`, ['id'])
+}
+
+// ---------- web search answers (plugin API 1.7.0, ADR-062) ----------
+
+/** Most native tools one `ProviderDefinition.webSearch()` answer may add (extra entries are ignored). */
+export const WEB_SEARCH_ANSWER_TOOLS_MAX = 4
+/** Longest provider tool id (`<provider>.<tool>`, e.g. `anthropic.web_search_20250305`). */
+const PROVIDER_TOOL_ID_MAX_CHARS = 128
+/** `<provider>.<tool>`: no whitespace, a dot after a non-empty provider name. */
+const PROVIDER_TOOL_ID_PATTERN = /^[^\s.]+\.\S+$/
+/** Deepest nesting of a native search's provider options (the answer is ignored beyond it). */
+const PROVIDER_OPTIONS_MAX_DEPTH = 16
+/** Keys never copied from provider options (prototype pollution). */
+const UNSAFE_OPTION_KEYS: ReadonlySet<string> = new Set(['__proto__', 'constructor', 'prototype'])
+
+/** What the host keeps of a `webSearch()` answer (`checkWebSearchParams`). */
+export interface CheckedWebSearchParams {
+  /**
+   * The accepted answer: a fresh object with the valid provider tools (the provider's own tool objects), a copy of the
+   * provider options and `exclusive: true` when set; undefined when the provider has nothing (usable) to add.
+   */
+  readonly params: WebSearchParams | undefined
+  /** Why the answer, or a part of it, was ignored (never quotes a value); empty when everything was accepted. */
+  readonly problems: readonly string[]
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value))
+    return false
+  const proto: unknown = Object.getPrototypeOf(value)
+  return proto === Object.prototype || proto === null
+}
+
+/** A JSON-compatible deep copy (plain objects, arrays, strings, finite numbers, booleans, null), else undefined. */
+function jsonCopy(value: unknown, depth: number): unknown {
+  if (depth > PROVIDER_OPTIONS_MAX_DEPTH)
+    return undefined
+  if (value === null || typeof value === 'string' || typeof value === 'boolean')
+    return value
+  if (typeof value === 'number')
+    return Number.isFinite(value) ? value : undefined
+  if (Array.isArray(value)) {
+    const items: unknown[] = []
+    for (const item of value) {
+      const copy = jsonCopy(item, depth + 1)
+      if (copy === undefined)
+        return undefined
+      items.push(copy)
+    }
+    return items
+  }
+  if (!isPlainRecord(value))
+    return undefined
+  const copy: Record<string, unknown> = {}
+  for (const [key, item] of Object.entries(value)) {
+    if (UNSAFE_OPTION_KEYS.has(key))
+      return undefined
+    if (item === undefined)
+      continue
+    const itemCopy = jsonCopy(item, depth + 1)
+    if (itemCopy === undefined)
+      return undefined
+    copy[key] = itemCopy
+  }
+  return copy
+}
+
+/** A copy of `value` when it is provider options (an object of JSON objects keyed by provider), else undefined. */
+function providerOptionsCopy(value: unknown): ProviderOptions | undefined {
+  if (!isPlainRecord(value) || !Object.values(value).every(isPlainRecord))
+    return undefined
+  return jsonCopy(value, 0) as ProviderOptions | undefined
+}
+
+/**
+ * A provider-defined tool as the AI SDK needs it (`type: 'provider'`, an `id` of the form `<provider>.<tool>`, an
+ * `args` object). Executed by the provider or not: the approval function answers only provider-executed calls
+ * (`nativeTools`), and a native tool that is not provider-executed (OpenRouter's `web_search` server tool) has no calls.
+ */
+export function isProviderToolShape(tool: unknown): tool is Tool {
+  if (typeof tool !== 'object' || tool === null)
+    return false
+  const record = tool as { type?: unknown, id?: unknown, args?: unknown }
+  return record.type === 'provider'
+    && typeof record.id === 'string'
+    && record.id.length <= PROVIDER_TOOL_ID_MAX_CHARS
+    && PROVIDER_TOOL_ID_PATTERN.test(record.id)
+    && typeof record.args === 'object'
+    && record.args !== null
+    && !Array.isArray(record.args)
+}
+
+/** Null when `name` may key a native search tool: a tool name, not an MCP name, never the builtin `search_web`. */
+function nativeToolNameProblem(name: string): string | null {
+  if (!TOOL_NAME_PATTERN.test(name))
+    return `the tool key ${describeValue(name)} is not a valid tool name`
+  if (name.startsWith(MCP_TOOL_PREFIX))
+    return `the tool key ${describeValue(name)} uses the reserved prefix "${MCP_TOOL_PREFIX}"`
+  if (name === SEARCH_WEB_TOOL_NAME)
+    return `the tool key "${SEARCH_WEB_TOOL_NAME}" is reserved for the builtin search tool`
+  return null
+}
+
+/**
+ * Reads the answer of `ProviderDefinition.webSearch(model, request)` (plugin API 1.7.0, ADR-062) defensively: only
+ * provider-defined tools (`isProviderToolShape`) under valid tool keys (`nativeToolNameProblem`), at most
+ * `WEB_SEARCH_ANSWER_TOOLS_MAX` of them, provider options that are JSON objects keyed by provider (copied), and a
+ * boolean `exclusive`. A bad tool entry is dropped; an answer that is not an object, has a `tools` that is not an
+ * object, provider options that are not JSON objects or a non-boolean `exclusive` is ignored as a whole (a provider bug
+ * must never decide whether function tools are dropped). An answer with nothing left to add is `params: undefined`.
+ * Collisions with the turn's function tools are checked when the answer is applied (`webSearchToolCollisions`).
+ * Never throws (a throwing getter ignores the answer).
+ */
+export function checkWebSearchParams(value: unknown): CheckedWebSearchParams {
+  if (value === undefined)
+    return { params: undefined, problems: [] }
+  const ignored = (problem: string): CheckedWebSearchParams => ({ params: undefined, problems: [problem] })
+  try {
+    if (!isPlainRecord(value))
+      return ignored('the answer is not an object')
+    const { tools, providerOptions, exclusive } = value as { tools?: unknown, providerOptions?: unknown, exclusive?: unknown }
+    if (exclusive !== undefined && typeof exclusive !== 'boolean')
+      return ignored('"exclusive" is not a boolean')
+    if (tools !== undefined && !isPlainRecord(tools))
+      return ignored('"tools" is not an object keyed by tool name')
+    let options: ProviderOptions | undefined
+    if (providerOptions !== undefined) {
+      options = providerOptionsCopy(providerOptions)
+      if (options === undefined)
+        return ignored('"providerOptions" is not an object of JSON objects keyed by provider')
+    }
+    const problems: string[] = []
+    const accepted: Record<string, Tool> = {}
+    let count = 0
+    for (const [name, tool] of Object.entries(tools ?? {})) {
+      const nameProblem = nativeToolNameProblem(name)
+      if (nameProblem !== null) {
+        problems.push(nameProblem)
+        continue
+      }
+      if (!isProviderToolShape(tool)) {
+        problems.push(`the tool "${name}" is not a provider-defined tool (type "provider", an id "<provider>.<tool>", args)`)
+        continue
+      }
+      if (count >= WEB_SEARCH_ANSWER_TOOLS_MAX) {
+        problems.push(`the tool "${name}" exceeds the limit of ${WEB_SEARCH_ANSWER_TOOLS_MAX} native tools`)
+        continue
+      }
+      accepted[name] = tool
+      count++
+    }
+    const hasOptions = options !== undefined && Object.keys(options).length > 0
+    if (count === 0 && !hasOptions)
+      return { params: undefined, problems }
+    return {
+      params: {
+        ...(count > 0 ? { tools: accepted } : {}),
+        ...(hasOptions ? { providerOptions: options } : {}),
+        ...(exclusive === true ? { exclusive: true } : {}),
+      },
+      problems,
+    }
+  }
+  catch {
+    return ignored('the answer cannot be read')
+  }
+}
+
+/**
+ * The tool keys of an accepted answer that a tool of the turn already takes (`taken`: a function tool's name in the
+ * tool set or the approval map): such a native tool is never added (the function tool keeps its name), so its turn
+ * searches without it. Never throws.
+ */
+export function webSearchToolCollisions(params: WebSearchParams, taken: (name: string) => boolean): string[] {
+  try {
+    return Object.keys(params.tools ?? {}).filter(name => taken(name))
+  }
+  catch {
+    return []
+  }
 }
 
 // ---------- models ----------

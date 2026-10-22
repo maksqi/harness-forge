@@ -277,4 +277,106 @@ describe('useComposerAttachments', () => {
       scope.stop()
     })
   })
+
+  describe('mCP resources (Phase 14)', () => {
+    const readme = { serverId: 'github', uri: 'repo://owner/name/README.md', name: 'README.md', serverName: 'GitHub', mime: 'text/markdown' }
+
+    it('addResource adds the chip of an attached resource once', () => {
+      const { scope, attachments } = setup()
+      const ref = fileRef('r', 'README.md', 'text/markdown')
+      attachments.addResource(ref)
+      attachments.addResource(ref)
+      expect(attachments.items.value).toMatchObject([{ source: 'upload', name: 'README.md', state: 'done', ref }])
+      expect(attachments.fileRefs.value).toEqual([ref])
+      scope.stop()
+    })
+
+    it('attachResource shows the upload state while the server reads it, then the stored file', async () => {
+      const read = deferred<FileRef>()
+      const attach = vi.fn((_signal: AbortSignal) => read.promise)
+      const { scope, attachments } = setup()
+      const chip = attachments.attachResource(readme, attach)
+      expect(chip).toMatchObject({ source: 'resource', serverId: 'github', uri: readme.uri, name: 'README.md', mime: 'text/markdown', state: 'uploading' })
+      expect(attachments.uploading.value).toBe(true)
+      expect(attach).toHaveBeenCalledTimes(1)
+      expect(attach.mock.calls[0]![0]).toBeInstanceOf(AbortSignal)
+      const settled = vi.fn()
+      void attachments.settled().then(settled)
+      await flushPromises()
+      expect(settled).not.toHaveBeenCalled()
+
+      const image = fileRef('i', 'diagram.png', 'image/png')
+      read.resolve({ ...image, name: 'README.md' })
+      await flushPromises()
+      expect(settled).toHaveBeenCalled()
+      expect(attachments.items.value[0]).toMatchObject({ state: 'done', mime: 'image/png', size: 5, previewUrl: image.url })
+      expect(attachments.fileRefs.value).toEqual([{ ...image, name: 'README.md' }])
+      scope.stop()
+    })
+
+    it('attaches the same server and URI once; a failed chip is retried, also with Retry', async () => {
+      const attach = vi.fn<(signal: AbortSignal) => Promise<FileRef>>()
+        .mockRejectedValueOnce(new HarnessError({ code: 'provider_unreachable', message: 'The MCP server is not connected.' }))
+        .mockRejectedValueOnce(new HarnessError({ code: 'internal_error', message: 'Could not reach the server.' }))
+        .mockResolvedValue(fileRef('r', 'README.md'))
+      const { scope, attachments, onReject } = setup()
+      const first = attachments.attachResource(readme, attach)
+      await flushPromises()
+      expect(attachments.items.value[0]).toMatchObject({ id: first.id, state: 'error' })
+      expect(attachments.failed.value).toBe(true)
+      expect(onReject).not.toHaveBeenCalled()
+
+      const again = attachments.attachResource(readme, attach)
+      expect(again.id).toBe(first.id)
+      await flushPromises()
+      expect(attachments.items.value[0]!.state).toBe('error')
+      attachments.retry(first.id)
+      await flushPromises()
+      expect(attachments.items.value).toHaveLength(1)
+      expect(attachments.items.value[0]!.state).toBe('done')
+      expect(attach).toHaveBeenCalledTimes(3)
+      // A done chip of that resource is returned as it is.
+      expect(attachments.attachResource(readme, attach).state).toBe('done')
+      expect(attach).toHaveBeenCalledTimes(3)
+      scope.stop()
+    })
+
+    it('drops a resource the server refuses (413, 409 needs-auth, 404, 400) and reports it with the server and error', async () => {
+      const errors = [
+        new HarnessError({ code: 'payload_too_large', message: 'Too large.', details: { limitBytes: LIMITS.mcpResourceReadBytes } }),
+        new HarnessError({ code: 'conflict', message: 'Sign in first.', details: { reason: 'needs-auth' } }),
+        new HarnessError({ code: 'not_found', message: 'Unknown resource.' }),
+        new HarnessError({ code: 'validation_error', message: 'Unsupported binary type.' }),
+      ]
+      const { scope, attachments, onReject } = setup()
+      for (const [index, error] of errors.entries())
+        attachments.attachResource({ ...readme, uri: `repo://owner/name/${index}` }, async () => Promise.reject(error))
+      await flushPromises()
+      expect(attachments.items.value).toEqual([])
+      expect(onReject.mock.calls.map(([info]) => [info.source, info.name, info.reason, info.serverName, info.error?.code])).toEqual([
+        ['resource', 'README.md', 'size', 'GitHub', 'payload_too_large'],
+        ['resource', 'README.md', 'server', 'GitHub', 'conflict'],
+        ['resource', 'README.md', 'server', 'GitHub', 'not_found'],
+        ['resource', 'README.md', 'server', 'GitHub', 'validation_error'],
+      ])
+      scope.stop()
+    })
+
+    it('a removed chip ignores its answer', async () => {
+      const read = deferred<FileRef>()
+      let signal: AbortSignal | null = null
+      const { scope, attachments } = setup()
+      const chip = attachments.attachResource(readme, (abort) => {
+        signal = abort
+        return read.promise
+      })
+      attachments.remove(chip.id)
+      expect(signal!.aborted).toBe(true)
+      read.resolve(fileRef('r', 'README.md'))
+      await flushPromises()
+      expect(attachments.items.value).toEqual([])
+      expect(attachments.uploading.value).toBe(false)
+      scope.stop()
+    })
+  })
 })

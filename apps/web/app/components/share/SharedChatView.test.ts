@@ -380,3 +380,45 @@ describe('sharedChatView', () => {
     expect(byTestId(testIds.shareTitle)?.textContent?.trim()).toBe('Second')
   })
 })
+
+describe('sharedChatView: web search and MCP questions (Phase 14, W14.9)', () => {
+  it('renders the search rows, the sources chips and an MCP call\'s result lines store-free', async () => {
+    respond(shareView({
+      options: { reasoning: false, toolDetails: true, attachments: true },
+      messages: [
+        { role: 'user', parts: [{ type: 'text', text: 'Search the web' }] },
+        {
+          role: 'assistant',
+          modelRef: 'anthropic:claude-sonnet-5',
+          parts: [
+            { type: 'tool', toolName: 'search_web', status: 'done', input: { query: 'harness forge' }, output: { query: 'harness forge', backend: 'brave', results: [{ title: 'Harness Forge', url: 'https://example.com/hf', snippet: 'A harness.', published: null }] } },
+            { type: 'tool', toolName: 'web_search', status: 'done', input: { query: 'weather in Lisbon' }, output: [{ type: 'web_search_result', url: 'https://weather.example.com/lisbon', title: 'Lisbon weather', pageAge: null }] },
+            {
+              type: 'tool',
+              toolName: 'mcp__linear__create_issue',
+              status: 'done',
+              input: {},
+              output: { elicitations: [{ id: 'eli_0000000000000001', message: 'Which team?', fields: ['team'], action: 'decline', reason: 'user' }] },
+            },
+            { type: 'text', text: 'Done.' },
+            { type: 'source-url', sourceId: 's1', url: 'https://example.com/hf', title: 'Harness Forge' },
+            { type: 'source-url', sourceId: 's2', url: 'https://weather.example.com/lisbon', title: 'Lisbon weather' },
+          ],
+        },
+      ],
+    }))
+    mountView()
+    await settle()
+    const rows = allByTestId(testIds.shareToolRow)
+    expect(rows.map(row => row.querySelector('[data-slot="web-search-row-label"]')?.textContent ?? null)).toEqual(['Searched the web', 'Searched the web', null])
+    expect(rows[0]!.querySelector('[data-slot="web-search-row-count"]')?.textContent).toBe('1 result')
+    for (const row of rows)
+      row.querySelector<HTMLElement>('button')!.click()
+    await settle()
+    const modes = allByTestId(testIds.webSearchTool).map(body => body.dataset.mode)
+    expect(modes).toEqual(['builtin', 'native'])
+    expect(allByTestId(testIds.elicitationResult).map(line => line.textContent?.trim())).toEqual(['You declined linear\'s request.'])
+    expect(allByTestId(testIds.sourcesChip).map(chip => chip.dataset.domain)).toEqual(['example.com', 'weather.example.com'])
+    expect(mocks.calls).toEqual(['shares.view'])
+  })
+})

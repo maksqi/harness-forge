@@ -7,7 +7,11 @@
 // the server refuses (413 / 404 / 400) is dropped and reported through `onReject` with `source` and `path`.
 // `addRefs(refs)` adds chips of files that are already uploaded (queued messages put back into the composer).
 // Phase 14 (ADR-061; C54 declares it, W14.8 owns it): `addResource(fileRef)` adds the chip of an MCP resource the composer
-// attached through `useResourceMentions().attach` (an upload already; a file already shown is skipped).
+// attached through `useResourceMentions().attach` (an upload already; a file already shown is skipped). W14.8 adds
+// `attachResource(resource, attach)` (additive): the chip of a picked resource shows its upload state while `attach`
+// (`useResourceMentions().attach`) runs, the same server and URI are attached once (a failed chip is retried); 413, 409
+// (`needs-auth`), 404 and 400 drop the chip and reach `onReject` (`source: 'resource'`, the server's name, the error);
+// any other failure (the server is not connected, the network) leaves an error chip with Retry.
 import type { FileRef, HarnessError } from '@harness-forge/shared'
 import type { ComputedRef, Ref } from 'vue'
 import type { AttachmentRejection } from '~/components/chat/composer/attachments'
@@ -20,8 +24,11 @@ import { isAbortError, toHarnessError } from '~/utils/errors'
 
 export type ComposerAttachmentState = 'uploading' | 'error' | 'done'
 
-/** + Phase 9: `upload` = a local file (or an already uploaded one); `project` = a project file of an `@` mention. */
-export type ComposerAttachmentSource = 'upload' | 'project'
+/**
+ * + Phase 9: `upload` = a local file (or an already uploaded one); `project` = a project file of an `@` mention; + Phase
+ * 14: `resource` = an MCP resource of an `@` mention (`attachResource`).
+ */
+export type ComposerAttachmentSource = 'upload' | 'project' | 'resource'
 
 export interface ComposerAttachment {
   /** Local id (not the server file id). */
@@ -34,6 +41,12 @@ export interface ComposerAttachment {
   path?: string
   /** + Phase 9: the project of a project chip. */
   projectId?: string
+  /** + Phase 14: the MCP server of a resource chip. */
+  serverId?: string
+  /** + Phase 14: the URI of a resource chip. */
+  uri?: string
+  /** + Phase 14: the MCP server's name of a resource chip (the error copy). */
+  serverName?: string
   /** File name (a project chip: the base name of its path). */
   name: string
   size: number
@@ -58,14 +71,31 @@ export interface AttachmentRejectionInfo {
   source?: ComposerAttachmentSource
   /** + Phase 9: the path of a refused project chip. */
   path?: string
-  /** + Phase 9: the server's error of a refused project chip. */
+  /** + Phase 9: the server's error of a refused project chip; + Phase 14: of a refused resource chip. */
   error?: HarnessError
+  /** + Phase 14: the MCP server's name of a refused resource chip. */
+  serverName?: string
 }
 
 export type UploadFile = (file: File, signal: AbortSignal) => Promise<FileRef>
 
 /** + Phase 9: attaches a project file (`POST /projects/:id/files/attach`). */
 export type AttachProjectFile = (projectId: string, path: string, signal: AbortSignal) => Promise<FileRef>
+
+/** + Phase 14: a picked MCP resource (`McpResourceEntry`): the chip's name and what identifies it. */
+export interface ResourceAttachTarget {
+  serverId: string
+  uri: string
+  /** The chip's name (the resource's title, else its name). */
+  name: string
+  /** The server's name (the error copy). */
+  serverName: string
+  /** The MIME type the server gave, if any (shown until the upload answers). */
+  mime?: string
+}
+
+/** + Phase 14: attaches the resource (`useResourceMentions().attach`); the signal aborts when the chip goes away. */
+export type AttachResource = (signal: AbortSignal) => Promise<FileRef>
 
 export interface ComposerAttachmentsOptions {
   /** Default: `POST /api/files` through `$api` (multipart, one `file` part). */
@@ -86,6 +116,11 @@ export interface ComposerAttachments {
   addRefs: (refs: readonly FileRef[]) => ComposerAttachment[]
   /** + Phase 14: the chip of an attached MCP resource (`POST /mcp/resources/attach` answered its `FileRef`). */
   addResource: (fileRef: FileRef) => void
+  /**
+   * + Phase 14 (W14.8, additive): the chip of a picked MCP resource while `attach` runs (upload state), then done; the
+   * same server and URI are attached once (an existing chip is returned; a failed one retried).
+   */
+  attachResource: (resource: ResourceAttachTarget, attach: AttachResource) => ComposerAttachment
   remove: (id: string) => void
   retry: (id: string) => void
   /** Removes everything (aborting uploads in flight). */
@@ -102,6 +137,8 @@ export interface ComposerAttachments {
 const PERMANENT_CODES = new Set(['payload_too_large', 'validation_error'])
 // A project file can also be gone (404).
 const PERMANENT_PROJECT_CODES = new Set(['payload_too_large', 'validation_error', 'not_found'])
+// + Phase 14: an MCP resource can also be gone (404) or need a sign-in first (409 `needs-auth`).
+const PERMANENT_RESOURCE_CODES = new Set(['payload_too_large', 'validation_error', 'not_found', 'conflict'])
 
 let nextLocalId = 0
 
@@ -140,6 +177,8 @@ export function useComposerAttachments(options: ComposerAttachmentsOptions = {})
 
   const items = ref<ComposerAttachment[]>([])
   const controllers = new Map<string, AbortController>()
+  /** + Phase 14: how each resource chip attaches (kept for Retry). */
+  const resourceAttachers = new Map<string, AttachResource>()
 
   function patch(id: string, change: Partial<ComposerAttachment>) {
     items.value = items.value.map(item => (item.id === id ? { ...item, ...change } : item))
@@ -149,6 +188,7 @@ export function useComposerAttachments(options: ComposerAttachmentsOptions = {})
     const item = items.value.find(entry => entry.id === id)
     controllers.get(id)?.abort()
     controllers.delete(id)
+    resourceAttachers.delete(id)
     revokePreviewUrl(item?.previewUrl)
     items.value = items.value.filter(entry => entry.id !== id)
   }
@@ -157,6 +197,9 @@ export function useComposerAttachments(options: ComposerAttachmentsOptions = {})
   function send(attachment: ComposerAttachment, signal: AbortSignal): Promise<FileRef> {
     if (attachment.source === 'project' && attachment.projectId && attachment.path)
       return projectAttach()(attachment.projectId, attachment.path, signal)
+    const attachResourceFn = attachment.source === 'resource' ? resourceAttachers.get(attachment.id) : undefined
+    if (attachResourceFn)
+      return attachResourceFn(signal)
     if (attachment.file)
       return upload(attachment.file, signal)
     return Promise.reject(new Error('Nothing to upload.'))
@@ -168,25 +211,31 @@ export function useComposerAttachments(options: ComposerAttachmentsOptions = {})
     controllers.set(attachment.id, controller)
     patch(attachment.id, { state: 'uploading', error: undefined })
     const project = attachment.source === 'project'
+    const resource = attachment.source === 'resource'
     try {
       const fileRef = await send(attachment, controller.signal)
       if (controller.signal.aborted)
         return
-      patch(attachment.id, project
-        ? { state: 'done', ref: fileRef, mime: fileRef.mime, size: fileRef.size }
-        : { state: 'done', ref: fileRef })
+      if (project)
+        patch(attachment.id, { state: 'done', ref: fileRef, mime: fileRef.mime, size: fileRef.size })
+      else if (resource)
+        patch(attachment.id, { state: 'done', ref: fileRef, mime: fileRef.mime, size: fileRef.size, previewUrl: isImageMime(fileRef.mime) ? fileRef.url : undefined })
+      else
+        patch(attachment.id, { state: 'done', ref: fileRef })
     }
     catch (error) {
       if (controller.signal.aborted || isAbortError(error))
         return
       const failure = toHarnessError(error)
-      if ((project ? PERMANENT_PROJECT_CODES : PERMANENT_CODES).has(failure.code)) {
+      const permanent = project ? PERMANENT_PROJECT_CODES : resource ? PERMANENT_RESOURCE_CODES : PERMANENT_CODES
+      if (permanent.has(failure.code)) {
         drop(attachment.id)
         options.onReject?.({
           name: project ? attachment.path ?? attachment.name : attachment.name,
           reason: failure.code === 'payload_too_large' ? 'size' : 'server',
           message: failure.message,
           ...(project ? { source: 'project' as const, path: attachment.path, error: failure } : {}),
+          ...(resource ? { source: 'resource' as const, error: failure, serverName: attachment.serverName } : {}),
         })
         return
       }
@@ -282,6 +331,32 @@ export function useComposerAttachments(options: ComposerAttachmentsOptions = {})
     addRefs([fileRef])
   }
 
+  function attachResource(resource: ResourceAttachTarget, attach: AttachResource): ComposerAttachment {
+    const existing = items.value.find(item => item.source === 'resource' && item.serverId === resource.serverId && item.uri === resource.uri)
+    if (existing) {
+      resourceAttachers.set(existing.id, attach)
+      if (existing.state === 'error')
+        void start(existing)
+      return existing
+    }
+    nextLocalId += 1
+    const attachment: ComposerAttachment = {
+      id: `att_${nextLocalId}`,
+      source: 'resource',
+      serverId: resource.serverId,
+      uri: resource.uri,
+      serverName: resource.serverName,
+      name: resource.name,
+      size: 0,
+      mime: resource.mime ?? '',
+      state: 'uploading',
+    }
+    resourceAttachers.set(attachment.id, attach)
+    items.value = [...items.value, attachment]
+    void start(attachment)
+    return attachment
+  }
+
   function retry(id: string) {
     const attachment = items.value.find(item => item.id === id)
     if (attachment && attachment.state === 'error')
@@ -292,6 +367,7 @@ export function useComposerAttachments(options: ComposerAttachmentsOptions = {})
     for (const controller of controllers.values())
       controller.abort()
     controllers.clear()
+    resourceAttachers.clear()
     for (const item of items.value)
       revokePreviewUrl(item.previewUrl)
     items.value = []
@@ -317,5 +393,5 @@ export function useComposerAttachments(options: ComposerAttachmentsOptions = {})
   if (getCurrentScope())
     onScopeDispose(clear)
 
-  return { items, add, addProject, addRefs, addResource, remove: drop, retry, clear, uploading, failed, fileRefs, settled }
+  return { items, add, addProject, addRefs, addResource, attachResource, remove: drop, retry, clear, uploading, failed, fileRefs, settled }
 }

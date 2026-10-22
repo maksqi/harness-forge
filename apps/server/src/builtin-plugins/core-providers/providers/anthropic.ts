@@ -1,13 +1,15 @@
-// Anthropic (Claude): `@ai-sdk/anthropic` Messages API (PROVIDERS.md sections 1-6).
+// Anthropic (Claude): `@ai-sdk/anthropic` Messages API (PROVIDERS.md sections 1-6); native web search through the
+// `webSearch` hook (plugin API 1.7.0, PROVIDERS.md 14).
 import type { ModelInfo, ProviderDefinition, ProviderRuntime, ReasoningEffort } from '@harness-forge/plugin-sdk'
 import type { JsonRecord } from '../lib/json.ts'
-import { createAnthropic } from '@ai-sdk/anthropic'
+import { anthropic, createAnthropic } from '@ai-sdk/anthropic'
 import { apiKeyField, apiKeyOf, baseUrlField, baseUrlOf } from '../lib/credentials.ts'
 import { mapProviderError, overloadedRule } from '../lib/errors.ts'
 import { requestJson, unexpectedListing } from '../lib/http.ts'
 import { positiveIntOf, recordOf, stringOf, supportedOf } from '../lib/json.ts'
 import { finalizeListing, modelInfo } from '../lib/models.ts'
 import { topLevelReasoning } from '../lib/reasoning.ts'
+import { baseModelId, searchMaxUses } from '../lib/web-search.ts'
 
 const PROVIDER = { id: 'anthropic', name: 'Anthropic' }
 export const ANTHROPIC_BASE_URL = 'https://api.anthropic.com/v1'
@@ -29,6 +31,18 @@ export function supportsAdaptiveThinking(modelId: string): boolean {
   if (/claude-(?:instant(?:-|$)|v?2(?=$|[-.:])|3(?=$|[-.]))/.test(modelId))
     return false
   return modelId.includes('claude-')
+}
+
+/** The oldest Claude families, without the web search server tool: `claude-instant*`, `claude-1*`, `claude-2*` and plain `claude-3` (Opus, Sonnet and Haiku 3). */
+const WITHOUT_WEB_SEARCH = /claude-(?:instant(?=$|[-.@:])|v?[12](?=$|[-.@:])|3(?=$|[-.@:](?:opus|sonnet|haiku)))/
+
+/**
+ * Native web search (`web_search_20250305`) for a model id: every `claude-*` model except the oldest families
+ * (`WITHOUT_WEB_SEARCH`; Claude 3.5 and 3.7 have it). Ids without `claude-` get none.
+ */
+export function supportsAnthropicWebSearch(modelId: string): boolean {
+  const id = baseModelId(modelId)
+  return id.includes('claude-') && !WITHOUT_WEB_SEARCH.test(id)
 }
 
 /** Adaptive-only models reject disabled and budget thinking, so `off` is not offered (PROVIDERS.md section 4). */
@@ -175,5 +189,12 @@ export const anthropicProvider: ProviderDefinition = {
   },
   mapError(err) {
     return mapProviderError(err, PROVIDER, [overloadedRule])
+  },
+  webSearch(model, request) {
+    // The `2025-03-05` version on every supported model (one result shape, no hidden `code_execution` calls; the
+    // dynamic-filtering versions are in the backlog). Its wire name is always `web_search`.
+    if (!supportsAnthropicWebSearch(model.id))
+      return undefined
+    return { tools: { web_search: anthropic.tools.webSearch_20250305({ maxUses: searchMaxUses(request) }) } }
   },
 }

@@ -56,7 +56,7 @@ describe('projectMcpServerRow', () => {
   })
 })
 
-describe('projectMcpServerRow: sign-in (Phase 14, C54 declares)', () => {
+describe('projectMcpServerRow: sign-in (Phase 14, W14.7)', () => {
   const signedIn = { signedIn: true, expiresAt: null, scope: null, client: 'dynamic' as const, issuer: null }
 
   it('a needs-auth remote server offers Sign in; a signed-in one Sign out…; pending rows neither', async () => {
@@ -80,5 +80,27 @@ describe('projectMcpServerRow: sign-in (Phase 14, C54 declares)', () => {
     expect(pending.find(`[data-testid="${testIds.projectMcpReview}"]`).exists()).toBe(true)
     expect(pending.find(`[data-testid="${testIds.projectMcpSignIn}"]`).exists()).toBe(false)
     expect(pending.find(`[data-testid="${testIds.projectMcpSignOut}"]`).exists()).toBe(false)
+  })
+
+  it('reads "Signed in" with the token tooltip; a busy needs-auth row is signing in', () => {
+    const connected = mount(ProjectMcpServerRow, { props: { server: projectMcpServer({ id: 'wiki', name: 'wiki', transport: 'http', state: 'connected', tools: ['mcp__wiki__a', 'mcp__wiki__b'], missingVariables: [], auth: { ...signedIn, expiresAt: Date.now() + 2 * 3_600_000 } }), trust: null, expanded: false, busy: false } })
+    const status = connected.get('[data-slot="project-mcp-status"]')
+    expect(status.text()).toBe('Connected · 2 tools · Signed in')
+    expect(status.attributes('title')).toBe('Signed in · expires in 2h')
+
+    const busy = mount(ProjectMcpServerRow, { props: { server: projectMcpServer({ id: 'docs', name: 'docs', transport: 'sse', state: 'needs-auth', missingVariables: [] }), trust: null, expanded: false, busy: true } })
+    const signIn = busy.get(`[data-testid="${testIds.projectMcpSignIn}"]`)
+    expect(signIn.text()).toBe('Signing in…')
+    expect(signIn.attributes('disabled')).toBeDefined()
+    expect(signIn.attributes('aria-busy')).toBe('true')
+    expect(busy.get('[data-slot="project-mcp-status"]').text()).toBe('Sign in required')
+  })
+
+  it('a needs-auth server that sends its own Authorization header names it instead of offering Sign in', () => {
+    const trust = trustMcpItem({ detail: { name: 'docs', id: 'docs', transport: 'http', url: 'https://docs.example.com/mcp', envNames: [], headerNames: ['authorization'], variables: [] } })
+    const wrapper = mount(ProjectMcpServerRow, { props: { server: projectMcpServer({ id: 'docs', name: 'docs', transport: 'http', state: 'needs-auth', missingVariables: [] }), trust, expanded: false, busy: false } })
+    expect(wrapper.find(`[data-testid="${testIds.projectMcpSignIn}"]`).exists()).toBe(false)
+    expect(wrapper.get('[data-slot="project-mcp-auth-header"]').text()).toBe('The server rejected its Authorization header.')
+    expect(wrapper.get('[data-slot="project-mcp-command"]').text()).toBe('https://docs.example.com/mcp')
   })
 })

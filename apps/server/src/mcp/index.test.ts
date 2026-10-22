@@ -693,8 +693,9 @@ describe('phase 14: prompts and resources (C51-T6)', () => {
       expect(await h.t.deps.mcp.prompts()).toEqual({ items: [], truncated: false, unavailable: [] })
       expect(await h.t.deps.mcp.resources()).toEqual({ items: [], truncated: false, unavailable: [] })
       const signal = new AbortController().signal
-      await expect(h.t.deps.mcp.getPrompt('elicit', 'greet', {}, signal)).rejects.toMatchObject({ code: 'not_implemented' })
-      await expect(h.t.deps.mcp.readResource('elicit', 'file:///a', signal)).rejects.toMatchObject({ code: 'not_implemented' })
+      // W14.2: the caches are real (the server lists no prompt and cannot read resources).
+      await expect(h.t.deps.mcp.getPrompt('elicit', 'greet', {}, signal)).rejects.toMatchObject({ code: 'not_found' })
+      await expect(h.t.deps.mcp.readResource('elicit', 'file:///a', signal)).rejects.toMatchObject({ code: 'provider_error' })
       await expect(h.t.deps.mcp.getPrompt('echo', 'greet', {}, signal)).rejects.toMatchObject({ code: 'not_found' })
       await expect(h.t.deps.mcp.getPrompt('nope', 'greet', {}, signal)).rejects.toMatchObject({ code: 'not_found' })
       await expect(h.t.deps.mcp.getPrompt('off', 'greet', {}, signal)).rejects.toMatchObject({ code: 'provider_unreachable' })

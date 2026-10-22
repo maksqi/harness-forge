@@ -9,7 +9,8 @@
 //   then stops any run or task whose chat appeared meanwhile. Settings, providers, credentials, plugins, MCP servers and
 //   the personal customizations stay; Phase 11: so do the personal hooks, the project approvals (`project_trust`) and
 //   the project MCP variables (configuration, like projects); Phase 12: so do the marketplaces and the Claude Code
-//   plugins (configuration as well).
+//   plugins (configuration as well); Phase 14 (ADR-059, ADR-063): so do the MCP OAuth sign-ins (`oauth.record`,
+//   `oauth.clientSecret`, `mcp-oauth.<serverId>`) and the `core-search` keys (secrets of their servers and plugin).
 // - Imports and delete-all run under the maintenance lock (Phase 7, C16-T1: `deps.maintenance.exclusive('import' |
 //   'delete-all', ...)`, shared with the key rotation and the file cleanup; it replaced the private mutex): while
 //   another maintenance operation runs they fail at once with `409 conflict` (`reason: 'busy'`). Summaries and exports

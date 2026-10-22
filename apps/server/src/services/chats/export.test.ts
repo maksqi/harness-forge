@@ -1,7 +1,8 @@
 import type { ChatDetail } from '@harness-forge/shared'
 import { chatExportAnySchema, chatExportSchema } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
-import { buildChatExport, compactionLine, EXPORT_TOOL_OUTPUT_BYTES, exportFilename, hookLine, linearTree, renderChatMarkdown, STEER_HEADING, taskResultHeading, titleSlug } from './export.ts'
+import { buildChatExport, compactionLine, elicitationLine, EXPORT_TOOL_OUTPUT_BYTES, exportFilename, hookLine, linearTree, renderChatMarkdown, searchLine, STEER_HEADING, taskResultHeading, titleSlug } from './export.ts'
+import { RECORD_SENTINELS, recordMessages, searchWebPart } from './records.test-util.ts'
 
 const CHAT_ID = '0199a8f0-0000-7000-8000-000000000001'
 const NOW = Date.UTC(2026, 8, 28, 12, 30)
@@ -571,5 +572,112 @@ describe('file names', () => {
     expect(name).toMatch(/^[a-z-]{1,60}-2026-09-28\.md$/)
     expect(name.startsWith('word-word')).toBe(true)
     expect(name).not.toContain('--')
+  })
+})
+
+function recordChat(): ChatDetail {
+  return { ...sampleChat(), title: 'Search', modelRef: 'mock:search-tool', running: false, pendingApproval: false, settings: { webSearch: 'auto' }, messages: recordMessages() }
+}
+
+const RECORD_MARKDOWN = `# Search
+
+Exported from harness-forge on 2026-09-28 · Model: mock:search-tool
+
+## User
+
+Look it up
+
+## Assistant (mock:search-tool)
+
+Searched the web: mcp authorization pkce (2 results · Brave Search)
+
+- [MCP authorization](https://modelcontextprotocol.io/specification/authorization) (2026-06-18): OAuth 2.1 with PKCE for remote servers.
+- [RFC 7636 \\[PKCE\\]](https://www.rfc-editor.org/rfc/rfc7636): Proof Key for Code Exchange.
+
+Source: [MCP authorization](https://modelcontextprotocol.io/specification/authorization)
+
+Source: [RFC 7636 \\[PKCE\\]](https://www.rfc-editor.org/rfc/rfc7636)
+
+Searched the web: weather in Lisbon
+
+Source: [Lisbon weather](https://weather.example/lisbon)
+
+Searched the web: nuxt 4 release date
+
+**Tool** \`mcp__fake__ask\` (output-available)
+
+\`\`\`json
+{}
+\`\`\`
+
+\`\`\`json
+{
+  "content": [
+    {
+      "type": "text",
+      "text": "Thanks, the account is set."
+    }
+  ]
+}
+\`\`\`
+
+_Input request (accept): \`name\`, \`email_address\`_
+
+_Input request (decline, not-interactive)_
+
+Done.
+`
+
+describe('markdown export: web search and MCP elicitation records (Phase 14)', () => {
+  it('renders search_web as its query and result lines, native search as its query, records as lines', () => {
+    const markdown = renderChatMarkdown(recordChat(), NOW)
+    expect(markdown).toBe(RECORD_MARKDOWN)
+    for (const hidden of [...Object.values(RECORD_SENTINELS), 'encryptedContent', 'providerOnly', 'javascript:', 'eli_', 'Which account should I use?', 'web_search_result'])
+      expect(markdown, hidden).not.toContain(hidden)
+  })
+
+  it('escapes untrusted search text, counts the results and falls back for unreadable outputs', () => {
+    const hostile = { title: 'A <b>bold</b> [link](javascript:x)', url: 'https://example.com/a_(b)', snippet: '`code`\n\n# heading', published: null }
+    const chat = { ...recordChat(), messages: [{ id: 'msg_records000000009', role: 'assistant' as const, parts: [
+      searchWebPart([hostile]),
+      { ...searchWebPart([]), output: { query: '', backend: 'exa', results: [] } },
+      { ...searchWebPart(), output: { truncated: true, originalBytes: 70000, preview: '{"query"' } },
+      { ...searchWebPart(), state: 'output-error', output: undefined, errorText: 'The search key was rejected.' },
+      { type: 'tool-google_search', toolCallId: 'g', state: 'output-available', providerExecuted: true, input: {}, output: {} },
+      { type: 'tool-web_search', toolCallId: 'w', state: 'output-error', providerExecuted: true, input: { query: 'a <script>' }, errorText: 'max_uses_exceeded' },
+    ] as ChatDetail['messages'][number]['parts'] }] }
+    const blocks = renderChatMarkdown(chat, NOW).split('\n\n').slice(3)
+    expect(blocks.slice(0, 4)).toEqual([
+      'Searched the web: mcp authorization pkce (1 result · Brave Search)',
+      '- [A \\<b\\>bold\\</b\\> \\[link\\](javascript:x)](<https://example.com/a_(b)>): \\`code\\` # heading',
+      'Searched the web: mcp authorization pkce (no results · Exa)',
+      '**Tool** `search_web` (output-available)',
+    ])
+    // A failed search_web keeps the generic blocks; native calls: the line (and the error text when one failed).
+    expect(blocks.slice(-6)).toEqual([
+      '**Tool** `search_web` (output-error)',
+      '```json\n{\n  "query": "mcp authorization pkce",\n  "count": 5\n}\n```',
+      '```text\nThe search key was rejected.\n```',
+      'Searched the web',
+      'Searched the web: a \\<script\\>',
+      '```text\nmax_uses_exceeded\n```\n',
+    ])
+  })
+
+  it('elicitationLine names the action, the reason unless the user answered, and the fields', () => {
+    expect(elicitationLine({ action: 'accept', reason: 'user', fields: ['name'] })).toBe('_Input request (accept): `name`_')
+    expect(elicitationLine({ action: 'cancel', reason: 'timeout', fields: [] })).toBe('_Input request (cancel, timeout)_')
+    expect(searchLine(null)).toBe('Searched the web')
+    expect(searchLine('a [b]')).toBe('Searched the web: a \\[b\\]')
+  })
+
+  it('the json export keeps the messages as stored (provider data included) and never awaitingInput', () => {
+    const chat = { ...recordChat(), awaitingInput: true }
+    const file = buildChatExport(chat, 'json', NOW)
+    const parsed = chatExportSchema.parse(JSON.parse(file.body))
+    expect(parsed.chat.messages).toEqual(recordMessages())
+    expect(parsed.chat.settings).toEqual({ webSearch: 'auto' })
+    expect(file.body).toContain(RECORD_SENTINELS.encrypted)
+    expect(JSON.parse(file.body).chat).not.toHaveProperty('awaitingInput')
   })
 })

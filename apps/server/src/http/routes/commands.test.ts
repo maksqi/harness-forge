@@ -1,11 +1,13 @@
 import type { CommandSummary } from '@harness-forge/shared'
+import type { McpPromptInfo } from '../../mcp/types.ts'
 import type { TestApp } from '../../testing/create-test-app.ts'
 import type { FakeCustomizationService } from '../../testing/fake-customizations.ts'
+import type { FakeProjectMcpManager } from '../../testing/fake-project-mcp.ts'
 import { mkdtemp, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { commandSummarySchema, listResponseSchema } from '@harness-forge/shared'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { commandSummarySchema, HarnessError, listResponseSchema, mcpPromptCommandName } from '@harness-forge/shared'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { BUILTIN_COMMANDS } from '../../builtin-plugins/core-commands/commands.ts'
 import { createTestApp } from '../../testing/create-test-app.ts'
 import { fakeCatalogEntry } from '../../testing/fake-customizations.ts'
@@ -156,6 +158,70 @@ describe('gET /api/commands?projectId: command files and personal commands (W10.
     }
     finally {
       fake.entries.set(projectA, (fake.entries.get(projectA) ?? []).filter(entry => entry.kind !== 'skill'))
+    }
+  })
+})
+
+describe('gET /api/commands: MCP prompts (W14.2-T2, ADR-061)', () => {
+  let app: TestApp
+  let root: string
+  let projectId: string
+
+  function prompt(serverId: string, name: string, args: McpPromptInfo['arguments'] = []): McpPromptInfo {
+    return { serverId, serverName: `${serverId} server`, name, commandName: mcpPromptCommandName(serverId, name), title: null, description: `The ${name} prompt.`, arguments: args }
+  }
+
+  async function list(query = ''): Promise<CommandSummary[]> {
+    const response = await app.request(`/api/commands${query}`)
+    expect(response.status).toBe(200)
+    return listResponseSchema(commandSummarySchema).parse(await response.json()).items
+  }
+
+  beforeAll(async () => {
+    root = await realpath(await mkdtemp(join(tmpdir(), 'hf-')))
+    app = await createTestApp({ env: { HF_MOCK_PROVIDER: '1' }, workspaceRoots: [root], projectMcp: 'fake' })
+    projectId = (await app.deps.projects.create({ name: 'Demo', path: root, newFolder: 'demo' })).id
+    vi.spyOn(app.deps.mcp, 'prompts').mockResolvedValue({
+      items: [prompt('docs', 'greet', [{ name: 'name', required: true }, { name: 'greeting', required: false }]), prompt('wiki', 'search')],
+      truncated: false,
+      unavailable: [{ serverId: 'locked', status: 'needs-auth' }],
+    })
+  })
+
+  afterAll(async () => {
+    vi.restoreAllMocks()
+    await app.close()
+    await rm(root, { recursive: true, force: true })
+  })
+
+  it('lists the prompts of the connected global servers with source mcp, the server and the hint, sorted by name', async () => {
+    const items = await list()
+    const mcp = items.filter(item => item.source === 'mcp')
+    expect(mcp).toEqual([
+      { name: 'mcp__docs__greet', kind: 'command', description: 'The greet prompt.', source: 'mcp', mcpServer: { id: 'docs', name: 'docs server' }, argumentHint: '<name> [greeting]' },
+      { name: 'mcp__wiki__search', kind: 'command', description: 'The search prompt.', source: 'mcp', mcpServer: { id: 'wiki', name: 'wiki server' } },
+    ])
+    expect(items.map(item => item.name)).toEqual([...items.map(item => item.name)].sort())
+    expect(items.some(item => item.name === 'compact')).toBe(true)
+  })
+
+  it('adds the project\'s prompts with its projectId (no wait); a project server shadows the global one', async () => {
+    const fake = app.deps.projectMcp as FakeProjectMcpManager
+    fake.promptLists.set(projectId, { items: [prompt('docs', 'local')], truncated: false, unavailable: [], shadowed: new Set(['docs']) })
+    const spy = vi.spyOn(fake, 'prompts')
+    try {
+      const names = (await list(`?projectId=${projectId}`)).filter(item => item.source === 'mcp').map(item => item.name)
+      expect(names).toEqual(['mcp__docs__local', 'mcp__wiki__search'])
+      expect(spy).toHaveBeenCalledWith(projectId, expect.objectContaining({ waitMs: 0 }))
+      // Without the project id the global servers answer.
+      expect((await list()).filter(item => item.source === 'mcp').map(item => item.name)).toEqual(['mcp__docs__greet', 'mcp__wiki__search'])
+      // A project listing that fails leaves the global prompts.
+      spy.mockRejectedValueOnce(new HarnessError({ code: 'provider_error', message: 'boom' }))
+      expect((await list(`?projectId=${projectId}`)).filter(item => item.source === 'mcp').map(item => item.name)).toEqual(['mcp__docs__greet', 'mcp__wiki__search'])
+    }
+    finally {
+      spy.mockRestore()
+      fake.promptLists.delete(projectId)
     }
   })
 })

@@ -17,6 +17,11 @@
 // they are: in replies, on user messages (a UserPromptSubmit / SessionStart context) and in the user-role carrier
 // message of a Stop continuation. Nothing runs on import: a record is history (the model reads its context again
 // through `splitHooks`, like in the chat it came from).
+//
+// Phase 14 (ADR-060, ADR-062, ADR-063, W14.6-T3): provider-executed search parts (`providerExecuted: true`, their
+// provider metadata and provider data such as `encryptedContent`), `search_web` parts, `source-url` parts and MCP tool
+// outputs with elicitation records (`elicitations`) are ordinary UI parts and are kept as they are; the model history of
+// a later turn drops another provider's provider-executed parts (`chat/search/history.ts`).
 import type { HarnessUIMessage, HarnessUIMessagePart } from '@harness-forge/shared'
 import { createMessageId, harnessDataSchemas, MESSAGE_ID_PATTERN, messageMetadataSchema, validationError } from '@harness-forge/shared'
 import { safeValidateUIMessages } from 'ai'

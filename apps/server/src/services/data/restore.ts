@@ -32,6 +32,11 @@
 //   the backup had turned on and that came back turned off (`CustomizationRestoreResult.turnedOff`). Marketplaces,
 //   Claude Code plugins, hook transcripts and home-folder import plans are never part of a backup (./backup.ts), so
 //   nothing here restores them.
+// - Phase 14 (ADR-059 … ADR-063, W14.6-T3): no format change. `settings.json` may carry `webSearchDefault` /
+//   `webSearchNative` (restored like every public setting; a v1.8.1 backup without them keeps the defaults); chats come
+//   back with their messages as stored (`search_web` parts, `source-url` parts, provider-executed search parts with
+//   their provider data, MCP tool outputs with elicitation records), validated like every imported message. MCP OAuth
+//   records and the `core-search` keys are never part of a backup, and nothing here writes a secret.
 import type {
   BackupCustomization,
   BackupFileEntry,

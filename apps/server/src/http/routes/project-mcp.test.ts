@@ -1,22 +1,34 @@
 // Route tests of the project MCP routes (API.md 5.33, ADR-050; W11.4-T6): every answer of `GET /projects/:id/mcp`,
 // `PUT /projects/:id/mcp/variables` (fresh auth) and `POST /projects/:id/mcp/:serverId/reconnect`, against the real
 // manager with the C36 fakes of the project config reader and of project trust (fixtures on loopback only).
+// Phase 14 (ADR-059, W14.1-T9): the sign-in of an approved project `.mcp.json` server (`POST|DELETE
+// /projects/:id/mcp/:serverId/oauth` and the callback) against the OAuth MCP fixture: pending → 409 `untrusted`, the
+// record in `project:<projectId>` `mcp-oauth.<serverId>`, removed with the project; a v1.8 approval of a server with
+// `oauth` stays valid.
+import type { OAuthMcpServer } from '../../mcp/__fixtures__/oauth-mcp-server.mjs'
 import type { ProjectMcpTestApp } from '../../mcp/project-testing.ts'
-import { harnessErrorEnvelopeSchema, projectMcpListSchema, projectMcpServerSchema } from '@harness-forge/shared'
+import type { ProjectMcpServerItem } from '../../services/project-config/types.ts'
+import { harnessErrorEnvelopeSchema, mcpAuthCallbackResultSchema, mcpAuthStartSchema, parseMcpJson, projectMcpListSchema, projectMcpServerSchema } from '@harness-forge/shared'
 import { eq } from 'drizzle-orm'
 import { afterEach, describe, expect, it } from 'vitest'
 import { secrets } from '../../db/schema.ts'
+import { startOAuthMcpServer } from '../../mcp/__fixtures__/oauth-mcp-server.mjs'
+import { followAuthorization, signIn } from '../../mcp/oauth/sign-in.test-util.ts'
 import { createProjectMcpTestApp, minServerItem } from '../../mcp/project-testing.ts'
+import { trustSha256 } from '../../services/project-config/index.ts'
 import { SESSION_COOKIE_NAME } from '../middleware/session-auth.ts'
 
 const PASSWORD = 'correct horse battery staple'
 const UNKNOWN_PROJECT = 'prj_ZZZZZZZZZZZZZZZZ'
 
 let h: ProjectMcpTestApp | null = null
+let fixture: OAuthMcpServer | null = null
 
 afterEach(async () => {
   await h?.close()
   h = null
+  await fixture?.stop()
+  fixture = null
 })
 
 async function open(env: Record<string, string> = {}): Promise<ProjectMcpTestApp> {
@@ -158,3 +170,81 @@ async function waitForEvent(app: ProjectMcpTestApp): Promise<void> {
     await new Promise(resolve => setTimeout(resolve, 10))
   }
 }
+
+/** A `.mcp.json` http item parsed from its raw object (`oauth` included), hashed like the project config reader does. */
+function oauthServerItem(name: string, raw: Record<string, unknown>): ProjectMcpServerItem {
+  const server = parseMcpJson(JSON.stringify({ mcpServers: { [name]: raw } })).servers[0]!
+  const hashItem: ProjectMcpServerItem['hashItem'] = { kind: 'mcp', name, server: server.raw, refs: [] }
+  return { kind: 'mcp', sha256: trustSha256(hashItem), hashItem, server, path: '.mcp.json', label: name, warnings: [] }
+}
+
+describe('project MCP sign-in routes (phase 14)', () => {
+  it('pending → 409 untrusted; approved → sign in → listed signed in; DELETE signs out; deleting the project removes the record', async () => {
+    fixture = await startOAuthMcpServer()
+    const app = await open()
+    const session = await cookie(app, 60 * 60 * 1000)
+    const item = oauthServerItem('Remote', { type: 'http', url: fixture.url, oauth: { clientId: 'seed-client', callbackPort: 33418 } })
+    expect(item.server.transport).toMatchObject({ oauth: { clientId: 'seed-client' } })
+    app.setServers([item])
+    const base = `/api/projects/${app.project.id}/mcp/remote/oauth`
+
+    const pending = await send(app, 'POST', base, session, {})
+    expect(pending.status).toBe(409)
+    expect(errorOf(pending.body)).toMatchObject({ code: 'conflict', details: { reason: 'untrusted' } })
+    expect(fixture.counters().connects).toBe(0)
+
+    await app.approve(item)
+    const started = await send(app, 'POST', base, session, { returnTo: '/settings/projects' })
+    expect(started.status).toBe(200)
+    const start = mcpAuthStartSchema.parse(started.body)
+    expect(new URL(start.authorizationUrl!).searchParams.get('client_id')).toBe('seed-client')
+    const redirect = await followAuthorization(start.authorizationUrl!)
+    const callback = await send(app, 'POST', '/api/mcp/oauth/callback', session, { state: redirect.state, code: redirect.code, iss: redirect.iss })
+    expect(callback.status).toBe(200)
+    expect(mcpAuthCallbackResultSchema.parse(callback.body)).toEqual({ target: { kind: 'project', projectId: app.project.id, serverId: 'remote' }, status: 'connected', returnTo: '/settings/projects' })
+    const listed = projectMcpListSchema.parse((await send(app, 'GET', `/api/projects/${app.project.id}/mcp`, session)).body)
+    expect(listed.items[0]).toMatchObject({ id: 'remote', state: 'connected', auth: { signedIn: true, client: 'configured' } })
+    expect(listed.items[0]?.tools).toContain('mcp__remote__whoami')
+    const names = async () => (await app.t.db.select().from(secrets).where(eq(secrets.scope, `project:${app.project.id}`))).map(row => row.name)
+    expect(await names()).toEqual(['mcp-oauth.remote'])
+
+    const signedOut = await send(app, 'DELETE', base, session)
+    expect(signedOut.status).toBe(200)
+    expect(projectMcpServerSchema.parse(signedOut.body)).toMatchObject({ id: 'remote', state: 'needs-auth', auth: null })
+    expect(fixture.counters().revocations).toBe(1)
+    expect(await names()).toEqual([])
+
+    await signIn(app.t, { kind: 'project', projectId: app.project.id, serverId: 'remote' })
+    expect(await names()).toEqual(['mcp-oauth.remote'])
+    await app.t.deps.projects.remove(app.project.id)
+    const deadline = Date.now() + 5000
+    while ((await names()).length > 0 && Date.now() < deadline)
+      await new Promise(resolve => setTimeout(resolve, 20))
+    expect(await names()).toEqual([])
+  })
+
+  it('answers 404 unknown project or server, 400 stdio, 409 disabled in safe mode', async () => {
+    fixture = await startOAuthMcpServer()
+    const app = await open({ HF_SAFE_MODE: '1' })
+    const session = await cookie(app, 0)
+    const item = oauthServerItem('Remote', { type: 'http', url: fixture.url })
+    const local = minServerItem('Local')
+    app.setServers([item, local])
+    await app.approve(item, local)
+    expect((await send(app, 'POST', `/api/projects/${UNKNOWN_PROJECT}/mcp/remote/oauth`, session, {})).status).toBe(404)
+    expect((await send(app, 'POST', `/api/projects/${app.project.id}/mcp/nope/oauth`, session, {})).status).toBe(404)
+    expect((await send(app, 'DELETE', `/api/projects/${app.project.id}/mcp/nope/oauth`, session)).status).toBe(404)
+    expect((await send(app, 'POST', `/api/projects/${app.project.id}/mcp/local/oauth`, session, {})).status).toBe(400)
+    const disabled = await send(app, 'POST', `/api/projects/${app.project.id}/mcp/remote/oauth`, session, {})
+    expect(disabled.status).toBe(409)
+    expect(errorOf(disabled.body)).toMatchObject({ code: 'conflict', details: { reason: 'disabled' } })
+    expect(fixture.counters().connects).toBe(0)
+  })
+
+  it('a v1.8.1 approval of a server with oauth stays valid (the trust hash covers the raw object)', () => {
+    // The golden hash of `packages/shared/src/util/mcp-config.test.ts` (computed by the v1.8.1 code).
+    const item = oauthServerItem('github', { type: 'http', url: 'https://mcp.example.com/github/', oauth: { clientId: 'Iv1.0123456789abcdef', scopes: 'repo read:org' } })
+    expect(item.sha256).toBe('8f352e1158d80315d563aa70091a1297f69097404b39aa4756b26232b0d3e333')
+    expect(item.server.transport).toMatchObject({ oauth: { clientId: 'Iv1.0123456789abcdef', scopes: 'repo read:org' } })
+  })
+})

@@ -3,7 +3,10 @@
 // more"). Phase 11 (ADR-052, W11.12): a skill invocation reads "Project skill", "Personal skill", "From {plugin}",
 // "Built-in skill"; what a trusted command inlined (`inlined`): "Ran {n} shell commands" and "Included {paths}". No Vue,
 // no stores.
+// Phase 14 (ADR-061; W14.9, open point 14): an MCP prompt (`source: 'mcp'`) reads "MCP · {server}" (the server's name,
+// else its id from the command name `mcp__<serverId>__<prompt>`, else "an MCP server").
 import type { CommandInvocation, CommandSource } from '@harness-forge/shared'
+import { mcpPromptServerId } from '@harness-forge/shared'
 
 /** Tool names listed in "Tools limited to …" before "and {n} more". */
 export const COMMAND_TOOLS_LISTED_MAX = 8
@@ -13,9 +16,14 @@ export const COMMAND_FILES_LISTED_MAX = 5
 
 /**
  * The source line of a command badge; the plugin's name when known, else "a plugin". + Phase 11: `kind` 'skill' says
- * "skill" instead of "command".
+ * "skill" instead of "command". + Phase 14: an MCP prompt reads "MCP · {server}" (`serverName`).
  */
-export function commandSourceText(source: CommandSource, pluginName: string | null = null, kind: 'command' | 'skill' = 'command'): string {
+export function commandSourceText(
+  source: CommandSource,
+  pluginName: string | null = null,
+  kind: 'command' | 'skill' = 'command',
+  serverName: string | null = null,
+): string {
   switch (source) {
     case 'project':
       return `Project ${kind}`
@@ -25,9 +33,9 @@ export function commandSourceText(source: CommandSource, pluginName: string | nu
       return `From ${pluginName ?? 'a plugin'}`
     case 'harness':
       return `Built-in ${kind}`
-    // Phase 14 (ADR-061): an MCP prompt (W14.9 names the server, "MCP · {server}").
+    // Phase 14 (ADR-061): an MCP prompt.
     case 'mcp':
-      return 'MCP prompt'
+      return `MCP · ${serverName ?? 'an MCP server'}`
   }
 }
 
@@ -61,17 +69,35 @@ export function commandToolsText(tools: readonly string[]): string {
 /**
  * The lines of a command badge's tooltip, in order: the source (absent on messages before v1.6), "Runs on {model}",
  * the tool limit and (+ Phase 11) what the command inlined; empty when the command carries none of them. `kind` names
- * a skill invocation (default: the invocation's own `kind`).
+ * a skill invocation (default: the invocation's own `kind`). + Phase 14: `names.server` = the MCP server's name of an
+ * MCP prompt.
  */
 export function commandBadgeLines(
   command: Pick<CommandInvocation, 'source' | 'modelRef' | 'allowedTools' | 'kind' | 'inlined'>,
-  names: { plugin: string | null, model: string | null },
+  names: { plugin: string | null, model: string | null, server?: string | null },
   kind: 'command' | 'skill' = command.kind ?? 'command',
 ): { source: string | null, model: string | null, tools: string | null, inlined: string[] } {
   return {
-    source: command.source ? commandSourceText(command.source, names.plugin, kind) : null,
+    source: command.source ? commandSourceText(command.source, names.plugin, kind, names.server ?? null) : null,
     model: command.modelRef ? `Runs on ${names.model ?? command.modelRef}` : null,
     tools: command.allowedTools && command.allowedTools.length > 0 ? commandToolsText(command.allowedTools) : null,
     inlined: commandInlinedLines(command.inlined),
   }
+}
+
+/**
+ * + Phase 14: the server named by an MCP prompt's badge: its listed name (`GET /commands`' `mcpServer.name`, else the
+ * MCP server list's name of the id in the command name), else that id; null for a name that is not an MCP prompt's.
+ */
+export function mcpCommandServerName(
+  name: string,
+  listed: { commands: readonly { name: string, source: CommandSource, mcpServer?: { id: string, name: string } }[], servers: readonly { id: string, name: string }[] },
+): string | null {
+  const command = listed.commands.find(item => item.name === name && item.source === 'mcp')
+  if (command?.mcpServer?.name)
+    return command.mcpServer.name
+  const serverId = mcpPromptServerId(name)
+  if (!serverId)
+    return null
+  return listed.servers.find(server => server.id === serverId)?.name || serverId
 }

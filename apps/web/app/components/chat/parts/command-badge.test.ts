@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { commandBadgeLines, commandInlinedLines, commandSourceText, commandToolsText } from './command-badge'
+import { commandBadgeLines, commandInlinedLines, commandSourceText, commandToolsText, mcpCommandServerName } from './command-badge'
 
 describe('command badge helpers', () => {
   it('words the source of a command', () => {
@@ -45,5 +45,24 @@ describe('command badge helpers', () => {
     expect(commandBadgeLines({ source: 'user' }, { plugin: null, model: null }, 'skill').source).toBe('Personal skill')
     expect(commandBadgeLines({ source: 'project', inlined: { shell: 2, files: ['README.md'] } }, { plugin: null, model: null }))
       .toEqual({ source: 'Project command', model: null, tools: null, inlined: ['Ran 2 shell commands', 'Included README.md'] })
+  })
+})
+
+describe('command badge helpers: MCP prompts (Phase 14, W14.9)', () => {
+  it('words the source of an MCP prompt "MCP · {server}"', () => {
+    expect(commandSourceText('mcp', null, 'command', 'Linear')).toBe('MCP · Linear')
+    expect(commandSourceText('mcp')).toBe('MCP · an MCP server')
+    expect(commandBadgeLines({ source: 'mcp' }, { plugin: null, model: null, server: 'Fixture' }).source).toBe('MCP · Fixture')
+  })
+
+  it('names the server of an MCP prompt: the listed name, the server list, else the id in the name', () => {
+    const listed = {
+      commands: [{ name: 'mcp__fixture__greet', source: 'mcp' as const, mcpServer: { id: 'fixture', name: 'Fixture' } }],
+      servers: [{ id: 'docs', name: 'Docs Server' }],
+    }
+    expect(mcpCommandServerName('mcp__fixture__greet', listed)).toBe('Fixture')
+    expect(mcpCommandServerName('mcp__docs__summarize', listed)).toBe('Docs Server')
+    expect(mcpCommandServerName('mcp__linear__triage', listed)).toBe('linear')
+    expect(mcpCommandServerName('review', listed)).toBeNull()
   })
 })

@@ -1,6 +1,10 @@
-import { catalogModelSchema } from '@harness-forge/shared'
+import type { WebSearchParams, WebSearchRequest } from '@harness-forge/plugin-sdk'
+import type { CatalogModel, ModelInfo } from '@harness-forge/shared'
+import type { Tool } from 'ai'
+import type { CatalogEntryInput, WebSearchHook } from './merge.ts'
+import { catalogModelSchema, WEB_SEARCH_MAX_USES } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
-import { buildCatalogModel, catalogModelInfo, cleanVoices, effortMenu, hiddenByDefault, MAX_MODEL_VOICES, mergeLayers, modelsDevLayer, sortEfforts } from './merge.ts'
+import { buildCatalogModel, catalogModelInfo, cleanVoices, effortMenu, hiddenByDefault, MAX_MODEL_VOICES, mergeLayers, modelsDevLayer, modelWebSearch, sortEfforts, WEB_SEARCH_PROBE } from './merge.ts'
 
 describe('field precedence', () => {
   it('takes each field, capability flag and price from the first layer that defines it', () => {
@@ -89,6 +93,7 @@ describe('buildCatalogModel', () => {
       custom: false,
       source: 'seed',
       lastUsedAt: null,
+      webSearch: null,
     })
   })
 
@@ -194,5 +199,79 @@ describe('buildCatalogModel', () => {
       reasoningEfforts: ['off', 'low', 'medium', 'high'],
       cost: { input: 1 },
     })
+  })
+})
+
+describe('webSearch (Phase 14, ADR-062)', () => {
+  const tool = { type: 'provider', id: 'acme.web_search', args: {}, isProviderExecuted: true } as unknown as Tool
+  const chat = (hook?: WebSearchHook, extra: Partial<CatalogEntryInput> = {}): CatalogModel => buildCatalogModel({
+    providerId: 'acme',
+    id: 'acme-chat',
+    layers: [{ id: 'acme-chat', name: 'Acme Chat', capabilities: { tools: true, reasoning: true }, reasoningEfforts: ['low'] }],
+    source: 'seed',
+    ...(hook === undefined ? {} : { webSearch: hook }),
+    ...extra,
+  })
+
+  it('is null without a hook and native / exclusive from the hook\'s answer to the probe', () => {
+    expect(chat().webSearch).toBeNull()
+    const seen: [ModelInfo, WebSearchRequest][] = []
+    const native = chat((info, request) => {
+      seen.push([info, request])
+      return { tools: { web_search: tool } }
+    })
+    expect(catalogModelSchema.parse(native).webSearch).toBe('native')
+    // The probe: a turn without function tools; the entry's own ModelInfo (what a turn passes).
+    expect(seen).toHaveLength(1)
+    expect(seen[0]?.[1]).toEqual({ functionTools: 0, maxUses: WEB_SEARCH_MAX_USES })
+    expect(seen[0]?.[0]).toEqual(catalogModelInfo(native))
+    expect(chat(() => ({ tools: { google_search: tool }, exclusive: true })).webSearch).toBe('exclusive')
+    expect(chat(() => ({ tools: { web_search: tool }, exclusive: false })).webSearch).toBe('native')
+    // Provider options alone (OpenRouter's web plugin) are native search too.
+    expect(chat(() => ({ providerOptions: { acme: { plugins: [{ id: 'web' }] } } })).webSearch).toBe('native')
+  })
+
+  it('is null for nothing usable, a throw or an invalid answer, and reports the problem (never a value)', () => {
+    const problems: unknown[] = []
+    const onWebSearchProblem = (problem: unknown): void => {
+      problems.push(problem)
+    }
+    expect(chat(() => undefined, { onWebSearchProblem }).webSearch).toBeNull()
+    expect(chat(() => ({}), { onWebSearchProblem }).webSearch).toBeNull()
+    expect(problems).toEqual([])
+    const error = new Error('boom')
+    expect(chat(() => {
+      throw error
+    }, { onWebSearchProblem }).webSearch).toBeNull()
+    expect(problems).toEqual([{ modelId: 'acme-chat', problems: ['the hook threw'], error }])
+    problems.length = 0
+    expect(chat(() => ({ tools: { web_search: { type: 'function', secret: 'sk-hidden' } as unknown as Tool } }), { onWebSearchProblem }).webSearch).toBeNull()
+    expect(chat(() => ({ tools: { web_search: tool }, exclusive: 'yes' as unknown as boolean }), { onWebSearchProblem }).webSearch).toBeNull()
+    expect(problems).toHaveLength(2)
+    expect(JSON.stringify(problems)).not.toContain('sk-hidden')
+  })
+
+  it('probes chat models only (image, speech and other kinds are null without a call)', () => {
+    let calls = 0
+    const hook: WebSearchHook = () => {
+      calls++
+      return { tools: { web_search: tool } }
+    }
+    for (const kind of ['image', 'speech', 'transcription', 'embedding'] as const) {
+      const model = buildCatalogModel({ providerId: 'acme', id: `acme-${kind}`, layers: [{ id: `acme-${kind}`, kind }], source: 'seed', webSearch: hook })
+      expect(model.webSearch, kind).toBeNull()
+    }
+    expect(calls).toBe(0)
+    expect(chat(hook).webSearch).toBe('native')
+    expect(calls).toBe(1)
+  })
+
+  it('modelWebSearch reads the answer like a turn does', () => {
+    const info: ModelInfo = { id: 'm' }
+    expect(modelWebSearch(() => ({ tools: { web_search: tool } }), info)).toBe('native')
+    expect(modelWebSearch(() => ({ tools: { 'bad name': tool } }), info)).toBeNull()
+    expect(modelWebSearch(() => 'native' as unknown as WebSearchParams, info)).toBeNull()
+    expect(WEB_SEARCH_PROBE).toEqual({ functionTools: 0, maxUses: WEB_SEARCH_MAX_USES })
+    expect(Object.isFrozen(WEB_SEARCH_PROBE)).toBe(true)
   })
 })

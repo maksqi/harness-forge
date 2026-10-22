@@ -2,7 +2,7 @@ import type { MockApi } from '~/utils/testing/mock-api'
 import { createServerEvent, HarnessError } from '@harness-forge/shared'
 import { createPinia, disposePinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { AGENT_MARKDOWN, agentCustomization, commandSummary, customizationEntry, customizationId, customizationList, pluginSummary, projectDefinitionFile, projectDefinitionWriteResult, projectId, trustSha } from '~/utils/testing/fixtures'
+import { AGENT_MARKDOWN, agentCustomization, commandSummary, customizationEntry, customizationId, customizationList, mcpPromptCommand, pluginSummary, projectDefinitionFile, projectDefinitionWriteResult, projectId, trustSha } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { customizationScopeKey, useCustomizationsStore } from './customizations'
 
@@ -99,6 +99,33 @@ describe('customizations store: commands', () => {
     store.applyEvent(createServerEvent('catalog.changed', { providerId: null }, 3))
     await store.refreshLoaded()
     expect(api.commands.list).toHaveBeenCalledTimes(4)
+  })
+})
+
+describe('customizations store: MCP prompts (Phase 14, W14.8-T1)', () => {
+  it('keeps the MCP rows of GET /commands and refetches the slash lists when a server\'s prompts change', async () => {
+    const greet = mcpPromptCommand()
+    const review = mcpPromptCommand({ name: 'mcp__docs__review', mcpServer: { id: 'docs', name: 'Docs' } })
+    api.commands.list
+      .mockResolvedValueOnce({ items: [commandSummary()] })
+      .mockResolvedValueOnce({ items: [commandSummary()] })
+      .mockImplementation(async (input: { query: { projectId?: string } }) => ({ items: input.query.projectId ? [commandSummary(), greet, review] : [commandSummary(), greet] }))
+    const store = useCustomizationsStore()
+    await store.fetchCommands(null, { maxAgeMs: 15_000 })
+    await store.fetchCommands(projectId(1), { maxAgeMs: 15_000 })
+    expect(store.slashCommands(null)).toEqual([commandSummary()])
+
+    // A global server connected (its prompts are listed in every scope): `customization.changed { kind: 'command' }`.
+    store.applyEvent(createServerEvent('customization.changed', { kind: 'command' }, 1))
+    await vi.waitFor(() => expect(store.slashCommands(null)).toEqual([commandSummary(), greet]))
+    await vi.waitFor(() => expect(store.slashCommands(projectId(1))).toEqual([commandSummary(), greet, review]))
+    expect(store.slashCommands(projectId(1))[2]).toMatchObject({ source: 'mcp', mcpServer: { id: 'docs', name: 'Docs' } })
+    const calls = api.commands.list.mock.calls.length
+
+    // A project server's prompts changed (`projectId` set): the lists are refetched again.
+    store.applyEvent(createServerEvent('customization.changed', { kind: 'command', projectId: projectId(1) }, 2))
+    await vi.waitFor(() => expect(api.commands.list.mock.calls.length).toBeGreaterThan(calls))
+    await vi.waitFor(() => expect(store.stale[`commands:${projectId(1)}`]).toBeUndefined())
   })
 })
 

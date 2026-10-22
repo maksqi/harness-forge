@@ -1,4 +1,5 @@
-import type { AgentDefinition, OutputStyleDefinition, ProviderDefinition, SkillDefinition, ToolDefinition } from '@harness-forge/plugin-sdk'
+import type { AgentDefinition, OutputStyleDefinition, ProviderDefinition, SkillDefinition, ToolDefinition, WebSearchParams } from '@harness-forge/plugin-sdk'
+import type { Tool } from 'ai'
 import type { ToolRegisterOptions } from './types.ts'
 import { BUILTIN_OUTPUT_STYLE_NAMES, CLIENT_COMMANDS, HARNESS_COMMANDS, HarnessError, WORKSPACE_TOOL_ACCESS } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
@@ -6,7 +7,7 @@ import { z } from 'zod'
 import { PROVIDER_DEFINITIONS } from '../builtin-plugins/core-providers/index.ts'
 import { createWorkspaceTools } from '../builtin-plugins/core-workspace/index.ts'
 import { createMemoryLogger } from '../logger.ts'
-import { validateAgentDefinition, validateCommandDefinition, validateOutputStyleDefinition, validateProviderDefinition, validateSkillDefinition, validateToolDefinition } from './validate.ts'
+import { checkWebSearchParams, validateAgentDefinition, validateCommandDefinition, validateOutputStyleDefinition, validateProviderDefinition, validateSkillDefinition, validateToolDefinition, WEB_SEARCH_ANSWER_TOOLS_MAX, webSearchToolCollisions } from './validate.ts'
 
 function unused(): never {
   throw new Error('unused')
@@ -87,6 +88,128 @@ describe('validateProviderDefinition: plugin API 1.1.0 members (ADR-028, ADR-029
     expect(failure(provider({ seedModels: [{ id: 'say', kind: 'speech', voices: ['a', 'a'] }] })).code).toBe('validation_error')
     const many = Array.from({ length: 101 }, (_, index) => `voice-${index}`)
     expect(failure(provider({ seedModels: [{ id: 'say', kind: 'speech', voices: many }] })).code).toBe('validation_error')
+  })
+})
+
+describe('validateProviderDefinition: the web search hook (plugin API 1.7.0, ADR-062)', () => {
+  it('accepts webSearch as a function and rejects anything else naming the member', () => {
+    expect(() => validateProviderDefinition('acme', provider({ webSearch: () => undefined }))).not.toThrow()
+    expect(() => validateProviderDefinition('acme', provider({ webSearch: undefined }))).not.toThrow()
+    for (const value of ['nope', 42, null, {}, true]) {
+      const error = failure({ ...provider(), webSearch: value } as unknown as ProviderDefinition)
+      expect(error.code).toBe('validation_error')
+      expect(error.message).toBe('Provider "acme": "webSearch" must be a function.')
+    }
+  })
+})
+
+describe('checkWebSearchParams (plugin API 1.7.0, ADR-062)', () => {
+  const searchTool = { type: 'provider', id: 'acme.web_search', args: { maxUses: 5 }, isProviderExecuted: true, inputSchema: z.object({ query: z.string() }) } as unknown as Tool
+  const serverTool = { type: 'provider', id: 'openrouter.web_search', args: { maxResults: 5 }, isProviderExecuted: false } as unknown as Tool
+
+  it('accepts provider-defined tools (executed by the provider or not), JSON provider options and exclusive', () => {
+    const options = { acme: { search: { depth: 'basic', domains: ['a.example'], limit: 5, safe: true, extra: null } } }
+    const checked = checkWebSearchParams({ tools: { web_search: searchTool, google_search: serverTool }, providerOptions: options, exclusive: true })
+    expect(checked.problems).toEqual([])
+    expect(checked.params).toEqual({ tools: { web_search: searchTool, google_search: serverTool }, providerOptions: options, exclusive: true })
+    expect(checked.params?.tools?.web_search).toBe(searchTool)
+    expect(checked.params?.providerOptions).not.toBe(options)
+    expect(checked.params?.providerOptions?.acme).not.toBe(options.acme)
+    // `exclusive: false` is dropped; options alone are an answer (OpenRouter's `web` plugin).
+    expect(checkWebSearchParams({ tools: { web_search: searchTool }, exclusive: false }).params).toEqual({ tools: { web_search: searchTool } })
+    expect(checkWebSearchParams({ providerOptions: { openrouter: { plugins: [{ id: 'web', max_results: 5 }] } } }).params).toEqual({ providerOptions: { openrouter: { plugins: [{ id: 'web', max_results: 5 }] } } })
+  })
+
+  it('answers nothing for undefined and for answers with nothing to add', () => {
+    expect(checkWebSearchParams(undefined)).toEqual({ params: undefined, problems: [] })
+    expect(checkWebSearchParams({})).toEqual({ params: undefined, problems: [] })
+    expect(checkWebSearchParams({ tools: {}, providerOptions: {}, exclusive: true })).toEqual({ params: undefined, problems: [] })
+    expect(checkWebSearchParams({ providerOptions: { acme: {} } }).params).toEqual({ providerOptions: { acme: {} } })
+  })
+
+  it('drops bad tool entries with a problem: shapes, keys, the reserved names, more than the limit', () => {
+    const fn = { description: 'A tool.', inputSchema: z.object({}), execute: async () => ({}) }
+    const checked = checkWebSearchParams({
+      tools: {
+        'web_search': searchTool,
+        'plain': fn,
+        'no_id': { type: 'provider', args: {} },
+        'bad_id': { type: 'provider', id: 'nodot', args: {} },
+        'spaced_id': { type: 'provider', id: 'acme.web search', args: {} },
+        'no_args': { type: 'provider', id: 'acme.x' },
+        'array_args': { type: 'provider', id: 'acme.x', args: [] },
+        'bad name': searchTool,
+        'mcp__srv__search': searchTool,
+        'search_web': searchTool,
+        'null_tool': null,
+      },
+    })
+    expect(Object.keys(checked.params?.tools ?? {})).toEqual(['web_search'])
+    expect(checked.problems).toHaveLength(10)
+    expect(checked.problems.join('\n')).toContain('"search_web" is reserved')
+    expect(checked.problems.join('\n')).toContain('"mcp__"')
+
+    const many = Object.fromEntries(Array.from({ length: WEB_SEARCH_ANSWER_TOOLS_MAX + 2 }, (_, index) => [`tool_${index}`, searchTool]))
+    const capped = checkWebSearchParams({ tools: many })
+    expect(Object.keys(capped.params?.tools ?? {})).toHaveLength(WEB_SEARCH_ANSWER_TOOLS_MAX)
+    expect(capped.problems).toHaveLength(2)
+  })
+
+  it('ignores the whole answer for a bad container, bad options, a non-boolean exclusive or a throwing getter', () => {
+    const answers: unknown[] = [
+      null,
+      'web_search',
+      42,
+      [searchTool],
+      new (class Params { tools = { web_search: searchTool } })(),
+      { tools: [searchTool] },
+      { tools: 'web_search' },
+      { tools: { web_search: searchTool }, exclusive: 'yes' },
+      { tools: { web_search: searchTool }, exclusive: 1 },
+      { tools: { web_search: searchTool }, providerOptions: 'x' },
+      { tools: { web_search: searchTool }, providerOptions: { acme: 1 } },
+      { tools: { web_search: searchTool }, providerOptions: { acme: { run: () => {} } } },
+      { tools: { web_search: searchTool }, providerOptions: { acme: { at: new Date(0) } } },
+      { tools: { web_search: searchTool }, providerOptions: { acme: { n: Number.NaN } } },
+      { tools: { web_search: searchTool }, providerOptions: { acme: JSON.parse('{"__proto__":{"polluted":true}}') as unknown } },
+      Object.defineProperty({}, 'tools', { enumerable: true, get: () => { throw new Error('getter') } }),
+    ]
+    for (const answer of answers) {
+      const checked = checkWebSearchParams(answer)
+      expect(checked.params, String(answer)).toBeUndefined()
+      expect(checked.problems, String(answer)).toHaveLength(1)
+    }
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined()
+    let deep: Record<string, unknown> = { leaf: true }
+    for (let level = 0; level < 20; level++)
+      deep = { next: deep }
+    expect(checkWebSearchParams({ providerOptions: { acme: deep } }).params).toBeUndefined()
+  })
+
+  it('never quotes a value of the answer in a problem', () => {
+    const checked = checkWebSearchParams({ tools: { web_search: { type: 'provider', id: 'acme.x', args: [], secret: 'sk-hidden-value' } }, providerOptions: { acme: { key: 'sk-other-value' } } })
+    expect(checked.problems.join('\n')).not.toMatch(/sk-hidden-value|sk-other-value/)
+  })
+
+  it('lists the keys that a tool of the turn already takes', () => {
+    const params: WebSearchParams = { tools: { web_search: searchTool, lookup: searchTool } }
+    expect(webSearchToolCollisions(params, name => name === 'lookup')).toEqual(['lookup'])
+    expect(webSearchToolCollisions(params, () => false)).toEqual([])
+    expect(webSearchToolCollisions({ providerOptions: { acme: {} } }, () => true)).toEqual([])
+    expect(webSearchToolCollisions(params, () => {
+      throw new Error('boom')
+    })).toEqual([])
+  })
+
+  it('accepts the answers of every builtin provider hook for a current model', () => {
+    const current: Record<string, string> = { anthropic: 'claude-sonnet-5', openai: 'gpt-6-sol', google: 'gemini-3.8-flash', xai: 'grok-4.7', openrouter: 'openai/gpt-6-luna', groq: 'openai/gpt-oss-120b' }
+    for (const definition of PROVIDER_DEFINITIONS) {
+      const modelId = current[definition.id]
+      const answer = definition.webSearch?.({ id: modelId ?? 'any-model', capabilities: { tools: true } }, { functionTools: 0, maxUses: 5 })
+      const checked = checkWebSearchParams(answer)
+      expect(checked.problems, definition.id).toEqual([])
+      expect(checked.params !== undefined, definition.id).toBe(modelId !== undefined)
+    }
   })
 })
 

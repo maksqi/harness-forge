@@ -25,7 +25,7 @@ import type { ModelPrefRow } from '../db/schema.ts'
 import type { RegisteredProvider } from '../registry/types.ts'
 import type { ResolvedCredentials } from '../services/secrets/types.ts'
 import type { AppDeps } from '../types.ts'
-import type { ModelLayer, ModelPrefsState } from './merge.ts'
+import type { ModelLayer, ModelPrefsState, WebSearchHook } from './merge.ts'
 import type { ModelsDevSnapshot } from './models-dev.ts'
 import type { CachedListing } from './store.ts'
 import type { CatalogQuery, ModelCatalog } from './types.ts'
@@ -325,6 +325,13 @@ export function createModelCatalogWith(deps: AppDeps, options: ModelCatalogOptio
     }
     const prefs = new Map(prefsRows.map(row => [row.modelId, row]))
     const devModels = snapshot?.providers[definition.modelsDevId ?? providerId]
+    // Phase 14 (ADR-062): the provider's web search hook, probed per chat model (`CatalogModel.webSearch`, `merge.ts`).
+    const webSearch: WebSearchHook | undefined = typeof definition.webSearch === 'function'
+      ? (info, request) => definition.webSearch?.(info, request)
+      : undefined
+    const onWebSearchProblem = (problem: { modelId: string, problems: readonly string[], error?: unknown }): void => {
+      logger.debug('provider webSearch() probe ignored', { providerId, modelId: problem.modelId, problems: problem.problems, ...(problem.error === undefined ? {} : { err: problem.error }) })
+    }
 
     const ids: string[] = []
     const seen = new Set<string>()
@@ -369,6 +376,7 @@ export function createModelCatalogWith(deps: AppDeps, options: ModelCatalogOptio
         prefs: prefsState(pref),
         source,
         imageModels: served.has('image'),
+        ...(webSearch === undefined ? {} : { webSearch, onWebSearchProblem }),
       })
     })
     return entries.filter(entry => entry.custom || !isMediaModelKind(entry.kind) || served.has(entry.kind))

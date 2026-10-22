@@ -21,6 +21,11 @@
 // server drops task results from shares, so no result note reaches this row.
 // Phase 11 (docs/UI.md 7.31): shares carry no hook records, so a call a hook denied reads "Denied" (no hook badge or
 // notes).
+// Phase 14 (ADR-060, ADR-062, ADR-063; W14.9, docs/UI.md 7.35): a search row (`search_web`, or a provider-executed
+// search tool's name: a snapshot keeps no `providerExecuted`) reads "Searched the web" with `Globe`, the query and
+// (builtin) "{n} results"; with tool details its body is WebSearchToolBody with the generic blocks behind "Raw input and
+// output" (`encryptedContent` removed). An MCP call's elicitation records show their result lines at the top of the body
+// (the action and the asked field names, never values; the server is named by its id).
 // Contract (docs/UI.md 10.4): `part` is the snapshot's tool part (toolName, status, input?, output?, errorText?).
 import type { TodoItem } from '@harness-forge/shared'
 import type { Component } from 'vue'
@@ -34,8 +39,10 @@ import {
   BotMessageSquareIcon,
   CheckIcon,
   ChevronRightIcon,
+  CircleCheckIcon,
   CircleSlashIcon,
   ClipboardListIcon,
+  GlobeIcon,
   ListTodoIcon,
   PencilLineIcon,
   ServerIcon,
@@ -68,6 +75,7 @@ import SkillToolBody from '~/components/chat/agent/SkillToolBody.vue'
 import TaskBody from '~/components/chat/agent/TaskBody.vue'
 import TodoList from '~/components/chat/agent/TodoList.vue'
 import {
+  firstStringArg,
   formatToolValue,
   isServerTruncated,
   PLAN_TOOL_NAME,
@@ -75,12 +83,15 @@ import {
   splitMcpToolName,
   TASK_TOOL_NAME,
 } from '~/components/chat/chat-format'
+import { elicitationFieldsText, elicitationRecordsOf, elicitationResultAction, elicitationResultText } from '~/components/chat/parts/elicitation'
 import { toolRowArgument } from '~/components/chat/parts/tool-row'
 import ToolRowSummary from '~/components/chat/parts/tools/ToolRowSummary.vue'
 import ToolRuleBadge from '~/components/chat/parts/tools/ToolRuleBadge.vue'
+import WebSearchToolBody from '~/components/chat/parts/tools/WebSearchToolBody.vue'
 import { workspaceRowSummary, workspaceToolIcon, workspaceToolView } from '~/components/chat/parts/tools/workspace-tools'
 import WorkspaceToolBody from '~/components/chat/parts/tools/WorkspaceToolBody.vue'
 import ToolValueBlock from '~/components/chat/parts/ToolValueBlock.vue'
+import { shareWebSearchKind, stripEncryptedContent, webSearchResultsText, webSearchRowLabel, webSearchView } from '~/components/chat/parts/web-search'
 import { testIds } from '~/utils/testids'
 
 const props = defineProps<{ part: ShareToolPart }>()
@@ -165,7 +176,25 @@ const agentView = computed<
 })
 /** + Phase 9: the label of an agent row without tool details ("Sub-agent", "Updated tasks", "Plan"). */
 const agentLabel = computed(() => (agentTool.value && !expandable.value ? AGENT_LABELS[agentTool.value] : null))
+/** + Phase 14: a search row (`builtin` = `search_web`, `native` = a provider-executed search tool), else null. */
+const searchKind = computed(() => shareWebSearchKind(props.part.toolName))
+/** + Phase 14: the search row's query and "{n} results" (builtin, with tool details). */
+const searchRow = computed(() => {
+  if (!searchKind.value)
+    return null
+  const view = hasInput.value || hasOutput.value ? webSearchView(props.part.input, props.part.output, searchKind.value === 'native') : null
+  const query = view?.query ? firstStringArg(view.query) : null
+  const count = searchKind.value === 'builtin' && props.part.status === 'done' && view?.backend ? webSearchResultsText(view.results.length) : null
+  return { label: webSearchRowLabel(false), query, count }
+})
+/** + Phase 14: the raw blocks of a search row never show `encryptedContent`. */
+const searchInputText = computed(() => formatToolValue(stripEncryptedContent(props.part.input)))
+const searchOutputText = computed(() => formatToolValue(stripEncryptedContent(props.part.output)))
+/** + Phase 14: the elicitation records of a shared MCP call (with tool details). */
+const elicitationRecords = computed(() => (mcp.value && hasOutput.value ? elicitationRecordsOf(props.part.output) : []))
 const rowIcon = computed<Component>(() => {
+  if (searchKind.value)
+    return GlobeIcon
   if (mcp.value)
     return ServerIcon
   if (agentTool.value === 'task') {
@@ -242,6 +271,10 @@ const ROW_CLASS = '-mx-1.5 flex h-(--row-height) w-[calc(100%+0.75rem)] min-w-0 
         <span class="shrink-0 font-medium">Loaded skill</span>
         <span class="min-w-0 truncate font-mono text-[13px]">{{ agentView.name }}</span>
       </template>
+      <template v-else-if="searchRow">
+        <span data-slot="web-search-row-label" class="shrink-0 font-medium">{{ searchRow.label }}</span>
+        <span v-if="searchRow.query" class="min-w-0 truncate font-mono text-xs text-muted-foreground">"{{ searchRow.query }}"</span>
+      </template>
       <template v-else>
         <span class="shrink-0 font-mono text-[13px] font-medium">{{ displayName }}</span>
         <span v-if="firstArg" class="min-w-0 truncate font-mono text-xs text-muted-foreground">"{{ firstArg }}"</span>
@@ -252,6 +285,7 @@ const ROW_CLASS = '-mx-1.5 flex h-(--row-height) w-[calc(100%+0.75rem)] min-w-0 
       <span class="ml-auto flex shrink-0 items-center gap-1.5 pl-2 text-xs text-muted-foreground">
         <ToolRuleBadge v-if="allowedBy.length > 0" :prefixes="allowedBy" />
         <ToolRowSummary v-if="summary" :summary="summary" class="mr-0.5" />
+        <span v-if="searchRow?.count" data-slot="web-search-row-count" class="mr-0.5">{{ searchRow.count }}</span>
         <template v-if="planApproved">
           <CheckIcon aria-hidden="true" class="size-3.5 text-success" />
           <span>{{ planApproved }}</span>
@@ -278,7 +312,33 @@ const ROW_CLASS = '-mx-1.5 flex h-(--row-height) w-[calc(100%+0.75rem)] min-w-0 
       :data-testid="testIds.shareToolRowOutput"
       class="min-w-0 overflow-hidden pt-1 pl-6 data-closed:animate-out data-closed:fade-out-0 data-open:animate-in data-open:fade-in-0"
     >
-      <TaskBody v-if="agentView?.kind === 'task'" :input="part.input" :output="part.output" :running="false" />
+      <div v-if="elicitationRecords.length > 0" data-slot="elicitation-records" class="mb-2 flex min-w-0 flex-col gap-1.5">
+        <div v-for="record in elicitationRecords" :key="record.id" class="flex min-w-0 flex-col gap-0.5">
+          <p
+            :data-testid="testIds.elicitationResult"
+            :data-action="elicitationResultAction(record)"
+            class="flex min-w-0 items-start gap-2 text-sm text-muted-foreground"
+          >
+            <CircleCheckIcon v-if="record.action === 'accept'" aria-hidden="true" class="mt-0.5 size-3.5 shrink-0" />
+            <CircleSlashIcon v-else aria-hidden="true" class="mt-0.5 size-3.5 shrink-0" />
+            <span class="min-w-0 break-words">{{ elicitationResultText(record, mcp?.serverId ?? part.toolName) }}</span>
+          </p>
+          <p v-if="elicitationFieldsText(record.fields)" data-slot="elicitation-record-fields" class="pl-5.5 text-xs break-words text-muted-foreground">
+            {{ elicitationFieldsText(record.fields) }}
+          </p>
+        </div>
+      </div>
+      <AgentToolBody v-if="searchKind">
+        <WebSearchToolBody :input="part.input" :output="part.output" :native="searchKind === 'native'" :running="false" />
+        <ToolValueBlock v-if="part.errorText" label="Error" :value="part.errorText" tone="error" class="mt-3" />
+        <template #raw>
+          <div class="flex min-w-0 flex-col gap-3 rounded-md bg-muted/50 p-3">
+            <ToolValueBlock v-if="hasInput" label="Input" :value="searchInputText || '{}'" :server-truncated="inputTruncated" />
+            <ToolValueBlock v-if="hasOutput" label="Output" :value="searchOutputText" :server-truncated="outputTruncated" />
+          </div>
+        </template>
+      </AgentToolBody>
+      <TaskBody v-else-if="agentView?.kind === 'task'" :input="part.input" :output="part.output" :running="false" />
       <AgentToolBody v-else-if="agentView">
         <TodoList v-if="agentView.kind === 'todo'" :todos="agentView.todos" />
         <SkillToolBody v-else-if="agentView.kind === 'skill'" :input="part.input" :output="part.output" />

@@ -4,8 +4,9 @@
 // after Phase 0.
 // Phase 14 (ADR-059; C54 declares the signatures, W14.7 owns the bodies; frozen from Gate P14-0b): `signInMcp(id,
 // returnTo?)` starts the OAuth sign-in of a personal or plugin http / sse server (`POST /mcp/:id/oauth`, the answer's
-// `authorizationUrl` is opened by `useMcpSignIn` in the same tab) and `signOutMcp(id)` forgets its tokens (`DELETE
-// /mcp/:id/oauth`; the answered server replaces its row). `useMcpSignIn` is their only caller.
+// `authorizationUrl` is opened by `useMcpSignIn` in the same tab; an answer without one refetches a loaded list) and
+// `signOutMcp(id)` forgets its tokens (`DELETE /mcp/:id/oauth`; the answered server replaces its row). `useMcpSignIn` is
+// their only caller; the rows follow the server's `plugin.changed` events (`applyEvent` refetches the loaded list).
 import type {
   CommandSummary,
   McpAuthStart,
@@ -408,16 +409,25 @@ export const usePluginsStore = defineStore('plugins', () => {
 
   /**
    * + Phase 14 (ADR-059): `POST /mcp/:id/oauth { returnTo }`: starts a sign-in; `authorizationUrl` null = the stored
-   * tokens still work (the server reconnected). Throws `HarnessError` (400 stdio / Authorization header, 409 disabled).
+   * tokens still work (the server reconnected: a loaded list refetches, besides the `plugin.changed` the server emits).
+   * Throws `HarnessError` (400 stdio / Authorization header, 409 disabled).
    */
   async function signInMcp(id: string, returnTo?: string): Promise<McpAuthStart> {
-    return withHarnessErrors(api.mcpAuth.start({ params: { id }, body: returnTo === undefined ? {} : { returnTo } }))
+    const answer = await withHarnessErrors(api.mcpAuth.start({ params: { id }, body: returnTo === undefined ? {} : { returnTo } }))
+    if (answer.authorizationUrl === null && mcpLoaded.value)
+      refetchMcp.schedule()
+    return answer
   }
 
-  /** + Phase 14 (ADR-059): `DELETE /mcp/:id/oauth`: forgets the server's tokens; the answered server replaces its row. */
+  /**
+   * + Phase 14 (ADR-059): `DELETE /mcp/:id/oauth`: forgets the server's tokens; the answered server replaces its row (a
+   * list request in flight may predate the sign-out: it is asked again).
+   */
   async function signOutMcp(id: string): Promise<McpServer> {
     const server = await withHarnessErrors(api.mcpAuth.signOut({ params: { id } }))
     replaceMcp(server)
+    if (pendingMcp)
+      refetchMcp.schedule()
     return server
   }
 

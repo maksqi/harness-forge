@@ -4,6 +4,8 @@
 // background tasks that never reach a backup. Phase 11 (W11.7-T6): with the real services, the settings `outputStyle` /
 // `hooksEnabled`, a personal output style and personal commands are written; personal hooks, project approvals and
 // project MCP variables never are, and hook records travel as parts of their messages.
+// Phase 14 (W14.6-T3): the web search settings and a chat with web search records are written as stored; the MCP OAuth
+// records and client secrets of every origin, the `core-search` keys and the MCP server rows never are.
 import type { BackupCustomizations, BackupFileIndex, BackupManifest, FileRef, HarnessUIMessage } from '@harness-forge/shared'
 import type { DataTestApp } from './fixtures.test-util.ts'
 import { Buffer } from 'node:buffer'
@@ -14,6 +16,7 @@ import { eq } from 'drizzle-orm'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { backgroundTasks, chats, customizations } from '../../db/schema.ts'
 import { readAllBytes } from '../../testing/fakes.ts'
+import { recordMessages } from '../chats/records.test-util.ts'
 import { PNG, TEXT } from '../files/fixtures.test-util.ts'
 import {
   closeCustomizedApps,
@@ -23,10 +26,12 @@ import {
   PHASE11_SENTINELS,
   PHASE12_PLUGIN_ID,
   PHASE12_SENTINELS,
+  PHASE14_SENTINELS,
   PLAIN_COMMAND_CONTENT,
   realDataApp,
   seedPhase11,
   seedPhase12,
+  seedPhase14,
   SPAN_COMMAND_CONTENT,
   STYLE_CONTENT,
 } from './backup-fixtures.test-util.ts'
@@ -497,5 +502,37 @@ describe('backup export: Phase 12 (never marketplaces, Claude Code plugins, tran
     expect(Object.keys(entries).some(name => /marketplace|plugin|transcript|import|claude/i.test(name))).toBe(false)
     // The plan is still held (in memory only) and the transcript is still on disk: the export only left them out.
     expect(entryJson<BackupManifest>(entries, 'manifest.json').counts).toMatchObject({ chats: 1, customizations: 3 })
+  })
+})
+
+describe('backup export: Phase 14 (never OAuth records or search keys; messages as stored)', () => {
+  it('writes the web search settings and the chat as stored; no OAuth record, client secret, search key or MCP server', async () => {
+    const t = await realDataApp()
+    const seeded = await seedPhase14(t)
+    const zip = await exportBytes(t.deps, { files: true })
+    const entries = unzip(zip)
+    expect(Object.keys(entries)).toEqual(['settings.json', `chats/${seeded.chatId}.json`, 'files/index.json', 'manifest.json'])
+
+    const settings = entryJson<Record<string, unknown>>(entries, 'settings.json')
+    expect(Object.keys(settings).sort()).toEqual([...SETTINGS_KEYS].sort())
+    expect(settings).toMatchObject({ webSearchDefault: 'auto', webSearchNative: false })
+
+    // Messages travel as stored: search_web and source-url parts, provider-executed parts with their provider data
+    // (decision C: only shares and Markdown exports strip it) and the elicitation records.
+    const exported = chatExportSchema.parse(entryJson(entries, `chats/${seeded.chatId}.json`))
+    expect(exported.chat.messages).toEqual(recordMessages())
+    expect(exported.chat.settings).toEqual({ toolMode: 'ask', webSearch: 'auto' })
+    expect(exported.chat).not.toHaveProperty('awaitingInput')
+    expect(entryJson<BackupManifest>(entries, 'manifest.json')).toMatchObject({ version: 1, chatExportVersion: 2, counts: { chats: 1, messages: 2 } })
+
+    const haystacks = [Buffer.from(zip).toString('latin1'), ...Object.values(entries).map(bytes => Buffer.from(bytes).toString('utf8'))]
+    for (const [name, value] of Object.entries(PHASE14_SENTINELS)) {
+      for (const haystack of haystacks)
+        expect(haystack.includes(value), name).toBe(false)
+    }
+    const text = haystacks.slice(1).join('\n')
+    for (const leaked of ['oauth.record', 'oauth.clientSecret', 'mcp-oauth.', 'ApiKey', 'public-client', seeded.serverId])
+      expect(text, leaked).not.toContain(leaked)
+    expect(Object.keys(entries).some(name => /oauth|secret|search|mcp|token|key/i.test(name))).toBe(false)
   })
 })

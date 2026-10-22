@@ -9,12 +9,17 @@
 //   `command` the server is skipped), every other `${VAR}` / `${VAR:-default}` → `{{settings.env_VAR}}` (a setting of
 //   its own; inside a stdio `command` the server is skipped), `${CLAUDE_PLUGIN_ROOT}` / `${CLAUDE_PLUGIN_DATA}` stay for
 //   the registration (literal at load, `register.ts`), `${CLAUDE_PROJECT_DIR}` skips the server (plugin servers are
-//   global); `headersHelper`, OAuth settings, bundles and URL sources are diagnostics;
+//   global); `headersHelper`, bundles and URL sources are diagnostics;
+// - Phase 14 (ADR-059, W14.1-T8): the `oauth` object of an http / sse server is kept (`transport.oauth { clientId?,
+//   scopes? }`, read by `parseMcpJson`; `callbackPort` is its info diagnostic "signs in through its own callback page"):
+//   a `${user_config.KEY}` client id of a declared option becomes `{{settings.KEY}}`; any other reference, a harness
+//   placeholder or a client id that is not printable ASCII drops the client id with a warning (the server then
+//   registers its client dynamically). The sign-in record lives in `plugin:<pluginId>` `mcp-oauth.<serverId>`;
 // - stdio servers run with the plugin folder as their working folder (the MCP manager) and only for a trusted plugin;
 //   every stdio server declared (even a skipped one) is an executable of the trust consent.
 // Values are never logged.
 import type { McpServerDecl } from '@harness-forge/plugin-sdk'
-import type { ClaudeDiagnostic, ClaudePluginExecutable, ClaudeUserConfigOption, McpJsonRemoteServer, McpJsonStdioServer } from '@harness-forge/shared'
+import type { ClaudeDiagnostic, ClaudePluginExecutable, ClaudeUserConfigOption, McpJsonOAuth, McpJsonRemoteServer, McpJsonStdioServer } from '@harness-forge/shared'
 import type { ClaudeMcpServerComponent } from './types.ts'
 import type { McpVariableSetting } from './user-config.ts'
 import { createHash } from 'node:crypto'
@@ -143,6 +148,32 @@ function hostOf(url: string, defaults: Readonly<Record<string, string>>): string
   }
 }
 
+/** Printable ASCII, 1-256 characters (the declaration's client id rule). */
+const CLIENT_ID_PATTERN = /^[\x20-\x7E]{1,256}$/
+
+/**
+ * Phase 14: the declaration's `oauth` of a remote server's `oauth` (see the module comment); undefined when nothing
+ * usable is left.
+ */
+function declOAuth(oauth: McpJsonOAuth, options: ReadonlyMap<string, ClaudeUserConfigOption>, diagnostics: ClaudeDiagnostic[], component: string): NonNullable<Extract<McpServerDecl['transport'], { type: 'http' | 'sse' }>['oauth']> | undefined {
+  let clientId: string | undefined
+  if (oauth.clientId !== undefined) {
+    // A harness placeholder written in the file is not a Claude Code value: only `${user_config.KEY}` becomes one.
+    const written = oauth.clientId.includes('{{') || oauth.clientId.includes('}}')
+    const converted = oauth.clientId.replace(USER_CONFIG_REFERENCE, (match: string, key: string) => (options.has(key) && FIELD_KEY_PATTERN.test(key) ? `{{settings.${key}}}` : match))
+    if (written || converted.includes('${') || !CLIENT_ID_PATTERN.test(converted)) {
+      diagnostics.push({ level: 'warning', code: 'invalid-server', message: 'The OAuth client id uses a value the harness cannot fill in; the server registers its client at sign-in instead.', component })
+    }
+    else {
+      clientId = converted
+    }
+  }
+  const scopes = oauth.scopes
+  if (clientId === undefined && scopes === undefined)
+    return undefined
+  return { ...(clientId === undefined ? {} : { clientId }), ...(scopes === undefined ? {} : { scopes }) }
+}
+
 /** Reads and merges the MCP servers of a Claude Code plugin (see the module comment). Never throws. */
 export async function readClaudeMcpServers(input: ClaudeMcpInput): Promise<ClaudeMcpRead> {
   const diagnostics: ClaudeDiagnostic[] = []
@@ -195,10 +226,6 @@ export async function readClaudeMcpServers(input: ClaudeMcpInput): Promise<Claud
     if (server.headersHelper !== undefined) {
       diagnostics.push({ level: 'info', code: 'unsupported-component', message: 'headersHelper is not supported; the server connects without it.', component })
       delete server.headersHelper
-    }
-    if (server.oauth !== undefined) {
-      diagnostics.push({ level: 'info', code: 'unsupported-component', message: 'OAuth settings of MCP servers are not supported; the server connects without them.', component })
-      delete server.oauth
     }
     const strings = serverStrings(server)
     if (strings.some(value => /\$\{CLAUDE_PROJECT_DIR\}/.test(value))) {
@@ -257,7 +284,13 @@ export async function readClaudeMcpServers(input: ClaudeMcpInput): Promise<Claud
     else {
       const remote = server.transport as McpJsonRemoteServer
       const headers = Object.fromEntries(Object.entries(remote.headers).map(([key, value]) => [key, convert(value, false)]))
-      transport = { type: remote.type, url: convert(remote.url, false), ...(Object.keys(headers).length === 0 ? {} : { headers }) }
+      const oauth = remote.oauth === undefined ? undefined : declOAuth(remote.oauth, options, diagnostics, component)
+      transport = {
+        type: remote.type,
+        url: convert(remote.url, false),
+        ...(Object.keys(headers).length === 0 ? {} : { headers }),
+        ...(oauth === undefined ? {} : { oauth }),
+      }
     }
     if (skipped) {
       diagnostics.push({ level: 'warning', code: 'invalid-variable', message: 'The server command uses a variable that only arguments and the environment may use; it is skipped.', component })

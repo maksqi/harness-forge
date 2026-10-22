@@ -1,7 +1,7 @@
 import type { ClientCommandContext } from './slash-commands'
 import { CATALOG_NAME_PATTERN } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
-import { projectTrustList, styleEntry, trustCommandItem, trustHookItem } from '~/utils/testing/fixtures'
+import { mcpPromptCommand, projectTrustList, styleEntry, trustCommandItem, trustHookItem } from '~/utils/testing/fixtures'
 import { styleOptions } from './output-style'
 import {
   argumentHintAt,
@@ -485,5 +485,63 @@ describe('qualified slash names (Phase 12, W12.13-T4)', () => {
     expect(slashNameDisplay(`${id}:x`, 10)).toEqual({ namespace: '', rest: middleEllipsis(`${id}:x`, 10), title: `/${id}:x` })
     expect(middleEllipsis('abcdefghij', 5)).toBe('ab…ij')
     expect(middleEllipsis('abc', 5)).toBe('abc')
+  })
+})
+
+describe('the MCP group (Phase 14, W14.8-T1)', () => {
+  const review = mcpPromptCommand({ name: 'mcp__github__review_pr', description: 'Review a pull request', argumentHint: '<pr> [base]', mcpServer: { id: 'github', name: 'GitHub' } })
+  const greet = mcpPromptCommand()
+  const skill = { name: 'pdf', description: 'Read PDFs', source: 'plugin' as const, kind: 'skill' as const, pluginId: 'pdf-kit' }
+  const plugin = { name: 'summarize', description: 'Summarize the chat', source: 'plugin' as const, pluginId: 'core-commands' }
+
+  it('puts the prompts of MCP servers into the MCP group, between Plugins and Skills', () => {
+    const items = serverSlashItems([skill, greet, plugin, review], id => (id === 'core-commands' ? 'Core commands' : undefined))
+    expect(items.map(item => [item.name, item.group])).toEqual([
+      ['pdf', 'skill'],
+      ['mcp__fixture__greet', 'mcp'],
+      ['summarize', 'plugin'],
+      ['mcp__github__review_pr', 'mcp'],
+    ])
+    expect(filterSlashItems(items, '').map(item => item.name)).toEqual(['summarize', 'mcp__fixture__greet', 'mcp__github__review_pr', 'pdf'])
+    expect(SLASH_GROUPS.map(group => group.value)).toEqual(['app', 'project', 'personal', 'plugin', 'mcp', 'skill'])
+  })
+
+  it('shows the server\'s name on the right and the prompt\'s argument hint', () => {
+    const [item] = serverSlashItems([review])
+    expect(item).toMatchObject({ kind: 'server', group: 'mcp', source: 'GitHub', argumentHint: '<pr> [base]' })
+    expect(slashItemDetail(item!)).toBe('GitHub')
+    expect(slashItemLabel(item!)).toBe('/mcp__github__review_pr, Review a pull request, arguments <pr> [base]')
+    // Without a server name the id shows; without a server nothing does.
+    expect(slashItemDetail(serverSlashItems([mcpPromptCommand({ mcpServer: { id: 'fixture', name: ' ' } })])[0]!)).toBe('fixture')
+    expect(slashItemDetail(serverSlashItems([mcpPromptCommand({ mcpServer: undefined })])[0]!)).toBeNull()
+  })
+
+  it('accepts MCP prompt names in the hint, query and command patterns, keeping their case', () => {
+    const items = serverSlashItems([review, mcpPromptCommand({ name: 'mcp__docs__Summarize-Page', argumentHint: '<url>' })])
+    expect(argumentHintAt('/mcp__github__review_pr ', items)).toBe('<pr> [base]')
+    expect(argumentHintAt('/mcp__docs__Summarize-Page  ', items)).toBe('<url>')
+    expect(isTypedCommand('/mcp__github__review_pr ')).toBe(true)
+    expect(slashQueryAt('/mcp__github__rev', 17)).toBe('mcp__github__rev')
+    expect(parseSlashCommand('/mcp__github__review_pr 42 main')).toEqual({ name: 'mcp__github__review_pr', args: '42 main' })
+    expect(parseSlashCommand('/mcp__docs__Summarize-Page https://example.com')).toEqual({ name: 'mcp__docs__Summarize-Page', args: 'https://example.com' })
+    expect(parseClientCommand('/mcp__github__review_pr 42')).toBeNull()
+    // The MCP shape only: an empty prompt part or a name over 64 characters is no command.
+    expect(parseSlashCommand('/mcp__')).toBeNull()
+    expect(parseSlashCommand(`/mcp__${'a'.repeat(60)}`)).toBeNull()
+    expect(parseSlashCommand(`/mcp__${'a'.repeat(59)}`)?.name).toBe(`mcp__${'a'.repeat(59)}`)
+    // Bare names that start with "mcp" stay bare names (lowercased as before).
+    expect(parseSlashCommand('/MCP-Tools x')).toEqual({ name: 'mcp-tools', args: 'x' })
+  })
+
+  it('filters on every `__` segment of an MCP prompt name', () => {
+    expect(slashNameMatches('mcp__github__review_pr', 'mcp__gi')).toBe(true)
+    expect(slashNameMatches('mcp__github__review_pr', 'github')).toBe(true)
+    expect(slashNameMatches('mcp__github__review_pr', 'review')).toBe(true)
+    expect(slashNameMatches('mcp__github__review_pr', 'github__rev')).toBe(true)
+    expect(slashNameMatches('mcp__github__review_pr', 'pr')).toBe(false)
+    // Only MCP names are split at `__`.
+    expect(slashNameMatches('my__tool', 'tool')).toBe(false)
+    const items = serverSlashItems([review, plugin])
+    expect(filterSlashItems(items, 'rev').map(item => item.name)).toEqual(['mcp__github__review_pr'])
   })
 })

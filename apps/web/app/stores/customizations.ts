@@ -14,6 +14,10 @@
 // approves) and `projectSource(projectId, entry)`, the editable target of a project entry. With the hooks store the only
 // caller of the project definition routes. W12.11 (P12-A): a save or a delete marks only that project's scope stale
 // (also when it fails: the file may have changed); qualified plugin names (`review-kit:db:migrate`) are kept as listed.
+// Phase 14 (ADR-061; W14.8): `GET /commands` also lists the prompts of connected MCP servers (`source: 'mcp'`,
+// `mcpServer`, names `mcp__<server>__<prompt>`, kept as listed); the MCP managers emit `customization.changed { kind:
+// 'command' }` (with `projectId` for a project server) when a server's prompts change, which refetches the slash lists
+// used in the last minute like any other change.
 import type {
   CommandSummary,
   Customization,

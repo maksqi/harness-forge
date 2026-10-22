@@ -157,7 +157,7 @@ describe('project-mcp store', () => {
   })
 })
 
-describe('project-mcp store: sign-in (Phase 14, C54)', () => {
+describe('project-mcp store: sign-in (Phase 14, W14.7)', () => {
   it('signIn starts a sign-in of a project server; signOut replaces its row', async () => {
     api.projectMcp.list.mockResolvedValue(connected())
     const store = useProjectMcpStore()
@@ -177,5 +177,28 @@ describe('project-mcp store: sign-in (Phase 14, C54)', () => {
     api.mcpAuth.projectStart.mockRejectedValue(new HarnessError({ code: 'conflict', message: 'Approve the server first.', details: { reason: 'untrusted' } }))
     await expect(useProjectMcpStore().signIn(P1, 'memory')).rejects.toMatchObject({ code: 'conflict' })
     expect(api.mcpAuth.projectStart).toHaveBeenCalledWith({ params: { id: P1, serverId: 'memory' }, body: {} })
+  })
+
+  it('an answer without an authorization URL refetches the project; a sign-out never caches an older answer', async () => {
+    api.projectMcp.list.mockResolvedValue(connected())
+    const store = useProjectMcpStore()
+    await store.fetch(P1)
+    api.mcpAuth.projectStart.mockResolvedValue(mcpAuthStart({ authorizationUrl: null }))
+    await store.signIn(P1, 'memory')
+    await flushPromises()
+    expect(api.projectMcp.list).toHaveBeenCalledTimes(2)
+
+    const older = deferred<ProjectMcpList>()
+    api.projectMcp.list.mockImplementationOnce(() => older.promise)
+    const inFlight = store.fetch(P1)
+    const signedOut = projectMcpServer({ state: 'needs-auth', tools: [], missingVariables: [] })
+    api.mcpAuth.projectSignOut.mockResolvedValue(signedOut)
+    api.projectMcp.list.mockResolvedValue(projectMcpList({ items: [signedOut], variables: connected().variables }))
+    await store.signOut(P1, 'memory')
+    older.resolve(connected())
+    await inFlight
+    await flushPromises()
+    expect(store.byId(P1, 'memory')).toEqual(signedOut)
+    expect(api.projectMcp.list).toHaveBeenCalledTimes(4)
   })
 })

@@ -5,11 +5,16 @@
 // with Edit / Delete. The list lives in the plugins store; it refetches on `plugin.changed`, so connection changes
 // show up without polling.
 // Phase 14 (ADR-059; C54 mounts, W14.7 implements; frozen from Gate P14-0b): a `needs-auth` row that can sign in
-// (`canSignIn`) shows **Sign in** (`mcp-sign-in`, `data-server-id`) between the status and the switch, and a signed-in
-// row's menu **Sign out…** (`mcp-sign-out`), both through `useMcpSignIn`. W14.7 adds the "Signing in…" state, the inline
-// error (`mcp-sign-in-error`), the sign-out confirmation and the plugin rows' menu.
+// (`canSignIn`) shows **Sign in** (`mcp-sign-in`, `data-server-id`, "Signing in…" while the start runs) between the status
+// and the switch (at 390px on its own full-width 40px line under the status), and a signed-in row's menu **Sign out…**
+// (`mcp-sign-out`; plugin rows get a menu with only that item) → ConfirmDialog "Sign out of {name}?" ("harness-forge
+// forgets the tokens; the server stays configured."), both through `useMcpSignIn`. Their errors show inline under the row
+// in a HarnessErrorAlert (`mcp-sign-in-error`, `data-code`, `data-server-id`; Retry for provider failures); a new attempt
+// clears it. A `needs-auth` server with an `Authorization` header cannot sign in: its line reads "The server rejected its
+// Authorization header." and a personal server offers Edit… instead (open point 6). A signed-in status line has the
+// tooltip "Signed in · expires {time}" / "Signed in · token renews automatically".
 import type { McpServer } from '@harness-forge/shared'
-import type { HarnessErrorUiAction } from '~/components/common/harness-error'
+import type { HarnessErrorUiAction, HarnessErrorView } from '~/components/common/harness-error'
 import { EllipsisIcon, LogInIcon, LogOutIcon, PencilIcon, PlusIcon, RotateCwIcon, ServerIcon, Trash2Icon } from '@lucide/vue'
 import { computed, nextTick, onMounted, ref, useId } from 'vue'
 import { toast } from 'vue-sonner'
@@ -30,11 +35,20 @@ import ConfirmDialog from '~/components/common/ConfirmDialog.vue'
 import { errorActions, toHarnessErrorView } from '~/components/common/harness-error'
 import HarnessErrorAlert from '~/components/common/HarnessErrorAlert.vue'
 import StatusDot from '~/components/common/StatusDot.vue'
-import { useMcpSignIn } from '~/composables/useMcpSignIn'
+import { mcpSignInKey, useMcpSignIn } from '~/composables/useMcpSignIn'
 import { usePluginsStore } from '~/stores/plugins'
 import { toHarnessError } from '~/utils/errors'
 import { testIds } from '~/utils/testids'
-import { canSignIn, CORE_MCP_PLUGIN_ID, MCP_STATUS_DOTS, MCP_STATUS_LABELS, mcpStatusText } from './mcp-form'
+import {
+  canSignIn,
+  CORE_MCP_PLUGIN_ID,
+  MCP_STATUS_DOTS,
+  MCP_STATUS_LABELS,
+  mcpStatusText,
+  rejectsAuthorizationHeader,
+  signedInTooltip,
+  signInErrorView,
+} from './mcp-form'
 import McpServerDialog from './McpServerDialog.vue'
 import McpTransportBadge from './McpTransportBadge.vue'
 
@@ -149,22 +163,99 @@ async function restart(server: McpServer) {
 
 // ---------- sign-in (Phase 14, ADR-059; W14.7) ----------
 
+/** The inline error of a row's last Sign in or Sign out (cleared by a new attempt). */
+const signInErrors = ref<Record<string, { action: 'in' | 'out', error: HarnessErrorView }>>({})
+
+function setSignInError(id: string, value: { action: 'in' | 'out', error: HarnessErrorView } | null) {
+  const { [id]: _previous, ...rest } = signInErrors.value
+  signInErrors.value = value ? { ...rest, [id]: value } : rest
+}
+
+/** The row's start runs (or the page is leaving for the authorization server). */
+function signingIn(server: McpServer): boolean {
+  return signIn.busyKey.value === mcpSignInKey({ kind: 'global', serverId: server.id })
+}
+
+/**
+ * Where the row's sign-in action sits: next to the switch from `sm`; below 640px on its own full-width 40px line under
+ * the status (the grid places it on row 2, so the switch and Restart stay on the first line); 40px tall on touch.
+ */
+const ROW_ACTION_CLASS = 'col-span-full row-start-2 h-10 w-full sm:col-span-1 sm:col-start-3 sm:row-start-1 sm:h-8 sm:w-auto pointer-coarse:h-10'
+
+/** The row's sign-in action: Sign in, Edit… (a personal server whose Authorization header was refused) or none. */
+function rowAction(server: McpServer): 'sign-in' | 'edit-header' | null {
+  if (canSignIn(server))
+    return 'sign-in'
+  if (server.editable && server.enabled && rejectsAuthorizationHeader(server))
+    return 'edit-header'
+  return null
+}
+
+/** The status line's tooltip: the full error, or how long a signed-in server's token lasts. */
+function statusTitle(server: McpServer): string | undefined {
+  if (server.status === 'error')
+    return mcpStatusText(server)
+  if (server.status === 'connected')
+    return signedInTooltip(server.auth) ?? undefined
+  return undefined
+}
+
+/** The row's `⋯` menu: personal servers always, plugin servers only to sign out. */
+function hasMenu(server: McpServer): boolean {
+  return server.editable || server.auth?.signedIn === true
+}
+
 async function startSignIn(server: McpServer) {
+  if (signingIn(server))
+    return
+  setSignInError(server.id, null)
   try {
     await signIn.start({ kind: 'global', serverId: server.id }, { name: server.name })
   }
   catch (error) {
-    toastError(error, `Could not sign in to ${server.name}`)
+    setSignInError(server.id, { action: 'in', error: signInErrorView(error) })
   }
 }
 
-async function signOut(server: McpServer) {
+const signOutTarget = ref<McpServer | null>(null)
+const signOutOpen = ref(false)
+const signingOut = ref(false)
+
+function askSignOut(server: McpServer) {
+  signOutTarget.value = server
+  signOutOpen.value = true
+}
+
+async function confirmSignOut() {
+  const server = signOutTarget.value
+  if (!server || signingOut.value)
+    return
+  signingOut.value = true
+  setSignInError(server.id, null)
   try {
     await signIn.signOut({ kind: 'global', serverId: server.id }, server.name)
   }
   catch (error) {
-    toastError(error, `Could not sign out of ${server.name}`)
+    setSignInError(server.id, { action: 'out', error: signInErrorView(error) })
   }
+  finally {
+    signingOut.value = false
+    signOutOpen.value = false
+  }
+}
+
+function onSignOutOpenChange(value: boolean) {
+  signOutOpen.value = value
+}
+
+/** The inline alert's Retry repeats what failed. */
+function onSignInErrorAction(server: McpServer, action: HarnessErrorUiAction) {
+  if (action !== 'retry')
+    return
+  if (signInErrors.value[server.id]?.action === 'out')
+    askSignOut(server)
+  else
+    void startSignIn(server)
 }
 
 // ---------- row menu ----------
@@ -188,7 +279,7 @@ function onMenuCloseAutoFocus(event: Event) {
     if (next.action === 'edit')
       openEdit(next.server)
     else if (next.action === 'sign-out')
-      void signOut(next.server)
+      askSignOut(next.server)
     else
       askDelete(next.server)
   })
@@ -316,7 +407,10 @@ function onDeleteOpenChange(value: boolean) {
         :data-testid="testIds.mcpServerRow"
         :data-server-id="server.id"
         :data-status="server.status"
-        class="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 px-4 py-3"
+        :class="cn(
+          'grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 px-4 py-3',
+          rowAction(server) && 'sm:grid-cols-[auto_minmax(0,1fr)_auto_auto]',
+        )"
       >
         <StatusDot :status="MCP_STATUS_DOTS[server.status]" :label="MCP_STATUS_LABELS[server.status]" class="-ml-1.5" />
         <div class="min-w-0">
@@ -329,27 +423,44 @@ function onDeleteOpenChange(value: boolean) {
           <p
             :data-testid="testIds.mcpStatus"
             :data-status="server.status"
-            :title="server.status === 'error' ? mcpStatusText(server) : undefined"
+            :title="statusTitle(server)"
             :class="cn('truncate text-xs', server.status === 'error' ? 'text-destructive' : 'text-muted-foreground')"
           >
             {{ mcpStatusText(server) }}
           </p>
         </div>
+        <Button
+          v-if="rowAction(server) === 'sign-in'"
+          type="button"
+          size="sm"
+          variant="outline"
+          :disabled="signingIn(server)"
+          :aria-busy="signingIn(server) || undefined"
+          :aria-label="`Sign in to ${server.name}`"
+          :data-testid="testIds.mcpSignIn"
+          :data-server-id="server.id"
+          :class="ROW_ACTION_CLASS"
+          @click="startSignIn(server)"
+        >
+          <Spinner v-if="signingIn(server)" data-icon="inline-start" />
+          <LogInIcon v-else aria-hidden="true" data-icon="inline-start" />
+          {{ signingIn(server) ? 'Signing in…' : 'Sign in' }}
+        </Button>
+        <Button
+          v-else-if="rowAction(server) === 'edit-header'"
+          type="button"
+          size="sm"
+          variant="outline"
+          :aria-label="`Edit ${server.name}…`"
+          data-action="mcp-edit-header"
+          :data-server-id="server.id"
+          :class="ROW_ACTION_CLASS"
+          @click="openEdit(server)"
+        >
+          <PencilIcon aria-hidden="true" data-icon="inline-start" />
+          Edit…
+        </Button>
         <div class="flex items-center gap-1">
-          <Button
-            v-if="canSignIn(server)"
-            type="button"
-            size="sm"
-            variant="outline"
-            :aria-label="`Sign in to ${server.name}`"
-            :data-testid="testIds.mcpSignIn"
-            :data-server-id="server.id"
-            class="mr-1"
-            @click="startSignIn(server)"
-          >
-            <LogInIcon aria-hidden="true" data-icon="inline-start" />
-            Sign in
-          </Button>
           <Switch
             v-if="server.editable"
             size="sm"
@@ -376,7 +487,7 @@ function onDeleteOpenChange(value: boolean) {
             <Spinner v-if="pending[server.id] === 'restart'" />
             <RotateCwIcon v-else aria-hidden="true" />
           </Button>
-          <DropdownMenu v-if="server.editable">
+          <DropdownMenu v-if="hasMenu(server)">
             <DropdownMenuTrigger as-child>
               <Button
                 type="button"
@@ -390,7 +501,12 @@ function onDeleteOpenChange(value: boolean) {
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" class="w-40" @close-auto-focus="onMenuCloseAutoFocus">
-              <DropdownMenuItem :data-testid="testIds.mcpEdit" :data-server-id="server.id" @select="chooseMenu('edit', server)">
+              <DropdownMenuItem
+                v-if="server.editable"
+                :data-testid="testIds.mcpEdit"
+                :data-server-id="server.id"
+                @select="chooseMenu('edit', server)"
+              >
                 <PencilIcon aria-hidden="true" />
                 Edit
               </DropdownMenuItem>
@@ -403,19 +519,31 @@ function onDeleteOpenChange(value: boolean) {
                 <LogOutIcon aria-hidden="true" />
                 Sign out…
               </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem
-                variant="destructive"
-                :data-testid="testIds.mcpDelete"
-                :data-server-id="server.id"
-                @select="chooseMenu('delete', server)"
-              >
-                <Trash2Icon aria-hidden="true" />
-                Delete
-              </DropdownMenuItem>
+              <template v-if="server.editable">
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  variant="destructive"
+                  :data-testid="testIds.mcpDelete"
+                  :data-server-id="server.id"
+                  @select="chooseMenu('delete', server)"
+                >
+                  <Trash2Icon aria-hidden="true" />
+                  Delete
+                </DropdownMenuItem>
+              </template>
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
+        <HarnessErrorAlert
+          v-if="signInErrors[server.id]"
+          compact
+          :error="signInErrors[server.id]!.error"
+          :provider-name="server.name"
+          :data-testid="testIds.mcpSignInError"
+          :data-server-id="server.id"
+          class="col-span-full"
+          @action="action => onSignInErrorAction(server, action)"
+        />
       </li>
     </ul>
 
@@ -441,6 +569,18 @@ function onDeleteOpenChange(value: boolean) {
     </Empty>
 
     <McpServerDialog v-if="canAdd" v-model:open="dialogOpen" :server="dialogServer" />
+
+    <ConfirmDialog
+      :open="signOutOpen"
+      :title="`Sign out of ${signOutTarget?.name ?? 'server'}?`"
+      description="harness-forge forgets the tokens; the server stays configured."
+      confirm-label="Sign out"
+      :destructive="false"
+      :pending="signingOut"
+      data-action="mcp-sign-out-confirm"
+      @update:open="onSignOutOpenChange"
+      @confirm="confirmSignOut"
+    />
 
     <ConfirmDialog
       :open="deleteOpen"

@@ -19,6 +19,7 @@ import type {
   SecretState,
   ToolPolicy,
 } from '@harness-forge/shared'
+import type { HarnessErrorView } from '~/components/common/harness-error'
 import type { StatusDotStatus } from '~/components/common/status'
 import {
   ENV_VAR_NAME_PATTERN,
@@ -29,6 +30,8 @@ import {
   mcpServerInputSchema,
   mcpServerUpdateSchema,
 } from '@harness-forge/shared'
+import { toHarnessErrorView } from '~/components/common/harness-error'
+import { formatRelativeTime } from '~/components/common/relative-time'
 import { toHarnessError } from '~/utils/errors'
 
 export type McpTransportType = McpServer['transport']['type']
@@ -93,11 +96,18 @@ export function toolCountLabel(count: number): string {
   return `${count} ${count === 1 ? 'tool' : 'tools'}`
 }
 
+/** + W14.7: the status line of a `needs-auth` server whose own `Authorization` header was refused (open point 6). */
+export const AUTHORIZATION_REJECTED_TEXT = 'The server rejected its Authorization header.'
+
+/** + W14.7: the note of the OAuth section while an `Authorization` header row is set. */
+export const AUTHORIZATION_HEADER_NOTE = 'Servers with an Authorization header don\'t sign in.'
+
 /**
  * Status line of a server row: "Connected · 12 tools", "Connecting…", "Error: {message}", "Disabled"; + Phase 14: "Sign
- * in required", and " · Signed in" after a connected server's tools when it holds OAuth tokens.
+ * in required", and " · Signed in" after a connected server's tools when it holds OAuth tokens. A `needs-auth` server
+ * with an `Authorization` header cannot sign in (the server refuses it): its line names the header instead.
  */
-export function mcpStatusText(server: Pick<McpServer, 'status' | 'tools' | 'error'> & { auth?: McpServer['auth'] }): string {
+export function mcpStatusText(server: Pick<McpServer, 'status' | 'tools' | 'error'> & { auth?: McpServer['auth'], transport?: McpServer['transport'] }): string {
   switch (server.status) {
     case 'connected':
       return `Connected · ${toolCountLabel(server.tools.length)}${server.auth?.signedIn ? ' · Signed in' : ''}`
@@ -106,7 +116,7 @@ export function mcpStatusText(server: Pick<McpServer, 'status' | 'tools' | 'erro
     case 'error':
       return `Error: ${server.error?.message?.trim() || 'The server could not be reached.'}`
     case 'needs-auth':
-      return 'Sign in required'
+      return server.transport && hasAuthorizationHeader(server) ? AUTHORIZATION_REJECTED_TEXT : 'Sign in required'
     default:
       return 'Disabled'
   }
@@ -183,7 +193,70 @@ export function signsOut(server: McpServer, next: { url: string, type: string, c
 export function canSignIn(server: Pick<McpServer, 'status' | 'enabled' | 'transport'>): boolean {
   if (server.status !== 'needs-auth' || !server.enabled || server.transport.type === 'stdio')
     return false
-  return !Object.keys(server.transport.headers).some(name => name.toLowerCase() === 'authorization')
+  return !hasAuthorizationHeader(server)
+}
+
+/** + W14.7: an http / sse server whose headers carry `Authorization` (any case): it never signs in (400). */
+export function hasAuthorizationHeader(server: { transport?: McpServer['transport'] }): boolean {
+  const transport = server.transport
+  if (!transport || transport.type === 'stdio')
+    return false
+  return Object.keys(transport.headers).some(name => name.toLowerCase() === 'authorization')
+}
+
+/**
+ * + W14.7: a `needs-auth` row whose server refused its own `Authorization` header: it shows the header note and, for a
+ * personal server, Edit… instead of Sign in.
+ */
+export function rejectsAuthorizationHeader(server: Pick<McpServer, 'status' | 'transport'>): boolean {
+  return server.status === 'needs-auth' && hasAuthorizationHeader(server)
+}
+
+/**
+ * + W14.7: the tooltip of a signed-in row: "Signed in · expires {time}" while the access token's expiry is ahead (a
+ * refresh renews it), else "Signed in · token renews automatically"; null when not signed in. Never a token or a scope.
+ */
+export function signedInTooltip(auth: McpServer['auth'] | undefined, now: number = Date.now()): string | null {
+  if (!auth?.signedIn)
+    return null
+  if (auth.expiresAt !== null && auth.expiresAt > now)
+    return `Signed in · expires ${formatRelativeTime(new Date(auth.expiresAt), now)}`
+  return 'Signed in · token renews automatically'
+}
+
+/** + W14.7: the OAuth fields differ from the server's stored settings (a new client id or scopes, a typed or removed secret). */
+export function oauthChanged(server: McpServer, draft: McpOAuthDraft): boolean {
+  const current = server.transport.type === 'stdio' ? null : server.transport.oauth
+  return draft.clientId.trim() !== (current?.clientId ?? '')
+    || draft.scopes.trim() !== (current?.scopes ?? '')
+    || draft.clientSecret.trim() !== ''
+    || (draft.removeSecret && current?.clientSecret.set === true)
+}
+
+/** + W14.7: failures a new attempt may fix (the alert offers Retry). */
+const SIGN_IN_RETRY_CODES: ReadonlySet<string> = new Set(['provider_error', 'provider_unreachable', 'auth_invalid', 'internal_error', 'rate_limited'])
+
+/** + W14.7: the reason of a 409 answer (`details.reason`), else undefined. */
+function conflictReasonOf(view: HarnessErrorView): string | undefined {
+  const details = view.details as { reason?: unknown } | undefined
+  return view.code === 'conflict' && typeof details?.reason === 'string' ? details.reason : undefined
+}
+
+/**
+ * + W14.7: a failed Sign in / Sign out as the view of the row's inline HarnessErrorAlert (`mcp-sign-in-error`): the
+ * server's message ("Turn the server on first." for 409 `disabled`); provider failures offer Retry (never "Open
+ * settings": there is no API key to fix), other refusals no action. The code stays the server's (`data-code`).
+ */
+export function signInErrorView(error: unknown): HarnessErrorView {
+  const view = toHarnessErrorView(error)
+  const shown: HarnessErrorView = { code: view.code, message: view.message }
+  if (view.details !== undefined)
+    shown.details = view.details
+  if (conflictReasonOf(view) === 'disabled')
+    shown.message = 'Turn the server on first.'
+  if (SIGN_IN_RETRY_CODES.has(view.code))
+    shown.action = 'retry'
+  return shown
 }
 
 /** Only user-configured (`core-mcp`) servers can be edited, switched and deleted; plugin servers only restarted. */
@@ -350,12 +423,21 @@ export function buildTransportUpdate(state: McpFormState): McpTransportUpdate {
   return { type: state.type, url: state.url.trim(), ...(headers ? { headers } : {}) }
 }
 
-/** Body of `POST /mcp` (new servers start enabled). */
-export function buildCreateInput(state: McpFormState): McpServerInput {
+/**
+ * Body of `POST /mcp` (new servers start enabled). + W14.7: with the dialog's OAuth fields (`oauth`), an http / sse
+ * transport carries `oauth` when a client id or scopes are set (`oauthInputOf`).
+ */
+export function buildCreateInput(state: McpFormState, oauth?: McpOAuthDraft): McpServerInput {
+  const transport = buildTransportInput(state)
+  if (transport.type !== 'stdio' && oauth) {
+    const input = oauthInputOf(oauth)
+    if (input)
+      transport.oauth = input
+  }
   return {
     id: state.id.trim(),
     name: state.name.trim(),
-    transport: buildTransportInput(state),
+    transport,
     policy: state.policy,
     enabled: true,
   }
@@ -386,16 +468,28 @@ export function transportChanged(server: McpServer, state: McpFormState): boolea
   return current.url !== state.url.trim() || secretsChanged(current.headers, state.headers)
 }
 
-/** Body of `PATCH /mcp/:id`: only what changed (empty when nothing did). */
-export function buildUpdatePatch(server: McpServer, state: McpFormState): McpServerUpdate {
+/**
+ * Body of `PATCH /mcp/:id`: only what changed (empty when nothing did). + W14.7: with the dialog's OAuth fields
+ * (`oauth`), a change of them alone also sends the transport, and every http / sse transport sent carries the OAuth
+ * settings (`oauthUpdateOf`: the transport is replaced, so an omitted `oauth` would remove them).
+ */
+export function buildUpdatePatch(server: McpServer, state: McpFormState, oauth?: McpOAuthDraft): McpServerUpdate {
   const patch: McpServerUpdate = {}
   const name = state.name.trim()
   if (name !== server.name)
     patch.name = name
   if (state.policy !== server.policy)
     patch.policy = state.policy
-  if (transportChanged(server, state))
-    patch.transport = buildTransportUpdate(state)
+  const remote = state.type !== 'stdio'
+  if (transportChanged(server, state) || (remote && oauth !== undefined && oauthChanged(server, oauth))) {
+    const transport = buildTransportUpdate(state)
+    if (transport.type !== 'stdio' && oauth) {
+      const update = oauthUpdateOf(server, oauth)
+      if (update)
+        transport.oauth = update
+    }
+    patch.transport = transport
+  }
   return patch
 }
 

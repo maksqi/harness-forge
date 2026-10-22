@@ -15,6 +15,9 @@
 // Phase 12 (ADR-053; docs/UI.md 7.34; W12.13): qualified names of Claude Code plugin commands and skills
 // (`data-value="review-kit:db:migrate"`): typing filters on every segment, the row shows the plugin namespace muted
 // (`data-slot="slash-menu-namespace"`) and cuts a name over 40 characters in the middle, the full name in its title.
+// Phase 14 (ADR-061; W14.8): a group MCP (`data-group="mcp"`, heading "MCP", between Plugins and Skills) holds the prompts
+// of connected MCP servers (`data-value="mcp__<server>__<prompt>"`): the row shows the prompt's argument hint, its
+// description (plain text) and the server's name muted on the right; typing any `__` segment of the name finds it.
 import type { SlashGroup, SlashItem } from './slash-commands'
 import { BookOpenIcon, ShieldQuestionMarkIcon } from '@lucide/vue'
 import { computed, nextTick, ref, useId, watch } from 'vue'

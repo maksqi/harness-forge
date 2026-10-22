@@ -143,6 +143,8 @@ export function loadedMcpDecl(decl: McpServerDecl, vars: PluginVariables): McpSe
       type: transport.type,
       url,
       ...(transport.headers === undefined ? {} : { headers: Object.fromEntries(Object.entries(transport.headers).map(([key, value]) => [key, literal(value)])) }),
+      // Phase 14 (ADR-059, W14.1-T8): the server's OAuth settings stay (`claude/mcp.ts` keeps them).
+      ...(transport.oauth === undefined ? {} : { oauth: transport.oauth }),
     },
   }
 }

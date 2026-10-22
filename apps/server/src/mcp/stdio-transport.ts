@@ -283,7 +283,14 @@ export class ChildProcessMcpTransport implements MCPTransport {
       this.#options.onNotification?.(message.method, 'params' in message ? message.params : undefined)
       return
     }
-    this.onmessage?.(message)
+    // The client throws for an answer to a request it already gave up on ("unknown message ID", e.g. after an aborted
+    // tool call); never let that escape the stdout listener.
+    try {
+      this.onmessage?.(message)
+    }
+    catch (error) {
+      this.onerror?.(error instanceof Error ? error : new Error(String(error)))
+    }
   }
 
   send(message: JSONRPCMessage): Promise<void> {

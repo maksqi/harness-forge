@@ -1,16 +1,20 @@
-import type { CallToolResult } from '@ai-sdk/mcp'
+import type { CallToolResult, ElicitResult } from '@ai-sdk/mcp'
 import type { ToolCallContext } from '@harness-forge/plugin-sdk'
-import type { McpElicitationForm } from '@harness-forge/shared'
+import type { McpElicitation, McpElicitationForm } from '@harness-forge/shared'
 import type { AgentRunScope } from '../chat/agent-scope.ts'
+import type { AppDeps } from '../types.ts'
 import type { McpListedTool, McpToolBinding } from './mcp-tools.ts'
 import { AuthorizationServerMismatchError, UnauthorizedError } from '@ai-sdk/mcp'
 import { HarnessError, LIMITS } from '@harness-forge/shared'
 import { asSchema } from 'ai'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { bindAgentScope } from '../chat/agent-scope.ts'
+import { createMemoryLogger } from '../logger.ts'
 import { createFakeElicitationBroker } from '../testing/fake-elicitations.ts'
+import { createRecordingEventBus } from '../testing/fakes.ts'
 import { runToolExecute, toolContext } from './__fixtures__/harness.ts'
 import { mcpContentText } from './content.ts'
+import { createElicitationBroker } from './elicitation/broker.ts'
 import {
   authRequiredInit,
   connectionErrorInit,
@@ -21,7 +25,7 @@ import {
   mcpConfigError,
   NEEDS_AUTH_MESSAGE,
 } from './errors.ts'
-import { createActiveBudget, MCP_TOOL_TIMEOUT_MS, mcpErrorText, mcpInputSchema, mcpModelOutput, mcpToolDefinition, mcpToolOutput, offlineToolOf } from './mcp-tools.ts'
+import { createActiveBudget, MCP_ELICITATION_KEEPALIVE_MS, MCP_TOOL_TIMEOUT_MS, mcpErrorText, mcpInputSchema, mcpModelOutput, mcpToolDefinition, mcpToolOutput, offlineToolOf } from './mcp-tools.ts'
 import { McpAuthRequired } from './oauth/types.ts'
 
 afterEach(() => {
@@ -191,8 +195,11 @@ describe('mcpToolDefinition and the elicitation broker', () => {
     const second = iterator.next()
     await vi.advanceTimersByTimeAsync(5 * LIMITS.mcpToolActiveMs)
     expect(call.mock.calls[0]?.[3].aborted).toBe(false)
+    // The keep-alive sent the card again meanwhile (W14.3).
+    expect((await second).value).toEqual({ status: 'input-required', elicitation: reply.elicitation })
+    const running = iterator.next()
     await broker.answer(context.chatId, reply.elicitation.id, { action: 'decline' })
-    expect((await second).value).toEqual({ status: 'running' })
+    expect((await running).value).toEqual({ status: 'running' })
     // 50 s of the budget are left.
     const third = iterator.next()
     await vi.advanceTimersByTimeAsync(LIMITS.mcpToolActiveMs - 10_000 - 1000)
@@ -221,6 +228,120 @@ describe('mcpToolDefinition and the elicitation broker', () => {
     await vi.waitFor(() => expect(call).toHaveBeenCalled())
     controller.abort(new Error('Stopped'))
     await expect(run).rejects.toThrow('Request was aborted')
+  })
+
+  it('re-yields a pending card every 25 s (the keep-alive), notifies the run once per request and never stores a value', async () => {
+    vi.useFakeTimers()
+    expect(MCP_ELICITATION_KEEPALIVE_MS).toBe(25_000)
+    const broker = createFakeElicitationBroker()
+    const { call, settle } = controlledCall()
+    const definition = mcpToolDefinition(listed(), { serverId: 'docs', pluginId: 'core-mcp', serverPolicy: 'ask', call, elicitation: { broker, runtimeKey: 'mcp:docs#1', serverName: 'Docs' } })
+    const context = toolContext()
+    const notify = vi.fn()
+    bindAgentScope(context, { chatId: context.chatId, notify } as unknown as AgentRunScope)
+    const iterator = iterate(definition.execute({ q: 'x' }, context))
+    const pending = (promise: Promise<unknown>) => {
+      const state = { done: false }
+      void promise.then(() => {
+        state.done = true
+      })
+      return state
+    }
+
+    const first = iterator.next()
+    const reply = broker.request({ chatId: context.chatId, toolCallId: 'call_1' }, { message: 'Your name?', form: FORM })
+    const card = { status: 'input-required', elicitation: reply.elicitation }
+    expect((await first).value).toEqual(card)
+    expect(notify).toHaveBeenCalledOnce()
+    expect(notify).toHaveBeenCalledWith({ message: 'Your name?', notificationType: 'elicitation_dialog' })
+
+    const second = iterator.next()
+    const secondState = pending(second)
+    await vi.advanceTimersByTimeAsync(MCP_ELICITATION_KEEPALIVE_MS - 1)
+    expect(secondState.done).toBe(false)
+    await vi.advanceTimersByTimeAsync(1)
+    expect((await second).value).toEqual(card)
+    const third = iterator.next()
+    await vi.advanceTimersByTimeAsync(MCP_ELICITATION_KEEPALIVE_MS)
+    expect((await third).value).toEqual(card)
+    // Waiting never uses the active budget; a keep-alive never notifies again.
+    expect(call.mock.calls[0]?.[3].aborted).toBe(false)
+    expect(notify).toHaveBeenCalledOnce()
+
+    const fourth = iterator.next()
+    await broker.answer(context.chatId, reply.elicitation.id, { action: 'accept', content: { name: 'Ada Lovelace' } })
+    expect((await fourth).value).toEqual({ status: 'running' })
+    // No keep-alive once the card settled.
+    const fifth = iterator.next()
+    const fifthState = pending(fifth)
+    await vi.advanceTimersByTimeAsync(MCP_ELICITATION_KEEPALIVE_MS + 1000)
+    expect(fifthState.done).toBe(false)
+
+    // A second request of the same call: a new card and one more notification.
+    const again = broker.request({ chatId: context.chatId, toolCallId: 'call_1' }, { message: 'And your nickname?', form: FORM })
+    expect((await fifth).value).toEqual({ status: 'input-required', elicitation: again.elicitation })
+    expect(notify).toHaveBeenCalledTimes(2)
+    const sixth = iterator.next()
+    await broker.answer(context.chatId, again.elicitation.id, { action: 'decline' })
+    expect((await sixth).value).toEqual({ status: 'running' })
+
+    const last = iterator.next()
+    settle({ content: [{ type: 'text', text: 'done' }] } as CallToolResult)
+    const final = (await last).value
+    expect(final).toEqual({
+      content: [{ type: 'text', text: 'done' }],
+      elicitations: [
+        { id: reply.elicitation.id, message: 'Your name?', fields: ['name'], action: 'accept', reason: 'user' },
+        { id: again.elicitation.id, message: 'And your nickname?', fields: ['name'], action: 'decline', reason: 'user' },
+      ],
+    })
+    expect(JSON.stringify(final)).not.toContain('Lovelace')
+    expect((await iterator.next()).done).toBe(true)
+    expect(broker.inFlight).toEqual([])
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('with the real broker: a 70 s wait does not time the call out, 61 s of server work after the answer does', async () => {
+    vi.useFakeTimers()
+    const memory = createMemoryLogger()
+    const deps = { logger: memory.logger, events: createRecordingEventBus(), chats: { find: async () => null, summary: async () => null } } as unknown as AppDeps
+    const broker = createElicitationBroker(deps)
+    const handler = broker.handler('mcp:docs#1')
+    const server: { answer: Promise<ElicitResult> | null } = { answer: null }
+    // The MCP server asks at once, then keeps working after the answer (it never finishes).
+    const call = vi.fn<McpToolBinding['call']>((_name, _input, _c, signal) => new Promise<CallToolResult>((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(new Error('Request was aborted')), { once: true })
+      server.answer = handler({ method: 'elicitation/create', params: { message: 'Your name?', requestedSchema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] } } })
+    }))
+    const definition = mcpToolDefinition(listed(), { serverId: 'docs', pluginId: 'core-mcp', serverPolicy: 'ask', call, elicitation: { broker, runtimeKey: 'mcp:docs#1', serverName: 'Docs' } })
+    const context = toolContext()
+    bindAgentScope(context, { chatId: context.chatId } as AgentRunScope)
+    const values: unknown[] = []
+    const consumed = (async () => {
+      for await (const value of definition.execute({}, context) as AsyncIterable<unknown>)
+        values.push(value)
+    })()
+    const failed = expect(consumed).rejects.toThrow(`"search" did not finish within ${LIMITS.mcpToolActiveMs / 1000} s`)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(broker.pendingCount(context.chatId)).toBe(1)
+    const card = values[0] as { status: string, elicitation: McpElicitation }
+    expect(card).toMatchObject({ status: 'input-required', elicitation: { serverId: 'docs', serverName: 'Docs', message: 'Your name?' } })
+
+    await vi.advanceTimersByTimeAsync(70_000)
+    expect(call.mock.calls[0]?.[3].aborted).toBe(false)
+    // The card was sent again at 25 s and 50 s.
+    expect(values).toEqual([card, card, card])
+
+    await broker.answer(context.chatId, card.elicitation.id, { action: 'accept', content: { name: 'Ada' } })
+    expect(await server.answer).toEqual({ action: 'accept', content: { name: 'Ada' } })
+    await vi.advanceTimersByTimeAsync(LIMITS.mcpToolActiveMs - 1)
+    expect(call.mock.calls[0]?.[3].aborted).toBe(false)
+    await vi.advanceTimersByTimeAsync(1001)
+    await failed
+    expect(values.at(-1)).toEqual({ status: 'running' })
+    expect(broker.pendingCount(context.chatId)).toBe(0)
+    await broker.stop()
+    expect(vi.getTimerCount()).toBe(0)
   })
 })
 
@@ -265,14 +386,19 @@ describe('outputs', () => {
   })
 
   it('converts content parts for the model and falls back to JSON', () => {
+    // Resource items and links become text through `mcpContentText` (`content.ts`, W14.2's mapping).
+    const link = { type: 'resource_link', uri: 'file:///a', name: 'a' }
+    const resource = { type: 'resource', resource: { uri: 'fixture://notes/readme.md', mimeType: 'text/markdown', text: '# Notes' } }
     expect(mcpModelOutput({ content: [
       { type: 'text', text: 'hello' },
       { type: 'image', data: 'aGk=', mimeType: 'image/png' },
-      { type: 'resource_link', uri: 'file:///a', name: 'a' },
+      link,
+      resource,
     ] })).toEqual({ type: 'content', value: [
       { type: 'text', text: 'hello' },
       { type: 'file', mediaType: 'image/png', data: { type: 'data', data: 'aGk=' } },
-      { type: 'text', text: JSON.stringify({ type: 'resource_link', uri: 'file:///a', name: 'a' }) },
+      { type: 'text', text: mcpContentText(link) },
+      { type: 'text', text: mcpContentText(resource) },
     ] })
     expect(mcpModelOutput({ content: [], structuredContent: { total: 3 } })).toEqual({ type: 'json', value: { total: 3 } })
     const truncated = { truncated: true, originalBytes: 70_000, preview: '{"content"' }
@@ -286,13 +412,6 @@ describe('outputs', () => {
   it('caps the error text and has a fallback', () => {
     expect(mcpErrorText({ content: [], isError: true } as unknown as CallToolResult)).toBe('The MCP tool reported an error.')
     expect(mcpErrorText({ content: [{ type: 'text', text: 'x'.repeat(3000) }], isError: true } as CallToolResult)).toHaveLength(2003)
-  })
-
-  it('mcpContentText (C51 stub): a text item as is, anything else as JSON, capped', () => {
-    expect(mcpContentText({ type: 'text', text: 'hi' })).toBe('hi')
-    expect(mcpContentText({ type: 'resource_link', uri: 'file:///a', name: 'a' })).toBe('{"type":"resource_link","uri":"file:///a","name":"a"}')
-    expect(mcpContentText({ type: 'text', text: 'abcdef' }, { maxChars: 3 })).toBe('abc...')
-    expect(mcpContentText(undefined)).toBe('undefined')
   })
 })
 

@@ -1,8 +1,10 @@
 // OpenRouter: `@openrouter/ai-sdk-provider` (PROVIDERS.md sections 1-7). The model listing is public, so the key is
 // checked with `GET /key`. Every request asks for usage accounting (the charged cost becomes `costUsd`). Images come
 // from chat models with image output (PROVIDERS.md section 13); no dedicated image, transcription or speech models.
+// Native web search (the `webSearch` hook, plugin API 1.7.0, PROVIDERS.md 14): the `openrouter:web_search` server tool
+// for models with tools, the `web` plugin (provider options) for the others.
 import type { ModelInfo, ProviderDefinition, ProviderRuntime, ReasoningEffort } from '@harness-forge/plugin-sdk'
-import { createOpenRouter } from '@openrouter/ai-sdk-provider'
+import { createOpenRouter, openrouter } from '@openrouter/ai-sdk-provider'
 import { apiKeyField, apiKeyOf, baseUrlField, baseUrlOf } from '../lib/credentials.ts'
 import { mapProviderError, paymentRequiredRule } from '../lib/errors.ts'
 import { requestJson, unexpectedListing } from '../lib/http.ts'
@@ -10,6 +12,7 @@ import { booleanOf, positiveIntOf, recordOf, stringOf, stringsOf } from '../lib/
 import { checkOrPing, pingModel, withDefaultSettings } from '../lib/language-model.ts'
 import { finalizeListing, modelInfo, perMillionTokens } from '../lib/models.ts'
 import { TOP_LEVEL_REASONING } from '../lib/reasoning.ts'
+import { searchMaxUses } from '../lib/web-search.ts'
 
 const PROVIDER = { id: 'openrouter', name: 'OpenRouter' }
 export const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1'
@@ -139,5 +142,14 @@ export const openrouterProvider: ProviderDefinition = {
     // `providerOptions.openrouter` into the request body.
     const imageConfig = request.aspectRatio === undefined ? {} : { image_config: { aspect_ratio: request.aspectRatio } }
     return { providerOptions: { openrouter: { modalities: ['image', 'text'], ...imageConfig } } }
+  },
+  webSearch(model, request) {
+    // Every OpenRouter model can search: the server tool (sent as `openrouter:web_search`; no tool-call parts, only
+    // `url_citation` sources) when the model takes tools, else the `web` plugin, which the package spreads into the
+    // request body from `providerOptions.openrouter`. The reported cost includes the search fee.
+    const results = searchMaxUses(request)
+    if (model.capabilities?.tools === true)
+      return { tools: { web_search: openrouter.tools.webSearch({ maxResults: results }) } }
+    return { providerOptions: { openrouter: { plugins: [{ id: 'web', max_results: results }] } } }
   },
 }

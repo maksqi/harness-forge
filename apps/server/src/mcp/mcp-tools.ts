@@ -6,14 +6,19 @@
 // `chat/tools.ts`), so a call can show an elicitation card while it waits for the user:
 // - the call is registered with the elicitation broker (`binding.elicitation.broker.begin`, `interactive` = the call
 //   runs in the chat's main agent, `agentScopeOf(c) !== null`) before `callTool` and removed (`end()`) in `finally`;
-// - while the handle reports a pending request the generator yields `{ status: 'input-required', elicitation }`, after
-//   it settled `{ status: 'running' }` (`McpToolProgress`); the last yield is the final output: the v1.8 output
-//   (`mcpToolOutput`) plus `elicitations` (the call's records: message, field names, action, reason; never a value),
-//   which `mcpModelOutput` keeps from the model;
+// - while the handle reports a pending request the generator yields `{ status: 'input-required', elicitation }` and
+//   yields it again every `MCP_ELICITATION_KEEPALIVE_MS` (25 s) while it waits (a keep-alive for reverse proxies with an
+//   idle timeout; a reload replays the card from the run's resume buffer), after it settled `{ status: 'running' }`
+//   (`McpToolProgress`); the last yield is the final output: the v1.8 output (`mcpToolOutput`) plus `elicitations` (the
+//   call's records: message, field names, action, reason; never a value), which `mcpModelOutput` keeps from the model;
+// - each new request of an interactive call runs the run's `Notification` hooks once (`agentScopeOf(c)?.notify?.({
+//   message, notificationType: 'elicitation_dialog' })`; the message is the server's cleaned request, never an answer);
 // - timeouts: the definition's `timeoutMs` is the 600 s outer guard (`MCP_TOOL_TIMEOUT_MS`); the work itself has an
 //   active budget of `LIMITS.mcpToolActiveMs` (60 s) on `callTool`'s own signal (`createActiveBudget`), paused while a
-//   request waits for the user, so a call that never elicits times out after 60 s as before.
-// W14.3 adds the 25 s keep-alive re-yield of a pending card.
+//   request waits for the user (driven by the handle's changes, whether or not the consumer reads the generator), so a
+//   call that never elicits times out after 60 s as before.
+// - Content parts of the result reach the model through `mcpContentText` (`content.ts`, W14.2: resources and links as
+//   readable text).
 import type { CallToolResult, ListToolsResult } from '@ai-sdk/mcp'
 import type { ToolCallContext, ToolDefinition, ToolResultOutput } from '@harness-forge/plugin-sdk'
 import type { McpToolProgress, ToolPolicy } from '@harness-forge/shared'
@@ -32,6 +37,9 @@ export type McpListedTool = ListToolsResult['tools'][number]
 
 /** The outer timeout of an MCP tool call (the tool guard, 600 s); the work itself has the active budget. */
 export const MCP_TOOL_TIMEOUT_MS = GUARD_TIMEOUT_MAX_MS
+
+/** A pending card is yielded again after this long without a change (ADR-060: the stream's keep-alive). */
+export const MCP_ELICITATION_KEEPALIVE_MS = 25_000
 
 /** Longest description / title kept (registry titles are limited to 256 characters). */
 const DESCRIPTION_MAX_CHARS = 8192
@@ -226,12 +234,46 @@ function beginCall(binding: McpToolBinding, c: ToolCallContext): ElicitationCall
 }
 
 /**
- * The preliminary outputs of a call while `call` runs: `input-required` when a request of the call starts waiting,
- * `running` when it settled; the budget pauses while the call waits for the user. Ends when `call` settles.
+ * Follows the call's handle whether or not the generator is read: the budget pauses while a request waits for the user
+ * and counts again after it settled, and each new request runs the run's `Notification` hooks once (`elicitation_dialog`;
+ * nothing without an agent scope: sub-agent and background calls never get a request anyway). Returns the unsubscribe
+ * function.
  */
-async function* progressOf(handle: ElicitationCallHandle, call: Promise<unknown>, budget: McpActiveBudget): AsyncGenerator<McpToolProgress, void, undefined> {
-  // Set by the callbacks below (a holder: the loop condition reads it after every wake-up).
-  const state = { settled: false, dirty: true }
+function watchCall(handle: ElicitationCallHandle, budget: McpActiveBudget, c: ToolCallContext): () => void {
+  let notified: string | null = null
+  const sync = (): void => {
+    if (handle.waiting())
+      budget.pause()
+    else
+      budget.resume()
+    const pending = handle.pending()
+    if (pending === null || pending.id === notified)
+      return
+    notified = pending.id
+    try {
+      agentScopeOf(c)?.notify?.({ message: pending.message, notificationType: 'elicitation_dialog' })
+    }
+    catch {
+      // A failing notification never fails the call.
+    }
+  }
+  try {
+    const unsubscribe = handle.onChange(sync)
+    sync()
+    return unsubscribe
+  }
+  catch {
+    return () => {}
+  }
+}
+
+/**
+ * The preliminary outputs of a call while `call` runs: `input-required` when a request of the call starts waiting and
+ * again every `keepAliveMs` while it waits, `running` when it settled. Ends when `call` settles.
+ */
+async function* progressOf(handle: ElicitationCallHandle, call: Promise<unknown>, keepAliveMs: number = MCP_ELICITATION_KEEPALIVE_MS): AsyncGenerator<McpToolProgress, void, undefined> {
+  // Set by the callbacks below (a holder: the loop reads it after every wake-up).
+  const state: { settled: boolean, dirty: boolean, timer: ReturnType<typeof setTimeout> | null } = { settled: false, dirty: true, timer: null }
   let wake: (() => void) | null = null
   const notify = (): void => {
     state.dirty = true
@@ -246,22 +288,33 @@ async function* progressOf(handle: ElicitationCallHandle, call: Promise<unknown>
   }
   void call.then(settle, settle)
   let shown: string | null = null
+  let shownAt = 0
   try {
     while (!state.settled) {
       if (!state.dirty) {
+        // While a card is shown, wake up when its keep-alive is due.
+        const due = shown === null ? null : Math.max(0, shownAt + keepAliveMs - Date.now())
         await new Promise<void>((resolve) => {
           wake = resolve
+          if (due !== null) {
+            state.timer = setTimeout(() => {
+              state.timer = null
+              notify()
+            }, due)
+            state.timer.unref?.()
+          }
         })
+        if (state.timer !== null) {
+          clearTimeout(state.timer)
+          state.timer = null
+        }
         continue
       }
       state.dirty = false
-      if (handle.waiting())
-        budget.pause()
-      else
-        budget.resume()
       const pending = handle.pending()
-      if (pending !== null && pending.id !== shown) {
+      if (pending !== null && (pending.id !== shown || Date.now() - shownAt >= keepAliveMs)) {
         shown = pending.id
+        shownAt = Date.now()
         yield { status: 'input-required', elicitation: pending }
       }
       else if (pending === null && shown !== null) {
@@ -271,6 +324,8 @@ async function* progressOf(handle: ElicitationCallHandle, call: Promise<unknown>
     }
   }
   finally {
+    if (state.timer !== null)
+      clearTimeout(state.timer)
     unsubscribe()
   }
 }
@@ -287,10 +342,11 @@ export function mcpToolDefinition(tool: McpListedTool, binding: McpToolBinding):
     async* execute(input, c) {
       const budget = createActiveBudget(LIMITS.mcpToolActiveMs, c.signal)
       const handle = beginCall(binding, c)
+      const unwatch = handle === null ? null : watchCall(handle, budget, c)
       try {
         const call = binding.call(tool.name, isRecord(input) ? input : {}, c, budget.signal)
         if (handle !== null)
-          yield* progressOf(handle, call, budget)
+          yield* progressOf(handle, call)
         let result: CallToolResult
         try {
           result = await call
@@ -307,6 +363,7 @@ export function mcpToolDefinition(tool: McpListedTool, binding: McpToolBinding):
         yield records.length > 0 ? { ...output, elicitations: records } : output
       }
       finally {
+        unwatch?.()
         handle?.end()
         budget.dispose()
       }

@@ -3,11 +3,13 @@ import { HarnessError } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
 import { mcpServer as mcpServerFixture } from '~/utils/testing/fixtures'
 import {
+  AUTHORIZATION_REJECTED_TEXT,
   buildCreateInput,
   buildUpdatePatch,
   canSignIn,
   emptyForm,
   formFromServer,
+  hasAuthorizationHeader,
   isBlankRow,
   issueField,
   MCP_STATUS_DOTS,
@@ -15,17 +17,21 @@ import {
   mcpStatusText,
   newRow,
   OAUTH_CALLBACK_PATH,
+  oauthChanged,
   oauthDraftOf,
   oauthInputOf,
   oauthUpdateOf,
   parseArgs,
   policyLabel,
   redirectUriFor,
+  rejectsAuthorizationHeader,
   requiresFreshAuth,
   rowKey,
   saveErrorFields,
   schemaErrors,
   secretRecord,
+  signedInTooltip,
+  signInErrorView,
   signsOut,
   slugify,
   storedPlaceholder,
@@ -259,7 +265,7 @@ describe('validation', () => {
   })
 })
 
-describe('oauth sign-in helpers (Phase 14, C54 signatures)', () => {
+describe('oauth sign-in helpers (Phase 14, W14.7)', () => {
   const remote = (overrides: Partial<McpServer> = {}) => mcpServerFixture({ id: 'linear', name: 'Linear', transport: { type: 'http', url: 'https://mcp.linear.app/mcp', headers: {}, oauth: null }, ...overrides })
 
   it('canSignIn: a needs-auth server that is on, remote and has no Authorization header', () => {
@@ -293,5 +299,71 @@ describe('oauth sign-in helpers (Phase 14, C54 signatures)', () => {
     expect(oauthUpdateOf(configured, { ...draft, removeSecret: true })).toEqual({ clientId: 'hf-linear', scopes: 'read' })
     expect(signsOut({ ...configured, auth: { signedIn: true, expiresAt: null, scope: null, client: 'configured', issuer: null } }, { url: 'https://mcp.linear.app/mcp', type: 'http', clientId: 'other' })).toBe(true)
     expect(signsOut(configured, { url: 'https://other.example.com/mcp', type: 'http', clientId: 'hf-linear' })).toBe(false)
+  })
+
+  it('an Authorization header (any case) blocks the sign-in and names itself in the status line', () => {
+    const header = remote({ status: 'needs-auth', transport: { type: 'http', url: 'https://mcp.linear.app/mcp', headers: { AUTHORIZATION: stored }, oauth: null } })
+    expect(hasAuthorizationHeader(header)).toBe(true)
+    expect(hasAuthorizationHeader(remote())).toBe(false)
+    expect(hasAuthorizationHeader(stdioServer())).toBe(false)
+    expect(rejectsAuthorizationHeader(header)).toBe(true)
+    expect(rejectsAuthorizationHeader({ ...header, status: 'connected' })).toBe(false)
+    expect(canSignIn(header)).toBe(false)
+    expect(mcpStatusText(header)).toBe(AUTHORIZATION_REJECTED_TEXT)
+    expect(AUTHORIZATION_REJECTED_TEXT).toBe('The server rejected its Authorization header.')
+    // Without the transport (a project server's shape) the line stays "Sign in required".
+    expect(mcpStatusText({ status: 'needs-auth', tools: [], error: null })).toBe('Sign in required')
+  })
+
+  it('the signed-in tooltip names the expiry while it is ahead, else the automatic renewal', () => {
+    const now = 1_759_000_000_000
+    expect(signedInTooltip(null, now)).toBeNull()
+    expect(signedInTooltip({ signedIn: false, expiresAt: null, scope: null, client: null, issuer: null }, now)).toBeNull()
+    expect(signedInTooltip({ signedIn: true, expiresAt: now + 3 * 3_600_000, scope: 'read', client: 'dynamic', issuer: null }, now)).toBe('Signed in · expires in 3h')
+    expect(signedInTooltip({ signedIn: true, expiresAt: now - 60_000, scope: null, client: 'dynamic', issuer: null }, now)).toBe('Signed in · token renews automatically')
+    expect(signedInTooltip({ signedIn: true, expiresAt: null, scope: null, client: 'configured', issuer: null }, now)).toBe('Signed in · token renews automatically')
+  })
+
+  it('oauthChanged: a new client id or scopes, a typed secret or a removed stored one', () => {
+    const configured = remote({ transport: { type: 'http', url: 'https://mcp.linear.app/mcp', headers: {}, oauth: { clientId: 'hf-linear', clientSecret: { set: true, hint: null, source: 'stored' }, scopes: 'read' } } })
+    const draft = oauthDraftOf(configured)
+    expect(oauthChanged(configured, draft)).toBe(false)
+    expect(oauthChanged(configured, { ...draft, clientId: ' hf-linear ' })).toBe(false)
+    expect(oauthChanged(configured, { ...draft, scopes: 'read write' })).toBe(true)
+    expect(oauthChanged(configured, { ...draft, clientId: 'other' })).toBe(true)
+    expect(oauthChanged(configured, { ...draft, clientSecret: 'new' })).toBe(true)
+    expect(oauthChanged(configured, { ...draft, removeSecret: true })).toBe(true)
+    expect(oauthChanged(remote(), { ...oauthDraftOf(null), removeSecret: true })).toBe(false)
+  })
+
+  it('the create body carries oauth for http / sse only; the update sends the transport for an OAuth change alone', () => {
+    const form = { ...emptyForm(), name: 'Linear', id: 'linear', type: 'http' as const, url: 'https://mcp.linear.app/mcp' }
+    const draft = { clientId: 'hf-linear', scopes: '', clientSecret: 's3cret', removeSecret: false }
+    expect(buildCreateInput(form, draft).transport).toEqual({ type: 'http', url: 'https://mcp.linear.app/mcp', oauth: { clientId: 'hf-linear', clientSecret: 's3cret' } })
+    expect(buildCreateInput(form, oauthDraftOf(null)).transport).toEqual({ type: 'http', url: 'https://mcp.linear.app/mcp' })
+    expect(buildCreateInput(form).transport).toEqual({ type: 'http', url: 'https://mcp.linear.app/mcp' })
+    expect(buildCreateInput({ ...form, type: 'stdio', command: 'npx' }, draft).transport).toEqual({ type: 'stdio', command: 'npx' })
+
+    const configured = remote({ transport: { type: 'http', url: 'https://mcp.linear.app/mcp', headers: {}, oauth: { clientId: 'hf-linear', clientSecret: { set: true, hint: null, source: 'stored' }, scopes: 'read' } } })
+    const state = formFromServer(configured)
+    const unchanged = oauthDraftOf(configured)
+    expect(buildUpdatePatch(configured, state, unchanged)).toEqual({})
+    expect(buildUpdatePatch(configured, state, { ...unchanged, scopes: 'read write' })).toEqual({
+      transport: { type: 'http', url: 'https://mcp.linear.app/mcp', oauth: { clientId: 'hf-linear', scopes: 'read write', clientSecret: null } },
+    })
+    // A transport change keeps the OAuth settings in the replaced transport.
+    expect(buildUpdatePatch(configured, { ...state, url: 'https://mcp2.linear.app/mcp' }, unchanged)).toEqual({
+      transport: { type: 'http', url: 'https://mcp2.linear.app/mcp', oauth: { clientId: 'hf-linear', scopes: 'read', clientSecret: null } },
+    })
+    // Clearing every OAuth field removes the settings (an omitted `oauth`).
+    expect(buildUpdatePatch(configured, state, oauthDraftOf(null))).toEqual({ transport: { type: 'http', url: 'https://mcp.linear.app/mcp' } })
+  })
+
+  it('a sign-in failure as the inline alert: the server message, Retry only for provider failures', () => {
+    expect(signInErrorView(new HarnessError({ code: 'provider_unreachable', message: 'Can\'t reach the authorization server.' }))).toEqual({ code: 'provider_unreachable', message: 'Can\'t reach the authorization server.', action: 'retry' })
+    expect(signInErrorView(new HarnessError({ code: 'conflict', message: 'The server is disabled.', details: { reason: 'disabled' } }))).toEqual({ code: 'conflict', message: 'Turn the server on first.', details: { reason: 'disabled' } })
+    expect(signInErrorView(new HarnessError({ code: 'validation_error', message: 'This server is set up with its own Authorization header, so it does not sign in.' }))).toMatchObject({ code: 'validation_error', message: 'This server is set up with its own Authorization header, so it does not sign in.' })
+    expect(signInErrorView(new HarnessError({ code: 'validation_error', message: 'x' })).action).toBeUndefined()
+    expect(signInErrorView(new Error('boom'))).toMatchObject({ code: 'internal_error', action: 'retry' })
   })
 })

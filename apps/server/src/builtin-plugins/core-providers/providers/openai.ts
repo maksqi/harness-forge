@@ -1,7 +1,8 @@
 // OpenAI (ChatGPT): `@ai-sdk/openai`, always the Responses API for chat (PROVIDERS.md sections 1-6); image,
-// transcription and speech models (PROVIDERS.md section 13).
+// transcription and speech models (PROVIDERS.md section 13); native web search through the `webSearch` hook (plugin API
+// 1.7.0, PROVIDERS.md 14).
 import type { ImageAspectRatio, ModelInfo, ProviderDefinition, ProviderRuntime, ReasoningEffort } from '@harness-forge/plugin-sdk'
-import { createOpenAI } from '@ai-sdk/openai'
+import { createOpenAI, openai } from '@ai-sdk/openai'
 import { apiKeyField, apiKeyOf, baseUrlField, baseUrlOf } from '../lib/credentials.ts'
 import { mapProviderError } from '../lib/errors.ts'
 import { requestJson, unexpectedListing } from '../lib/http.ts'
@@ -9,6 +10,7 @@ import { recordOf, stringOf } from '../lib/json.ts'
 import { imageSeed, speechSeed, transcriptionLanguage, transcriptionSeed } from '../lib/media.ts'
 import { finalizeListing, modelInfo } from '../lib/models.ts'
 import { topLevelReasoning } from '../lib/reasoning.ts'
+import { baseModelId } from '../lib/web-search.ts'
 
 const PROVIDER = { id: 'openai', name: 'OpenAI' }
 export const OPENAI_BASE_URL = 'https://api.openai.com/v1'
@@ -25,6 +27,18 @@ const TRANSCRIPTION_IDS = /transcribe/i
 const SPEECH_IDS = /^tts-|-tts/i
 const O_SERIES = /^o\d+(?:-|$)/
 const GPT_VERSION = /^gpt-(\d+)(?:\.(\d+))?(?:-(.+))?$/
+
+/**
+ * Old models without the `web_search` tool (a deny-list: an unknown new id counts as supported): `o1*`, `o3-mini*`,
+ * `*-nano`, `gpt-3.5*`, and `gpt-4` / `gpt-4-*` (not `gpt-4o*`, not `gpt-4.1*`).
+ */
+const WITHOUT_WEB_SEARCH: readonly RegExp[] = [/^o1(?:-|$)/, /^o3-mini(?:-|$)/, /-nano(?:-|$)/, /^gpt-3\.5/, /^gpt-4(?:-|$)/]
+
+/** Native web search (`openai.tools.webSearch`, Responses API) for a model id (see `WITHOUT_WEB_SEARCH`). */
+export function supportsOpenAIWebSearch(modelId: string): boolean {
+  const id = baseModelId(modelId)
+  return id !== '' && !WITHOUT_WEB_SEARCH.some(pattern => pattern.test(id))
+}
 
 /** Voices of `tts-1` and `tts-1-hd` (vendor docs, unverified; PROVIDERS.md section 13). */
 export const OPENAI_TTS_VOICES: readonly string[] = ['alloy', 'ash', 'coral', 'echo', 'fable', 'nova', 'onyx', 'sage', 'shimmer']
@@ -198,5 +212,9 @@ export const openaiProvider: ProviderDefinition = {
   transcriptionOptions(hints) {
     const language = transcriptionLanguage(hints)
     return language === undefined ? undefined : { openai: { language } }
+  },
+  webSearch(model) {
+    // `webSearchPreview` is deprecated; the tool takes no search count.
+    return supportsOpenAIWebSearch(model.id) ? { tools: { web_search: openai.tools.webSearch({}) } } : undefined
   },
 }

@@ -1,14 +1,22 @@
 // User-configured MCP servers (`core-mcp`): rows of `mcp_servers` + header / env values stored as secrets in scope
 // `mcp:<id>` with names `header.<Name>` / `env.<NAME>` (ARCHITECTURE.md 8). The row keeps only the names; values are
 // decrypted only at connect time and are never returned (DTOs carry `SecretState`s).
+//
+// Phase 14 (ADR-059, W14.1-T7): an http / sse server may carry `oauth { clientId?, scopes?, clientSecret? }`: the row's
+// `transport.oauth` keeps the client id and the scopes (`null` when not set; no `oauth` key when neither is set), the
+// client secret is the secret `oauth.clientSecret` (write-only). The OAuth token record is the secret `oauth.record`
+// (written by `mcp/oauth/`). A transport replacement (`PATCH /mcp/:id`) keeps both unless the URL, the transport type or
+// the client id changed; in the update `clientSecret: null` keeps the stored secret, an omitted one removes it, and an
+// omitted `oauth` removes the OAuth settings (and the secret).
 import type { McpServerInput, McpServerUpdate, McpTransportInput, McpTransportUpdate, SecretState, ToolPolicy } from '@harness-forge/shared'
-import type { McpServerRow, McpTransportRecord } from '../db/schema.ts'
+import type { McpServerRow, McpTransportOAuthRecord, McpTransportRecord } from '../db/schema.ts'
 import type { SecretEntry, SecretScope } from '../services/secrets/types.ts'
 import type { AppDeps } from '../types.ts'
 import type { ResolvedMcpTransport } from './templating.ts'
 import { HarnessError } from '@harness-forge/shared'
 import { asc, eq } from 'drizzle-orm'
 import { mcpServers } from '../db/schema.ts'
+import { OAUTH_CLIENT_SECRET_NAME, OAUTH_RECORD_SECRET_NAME } from './index.ts'
 import { DEFAULT_MCP_POLICY } from './policy.ts'
 
 export const HEADER_SECRET_PREFIX = 'header.'
@@ -50,11 +58,38 @@ export function checkTransportNames(transport: McpTransportInput | McpTransportU
   }
 }
 
+/** The stored OAuth settings of an input or replacement transport (Phase 14); undefined when it names none. */
+function oauthRecordOf(transport: McpTransportInput | McpTransportUpdate): McpTransportOAuthRecord | undefined {
+  if (transport.type === 'stdio' || transport.oauth === undefined)
+    return undefined
+  const clientId = transport.oauth.clientId ?? null
+  const scopes = transport.oauth.scopes === undefined || transport.oauth.scopes === '' ? null : transport.oauth.scopes
+  return clientId === null && scopes === null ? undefined : { clientId, scopes }
+}
+
 /** The stored transport (names only) of an input or replacement transport. */
 export function transportRecordOf(transport: McpTransportInput | McpTransportUpdate): McpTransportRecord {
-  return transport.type === 'stdio'
-    ? { type: 'stdio', command: transport.command, args: [...(transport.args ?? [])], envNames: Object.keys(transport.env ?? {}) }
-    : { type: transport.type, url: transport.url, headerNames: Object.keys(transport.headers ?? {}) }
+  if (transport.type === 'stdio')
+    return { type: 'stdio', command: transport.command, args: [...(transport.args ?? [])], envNames: Object.keys(transport.env ?? {}) }
+  const oauth = oauthRecordOf(transport)
+  return { type: transport.type, url: transport.url, headerNames: Object.keys(transport.headers ?? {}), ...(oauth === undefined ? {} : { oauth }) }
+}
+
+/** The configured OAuth client id of a stored transport (null: none, or stdio). */
+function clientIdOf(record: McpTransportRecord): string | null {
+  return record.type === 'stdio' ? null : record.oauth?.clientId ?? null
+}
+
+/**
+ * Phase 14 (ADR-059): true when a stored OAuth token record (and a configured client secret) no longer belongs to the
+ * server after a transport change: the URL, the transport type or the configured client id changed.
+ */
+export function oauthBindingChanged(current: McpTransportRecord, next: McpTransportRecord): boolean {
+  if (current.type !== next.type)
+    return true
+  if (current.type === 'stdio' || next.type === 'stdio')
+    return false
+  return current.url !== next.url || clientIdOf(current) !== clientIdOf(next)
 }
 
 /** Secret name -> value of the values present in a transport (null values of an update are skipped). */
@@ -67,6 +102,9 @@ function secretValuesOf(transport: McpTransportInput | McpTransportUpdate): Map<
     if (typeof value === 'string')
       values.set(name, value)
   }
+  // Phase 14: a new client secret (null = keep, handled by the update).
+  if (transport.type !== 'stdio' && typeof transport.oauth?.clientSecret === 'string' && transport.oauth.clientId !== undefined)
+    values.set(OAUTH_CLIENT_SECRET_NAME, transport.oauth.clientSecret)
   return values
 }
 
@@ -187,6 +225,13 @@ export function createUserServerStore(deps: Pick<AppDeps, 'db' | 'secrets'>): Us
       if (patch.transport) {
         const scope = mcpSecretScope(current.id)
         const keep = new Set(secretNamesOf(next.transport))
+        // Phase 14 (ADR-059): the OAuth token record and the client secret stay unless the URL, the transport type or
+        // the client id changed; the stored client secret only with `clientSecret: null` (an omitted one is removed).
+        if (!oauthBindingChanged(current.transport, next.transport)) {
+          keep.add(OAUTH_RECORD_SECRET_NAME)
+          if (patch.transport.type !== 'stdio' && patch.transport.oauth?.clientSecret === null && clientIdOf(next.transport) !== null)
+            keep.add(OAUTH_CLIENT_SECRET_NAME)
+        }
         for (const entry of await deps.secrets.list(scope)) {
           if (!keep.has(entry.name))
             await deps.secrets.delete(scope, entry.name)
@@ -215,9 +260,14 @@ export function createUserServerStore(deps: Pick<AppDeps, 'db' | 'secrets'>): Us
         return values
       }
       const transport = record.transport
-      return transport.type === 'stdio'
-        ? { type: 'stdio', command: transport.command, args: [...transport.args], env: await read(transport.envNames, ENV_SECRET_PREFIX) }
-        : { type: transport.type, url: transport.url, headers: await read(transport.headerNames, HEADER_SECRET_PREFIX) }
+      if (transport.type === 'stdio')
+        return { type: 'stdio', command: transport.command, args: [...transport.args], env: await read(transport.envNames, ENV_SECRET_PREFIX) }
+      return {
+        type: transport.type,
+        url: transport.url,
+        headers: await read(transport.headerNames, HEADER_SECRET_PREFIX),
+        ...(transport.oauth === undefined ? {} : { oauth: { clientId: transport.oauth.clientId ?? null, scopes: transport.oauth.scopes ?? null } }),
+      }
     },
   }
 }

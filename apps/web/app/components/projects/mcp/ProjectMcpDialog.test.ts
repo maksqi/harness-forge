@@ -23,10 +23,14 @@ const mocks = vi.hoisted(() => ({
   toast: Object.assign(vi.fn(), { success: vi.fn(), error: vi.fn() }),
   start: vi.fn(),
   signOut: vi.fn(),
+  busyKey: { value: null as string | null },
 }))
 vi.mock('~/composables/useApi', () => ({ useApi: () => mocks.api }))
-// + Phase 14: a row's Sign in / Sign out go through useMcpSignIn (W14.7 implements it).
-vi.mock('~/composables/useMcpSignIn', () => ({ useMcpSignIn: () => ({ start: mocks.start, signOut: mocks.signOut, complete: vi.fn(), busyKey: { value: null } }) }))
+// + Phase 14: a row's Sign in / Sign out go through useMcpSignIn (its own tests cover the requests and the navigation).
+vi.mock('~/composables/useMcpSignIn', async importOriginal => ({
+  ...await importOriginal<typeof import('~/composables/useMcpSignIn')>(),
+  useMcpSignIn: () => ({ start: mocks.start, signOut: mocks.signOut, complete: vi.fn(), busyKey: mocks.busyKey }),
+}))
 vi.mock('vue-sonner', () => ({ toast: mocks.toast }))
 
 const P1 = projectId(1)
@@ -318,7 +322,7 @@ describe('projectMcpDialog: a saved .mcp.json (Phase 12, W12.13-T6)', () => {
   })
 })
 
-describe('projectMcpDialog: sign-in (Phase 14, C54 mounts)', () => {
+describe('projectMcpDialog: sign-in (Phase 14, W14.7)', () => {
   const signedIn = { signedIn: true, expiresAt: null, scope: null, client: 'dynamic' as const, issuer: null }
   function remote() {
     return projectMcpList({
@@ -330,14 +334,35 @@ describe('projectMcpDialog: sign-in (Phase 14, C54 mounts)', () => {
     })
   }
 
-  it('a row\'s Sign in and Sign out go through useMcpSignIn with the project target', async () => {
+  beforeEach(() => {
+    mocks.busyKey.value = null
+  })
+
+  it('a row\'s Sign in goes through useMcpSignIn with the project target; Sign out asks first', async () => {
     mocks.start.mockReset().mockResolvedValue('redirected')
     mocks.signOut.mockReset().mockResolvedValue(undefined)
     await mountDialog(remote())
     await click(byTestId(testIds.projectMcpSignIn, row('docs')))
     expect(mocks.start).toHaveBeenCalledWith({ kind: 'project', projectId: P1, serverId: 'docs' }, { name: 'docs' })
+    expect(row('wiki').textContent).toContain('Connected · 0 tools · Signed in')
     await click(byTestId(testIds.projectMcpSignOut, row('wiki')))
+    expect(mocks.signOut).not.toHaveBeenCalled()
+    const confirm = document.body.querySelector<HTMLElement>('[data-slot="confirm-dialog"]')!
+    expect(confirm.textContent).toContain('Sign out of wiki?')
+    expect(confirm.textContent).toContain('harness-forge forgets the tokens; the server stays configured.')
+    await click(document.body.querySelector<HTMLElement>('[data-action="project-mcp-sign-out-confirm"]'))
     expect(mocks.signOut).toHaveBeenCalledWith({ kind: 'project', projectId: P1, serverId: 'wiki' }, 'wiki')
+    await flushPromises()
+    await nextTick()
+    expect(document.body.querySelector('[data-slot="confirm-dialog"]')).toBeNull()
+  })
+
+  it('the row of the running start reads "Signing in…"', async () => {
+    mocks.busyKey.value = `project:${P1}:docs`
+    await mountDialog(remote())
+    const button = byTestId<HTMLButtonElement>(testIds.projectMcpSignIn, row('docs'))!
+    expect(button.textContent?.trim()).toBe('Signing in…')
+    expect(button.disabled).toBe(true)
   })
 
   it('a refused sign-in shows the dialog\'s error', async () => {

@@ -50,7 +50,18 @@
 // answer goes through `TOOL_ELICITATIONS.respond`); a web search row (`isWebSearchPart`: the builtin `search_web`, or a
 // provider-executed search) renders WebSearchToolBody in its body. W14.9 adds "Waiting for your input", the result lines
 // of the final output's records and the search row's label.
+// W14.9 (P14-A; docs/UI.md 7.35, 14): the status cell of a call that waits on a question reads "Waiting for your input"
+// (a `bg-warning` dot instead of the spinner; the row's name gains ", waiting for your input"). An answer the server took
+// ('answered') replaces the card with its result line (`elicitation-result`, `data-action`, `role="status"`) until the
+// call's next output arrives; focus moves to that line (`tabindex="-1"`) when it was inside the card. A failed answer
+// other than a 400 (whose issues the card shows) is a toast. The body of a finished MCP call starts with the result lines
+// of its records (`elicitationRecordsOf`: the action and the asked field names, never the values). A search row reads
+// "Searching the web…" / "Searched the web" with `Globe`, the query as its argument and (builtin) "{n} results" before the
+// status; its body is WebSearchToolBody with the generic blocks behind "Raw input and output" (`encryptedContent`
+// removed). A provider-executed search never shows an approval card, "Needs approval", hook badges or hook notes; its row
+// is named "Searched the web, {query}".
 import type { HookData, McpElicitationAnswerBody, TodoItem } from '@harness-forge/shared'
+import type { ComponentPublicInstance } from 'vue'
 import type { ToolPartLike } from '../chat-format'
 import type { WorkspaceRowSummary } from './tools/workspace-tools'
 import type { AllowRules } from '~/components/workspace/allowlist/allow-rule'
@@ -60,15 +71,18 @@ import {
   BookOpenIcon,
   CheckIcon,
   ChevronRightIcon,
+  CircleCheckIcon,
   CircleSlashIcon,
   ClipboardListIcon,
+  GlobeIcon,
   ListTodoIcon,
   PencilLineIcon,
   ServerIcon,
   WrenchIcon,
   XIcon,
 } from '@lucide/vue'
-import { computed, inject, provide, ref, watch } from 'vue'
+import { computed, inject, nextTick, provide, ref, useTemplateRef, watch } from 'vue'
+import { toast } from 'vue-sonner'
 import { Tool as AiTool, ToolContent as AiToolContent } from '@/components/ai-elements/tool'
 import { Badge } from '@/components/ui/badge'
 import { CollapsibleTrigger } from '@/components/ui/collapsible'
@@ -78,6 +92,7 @@ import { cn } from '@/lib/utils'
 import { useCustomizationsStore } from '~/stores/customizations'
 import { usePluginsStore } from '~/stores/plugins'
 import { useProjectMcpStore } from '~/stores/project-mcp'
+import { toHarnessError } from '~/utils/errors'
 import { testIds } from '~/utils/testids'
 import {
   doneTodos,
@@ -101,6 +116,7 @@ import TodoList from '../agent/TodoList.vue'
 import { HOOK_ACTIVITY, TRANSCRIPT_SCROLL } from '../chat-context'
 import {
   CORE_AGENT_PLUGIN_ID,
+  firstStringArg,
   formatToolValue,
   isServerTruncated,
   isSupersededDenial,
@@ -112,6 +128,14 @@ import {
 } from '../chat-format'
 import { hookPluginId, toolHookDecision } from '../hooks/hook-notes'
 import HookNote from '../hooks/HookNote.vue'
+import {
+  ELICITATION_WAITING_TEXT,
+  elicitationFieldsText,
+  elicitationRecordsOf,
+  elicitationResultAction,
+  elicitationResultText,
+  pendingElicitationOf,
+} from './elicitation'
 import ElicitationCard from './ElicitationCard.vue'
 import { TOOL_APPROVAL_CONTEXT } from './tool-approval-context'
 import { TOOL_APPROVAL_HOOKS } from './tool-approval-hooks'
@@ -130,7 +154,7 @@ import {
 } from './tools/workspace-tools'
 import WorkspaceToolBody from './tools/WorkspaceToolBody.vue'
 import ToolValueBlock from './ToolValueBlock.vue'
-import { isWebSearchPart } from './web-search'
+import { isWebSearchPart, stripEncryptedContent, webSearchResultsText, webSearchRowLabel, webSearchView } from './web-search'
 
 const props = withDefaults(defineProps<{
   part: ToolPartLike
@@ -204,6 +228,9 @@ watch([serverId, projectId], ([id, project]) => {
     projectMcp.fetch(project, { maxAgeMs: PROJECT_MCP_MAX_AGE_MS }).catch(() => {})
 }, { immediate: true })
 const firstArg = computed(() => toolRowArgument(name.value, props.part.input))
+/** + Phase 14 (ADR-062): a web search row (the builtin `search_web`, or a provider-executed search). */
+const webSearchRow = computed(() => isWebSearchPart(props.part))
+const nativeSearch = computed(() => webSearchRow.value && isProviderExecutedPart(props.part))
 /** + Phase 9: a tool of `core-agent` (before the tool list has loaded, any tool with an agent tool's name). */
 const coreAgent = computed(() => tool.value === undefined || tool.value.pluginId === CORE_AGENT_PLUGIN_ID)
 /** + Phase 9: the plan tool of `core-agent`. */
@@ -213,6 +240,8 @@ const isTodoTool = computed(() => name.value === TODO_TOOL_NAME && coreAgent.val
 /** + Phase 10: the skill tool of `core-agent`. */
 const isSkillTool = computed(() => name.value === SKILL_TOOL_NAME && coreAgent.value)
 const rowIcon = computed(() => {
+  if (webSearchRow.value)
+    return GlobeIcon
   if (serverId.value)
     return ServerIcon
   if (isPlanTool.value)
@@ -425,15 +454,97 @@ const view = computed(() => {
 
 /** + Phase 14 (ADR-060): the question this running call waits on, if any. */
 const pendingRequest = computed(() => (elicitations && props.part.toolCallId ? elicitations.forCall(props.part.toolCallId) : null))
-/** + Phase 14 (ADR-062): a web search row (the builtin `search_web`, or a provider-executed search). */
-const webSearchRow = computed(() => isWebSearchPart(props.part))
-const nativeSearch = computed(() => webSearchRow.value && isProviderExecutedPart(props.part))
+/** + Phase 14 (W14.9): the status cell reads "Waiting for your input" instead of the spinner. */
+const waitingForInput = computed(() => pendingRequest.value !== null && status.value === 'running')
+/** + Phase 14 (W14.9): the name of the call's MCP server in the result lines. */
+const elicitationServer = computed(() => serverName.value ?? serverId.value ?? displayName.value)
 
-/** + Phase 14: the card's answer (a 400's field issues stay in TOOL_ELICITATIONS; W14.9 shows the other failures). */
+/**
+ * + Phase 14 (W14.9): the result line of an answer the server took, shown in place of the card until the call's next
+ * output arrives (`progressKey` changes).
+ */
+const answered = ref<{ id: string, action: 'accept' | 'decline' | 'cancel', server: string } | null>(null)
+const answeredLine = useTemplateRef<HTMLElement>('answeredLine')
+const card = useTemplateRef<ComponentPublicInstance>('card')
+const partRoot = useTemplateRef<HTMLElement>('partRoot')
+/** What the call shows now: its state and, for a preliminary output, the pending request's id (else `running`). */
+const progressKey = computed(() => {
+  const part = props.part
+  if (part.state !== 'output-available')
+    return part.state
+  return part.preliminary === true ? `preliminary:${pendingElicitationOf(part)?.id ?? 'running'}` : 'final'
+})
+watch(progressKey, () => {
+  answered.value = null
+})
+const answeredText = computed(() => (answered.value ? elicitationResultText({ action: answered.value.action, reason: 'user' }, answered.value.server) : ''))
+
+/**
+ * + Phase 14 (W14.9): the records of an MCP call's final output (the action and the asked field names, never the values);
+ * the final output may first arrive as a preliminary chunk, a progress output has none.
+ */
+const elicitationRecords = computed(() => (serverId.value && props.part.state === 'output-available'
+  ? elicitationRecordsOf(props.part.output)
+  : []))
+
+/** + Phase 14 (W14.9): the view of a search row (its query and, for the builtin, its results). */
+const searchView = computed(() => (webSearchRow.value
+  ? webSearchView(props.part.input, hasOutput.value ? props.part.output : undefined, nativeSearch.value)
+  : null))
+/**
+ * + Phase 14 (W14.9): the search row's label, query (one line), "{n} results" of a finished builtin search and the row's
+ * name for a provider-executed one ("Searched the web, {query}").
+ */
+const searchRow = computed(() => {
+  if (!webSearchRow.value)
+    return null
+  const label = webSearchRowLabel(status.value === 'running')
+  const query = searchView.value?.query ? firstStringArg(searchView.value.query) : null
+  const count = !nativeSearch.value && status.value === 'done' && searchView.value?.backend
+    ? webSearchResultsText(searchView.value.results.length)
+    : null
+  let ariaLabel: string | undefined
+  if (nativeSearch.value) {
+    ariaLabel = query ? `${label}, ${query}` : label
+    if (status.value !== 'running' && status.value !== 'done')
+      ariaLabel = `${ariaLabel}, ${statusLabel.value.toLowerCase()}`
+  }
+  return { label, query, count, ariaLabel }
+})
+/** + Phase 14 (W14.9): the raw blocks of a search row never show `encryptedContent`. */
+const searchInputText = computed(() => (webSearchRow.value ? formatToolValue(stripEncryptedContent(props.part.input)) : ''))
+const searchOutputText = computed(() => (webSearchRow.value && hasOutput.value ? formatToolValue(stripEncryptedContent(props.part.output)) : ''))
+/** + Phase 14 (W14.9): a provider-executed search never shows hook badges or notes (the provider already ran it). */
+const shownHooks = computed(() => (nativeSearch.value ? [] : props.hooks))
+
+/** + Phase 14: the card's answer; a 400's field issues stay in TOOL_ELICITATIONS (the card shows them). */
 function onElicitationRespond(answer: McpElicitationAnswerBody) {
   const request = pendingRequest.value
-  if (request && elicitations)
-    elicitations.respond(request.id, answer).catch(() => {})
+  if (!request || !elicitations)
+    return
+  const cardElement = card.value?.$el as HTMLElement | undefined
+  const active = typeof document === 'undefined' ? null : document.activeElement
+  const focusInside = !!cardElement && active instanceof Node && cardElement.contains(active)
+  const keyAtAnswer = progressKey.value
+  elicitations.respond(request.id, answer)
+    .then(async (result) => {
+      if (result !== 'answered')
+        return
+      // The call moved on before the answer came back: its next output already replaced the card.
+      if (progressKey.value === keyAtAnswer)
+        answered.value = { id: request.id, action: answer.action, server: request.serverName || request.serverId }
+      if (!focusInside)
+        return
+      await nextTick()
+      // The result line, else (the card is already gone) the row itself.
+      const target = answeredLine.value ?? partRoot.value?.querySelector<HTMLElement>(`[data-testid="${testIds.toolRow}"] button`)
+      target?.focus()
+    })
+    .catch((failure) => {
+      const error = toHarnessError(failure)
+      if (error.code !== 'validation_error')
+        toast.error('Could not send your answer', { description: error.message })
+    })
 }
 
 /** + Phase 9: the plan card's decision as the approval of the call (`planMode` only with an approval). */
@@ -467,7 +578,7 @@ function onDecide(decision: { approved: boolean, alwaysAllow: boolean, acceptEdi
 </script>
 
 <template>
-  <div data-slot="tool-part" class="flex flex-col gap-1.5">
+  <div ref="partRoot" data-slot="tool-part" class="flex flex-col gap-1.5">
     <AiTool v-model:open="open" class="mb-0 rounded-md border-0">
       <div
         :data-testid="testIds.toolRow"
@@ -476,7 +587,7 @@ function onDecide(decision: { approved: boolean, alwaysAllow: boolean, acceptEdi
         :data-status="status"
       >
         <CollapsibleTrigger
-          :aria-label="skillRow?.ariaLabel"
+          :aria-label="skillRow?.ariaLabel ?? searchRow?.ariaLabel"
           class="group/tool-row -mx-1.5 flex h-(--row-height) pointer-coarse:h-10 w-[calc(100%+0.75rem)] min-w-0 items-center gap-2 rounded-md px-1.5 text-left text-sm outline-none transition-colors duration-(--duration-fast) hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring/50"
         >
           <ChevronRightIcon
@@ -488,6 +599,10 @@ function onDecide(decision: { approved: boolean, alwaysAllow: boolean, acceptEdi
             <span data-slot="skill-row-label" :class="cn('shrink-0 font-medium', status === 'running' && 'hf-shimmer-text')">{{ skillRow.label }}</span>
             <span v-if="skillRow.name" data-slot="skill-row-name" class="min-w-0 truncate font-mono text-[13px]">{{ skillRow.name }}</span>
           </template>
+          <template v-else-if="searchRow">
+            <span data-slot="web-search-row-label" :class="cn('shrink-0 font-medium', status === 'running' && 'hf-shimmer-text')">{{ searchRow.label }}</span>
+            <span v-if="searchRow.query" data-slot="web-search-row-query" class="min-w-0 truncate font-mono text-xs text-muted-foreground">"{{ searchRow.query }}"</span>
+          </template>
           <template v-else>
             <span class="shrink-0 font-mono text-[13px] font-medium">{{ displayName }}</span>
             <span v-if="firstArg" class="min-w-0 truncate font-mono text-xs text-muted-foreground">"{{ firstArg }}"</span>
@@ -498,17 +613,23 @@ function onDecide(decision: { approved: boolean, alwaysAllow: boolean, acceptEdi
           <span class="ml-auto flex shrink-0 items-center gap-1.5 pl-2 text-xs text-muted-foreground">
             <span v-if="skillRow?.source" data-slot="skill-row-source" class="max-w-[16ch] truncate">{{ skillRow.source }}</span>
             <span v-if="runningHook" data-slot="running-hook" class="max-w-[24ch] truncate hf-shimmer-text">{{ runningHookText }}</span>
-            <ToolHookBadge v-if="hooks.length > 0 && !hookDenied" :hooks="hooks" />
+            <ToolHookBadge v-if="shownHooks.length > 0 && !hookDenied" :hooks="shownHooks" />
             <ToolRuleBadge v-if="allowedBy.length > 0" :prefixes="allowedBy" />
             <ToolRowSummary v-if="summary" :summary="summary" class="mr-0.5" />
-            <template v-if="status === 'running'">
+            <span v-if="searchRow?.count" data-slot="web-search-row-count" class="mr-0.5">{{ searchRow.count }}</span>
+            <template v-if="status === 'running' && waitingForInput">
+              <span aria-hidden="true" class="size-2 rounded-full bg-warning" />
+              <span data-slot="tool-row-waiting" aria-hidden="true">{{ ELICITATION_WAITING_TEXT }}</span>
+              <span class="sr-only">, waiting for your input</span>
+            </template>
+            <template v-else-if="status === 'running'">
               <Spinner v-if="!runningHook" class="size-3" />
             </template>
             <template v-else-if="status === 'approval' && isPlanTool">
               <span aria-hidden="true" class="size-2 rounded-full bg-info" />
               <span>Plan ready for review</span>
             </template>
-            <template v-else-if="status === 'approval'">
+            <template v-else-if="status === 'approval' && !nativeSearch">
               <span aria-hidden="true" class="size-2 rounded-full bg-warning" />
               <span>Needs approval</span>
             </template>
@@ -542,23 +663,46 @@ function onDecide(decision: { approved: boolean, alwaysAllow: boolean, acceptEdi
               <CircleSlashIcon aria-hidden="true" class="size-3.5" />
               <span>Stopped</span>
             </template>
-            <span v-if="status === 'running' || (status === 'done' && !planApproved) || status === 'error'" class="sr-only">{{ statusLabel }}</span>
+            <span v-if="(status === 'running' && !waitingForInput) || (status === 'done' && !planApproved) || status === 'error'" class="sr-only">{{ statusLabel }}</span>
           </span>
         </CollapsibleTrigger>
       </div>
       <AiToolContent :data-testid="testIds.toolRowOutput" class="min-w-0 pt-1 pl-6">
-        <div v-if="hooks.length > 0" data-slot="tool-hook-notes" class="mb-2 flex min-w-0 flex-col gap-1">
-          <HookNote v-for="data in hooks" :key="data.id" :data="data" variant="tool" :plugin-name="hookPluginName(data)" />
+        <div v-if="shownHooks.length > 0" data-slot="tool-hook-notes" class="mb-2 flex min-w-0 flex-col gap-1">
+          <HookNote v-for="data in shownHooks" :key="data.id" :data="data" variant="tool" :plugin-name="hookPluginName(data)" />
         </div>
-        <WebSearchToolBody
-          v-if="webSearchRow"
-          :input="part.input"
-          :output="hasOutput ? part.output : undefined"
-          :native="nativeSearch"
-          :running="status === 'running'"
-          class="mb-2"
-        />
-        <AgentToolBody v-if="agentView">
+        <div v-if="elicitationRecords.length > 0" data-slot="elicitation-records" class="mb-2 flex min-w-0 flex-col gap-1.5">
+          <div v-for="record in elicitationRecords" :key="record.id" class="flex min-w-0 flex-col gap-0.5">
+            <p
+              :data-testid="testIds.elicitationResult"
+              :data-action="elicitationResultAction(record)"
+              class="flex min-w-0 items-start gap-2 text-sm text-muted-foreground"
+            >
+              <CircleCheckIcon v-if="record.action === 'accept'" aria-hidden="true" class="mt-0.5 size-3.5 shrink-0" />
+              <CircleSlashIcon v-else aria-hidden="true" class="mt-0.5 size-3.5 shrink-0" />
+              <span class="min-w-0 break-words">{{ elicitationResultText(record, elicitationServer) }}</span>
+            </p>
+            <p v-if="elicitationFieldsText(record.fields)" data-slot="elicitation-record-fields" class="pl-5.5 text-xs break-words text-muted-foreground">
+              {{ elicitationFieldsText(record.fields) }}
+            </p>
+          </div>
+        </div>
+        <AgentToolBody v-if="webSearchRow">
+          <WebSearchToolBody
+            :input="part.input"
+            :output="hasOutput ? part.output : undefined"
+            :native="nativeSearch"
+            :running="status === 'running'"
+          />
+          <ToolValueBlock v-if="errorText" label="Error" :value="errorText" tone="error" class="mt-3" />
+          <template #raw>
+            <div class="flex min-w-0 flex-col gap-3 rounded-md bg-muted/50 p-3">
+              <ToolValueBlock :label="inputLabel" :value="searchInputText || '{}'" />
+              <ToolValueBlock v-if="hasOutput" label="Output" :value="searchOutputText" :server-truncated="outputTruncated" />
+            </div>
+          </template>
+        </AgentToolBody>
+        <AgentToolBody v-else-if="agentView">
           <TodoList v-if="agentView.kind === 'todo'" :todos="agentView.todos" />
           <SkillToolBody v-else-if="agentView.kind === 'skill'" :input="part.input" :output="hasOutput ? part.output : undefined" />
           <template v-else>
@@ -589,20 +733,34 @@ function onDecide(decision: { approved: boolean, alwaysAllow: boolean, acceptEdi
     </AiTool>
     <ElicitationCard
       v-if="pendingRequest && elicitations"
+      ref="card"
       :request="pendingRequest"
       :busy="elicitations.busy(pendingRequest.id)"
       :issues="elicitations.issues(pendingRequest.id)"
       :gone="elicitations.gone(pendingRequest.id)"
       @respond="onElicitationRespond"
     />
+    <p
+      v-else-if="answered"
+      ref="answeredLine"
+      tabindex="-1"
+      role="status"
+      :data-testid="testIds.elicitationResult"
+      :data-action="answered.action"
+      class="flex min-w-0 items-start gap-2 rounded-sm text-sm text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+    >
+      <CircleCheckIcon v-if="answered.action === 'accept'" aria-hidden="true" class="mt-0.5 size-3.5 shrink-0" />
+      <CircleSlashIcon v-else aria-hidden="true" class="mt-0.5 size-3.5 shrink-0" />
+      <span class="min-w-0 break-words">{{ answeredText }}</span>
+    </p>
     <PlanApprovalCard
-      v-if="awaitingDecision && isPlanTool"
+      v-if="awaitingDecision && isPlanTool && !nativeSearch"
       :part="part"
       :source="tool?.pluginId ?? CORE_AGENT_PLUGIN_ID"
       @decide="onPlanDecide"
     />
     <ToolApprovalCard
-      v-else-if="awaitingDecision"
+      v-else-if="awaitingDecision && !nativeSearch"
       :part="part"
       :tool-name="name"
       :source="tool?.pluginId ?? null"

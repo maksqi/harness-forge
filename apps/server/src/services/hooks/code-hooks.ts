@@ -9,7 +9,10 @@
 //
 // `PreToolUse` / `PostToolUse` have no entry here: their code hooks (`tool.approve`, `tool.before`, `tool.after`) run
 // in the chat pipeline's approval and tool wrapper. The kill switches never stop code hooks (trusted in-process code).
-import type { HookName } from '@harness-forge/plugin-sdk'
+// `notification` receives the notification types of plugin API 1.7.0: `permission_prompt` (an approval request) and,
+// Phase 14 (ADR-060, W14.3), `elicitation_dialog` (an MCP server asks the user for input during a tool call); any other
+// type runs no code hook.
+import type { HookMap, HookName } from '@harness-forge/plugin-sdk'
 import type { HookEvent, HookOutcome } from '@harness-forge/shared'
 import type { Registry } from '../../registry/types.ts'
 import type { HookRunInput, HookScope } from './types.ts'
@@ -102,6 +105,16 @@ function taskType(input: unknown): string {
   return typeof type === 'string' && type !== '' ? type : 'general'
 }
 
+/** The notification types plugin `notification` code hooks receive (plugin API 1.7.0). */
+export type CodeNotificationType = HookMap['notification'][0]['type']
+
+const CODE_NOTIFICATION_TYPES: ReadonlySet<string> = new Set<CodeNotificationType>(['permission_prompt', 'elicitation_dialog'])
+
+/** The `notification` code hook type of a `Notification` hook's `notificationType`, or null (no code hook runs). */
+export function codeNotificationType(value: string | undefined): CodeNotificationType | null {
+  return value !== undefined && CODE_NOTIFICATION_TYPES.has(value) ? value as CodeNotificationType : null
+}
+
 /**
  * Runs the code hooks of `event` (every active plugin's handlers, through `registry.hooks.run`) and reads their output;
  * null when the event has no code hook event or (`Notification`) the notification type is not one code hooks know.
@@ -144,11 +157,13 @@ export async function runCodeHooks(registry: Pick<Registry, 'hooks'>, event: Hoo
     case 'PreCompact':
       await registry.hooks.run('compact.before', { ...base, trigger: input.trigger === 'manual' ? 'manual' : 'auto', focus: input.customInstructions ?? null }, undefined)
       return codeOutcome({})
-    case 'Notification':
-      if (input.notificationType !== 'permission_prompt')
+    case 'Notification': {
+      const type = codeNotificationType(input.notificationType)
+      if (type === null)
         return null
-      await registry.hooks.run('notification', { ...base, type: 'permission_prompt', message: input.message ?? '' }, undefined)
+      await registry.hooks.run('notification', { ...base, type, message: input.message ?? '' }, undefined)
       return codeOutcome({})
+    }
     default:
       return null
   }

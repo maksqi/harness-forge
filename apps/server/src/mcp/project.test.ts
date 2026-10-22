@@ -592,13 +592,14 @@ describe('project MCP manager: Phase 14 seams', () => {
     expect(await app.t.deps.projectMcp.resources(app.project.id, { waitMs: 100 })).toEqual({ items: [], truncated: false, unavailable: [], shadowed: new Set() })
     await expect(app.t.deps.projectMcp.prompts('prj_ZZZZZZZZZZZZZZZZ')).rejects.toMatchObject({ code: 'not_found' })
     const signal = new AbortController().signal
-    await expect(app.t.deps.projectMcp.getPrompt(app.project.id, 'elicit', 'greet', {}, signal)).rejects.toMatchObject({ code: 'not_implemented' })
-    await expect(app.t.deps.projectMcp.readResource(app.project.id, 'elicit', 'file:///a', signal)).rejects.toMatchObject({ code: 'not_implemented' })
+    // W14.2: the caches are real (the server lists no prompt and cannot read resources).
+    await expect(app.t.deps.projectMcp.getPrompt(app.project.id, 'elicit', 'greet', {}, signal)).rejects.toMatchObject({ code: 'not_found' })
+    await expect(app.t.deps.projectMcp.readResource(app.project.id, 'elicit', 'file:///a', signal)).rejects.toMatchObject({ code: 'provider_error' })
     await expect(app.t.deps.projectMcp.getPrompt(app.project.id, 'later', 'greet', {}, signal)).rejects.toMatchObject({ code: 'conflict', details: { reason: 'untrusted' } })
     await expect(app.t.deps.projectMcp.readResource(app.project.id, 'nope', 'file:///a', signal)).rejects.toMatchObject({ code: 'not_found' })
   })
 
-  it('the listings start approved servers that are not running and wait at most waitMs', async () => {
+  it('the listings never start a server (lazy start for a run, ADR-050) and list it once a run started it', async () => {
     const endpoint = await startElicitServer()
     servers.push(endpoint)
     const app = await open()
@@ -606,8 +607,11 @@ describe('project MCP manager: Phase 14 seams', () => {
     app.setServers([item])
     await app.approve(item)
     expect(await stateOf(app, 'elicit')).toBe('idle')
-    const first = await app.t.deps.projectMcp.prompts(app.project.id)
-    expect(first.unavailable).toEqual([{ serverId: 'elicit', status: 'connecting' }])
+    const first = await app.t.deps.projectMcp.prompts(app.project.id, { waitMs: 200 })
+    expect(first.unavailable).toEqual([{ serverId: 'elicit', status: 'idle' }])
+    expect((await app.t.deps.projectMcp.resources(app.project.id)).unavailable).toEqual([{ serverId: 'elicit', status: 'idle' }])
+    expect(await stateOf(app, 'elicit')).toBe('idle')
+    await app.t.deps.projectMcp.toolsFor(app.project.id, { signal: new AbortController().signal, waitMs: 5000 })
     await waitFor(async () => (await stateOf(app, 'elicit')) === 'connected')
     expect((await app.t.deps.projectMcp.resources(app.project.id)).unavailable).toEqual([])
   })

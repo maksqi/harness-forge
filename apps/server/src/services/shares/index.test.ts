@@ -1,5 +1,7 @@
 // Share service (W5.4) over the test database, with the C8 fake of the chats tree (`createFakeChatsService`: `get`
 // returns the active path) and the real files service.
+// Phase 14 (W14.6-T1): a chat with web search and MCP elicitation records is shared without the provider data of native
+// search.
 import type { ChatCreate, HarnessError, ShareSummary } from '@harness-forge/shared'
 import type { TestApp } from '../../testing/create-test-app.ts'
 import { LIMITS, SHARE_TOKEN_PATTERN, shareSummarySchema, shareViewSchema } from '@harness-forge/shared'
@@ -9,6 +11,7 @@ import { chats, chatShares } from '../../db/schema.ts'
 import { swapMasterKey } from '../../security/keyring.ts'
 import { createTestApp } from '../../testing/create-test-app.ts'
 import { createFakeChatsService, createFakeKeyring, fakeMasterKey, readAllBytes } from '../../testing/fakes.ts'
+import { ELICITATION_RECORDS, RECORD_SENTINELS, recordMessages, SEARCH_RESULTS } from '../chats/records.test-util.ts'
 import { isInvalidShareTokenError, SHARE_UNAVAILABLE_MESSAGE } from './errors.ts'
 import { createShareService, SHARE_MAX_EXPIRY_MS } from './index.ts'
 import { createShareTokens } from './token.ts'
@@ -388,5 +391,23 @@ describe('view and openFile (public)', () => {
     const token = tokenOf(created)
     await rejection(t.deps.shares.view(`${token.slice(0, 37)}${token.endsWith('_') ? '-' : '_'}`))
     expect(await storedRow(t, created.id)).toEqual(before)
+  })
+})
+
+describe('web search and MCP elicitation records (Phase 14)', () => {
+  it('stores and serves the search rows, the sources and the records; never the provider data of native search', async () => {
+    const t = await testApp()
+    await t.deps.chats.create({ id: CHAT, title: 'Search', messages: recordMessages() })
+    const created = await t.deps.shares.create({ chatId: CHAT, options: { toolDetails: true } })
+    const stored = JSON.stringify((await storedRow(t, created.id))?.snapshot)
+    for (const leaked of [...Object.values(RECORD_SENTINELS), 'encryptedContent', 'providerExecuted'])
+      expect(stored, leaked).not.toContain(leaked)
+    const view = shareViewSchema.parse(await t.deps.shares.view(tokenOf(created)))
+    const parts = view.messages[1]!.parts
+    expect(parts.filter(part => part.type === 'source-url').map(part => part.url)).toEqual([...SEARCH_RESULTS.map(result => result.url), 'https://weather.example/lisbon'])
+    expect(parts.find(part => part.type === 'tool' && part.toolName === 'search_web')).toMatchObject({ status: 'done', output: { query: 'mcp authorization pkce', backend: 'brave', results: SEARCH_RESULTS } })
+    expect(parts.filter(part => part.type === 'tool' && part.toolName === 'web_search').map(part => part.type === 'tool' ? part.input : null)).toEqual([{ query: 'weather in Lisbon' }, { query: 'nuxt 4 release date' }])
+    expect(parts.find(part => part.type === 'tool' && part.toolName === 'mcp__fake__ask')).toMatchObject({ output: { elicitations: ELICITATION_RECORDS } })
+    expect(created.messageCount).toBe(2)
   })
 })

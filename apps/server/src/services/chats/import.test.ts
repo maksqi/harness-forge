@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { createTestApp } from '../../testing/create-test-app.ts'
 import { buildChatExport } from './export.ts'
 import { assignMessageIds, freshMessageIds, IMPORT_DENIAL_REASON, planImportTree, validateImportedMessages } from './import.ts'
+import { anthropicSearchPart, mcpWaitingPart, RECORD_SENTINELS, recordMessages } from './records.test-util.ts'
 
 const META = { modelRef: 'mock:echo', startedAt: 1 }
 
@@ -437,5 +438,31 @@ describe('chat export -> import round trip: hook records (Phase 11)', () => {
       expect(error.code).toBe('validation_error')
       expect((error.details as { issues: { path: unknown[] }[] }).issues[0]!.path.slice(0, 3)).toEqual(['chat', 'messages', 0])
     }
+  })
+})
+
+describe('chat export -> import round trip: web search and MCP elicitation records (Phase 14)', () => {
+  it('keeps search_web, source-url and provider-executed parts (provider data included) and the records', async () => {
+    const t = await testApp()
+    const messages = [...recordMessages(), { id: 'msg_records000000003', role: 'assistant', parts: [mcpWaitingPart()] } as HarnessUIMessage]
+    await expect(validateImportedMessages(messages)).resolves.toEqual(messages)
+    const exported = exportOf({ ...agentChat(messages), settings: { webSearch: 'auto' } })
+    const { id } = await t.deps.chats.importChat({ exported, id: 'keep', restore: true })
+    const imported = await t.deps.chats.get(id)
+    expect(imported.messages).toEqual(messages)
+    expect(imported.settings).toEqual({ webSearch: 'auto' })
+    expect(JSON.stringify(imported.messages)).toContain(RECORD_SENTINELS.encrypted)
+    const again = (await t.deps.chats.export(id, 'json')).body
+    expect(chatExportAnySchema.parse(JSON.parse(again)).chat.messages).toEqual(exported.chat.messages)
+
+    const copy = await t.deps.chats.importChat({ exported, id: 'new', restore: false })
+    expect((await t.deps.chats.get(copy.id)).messages.map(message => message.parts)).toEqual(messages.map(message => message.parts))
+  })
+
+  it('rejects a malformed provider-executed part with the issue path', async () => {
+    const bad = { id: 'msg_records000000004', role: 'assistant', parts: [{ ...anthropicSearchPart(), providerExecuted: 'yes' }] } as unknown as HarnessUIMessage
+    const error = await rejection(validateImportedMessages([bad], ['chat']))
+    expect(error.code).toBe('validation_error')
+    expect((error.details as { issues: { path: unknown[] }[] }).issues[0]!.path.slice(0, 3)).toEqual(['chat', 'messages', 0])
   })
 })

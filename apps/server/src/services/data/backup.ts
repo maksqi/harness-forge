@@ -26,6 +26,14 @@
 // marketplaces (`marketplaces`), Claude Code plugins (their rows, folders and trust pins), hook transcripts
 // (`<dataDir>/transcripts`) and home-folder import plans (in memory only): a crafted backup must not make anything
 // run. The list of what is written is explicit (above), so a new table or folder never joins a backup by accident.
+// Phase 14 (ADR-059 … ADR-063, W14.6-T3): the MCP OAuth records and client secrets (secret scopes `mcp:<id>` names
+// `oauth.record` / `oauth.clientSecret`, `plugin:<pluginId>` and `project:<projectId>` names `mcp-oauth.<serverId>`) and
+// the `core-search` keys (`plugin:core-search` `settings.<backend>ApiKey`) live in the `secrets` table, which a backup
+// never reads; `settings.json` gains `webSearchDefault` / `webSearchNative` (public settings) and a chat's
+// `settings.webSearch` travels with its export. Messages travel as stored: `search_web` parts, their `source-url`
+// parts, provider-executed search parts (their provider data, e.g. `encryptedContent`, included: the same provider's
+// next turn needs it; shares and Markdown exports strip it) and the elicitation records of MCP tool outputs (never a
+// value). No format version changes.
 // `data-hook` parts are chat content and stay in their messages. A chat deleted during the export is left out; a blob that is missing or no
 // longer matches its sha256 is left out of the index (the import then reports it missing); the personal definitions
 // are read after the attachments, and when that read fails the backup goes on without them (`includes.customizations:

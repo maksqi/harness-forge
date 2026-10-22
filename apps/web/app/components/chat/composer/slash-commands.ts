@@ -21,10 +21,13 @@
 // what the server lists: a bare alias of a plugin command (`/review`) is never added here (the server resolves it).
 // Phase 14 (ADR-061; C54 declares the group, W14.8 owns the rows; signatures frozen from Gate P14-0b): the group MCP
 // (`mcp`, label "MCP", between Plugins and Skills) holds the prompts of connected MCP servers (`source: 'mcp'`, names
-// `mcp__<server>__<prompt>`).
+// `mcp__<server>__<prompt>`, `MCP_PROMPT_NAME_PATTERN`). A row's detail is the server's name (`mcpServer.name`), its
+// hint the prompt's `argumentHint` (`<required> [optional]`); the hint, query and command patterns accept the MCP name
+// shape (its case is kept: the server matches prompt names exactly), and typing filters on every `__` segment of it
+// (`/review` and `/github` both find `/mcp__github__review`).
 import type { ClientCommand, CommandSummary, ProjectTrustList, ReasoningEffort, ToolMode } from '@harness-forge/shared'
 import type { OutputStyleOption } from './output-style'
-import { CLIENT_COMMANDS, isClientCommand, QUALIFIED_NAME_MAX_CHARS, splitQualifiedName } from '@harness-forge/shared'
+import { CLIENT_COMMANDS, isClientCommand, isMcpPromptCommandName, QUALIFIED_NAME_MAX_CHARS, splitQualifiedName } from '@harness-forge/shared'
 import { EFFORT_LABELS } from './effort'
 import { resolveStyleQuery, styleOptions } from './output-style'
 import { EDITS_NEEDS_PROJECT, isProjectOnlyMode, PLAN_NEEDS_PROJECT, TOOL_MODE_OPTIONS } from './permission'
@@ -123,10 +126,18 @@ function skillSourceText(command: Pick<CommandSummary, 'source' | 'pluginId'>, p
   }
 }
 
+/** + Phase 14: the server of an MCP prompt as its row shows it (`mcpServer.name`, else its id; none without one). */
+function mcpServerText(command: Pick<CommandSummary, 'mcpServer'>): string | undefined {
+  const server = command.mcpServer
+  if (!server)
+    return undefined
+  return server.name.trim() || server.id
+}
+
 /**
  * The server items: `/compact` (App), the project's, the personal and the plugin commands, with the contributing
  * plugin's name, the argument hint and the namespace; + Phase 11: the user-invocable skills (group `skill`, `source` =
- * the skill's source text). The server already resolved the precedence (one item per name; a command wins over a
+ * the skill's source text); + Phase 14: the MCP prompts (group `mcp`, `source` = the server's name). The server already resolved the precedence (one item per name; a command wins over a
  * skill). A server command can never shadow a client command (plugins and command files cannot take those names; this
  * is a second guard).
  */
@@ -138,10 +149,13 @@ export function serverSlashItems(
     .filter(command => !isClientCommand(command.name))
     .map((command) => {
       const skill = command.kind === 'skill'
-      // Phase 10: `pluginId` is optional (personal and project commands have none).
+      // Phase 10: `pluginId` is optional (personal and project commands have none); + Phase 14: an MCP prompt's source
+      // is its server's name.
       const source = skill
         ? skillSourceText(command, pluginName)
-        : command.pluginId === undefined ? undefined : pluginName(command.pluginId) ?? command.pluginId
+        : command.source === 'mcp'
+          ? mcpServerText(command)
+          : command.pluginId === undefined ? undefined : pluginName(command.pluginId) ?? command.pluginId
       return {
         name: command.name,
         description: command.description,
@@ -178,14 +192,21 @@ export function withPendingCommands(items: SlashItem[], pending: ReadonlySet<str
 /**
  * A slash name as typed (+ Phase 12, ADR-053: `CATALOG_NAME_PATTERN`, case-insensitive): a bare name of up to 64
  * characters, or a qualified `<pluginId>:<segment>[:<segment>…]` name (1..3 segments; at most 128 characters, checked
- * by `isSlashName`). The two alternatives; the patterns below put them in their capture group.
+ * by `isSlashName`); + Phase 14 (ADR-061): an MCP prompt name `mcp__<server>__<prompt>` (`MCP_PROMPT_NAME_PATTERN`,
+ * first: the bare alternative would stop at its `_`). The alternatives; the patterns below put them in their capture
+ * group.
  */
-const SLASH_NAME = '[a-z][\\da-z-]{0,63}|[\\da-z](?:[\\da-z-]{0,38}[\\da-z])?(?::[a-z][\\da-z-]{0,63}){1,3}'
+const SLASH_NAME = 'mcp__[\\w-]{1,59}|[a-z][\\da-z-]{0,63}|[\\da-z](?:[\\da-z-]{0,38}[\\da-z])?(?::[a-z][\\da-z-]{0,63}){1,3}'
 
 const HINT_PATTERN = new RegExp(`^\\/(${SLASH_NAME})[ \\t]+$`, 'i')
 
-/** + Phase 12: a qualified name is at most 128 characters (the pattern alone cannot say it). */
+/**
+ * + Phase 12: a qualified name is at most 128 characters (the pattern alone cannot say it); + Phase 14: an `mcp__` name
+ * is an MCP prompt name only (`isMcpPromptCommandName`, at most 64 characters).
+ */
 function isSlashName(name: string): boolean {
+  if (name.toLowerCase().startsWith('mcp__'))
+    return isMcpPromptCommandName(name)
   return name.length <= QUALIFIED_NAME_MAX_CHARS
 }
 
@@ -214,10 +235,11 @@ export function argumentHintAt(text: string, items: readonly SlashItem[]): strin
 
 /**
  * The muted text on the right of a row: the namespace of a command file (`frontend`), else the plugin name of a plugin
- * command; + Phase 11: a skill's source text. App and personal rows show none.
+ * command; + Phase 11: a skill's source text; + Phase 14: an MCP prompt's server name. App and personal rows show none.
  */
 export function slashItemDetail(item: SlashItem): string | null {
-  if (item.group === 'skill')
+  // + Phase 14: an MCP prompt shows its server's name.
+  if (item.group === 'skill' || item.group === 'mcp')
     return item.source ?? null
   if (item.namespace)
     return item.namespace
@@ -236,7 +258,8 @@ export function slashItemLabel(item: SlashItem): string {
 
 /**
  * + Phase 12: a name matches the typed query when it starts with it, or (a qualified name) when one of its segments
- * does, read on to the end (`migrate` and `db:mi` both match `review-kit:db:migrate`).
+ * does, read on to the end (`migrate` and `db:mi` both match `review-kit:db:migrate`); + Phase 14: the same for the `__`
+ * segments of an MCP prompt name (`github`, `review` and `github__rev` match `mcp__github__review`).
  */
 export function slashNameMatches(name: string, query: string): boolean {
   const lower = name.toLowerCase()
@@ -247,12 +270,19 @@ export function slashNameMatches(name: string, query: string): boolean {
     if (lower.startsWith(needle, index + 1))
       return true
   }
+  if (isMcpPromptCommandName(name)) {
+    for (let index = lower.indexOf('__'); index !== -1; index = lower.indexOf('__', index + 2)) {
+      if (lower.startsWith(needle, index + 2))
+        return true
+    }
+  }
   return false
 }
 
 /**
  * Items whose name starts with `query` (case-insensitive; + Phase 12: or one of its segments does), in group order
- * (App, Project, Personal, Plugins, Skills); the order inside a group is kept (client commands before `/compact` in App).
+ * (App, Project, Personal, Plugins, MCP, Skills); the order inside a group is kept (client commands before `/compact` in
+ * App).
  */
 export function filterSlashItems(items: readonly SlashItem[], query: string): SlashItem[] {
   const matches = items.filter(item => slashNameMatches(item.name, query))
@@ -306,7 +336,7 @@ export function slashQueryAt(text: string, caret: number): string | null {
 }
 
 export interface ParsedSlashCommand {
-  /** Lowercase command name. */
+  /** Lowercase command name (+ Phase 14: an MCP prompt name as typed). */
   name: string
   /** Trimmed text after the name. */
   args: string
@@ -314,12 +344,16 @@ export interface ParsedSlashCommand {
 
 const COMMAND_PATTERN = new RegExp(`^\\/(${SLASH_NAME})(?:\\s([\\s\\S]*))?$`, 'i')
 
-/** `/name args` -> `{ name, args }` (+ Phase 12: `name` may be qualified); null when the text is not a slash command. */
+/**
+ * `/name args` -> `{ name, args }` (+ Phase 12: `name` may be qualified; + Phase 14: an MCP prompt name keeps its case,
+ * every other name is lowercase); null when the text is not a slash command.
+ */
 export function parseSlashCommand(text: string): ParsedSlashCommand | null {
   const match = text.trim().match(COMMAND_PATTERN)
   if (!match || !isSlashName(match[1]!))
     return null
-  return { name: match[1]!.toLowerCase(), args: (match[2] ?? '').trim() }
+  const name = isMcpPromptCommandName(match[1]!) ? match[1]! : match[1]!.toLowerCase()
+  return { name, args: (match[2] ?? '').trim() }
 }
 
 /** The client command typed in `text`, or null (server commands and plain text are sent as typed). */

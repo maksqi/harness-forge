@@ -1,14 +1,16 @@
 import type { HarnessUIMessage, ShareOptions } from '@harness-forge/shared'
 import type { RenderContext } from './snapshot.ts'
 import { Buffer } from 'node:buffer'
-import { LIMITS, shareMessageSchema, shareSnapshotSchema } from '@harness-forge/shared'
+import { LIMITS, searchWebOutputSchema, shareMessageSchema, shareSnapshotSchema } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
+import { ELICITATION_RECORDS, mcpWaitingPart, RECORD_SENTINELS, recordMessages, SEARCH_RESULTS, searchWebPart } from '../chats/records.test-util.ts'
 import {
   capToolValue,
   clipText,
   rasterDataUrlType,
   renderShareMessages,
   sanitizeSnapshot,
+  SHARE_ELICITATION_RECORDS_MAX,
   SHARE_TRUNCATION_MARKER,
   shareableMessageCount,
   snapshotBytes,
@@ -605,5 +607,146 @@ describe('snapshot helpers', () => {
     expect(snapshotTitle({ title: 'Chat', messages: [] })).toBe('Chat')
     expect(snapshotTitle({ title: null, messages: [] })).toBeNull()
     expect(snapshotTitle(null)).toBeNull()
+  })
+})
+
+describe('sanitizeSnapshot: web search and MCP elicitation records (Phase 14)', () => {
+  it('keeps search_web rows, a "searched the web" row per native call, the records of MCP rows and the sources', () => {
+    const { snapshot } = sanitizeSnapshot('Search', recordMessages(), fileIdOf)
+    expect(shareSnapshotSchema.parse(snapshot)).toEqual(snapshot)
+    expect(snapshot.messages[1]).toEqual({
+      role: 'assistant',
+      modelRef: 'mock:search-tool',
+      parts: [
+        {
+          type: 'tool',
+          toolName: 'search_web',
+          status: 'done',
+          input: { query: 'mcp authorization pkce', count: 5 },
+          output: { query: 'mcp authorization pkce', backend: 'brave', results: SEARCH_RESULTS },
+        },
+        { type: 'source-url', sourceId: 'src_search_1', url: SEARCH_RESULTS[0]!.url, title: SEARCH_RESULTS[0]!.title },
+        { type: 'source-url', sourceId: 'src_search_2', url: SEARCH_RESULTS[1]!.url, title: SEARCH_RESULTS[1]!.title },
+        {
+          type: 'tool',
+          toolName: 'web_search',
+          status: 'done',
+          input: { query: 'weather in Lisbon' },
+          // `encryptedContent` and the non-http(s) URL are dropped; the rest of the result stays readable.
+          output: [
+            { type: 'web_search_result', url: 'https://weather.example/lisbon', title: 'Lisbon weather', pageAge: '1 day ago' },
+            { type: 'web_search_result', title: 'Not a web page', pageAge: null },
+          ],
+        },
+        { type: 'source-url', sourceId: 'src_native_1', url: 'https://weather.example/lisbon', title: 'Lisbon weather' },
+        {
+          type: 'tool',
+          toolName: 'web_search',
+          status: 'done',
+          // OpenAI: the query comes from the output's action.
+          input: { query: 'nuxt 4 release date' },
+          output: { action: { type: 'search', query: 'nuxt 4 release date' }, sources: [{ type: 'url', url: 'https://nuxt.com/blog' }] },
+        },
+        {
+          type: 'tool',
+          toolName: 'mcp__fake__ask',
+          status: 'done',
+          input: {},
+          output: { content: [{ type: 'text', text: 'Thanks, the account is set.' }], elicitations: ELICITATION_RECORDS },
+        },
+        { type: 'text', text: 'Done.' },
+      ],
+    })
+  })
+
+  it('never copies encryptedContent, provider metadata or other provider fields of native search', () => {
+    const json = JSON.stringify(sanitizeSnapshot(null, recordMessages(), fileIdOf))
+    for (const leaked of [...Object.values(RECORD_SENTINELS), 'encryptedContent', 'providerOnly', 'javascript:', 'srvtoolu_', 'providerExecuted'])
+      expect(json, leaked).not.toContain(leaked)
+  })
+
+  it('a native call without a query keeps no input; one that failed keeps its error text', () => {
+    const path = [message(1, 'assistant', [
+      { type: 'tool-google_search', toolCallId: 'g1', state: 'output-available', providerExecuted: true, input: {}, output: {} },
+      { type: 'tool-browser_search', toolCallId: 'b1', state: 'output-error', providerExecuted: true, input: { query: 'groq' }, errorText: 'Search failed' },
+      { type: 'tool-web_search', toolCallId: 'w1', state: 'output-available', providerExecuted: true, input: { query: 'deep' }, output: { action: { a: { b: { c: { d: { url: 'https://deep.example' } } } } }, encryptedContent: 'x' } },
+    ])]
+    expect(sanitizeSnapshot(null, path, fileIdOf).snapshot.messages[0]?.parts).toEqual([
+      { type: 'tool', toolName: 'google_search', status: 'done', output: {} },
+      { type: 'tool', toolName: 'browser_search', status: 'error', input: { query: 'groq' }, errorText: 'Search failed' },
+      // Unknown keys are dropped at every level.
+      { type: 'tool', toolName: 'web_search', status: 'done', input: { query: 'deep' }, output: { action: {} } },
+    ])
+  })
+
+  it('drops search_web results from the end to fit the value cap and caps an unreadable output like any value', () => {
+    const results = Array.from({ length: 10 }, (_value, index) => ({ title: `Result ${index}`, url: `https://example.com/${index}/${'p'.repeat(1900)}`, snippet: 's'.repeat(800), published: null }))
+    const unreadable = { query: 'q', backend: 'brave', results: 'x'.repeat(LIMITS.shareToolValueChars) }
+    const path = [message(1, 'assistant', [
+      searchWebPart(results),
+      { type: 'tool-search_web', toolCallId: 'call_x', state: 'output-available', input: { query: 'q' }, output: unreadable },
+      { type: 'tool-search_web', toolCallId: 'call_y', state: 'output-error', input: { query: 'q' }, errorText: 'The search key was rejected.' },
+    ])]
+    const [fitted, capped, failed] = sanitizeSnapshot(null, path, fileIdOf).snapshot.messages[0]!.parts as Array<{ output?: unknown, errorText?: string }>
+    const output = searchWebOutputSchema.parse(fitted?.output)
+    expect(output.results.length).toBeGreaterThan(0)
+    expect(output.results.length).toBeLessThan(10)
+    expect(output.results).toEqual(results.slice(0, output.results.length))
+    expect(JSON.stringify(output).length).toBeLessThanOrEqual(LIMITS.shareToolValueChars)
+    expect(String(capped?.output).endsWith(SHARE_TRUNCATION_MARKER)).toBe(true)
+    expect(failed).toEqual({ type: 'tool', toolName: 'search_web', status: 'error', input: { query: 'q' }, errorText: 'The search key was rejected.' })
+  })
+
+  it('keeps the elicitation records when the rest of an MCP output is cut, and drops invalid records and extra keys', () => {
+    const big = 'x'.repeat(LIMITS.shareToolValueChars)
+    const many = Array.from({ length: 12 }, (_value, index) => ({ ...ELICITATION_RECORDS[0]!, id: `eli_${String(index).padStart(16, '0')}` }))
+    const path = [message(1, 'assistant', [
+      { type: 'dynamic-tool', toolName: 'mcp__fake__ask', toolCallId: 'a', state: 'output-available', input: {}, output: { content: [{ type: 'text', text: big }], elicitations: ELICITATION_RECORDS } },
+      { type: 'dynamic-tool', toolName: 'mcp__fake__ask', toolCallId: 'b', state: 'output-available', input: {}, output: { content: [], elicitations: [{ ...ELICITATION_RECORDS[0], content: { name: 'VALUE-SENTINEL' } }, { id: 'bad' }] } },
+      { type: 'dynamic-tool', toolName: 'mcp__fake__ask', toolCallId: 'c', state: 'output-available', input: {}, output: { content: [], elicitations: many } },
+      { type: 'dynamic-tool', toolName: 'mcp__fake__ask', toolCallId: 'd', state: 'output-available', input: {}, output: { content: [], elicitations: [{ id: 'bad' }] } },
+      // Only MCP tools carry records: another tool's output is capped as it is.
+      { type: 'tool-echo', toolCallId: 'e', state: 'output-available', input: {}, output: { elicitations: [{ id: 'other' }] } },
+    ])]
+    const parts = sanitizeSnapshot(null, path, fileIdOf).snapshot.messages[0]!.parts as Array<{ output?: unknown }>
+    const cut = parts[0]?.output as { truncated: boolean, preview: string, elicitations: unknown }
+    expect(cut.truncated).toBe(true)
+    expect(cut.preview.startsWith('{"content":[{"type":"text","text":"xxx')).toBe(true)
+    expect(cut.preview.endsWith(SHARE_TRUNCATION_MARKER)).toBe(true)
+    expect(cut.elicitations).toEqual(ELICITATION_RECORDS)
+    expect(JSON.stringify(cut).length).toBeLessThanOrEqual(LIMITS.shareToolValueChars)
+    expect(parts[1]?.output).toEqual({ content: [], elicitations: [ELICITATION_RECORDS[0]] })
+    expect((parts[2]?.output as { elicitations: unknown[] }).elicitations).toEqual(many.slice(0, SHARE_ELICITATION_RECORDS_MAX))
+    expect(parts[3]?.output).toEqual({ content: [] })
+    expect(parts[4]?.output).toEqual({ elicitations: [{ id: 'other' }] })
+    expect(JSON.stringify(parts)).not.toContain('VALUE-SENTINEL')
+  })
+
+  it('a call stored with a preliminary output is stopped and its progress is not copied', () => {
+    const path = [message(1, 'assistant', [
+      mcpWaitingPart(),
+      { type: 'tool-task', toolCallId: 't', state: 'output-available', preliminary: true, input: { description: 'Scan' }, output: { status: 'running', steps: [] } },
+    ])]
+    expect(sanitizeSnapshot(null, path, fileIdOf).snapshot.messages[0]?.parts).toEqual([
+      { type: 'tool', toolName: 'mcp__fake__ask', status: 'stopped', input: {} },
+      { type: 'tool', toolName: 'task', status: 'stopped', input: { description: 'Scan' } },
+    ])
+  })
+
+  it('serves the search rows and records only with tool details; the sources always', () => {
+    const { snapshot } = sanitizeSnapshot('Search', recordMessages(), fileIdOf)
+    const hidden = renderShareMessages(snapshot, renderContext(NO_OPTIONS))
+    expect(hidden[1]?.parts).toEqual([
+      { type: 'tool', toolName: 'search_web', status: 'done' },
+      { type: 'source-url', sourceId: 'src_search_1', url: SEARCH_RESULTS[0]!.url, title: SEARCH_RESULTS[0]!.title },
+      { type: 'source-url', sourceId: 'src_search_2', url: SEARCH_RESULTS[1]!.url, title: SEARCH_RESULTS[1]!.title },
+      { type: 'tool', toolName: 'web_search', status: 'done' },
+      { type: 'source-url', sourceId: 'src_native_1', url: 'https://weather.example/lisbon', title: 'Lisbon weather' },
+      { type: 'tool', toolName: 'web_search', status: 'done' },
+      { type: 'tool', toolName: 'mcp__fake__ask', status: 'done' },
+      { type: 'text', text: 'Done.' },
+    ])
+    const shown = renderShareMessages(snapshot, renderContext(ALL_OPTIONS))
+    expect(shown[1]?.parts).toEqual(snapshot.messages[1]?.parts)
   })
 })
