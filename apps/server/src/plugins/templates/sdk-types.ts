@@ -38,7 +38,7 @@ declare module '@harness-forge/plugin-sdk' {
   export type ToolPolicy = 'safe' | 'ask' | 'always'
   export type ReasoningEffort = 'auto' | 'off' | 'low' | 'medium' | 'high' | 'max'
   /** AI SDK top-level "reasoning" values (without "provider-default"). */
-  export type ReasoningLevel = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
+  export type ReasoningLevel = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
   export type ApiFormat = 'openai-chat' | 'openai-responses' | 'anthropic' | 'google'
   export type ReasoningStyle = 'openai-effort' | 'anthropic-thinking' | 'google-thinking' | 'none'
   export type HarnessErrorCode

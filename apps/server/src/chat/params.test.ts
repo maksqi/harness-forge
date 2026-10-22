@@ -84,6 +84,13 @@ describe('providerReasoning', () => {
     expect(providerReasoning(resolved(), 'high', logger)).toBeUndefined()
   })
 
+  it('keeps every AI SDK reasoning level, including max (@ai-sdk/provider 4.0.23+)', () => {
+    const logger = createSilentLogger()
+    for (const level of ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const)
+      expect(providerReasoning(resolved({ fn: () => ({ reasoning: level }) }), 'high', logger)).toEqual({ reasoning: level })
+    expect(providerReasoning(resolved({ fn: () => ({ reasoning: 'provider-default' }) as never }), 'high', logger)).toEqual({})
+  })
+
   it('ignores a throwing provider and invalid values', () => {
     const logger = createSilentLogger()
     expect(providerReasoning(resolved({ fn: () => {
@@ -131,6 +138,14 @@ describe('buildRunParams', () => {
       providerOptions: { prov: { budget: 1024 }, extra: { on: true } },
       headers: { 'x-ok': 'yes' },
     })
+  })
+
+  it('keeps reasoning "max" from a chat.params hook', async () => {
+    const run: HookRun = async (name, ...args) => {
+      if (name === 'chat.params')
+        (args[1] as unknown as Record<string, unknown>).reasoning = 'max'
+    }
+    expect((await buildRunParams(input({ run }))).reasoning).toBe('max')
   })
 
   it('falls back to the pre-hook values for invalid hook output', async () => {

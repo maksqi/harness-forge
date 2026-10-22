@@ -5,16 +5,16 @@ packages:
 
 # Shared versions. Reference them from package.json files as "catalog:".
 catalog:
-  '@ai-sdk/provider': ^4.0.21
+  '@ai-sdk/provider': ^4.0.31
   '@types/node': ^22.20.5
-  '@vitest/coverage-v8': ^4.1.11
-  ai: ^7.0.127
+  '@vitest/coverage-v8': ^5.0.5
+  ai: ^7.0.147
   hono: ^4.13.13
   tsx: ^4.23.15
   typescript: ~6.0.3
-  vitest: ^4.0.0
+  vitest: ^5.0.5
   yaml: ^2.9.1
-  zod: ^4.1.0
+  zod: ^4.6.7
 
 overrides:
   # TypeScript 7 breaks .vue files that import prop types (ADR-013). Never upgrade.
@@ -23,6 +23,12 @@ overrides:
   source-map-js@<1.2.2: ^1.2.2
   # GHSA-pqg4-j6r4-53mv (2026-10-06): shell-quote < 1.11.0 (only @nuxt/devtools -> launch-editor, which allows ^1.8.4).
   shell-quote@<1.11.0: ^1.11.0
+  # GHSA-238p-pmpm-9mq7 (low, 2026-10-22): the last katex < 0.18.2 path is dev tooling only (@antfu/eslint-config ->
+  # @eslint/markdown -> micromark-extension-math, which allows ^0.16.0); mermaid 12.2 already depends on katex ^0.18.
+  micromark-extension-math>katex: ^0.18.11
+  # GHSA-67mh-4wv8-2f99 (moderate, 2026-10-22): drizzle-kit (db:generate only) still pulls esbuild 0.18 through the
+  # deprecated @esbuild-kit loaders; their esbuild calls (transform / build) are unchanged in 0.25.
+  '@esbuild-kit/core-utils>esbuild': ^0.25.12
 
 # Dependency build scripts are blocked unless listed here (true = run, false = skip silently).
 allowBuilds:
@@ -36,16 +42,15 @@ strictDepBuilds: true
 
 # Ignored advisories (2026-10-03): both reach only the web build tooling (nuxt CLI / nitropack: listhen -> node-forge,
 # globby -> micromatch -> braces), never the server runtime or the generated SPA, and no patched release (braces 3.0.4,
-# node-forge 1.4.1) was published yet. Remove each entry once the fix is released.
-# Ignored advisories (2026-10-06): simple-git / @simple-git/argv-parser reach only @nuxt/devtools (nuxt -> @nuxt/devtools
-# 3.4.2 -> simple-git ^3.36.0), which is disabled in apps/web/nuxt.config.ts and never part of the server runtime or the
-# generated SPA; the fixes exist only in new majors (simple-git 4.0.1, argv-parser 2.0.1). Remove them once a stable
-# @nuxt/devtools depends on simple-git 4.
+# node-forge 1.4.1) was published yet (re-checked 2026-10-22). Remove each entry once the fix is released.
 auditConfig:
   ignoreGhsas:
     - GHSA-86w9-cpqp-85rv
     - GHSA-vfj7-8cjw-p6xm
-    - GHSA-v5rq-49vh-5v5c
-    - GHSA-858h-whjf-mvg5
-    - GHSA-g4wm-2vf7-vfgr
-    - GHSA-x6jw-m9v5-85vh
+
+# Local fixes of published packages (`pnpm patch`; the Dockerfile copies patches/ before `pnpm fetch`). Drop an entry
+# once upstream ships the fix and the version is bumped.
+# vue-stick-to-bottom 1.0.1: the compiled runtime props of StickToBottom drop `String` from `initial` although its
+# types allow 'instant' (AiConversation passes initial="instant"), so Vue warns on every mount in dev and tests.
+patchedDependencies:
+  vue-stick-to-bottom@1.0.1: patches/vue-stick-to-bottom@1.0.1.patch

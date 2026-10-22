@@ -48,8 +48,8 @@ import type { z } from 'zod'
 export type ProviderOptions = SharedV4ProviderOptions
 
 /**
- * AI SDK v7 top-level `reasoning` values without `provider-default`:
- * `'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'`.
+ * AI SDK v7 top-level `reasoning` values without `provider-default` (`@ai-sdk/provider` 4.0.23+ adds `max`):
+ * `'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'`.
  */
 export type ReasoningLevel = Exclude<NonNullable<LanguageModelCallOptions['reasoning']>, 'provider-default'>
 

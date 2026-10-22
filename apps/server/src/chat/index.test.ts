@@ -483,27 +483,40 @@ describe('the run end', () => {
   })
 
   it('an aborted run removes what was queued after the stop emptied the queue (stopped)', async () => {
-    // A stream that ignores the abort until the test ends it, so the run stays registered after the stop.
-    let streamController!: ReadableStreamDefaultController<LanguageModelV4StreamPart>
-    const model = controlledModel(() => new ReadableStream<LanguageModelV4StreamPart>({
-      start(controller) {
-        streamController = controller
-      },
-    }))
+    // The run's end (the chat touch after the reply is stored) waits until the test releases it, so the run stays
+    // registered after the stop. A model stream cannot hold it any more: since AI SDK 7.0.130 `streamText` cancels the
+    // model stream and ends with `abort` as soon as the signal fires.
+    const model = controlledModel(() => new ReadableStream<LanguageModelV4StreamPart>())
     const chatId = newChatId()
-    const response = await postChat(t, chatBody(chatId, 'go', { modelRef: 'testkit:tools' }))
-    await model.entered(1)
-    const before = await enqueued(t, chatId, 'before the stop')
-    const stopping = t.deps.runs.stop(chatId)
-    expect(t.deps.runs.queueList(chatId)).toEqual([])
-    expect(t.deps.runs.hasRun(chatId)).toBe(true)
-    const late = await enqueued(t, chatId, 'after the stop')
-    streamController.close()
-    expect(await stopping).toBe(true)
-    void response.body?.cancel()
-    expect(removals(chatId)).toEqual([`stopped:${before.id}`, `stopped:${late.id}`])
-    expect(t.deps.runs.queueList(chatId)).toEqual([])
-    expect(runStarts(chatId)).toHaveLength(1)
+    const ended = deferred()
+    let holding = false
+    const touch = t.deps.chats.touch
+    const held = vi.spyOn(t.deps.chats, 'touch').mockImplementation(async (id, input) => {
+      if (holding && id === chatId)
+        await ended.promise
+      return touch(id, input)
+    })
+    try {
+      const response = await postChat(t, chatBody(chatId, 'go', { modelRef: 'testkit:tools' }))
+      await model.entered(1)
+      const before = await enqueued(t, chatId, 'before the stop')
+      holding = true
+      const stopping = t.deps.runs.stop(chatId)
+      expect(t.deps.runs.queueList(chatId)).toEqual([])
+      expect(t.deps.runs.hasRun(chatId)).toBe(true)
+      const late = await enqueued(t, chatId, 'after the stop')
+      expect(t.deps.runs.hasRun(chatId)).toBe(true)
+      ended.resolve()
+      expect(await stopping).toBe(true)
+      void response.body?.cancel()
+      expect(removals(chatId)).toEqual([`stopped:${before.id}`, `stopped:${late.id}`])
+      expect(t.deps.runs.queueList(chatId)).toEqual([])
+      expect(runStarts(chatId)).toHaveLength(1)
+    }
+    finally {
+      ended.resolve()
+      held.mockRestore()
+    }
   })
 
   it('a next turn that cannot start is reported failed with its error', async () => {

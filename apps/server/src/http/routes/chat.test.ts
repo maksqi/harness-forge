@@ -394,7 +394,7 @@ describe('pOST /api/chat: stop, disconnect and resume', () => {
     expect(result).toEqual({ stopped: true, dropped: queued })
     expect(events.filter(event => event.type === 'queue.changed' && event.data.removed !== undefined).map(event => event.data))
       .toEqual([{ chatId, items: [], removed: queued.map(item => ({ id: item.id, reason: 'stopped' })) }])
-    expect((await t.request(`/api/chat/${chatId}/queue`)).json()).resolves.toEqual({ items: [] })
+    await expect((await t.request(`/api/chat/${chatId}/queue`)).json()).resolves.toEqual({ items: [] })
     // Nothing queued starts a turn: the path ends with the aborted reply.
     expect((await detailOf(chatId)).messages.map(message => message.role)).toEqual(['user', 'assistant'])
     expect(events.filter(event => event.type === 'run.started' && event.data.chatId === chatId)).toHaveLength(1)
@@ -1210,12 +1210,31 @@ describe('robustness', () => {
 })
 
 describe('a provider that ignores the abort signal', () => {
-  it('is force-released after the stop wait, so the chat is not locked', async () => {
-    const app = await createTestApp({ env: { HF_MOCK_PROVIDER: '1' }, factories: { runs: deps => createChatRunnerWith(deps, { stopWaitMs: 200 }) } })
+  /** A stream that sends `first` (if any), then never produces a chunk and never ends, whatever the signal says. */
+  function hangingModel(first?: LanguageModelV4StreamPart): LanguageModelV4 {
+    return new MockLanguageModelV4({
+      doStream: async () => ({
+        stream: new ReadableStream<LanguageModelV4StreamPart>({
+          start(controller) {
+            if (first !== undefined)
+              controller.enqueue(first)
+          },
+          pull: () => new Promise<void>(() => {}),
+        }),
+      }),
+    })
+  }
+
+  async function storedTexts(app: TestApp, chatId: string): Promise<string[]> {
+    const detail = chatDetailSchema.parse(await (await app.request(`/api/chats/${chatId}`)).json())
+    return detail.messages.map(message => messageText(message))
+  }
+
+  it('is cut off by the stop: the reply is stored as aborted at once and the chat is not locked', async () => {
+    const app = await createTestApp({ env: { HF_MOCK_PROVIDER: '1' }, factories: { runs: deps => createChatRunnerWith(deps, { stopWaitMs: 2000 }) } })
     const testkit = registerTestkit(app)
     try {
-      // A stream that never produces a chunk and never ends, whatever the signal says.
-      scripted.set('plain', new MockLanguageModelV4({ doStream: async () => ({ stream: new ReadableStream<LanguageModelV4StreamPart>({ pull: () => new Promise<void>(() => {}) }) }) }))
+      scripted.set('plain', hangingModel())
       const chatId = testChatId(980)
       const finished = nextEvent(app, 'run.finished', event => event.data.chatId === chatId)
       const response = await postChat(app, chatBody(chatId, 'hang', { modelRef: 'testkit:plain' }))
@@ -1224,15 +1243,69 @@ describe('a provider that ignores the abort signal', () => {
       expect(await stop.json()).toEqual({ stopped: true })
       expect((await finished).data).toMatchObject({ outcome: 'aborted', awaitingApproval: false })
       expect(app.deps.runs.isActive(chatId)).toBe(false)
-      // Nothing was stored for the run: the active path ends at its user message.
+      // Since AI SDK 7.0.130 `streamText` cancels the model stream and ends with `abort` as soon as the signal fires, so
+      // the run ends through the normal persistence path (a forced release would store nothing): the empty reply is
+      // stored with `aborted: true`.
       const stopped = chatDetailSchema.parse(await (await app.request(`/api/chats/${chatId}`)).json())
-      expect(stopped.messages.map(message => messageText(message))).toEqual(['hang'])
+      expect(stopped.messages.map(message => messageText(message))).toEqual(['hang', ''])
+      expect(stopped.messages[1]?.metadata).toMatchObject({ aborted: true })
       void response.body?.cancel()
       const again = await postChat(app, chatBody(chatId, 'again'))
       expect(again.status).toBe(200)
       expect(streamedText((await readSse(again)).chunks)).toBe('again')
     }
     finally {
+      testkit.dispose()
+      await app.close()
+    }
+  })
+
+  it('is force-released after the stop wait when its stream stalls too, so the chat is not locked; the late end stores nothing', async () => {
+    const app = await createTestApp({ env: { HF_MOCK_PROVIDER: '1' }, factories: { runs: deps => createChatRunnerWith(deps, { stopWaitMs: 200 }) } })
+    const testkit = registerTestkit(app)
+    // Storing the generated image stalls until the test ends it: the SDK cuts its own stream at the stop, but the run's
+    // stream waits for the store, so the run does not settle within the stop wait.
+    let storing!: () => void
+    const entered = new Promise<void>((resolve) => {
+      storing = resolve
+    })
+    let unstall!: () => void
+    const stalled = new Promise<void>((resolve) => {
+      unstall = resolve
+    })
+    const saveGenerated = app.deps.files.saveGenerated
+    Object.assign(app.deps.files, {
+      saveGenerated: async (input: Parameters<typeof saveGenerated>[0]) => {
+        storing()
+        await stalled
+        return saveGenerated(input)
+      },
+    })
+    try {
+      scripted.set('plain', hangingModel({ type: 'file', mediaType: 'image/png', data: { type: 'data', data: PNG } }))
+      const chatId = testChatId(981)
+      const finished = nextEvent(app, 'run.finished', event => event.data.chatId === chatId)
+      const response = await postChat(app, chatBody(chatId, 'hang', { modelRef: 'testkit:plain' }))
+      expect(response.status).toBe(200)
+      await entered
+      const stop = await app.request(`/api/chat/${chatId}/stop`, { method: 'POST' })
+      expect(await stop.json()).toEqual({ stopped: true })
+      expect((await finished).data).toMatchObject({ outcome: 'aborted', awaitingApproval: false })
+      expect(app.deps.runs.isActive(chatId)).toBe(false)
+      expect(app.deps.runs.hasRun(chatId)).toBe(false)
+      // Nothing was stored for the run: the active path ends at its user message.
+      expect(await storedTexts(app, chatId)).toEqual(['hang'])
+      // The stalled stream ends after the release: its late end callback stores nothing either.
+      unstall()
+      await readSse(response)
+      expect(app.logs.records.some(record => record.msg === 'a force-released run ended; its message is not stored' && record.chatId === chatId)).toBe(true)
+      expect(await storedTexts(app, chatId)).toEqual(['hang'])
+      const again = await postChat(app, chatBody(chatId, 'again'))
+      expect(again.status).toBe(200)
+      expect(streamedText((await readSse(again)).chunks)).toBe('again')
+    }
+    finally {
+      unstall()
       testkit.dispose()
       await app.close()
     }

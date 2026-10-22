@@ -40,6 +40,7 @@ WORKDIR /app
 # ---------- deps: download every package of the lockfile (cached until the lockfile changes) ----------
 FROM base AS deps
 COPY pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY patches ./patches
 RUN pnpm fetch
 
 # ---------- build: install from the fetched store, then build the web app (nuxt generate) and the server (tsdown) ----

@@ -11,6 +11,10 @@
 // client, which terminates a stdio child. Connected servers' tools are registered as `mcp__<serverId>__<tool>` owned
 // by the declaring plugin (`mcpServerId` set) with the policy from their annotations; they are unregistered on
 // disconnect and listed as `available: false` by the tool service. Status changes emit `plugin.changed` for the owner.
+// v1.8.1 (ADR-053): a plugin's stdio server starts (connect, retry, reconnect) only while a Claude Code plugin's whole
+// tree still hashes to its trust pin (`createClaudeTrustGuard`, `plugins/claude/trust.ts`; other formats pass); a
+// mismatch is a permanent `forbidden` error of the server (no retry) and the plugin is loaded again, which leaves it
+// `untrusted` and removes its servers.
 import type { MCPClient, MCPClientConfig } from '@ai-sdk/mcp'
 import type { Disposable, McpServerDecl, ToolCallContext, ToolDefinition } from '@harness-forge/plugin-sdk'
 import type { HarnessErrorInit, LogLevel, McpServer, McpStatus, ToolPolicy } from '@harness-forge/shared'
@@ -27,6 +31,7 @@ import { join } from 'node:path'
 import { createMCPClient } from '@ai-sdk/mcp'
 import { HarnessError } from '@harness-forge/shared'
 import { appVersion } from '../paths.ts'
+import { createClaudeTrustGuard } from '../plugins/claude/trust.ts'
 import { connectionErrorInit, errorMessage, isConnectionFailure, isPermanentMcpError, mcpConfigError } from './errors.ts'
 import { CORE_MCP_PLUGIN_ID } from './internal.ts'
 import { mcpToolDefinition, mcpToolTitle, offlineToolOf } from './mcp-tools.ts'
@@ -143,7 +148,8 @@ export function createMcpManager(deps: AppDeps): McpManager {
 export function createMcpManagerCore(deps: AppDeps, options: McpManagerOptions = {}): McpManager & McpManagerInternals {
   const store = createUserServerStore(deps)
   const retryDelays = options.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS
-  const createClient = options.createClient ?? createMCPClient
+  // Without an `experimental_events.adapter` the SDK returns a plain MCPClient (the overloads of @ai-sdk/mcp 2.0.80).
+  const createClient = options.createClient ?? ((config: MCPClientConfig): Promise<MCPClient> => createMCPClient({ ...config, experimental_events: undefined }))
   const servers = new Map<string, ServerRuntime>()
   /** Cache of `mcp_servers` rows, maintained by the serialized user operations. */
   const userRows = new Map<string, UserServerRecord>()
@@ -153,6 +159,8 @@ export function createMcpManagerCore(deps: AppDeps, options: McpManagerOptions =
   const userErrors = new Map<string, HarnessErrorInit>()
   const closing = new Set<Promise<void>>()
   const attempts = new Set<Promise<void>>()
+  /** v1.8.1: the verify-before-spawn of Claude Code plugin stdio servers. */
+  const trustGuard = createClaudeTrustGuard(deps.plugins, deps.logger.child({ component: 'mcp' }))
   const emitTimers = new Map<string, NodeJS.Timeout>()
   let subscriptions: Disposable[] = []
   let userOps: Promise<unknown> = Promise.resolve()
@@ -348,6 +356,12 @@ export function createMcpManagerCore(deps: AppDeps, options: McpManagerOptions =
     }
     if (!trusted)
       throw new HarnessError({ code: 'forbidden', message: `The plugin "${pluginId}" is not trusted, so its stdio MCP server "${id}" is not started.` })
+    // v1.8.1: a Claude Code plugin's files are hashed again right before its server starts (other formats pass).
+    const root = await deps.plugins.directory(pluginId).catch(() => null)
+    if (root === null || await trustGuard.verify(pluginId, root))
+      return
+    trustGuard.changed(pluginId)
+    throw new HarnessError({ code: 'forbidden', message: `The files of the plugin "${pluginId}" changed after it was trusted, so its stdio MCP server "${id}" is not started. Review and trust the plugin again.` })
   }
 
   async function resolveTarget(id: string): Promise<ConnectTarget> {
@@ -885,7 +899,7 @@ export function createMcpManagerCore(deps: AppDeps, options: McpManagerOptions =
       coreActive = false
       disposeUserDecls()
       await Promise.allSettled(pending)
-      await Promise.allSettled([...closing])
+      await Promise.allSettled([...closing, trustGuard.stop()])
     },
 
     list: async () => {

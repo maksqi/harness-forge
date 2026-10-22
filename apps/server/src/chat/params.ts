@@ -41,7 +41,10 @@ export interface RunParams {
   headers: Record<string, string>
 }
 
-const REASONING_LEVELS: ReadonlySet<string> = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh'])
+// Every `ReasoningLevel` (derived from `@ai-sdk/provider`; 4.0.23+ adds `max`): `satisfies` fails the typecheck when the
+// union changes, so a new level is never dropped silently.
+const REASONING_LEVEL_KEYS = { none: true, minimal: true, low: true, medium: true, high: true, xhigh: true, max: true } as const satisfies Record<ReasoningLevel, true>
+const REASONING_LEVELS: ReadonlySet<string> = new Set(Object.keys(REASONING_LEVEL_KEYS))
 const MAX_STEPS_LIMIT = LIMITS.stepsMax
 const HEADER_VALUE_MAX_CHARS = 8192
 

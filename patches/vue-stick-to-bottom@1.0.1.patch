@@ -1,0 +1,13 @@
+diff --git a/dist/index.es.js b/dist/index.es.js
+index 09b924c2ef86ea6433308523177911f8cce49786..85c487bdc36e4e897c0e4ffb732a947d9a2cf7d4 100644
+--- a/dist/index.es.js
++++ b/dist/index.es.js
+@@ -391,7 +391,7 @@ var StickToBottom_default = /* @__PURE__ */ defineComponent({
+ 	__name: "StickToBottom",
+ 	props: {
+ 		resize: {},
+-		initial: { type: [Object, Boolean] },
++		initial: { type: [Object, Boolean, String] },
+ 		targetScrollTop: { type: Function },
+ 		anchor: {},
+ 		damping: {},
