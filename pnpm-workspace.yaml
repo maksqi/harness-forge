@@ -8,7 +8,7 @@ catalog:
   '@ai-sdk/provider': ^4.0.31
   '@types/node': ^22.20.5
   '@vitest/coverage-v8': ^5.0.5
-  ai: ^7.0.147
+  ai: ^7.0.148
   hono: ^4.13.13
   tsx: ^4.23.15
   typescript: ~6.0.3

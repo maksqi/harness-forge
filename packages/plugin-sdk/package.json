@@ -13,10 +13,10 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@ai-sdk/anthropic": "^4.0.84",
-    "@ai-sdk/google": "^4.0.101",
-    "@ai-sdk/openai": "^4.0.98",
-    "@ai-sdk/openai-compatible": "^3.0.74",
+    "@ai-sdk/anthropic": "^4.0.85",
+    "@ai-sdk/google": "^4.0.102",
+    "@ai-sdk/openai": "^4.0.99",
+    "@ai-sdk/openai-compatible": "^3.0.75",
     "@ai-sdk/provider": "catalog:",
     "@harness-forge/shared": "workspace:*",
     "ai": "catalog:",
