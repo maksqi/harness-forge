@@ -564,4 +564,32 @@ describe('sEC-A5 negative controls: nothing runs code, a stale session is enough
         expect(response.status, key).toBe(501)
     }
   })
+
+  it('the MCP sign-in, elicitation, resource and search test routes (Phase 14, ADR-059 … ADR-063) take a stale session', async () => {
+    const a = await passwordApp()
+    const stale = await cookie(a, FRESH_AUTH_WINDOW_MS + 60_000)
+    const keys = API_ROUTE_KEYS.filter(key => ['mcpAuth', 'chatElicitations', 'mcpResources', 'webSearch'].includes(apiRoutes[key].module))
+    expect(keys).toEqual([
+      'mcpAuth.start',
+      'mcpAuth.signOut',
+      'mcpAuth.projectStart',
+      'mcpAuth.projectSignOut',
+      'mcpAuth.callback',
+      'chatElicitations.answer',
+      'mcpResources.list',
+      'mcpResources.attach',
+      'webSearch.test',
+    ])
+    for (const key of keys) {
+      expect((apiRoutes[key] as ApiRouteDef).fresh, key).toBeUndefined()
+      const { path, init } = sampleRequest(key, { headers: { cookie: stale } })
+      const response = await a.t.request(path, init)
+      const text = await response.text()
+      // The sample server, project, chat, elicitation and sign-in flow do not exist and no search key is set: the
+      // request reaches the route (501 while stubbed, else 200, 400, 404 or 409), never the fresh-auth refusal.
+      expect([401, 403], `${key}: ${text}`).not.toContain(response.status)
+      if (stubRouteKeys().has(key))
+        expect(response.status, key).toBe(501)
+    }
+  })
 })

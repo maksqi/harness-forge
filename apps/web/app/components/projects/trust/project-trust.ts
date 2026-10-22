@@ -280,6 +280,9 @@ export function mcpStatusText(server: ProjectMcpServer): string {
       return server.error ? `Error: ${server.error.message}` : 'Error'
     case 'disabled':
       return server.error?.message ?? 'Off on this server (safe mode)'
+    // Phase 14 (ADR-059): an approved http / sse server asks for a sign-in.
+    case 'needs-auth':
+      return 'Sign in required'
   }
 }
 
@@ -300,6 +303,8 @@ export function mcpStatusDot(server: ProjectMcpServer): { status: StatusDotStatu
       return { status: 'error', label: 'Error' }
     case 'disabled':
       return { status: 'off', label: 'Off' }
+    case 'needs-auth':
+      return { status: 'warning', label: 'Sign in required' }
   }
 }
 

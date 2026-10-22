@@ -84,7 +84,8 @@ describe('enums (Phase 12, ADR-053 / ADR-054)', () => {
     expect(pluginFormatSchema.options).toEqual(['harness', 'claude'])
     expect(marketplaceSourceTypeSchema.options).toEqual(['github', 'url', 'path'])
     expect(marketplaceEntrySourceKindSchema.options).toEqual([...CLAUDE_ENTRY_SOURCE_KINDS])
-    expect(conflictReasonSchema.options.at(-1)).toBe('offline')
+    // Phase 14 appends `needs-auth` after `offline`.
+    expect(conflictReasonSchema.options.slice(-2)).toEqual(['offline', 'needs-auth'])
   })
 })
 

@@ -50,7 +50,10 @@ describe('fresh routes of the route table', () => {
     // (checked by the route, like stdio `mcp.update`); listing, the run log, deleting a hook, revoking an approval and
     // reconnecting a server do not. Phase 12: scanning the server's Claude Code folder and applying an import (personal
     // hooks, stdio MCP servers, shell rules; ADR-055) need it; marketplaces (installs go through the plugin install
-    // review) and project definition files (saving never approves anything, ADR-056) do not.
+    // review) and project definition files (saving never approves anything, ADR-056) do not. Phase 14: none of the MCP
+    // sign-in routes (a sign-in grants a remote server access, never code on the host, ADR-059), the elicitation answer
+    // (ADR-060), the resource routes (ADR-061) nor the search test (ADR-063) needs it (still 14).
+    expect(FRESH_KEYS).toHaveLength(14)
     expect(FRESH_KEYS.sort()).toEqual([
       'auth.setPassword',
       'claudeImport.apply',

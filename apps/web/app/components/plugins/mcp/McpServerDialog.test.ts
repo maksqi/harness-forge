@@ -26,13 +26,14 @@ function mcpServer(overrides: Partial<McpServer> = {}): McpServer {
     name: 'GitHub',
     pluginId: 'core-mcp',
     editable: true,
-    transport: { type: 'http', url: 'https://mcp.example.com/mcp', headers: { Authorization: { set: true, hint: STORED_HINT, source: 'stored' } } },
+    transport: { type: 'http', url: 'https://mcp.example.com/mcp', headers: { Authorization: { set: true, hint: STORED_HINT, source: 'stored' } }, oauth: null },
     policy: 'ask',
     enabled: true,
     status: 'connected',
     error: null,
     tools: [],
     connectedAt: 1_759_000_000_000,
+    auth: null,
     ...overrides,
   }
 }
@@ -41,7 +42,7 @@ function mcpServer(overrides: Partial<McpServer> = {}): McpServer {
 function created(input: McpServerInput): McpServer {
   const transport: McpServer['transport'] = input.transport.type === 'stdio'
     ? { type: 'stdio', command: input.transport.command, args: input.transport.args ?? [], env: {} }
-    : { type: input.transport.type, url: input.transport.url, headers: {} }
+    : { type: input.transport.type, url: input.transport.url, headers: {}, oauth: null }
   return mcpServer({ id: input.id, name: input.name, transport, policy: input.policy ?? 'ask', status: 'connecting' })
 }
 
@@ -371,6 +372,7 @@ describe('mcpServerDialog: edit', () => {
           'Authorization': { set: true, hint: STORED_HINT, source: 'stored' },
           'X-Old': { set: true, hint: null, source: 'stored' },
         },
+        oauth: null,
       },
     })
     api.mcp.update.mockResolvedValue(server)

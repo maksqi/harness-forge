@@ -8,7 +8,7 @@
 // opens the project MCP dialog through CHAT_VIEW_ACTIONS (only inside a chat view).
 import type { NoticeCode, NoticeData } from '@harness-forge/shared'
 import type { Component } from 'vue'
-import { BanIcon, CpuIcon, FeatherIcon, FolderXIcon, FoldVerticalIcon, ImageOffIcon, InfoIcon, PaperclipIcon, ServerOffIcon, TriangleAlertIcon, WebhookIcon, WrenchIcon } from '@lucide/vue'
+import { BanIcon, CpuIcon, FeatherIcon, FolderXIcon, FoldVerticalIcon, GlobeOffIcon, ImageOffIcon, InfoIcon, PaperclipIcon, ServerOffIcon, TriangleAlertIcon, WebhookIcon, WrenchIcon } from '@lucide/vue'
 import { computed, inject } from 'vue'
 import { cn } from '@/lib/utils'
 import { CHAT_VIEW_ACTIONS } from '../chat-context'
@@ -31,6 +31,8 @@ const CODE_ICONS: Record<NoticeCode, Component> = {
   'output-style-unavailable': FeatherIcon,
   'hook-continuation-limit': WebhookIcon,
   'project-mcp-unavailable': ServerOffIcon,
+  // Phase 14 (ADR-063): web search is on but the turn cannot search (the text comes from the server).
+  'web-search-unavailable': GlobeOffIcon,
 }
 
 const icon = computed<Component>(() => (CODE_ICONS as Partial<Record<string, Component>>)[props.notice.code]

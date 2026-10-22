@@ -73,6 +73,18 @@ import {
   marketplaceParamsSchema,
 } from '../schemas/marketplaces.ts'
 import {
+  chatElicitationParamsSchema,
+  mcpAuthCallbackBodySchema,
+  mcpAuthCallbackResultSchema,
+  mcpAuthStartBodySchema,
+  mcpAuthStartSchema,
+  mcpElicitationAnswerBodySchema,
+  mcpElicitationAnswerResultSchema,
+  mcpResourceAttachBodySchema,
+  mcpResourceListSchema,
+  mcpResourceQuerySchema,
+} from '../schemas/mcp.ts'
+import {
   catalogModelSchema,
   customModelInputSchema,
   customModelKeySchema,
@@ -179,6 +191,7 @@ import {
   toolSummarySchema,
   toolUpdateSchema,
 } from '../schemas/tools.ts'
+import { webSearchTestBodySchema, webSearchTestResultSchema } from '../schemas/web-search.ts'
 
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
 
@@ -226,6 +239,10 @@ export const API_MODULES = [
   'marketplaces',
   'claudeImport',
   'projectDefinitions',
+  'mcpAuth',
+  'chatElicitations',
+  'mcpResources',
+  'webSearch',
 ] as const
 export type ApiModule = (typeof API_MODULES)[number]
 
@@ -260,7 +277,7 @@ export interface ApiRouteDef {
   status?: 200 | 201 | 204
 }
 
-/** Every endpoint of API.md (132 routes), keyed `<module>.<action>`. */
+/** Every endpoint of API.md (141 routes), keyed `<module>.<action>`. */
 export const apiRoutes = {
   // health.ts
   'health.get': { module: 'health', method: 'GET', path: '/health', public: true, response: healthSchema },
@@ -482,6 +499,29 @@ export const apiRoutes = {
   'projectDefinitions.read': { module: 'projectDefinitions', method: 'GET', path: '/projects/:id/definitions/file', params: projectParamsSchema, query: projectDefinitionQuerySchema, response: projectDefinitionFileSchema },
   'projectDefinitions.write': { module: 'projectDefinitions', method: 'PUT', path: '/projects/:id/definitions/file', params: projectParamsSchema, body: projectDefinitionWriteBodySchema, response: projectDefinitionWriteResultSchema },
   'projectDefinitions.remove': { module: 'projectDefinitions', method: 'DELETE', path: '/projects/:id/definitions/file', params: projectParamsSchema, query: projectDefinitionRemoveQuerySchema, response: 'empty' },
+
+  // mcp-auth.ts (ADR-059): OAuth sign-in of http / sse MCP servers (personal, plugin and approved project servers); a
+  // start answers the authorization URL the browser opens in the same tab, the SPA page `/oauth/callback` posts the
+  // redirect's `state` and `code` (or `error`) with the session cookie; no fresh auth. `POST /mcp/oauth/callback` and
+  // `POST /mcp/:id/oauth` differ in their static third segment, as do `/mcp/:id/reconnect` and `/mcp/resources/attach`
+  'mcpAuth.start': { module: 'mcpAuth', method: 'POST', path: '/mcp/:id/oauth', params: mcpServerParamsSchema, body: mcpAuthStartBodySchema, response: mcpAuthStartSchema },
+  'mcpAuth.signOut': { module: 'mcpAuth', method: 'DELETE', path: '/mcp/:id/oauth', params: mcpServerParamsSchema, response: mcpServerSchema },
+  'mcpAuth.projectStart': { module: 'mcpAuth', method: 'POST', path: '/projects/:id/mcp/:serverId/oauth', params: projectMcpServerParamsSchema, body: mcpAuthStartBodySchema, response: mcpAuthStartSchema },
+  'mcpAuth.projectSignOut': { module: 'mcpAuth', method: 'DELETE', path: '/projects/:id/mcp/:serverId/oauth', params: projectMcpServerParamsSchema, response: projectMcpServerSchema },
+  'mcpAuth.callback': { module: 'mcpAuth', method: 'POST', path: '/mcp/oauth/callback', body: mcpAuthCallbackBodySchema, response: mcpAuthCallbackResultSchema },
+
+  // chat-elicitations.ts (ADR-060): the answer to a pending MCP elicitation of a running tool call, next to
+  // `/chat/:id/queue` and `/chat/:id/tasks`; the card comes from the tool part's preliminary output (no list route)
+  'chatElicitations.answer': { module: 'chatElicitations', method: 'POST', path: '/chat/:id/elicitations/:elicitationId', params: chatElicitationParamsSchema, body: mcpElicitationAnswerBodySchema, response: mcpElicitationAnswerResultSchema },
+
+  // mcp-resources.ts (ADR-061): the resources of connected MCP servers for the `@` menu, and attaching one as an upload
+  // (the answer is the upload's `FileRef`); `GET /mcp/resources` meets no `GET /mcp/:id` (there is none)
+  'mcpResources.list': { module: 'mcpResources', method: 'GET', path: '/mcp/resources', query: mcpResourceQuerySchema, response: mcpResourceListSchema },
+  'mcpResources.attach': { module: 'mcpResources', method: 'POST', path: '/mcp/resources/attach', body: mcpResourceAttachBodySchema, response: fileRefSchema, status: 201 },
+
+  // web-search.ts (ADR-063): "Test search" of Settings -> Web search (the backend and its keys are `core-search` plugin
+  // settings, the mode defaults are global settings)
+  'webSearch.test': { module: 'webSearch', method: 'POST', path: '/web-search/test', body: webSearchTestBodySchema, response: webSearchTestResultSchema },
 } as const satisfies Record<string, ApiRouteDef>
 
 export type ApiRoutes = typeof apiRoutes

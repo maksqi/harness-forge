@@ -103,6 +103,34 @@ export interface ImageParamsResult {
   providerOptions?: ProviderOptions
 }
 
+/**
+ * What a turn asks of a provider's own web search: the input of `ProviderDefinition.webSearch()` (plugin API 1.7.0,
+ * ADR-062). Frozen.
+ */
+export interface WebSearchRequest {
+  /**
+   * Function tools the turn sends besides search (0 when the catalog probes the hook). A provider whose search tool
+   * drops function tools (Gemini 2.x) answers `exclusive: true` and is used only for turns with 0.
+   */
+  readonly functionTools: number
+  /** Most searches one turn may run (`maxUses` / `max_results`; `WEB_SEARCH_MAX_USES`, 5). */
+  readonly maxUses: number
+}
+
+/** Request additions returned by `ProviderDefinition.webSearch()` (plugin API 1.7.0, ADR-062). */
+export interface WebSearchParams {
+  /**
+   * Provider-defined tools to add to the turn's tool set, keyed by tool name (e.g. `{ web_search:
+   * anthropic.tools.webSearch_20250305({ maxUses: 5 }) }`). The host accepts only tools with `type: 'provider'` whose
+   * name does not collide with another tool of the turn; their calls are executed by the provider and never ask.
+   */
+  tools?: Record<string, Tool>
+  /** Deep-merged into the call's provider options (e.g. OpenRouter's `plugins: [{ id: 'web' }]` for a model without tools). */
+  providerOptions?: ProviderOptions
+  /** The search tool drops function tools: offer it only for turns without function tools (`CatalogModel.webSearch` `exclusive`). */
+  exclusive?: boolean
+}
+
 /** Hints of a transcription request: the input of `ProviderDefinition.transcriptionOptions()` (ADR-029). */
 export interface TranscriptionHints {
   /** ISO 639 code of the spoken language; absent = detect automatically. */
@@ -174,6 +202,13 @@ export interface ProviderDefinition {
    * `undefined` = none (the provider detects the language).
    */
   transcriptionOptions?(hints: TranscriptionHints): ProviderOptions | undefined
+  /**
+   * Plugin API 1.7.0 (ADR-062): the model's own web search. Synchronous, no network I/O (guarded like `reasoning`; a
+   * throw counts as `undefined`); called for turns whose web search resolves to native search, and once with
+   * `{ functionTools: 0 }` to compute `CatalogModel.webSearch`. Returns provider-executed tools and / or provider
+   * options, or `undefined` when the model has no native search (the builtin `search_web` tool is used instead).
+   */
+  webSearch?(model: ModelInfo, request: WebSearchRequest): WebSearchParams | undefined
 }
 
 // ---------- tools ----------
@@ -538,8 +573,12 @@ export interface HookMap {
   ]
   /** Plugin API 1.5.0: before every compaction (observe only). */
   'compact.before': [HookChatContext & { trigger: 'manual' | 'auto', focus: string | null }, void]
-  /** Plugin API 1.5.0: the agent waits for the user (an approval request); observe only. */
-  'notification': [HookChatContext & { type: 'permission_prompt', message: string }, void]
+  /**
+   * Plugin API 1.5.0: the agent waits for the user (an approval request); observe only. Plugin API 1.7.0 (ADR-060):
+   * also `elicitation_dialog`, an MCP server asks the user for input (the message is the server's request, never the
+   * answer).
+   */
+  'notification': [HookChatContext & { type: 'permission_prompt' | 'elicitation_dialog', message: string }, void]
 }
 export type HookName = keyof HookMap
 

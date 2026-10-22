@@ -13,6 +13,7 @@ import {
   parseMcpJson,
   serverVariables,
 } from './mcp-config.ts'
+import { trustHashInput } from './trust.ts'
 
 function prng(seed: number): () => number {
   let state = seed
@@ -249,4 +250,183 @@ describe('fuzzing', { timeout: 30_000 }, () => {
     }
     expect(Date.now() - started).toBeLessThan(10_000)
   })
+})
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Phase 14 (ADR-059, C49): `oauth` of remote servers
+
+/** sha256 of `text` (UTF-8) in lowercase hex, with WebCrypto (the server hashes with `node:crypto`; same bytes). */
+async function sha256Hex(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))
+  return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('')
+}
+
+/** A `.mcp.json` with Claude Code `oauth` objects (example hosts only). */
+const OAUTH_FILE = {
+  mcpServers: {
+    github: { type: 'http', url: 'https://mcp.example.com/github/', oauth: { clientId: 'Iv1.0123456789abcdef', scopes: 'repo read:org' } },
+    linear: { type: 'sse', url: 'https://mcp.example.com/linear/sse', oauth: { clientId: 'lin_123', callbackPort: 8080 } },
+    scoped: { url: 'https://mcp.example.com/mcp', oauth: { scopes: ['read', 'write'] }, headers: { 'X-Team': '${TEAM:-core}' } },
+    remote: { type: 'http', url: 'https://mcp.example.com/mcp', headers: { Authorization: 'Bearer ${API_TOKEN}' } },
+    db: { command: 'node', args: ['tools/mcp-min.mjs'], oauth: { clientId: 'x' } },
+  },
+}
+
+/**
+ * The trust hash input and sha256 of each server of `OAUTH_FILE`, computed by the v1.8.1 code (before Phase 14 read
+ * `oauth`): every approval of a v1.8.1 project pins these bytes, so reading `oauth` must never change them.
+ */
+const GOLDEN_V181: ReadonlyArray<{ name: string, text: string, sha256: string }> = [
+  {
+    name: 'github',
+    text: '["mcp",1,"github",{"oauth":{"clientId":"Iv1.0123456789abcdef","scopes":"repo read:org"},"type":"http","url":"https://mcp.example.com/github/"},[]]',
+    sha256: '8f352e1158d80315d563aa70091a1297f69097404b39aa4756b26232b0d3e333',
+  },
+  {
+    name: 'linear',
+    text: '["mcp",1,"linear",{"oauth":{"callbackPort":8080,"clientId":"lin_123"},"type":"sse","url":"https://mcp.example.com/linear/sse"},[]]',
+    sha256: '43b50243d2b590c6259a2987cb8459ae6eed42e0b9944ae7777a2a8ffef19ece',
+  },
+  {
+    name: 'scoped',
+    text: '["mcp",1,"scoped",{"headers":{"X-Team":"${TEAM:-core}"},"oauth":{"scopes":["read","write"]},"url":"https://mcp.example.com/mcp"},[]]',
+    sha256: '50c9b1086e6f678334bb9c0b05bf5af31f304b65697f5c7f1e376d980d67d153',
+  },
+  {
+    name: 'remote',
+    text: '["mcp",1,"remote",{"headers":{"Authorization":"Bearer ${API_TOKEN}"},"type":"http","url":"https://mcp.example.com/mcp"},[]]',
+    sha256: '5426466b9e7a8cc12ed96920b148c6a3eb437a3a4ceba9c6561f34ee36f29592',
+  },
+  {
+    name: 'db',
+    text: '["mcp",1,"db",{"args":["tools/mcp-min.mjs"],"command":"node","oauth":{"clientId":"x"}},[]]',
+    sha256: '7cd227b916a7da553a1376c05f7139f237dd6996f9cc8be52f8cf80ac7adbab1',
+  },
+]
+
+describe('parseMcpJson: oauth (Phase 14)', () => {
+  const parse = (server: unknown): ParseMcpJsonResult => parseMcpJson(JSON.stringify({ mcpServers: { s: server } }))
+  const remote = (server: unknown): McpJsonRemoteServer => parse(server).servers[0]?.transport as McpJsonRemoteServer
+  const messages = (result: ParseMcpJsonResult): string[] => result.diagnostics.map(entry => `${entry.level}:${entry.code}:${entry.message}`)
+
+  it('reads the client id and scopes of remote servers', () => {
+    const result = parseMcpJson(JSON.stringify(OAUTH_FILE, null, 2))
+    const byName = new Map(result.servers.map(server => [server.name, server.transport]))
+    expect(byName.get('github')).toEqual({ type: 'http', url: 'https://mcp.example.com/github/', headers: {}, oauth: { clientId: 'Iv1.0123456789abcdef', scopes: 'repo read:org' } })
+    expect(byName.get('linear')).toEqual({ type: 'sse', url: 'https://mcp.example.com/linear/sse', headers: {}, oauth: { clientId: 'lin_123' } })
+    expect(byName.get('scoped')).toEqual({ type: 'http', url: 'https://mcp.example.com/mcp', headers: { 'X-Team': '${TEAM:-core}' }, oauth: { scopes: 'read write' } })
+    expect(byName.get('remote')).not.toHaveProperty('oauth')
+    expect(byName.get('db')).toEqual({ type: 'stdio', command: 'node', args: ['tools/mcp-min.mjs'], env: {} })
+    expect(messages(result)).toEqual([
+      'info:ignored-field:The OAuth callback port is ignored; the harness signs in through its own callback page.',
+      'info:ignored-field:The field "oauth" is ignored.',
+    ])
+    expect(codes(result)).toEqual(['info:ignored-field@linear', 'info:ignored-field@db'])
+  })
+
+  it('keeps the v1.8.1 trust hash of every server, with and without oauth', async () => {
+    const servers = parseMcpJson(JSON.stringify(OAUTH_FILE, null, 2)).servers
+    expect(servers.map(server => server.name)).toEqual(GOLDEN_V181.map(entry => entry.name))
+    for (const [index, server] of servers.entries()) {
+      const golden = GOLDEN_V181[index]!
+      expect(server.raw).toEqual(OAUTH_FILE.mcpServers[server.name as keyof typeof OAUTH_FILE.mcpServers])
+      const text = trustHashInput({ kind: 'mcp', name: server.name, server: server.raw, refs: [] })
+      expect(text, server.name).toBe(golden.text)
+      expect(await sha256Hex(text), server.name).toBe(golden.sha256)
+    }
+  })
+
+  it('ignores callbackPort and unknown OAuth keys with info diagnostics that never quote values', () => {
+    const secret = 'SecretValue'
+    const result = parse({ url: 'https://a.example.invalid', oauth: { clientId: 'app', clientSecret: secret, authServerMetadataUrl: `https://${secret}.example.invalid`, callbackPort: 9 } })
+    expect((result.servers[0]?.transport as McpJsonRemoteServer).oauth).toEqual({ clientId: 'app' })
+    expect(messages(result)).toEqual([
+      'info:ignored-field:The OAuth callback port is ignored; the harness signs in through its own callback page.',
+      'info:ignored-field:The OAuth field "clientSecret" is ignored.',
+      'info:ignored-field:The OAuth field "authServerMetadataUrl" is ignored.',
+    ])
+    for (const entry of result.diagnostics)
+      expect(entry.message).not.toContain(secret)
+    expect(remote({ url: 'https://a.example.invalid', oauth: { callbackPort: 9 } })).not.toHaveProperty('oauth')
+  })
+
+  it.each([
+    [{ clientId: 'app' }, { clientId: 'app' }, []],
+    [{ clientId: '  app  ' }, { clientId: 'app' }, []],
+    [{ clientId: 'c'.repeat(256) }, { clientId: 'c'.repeat(256) }, []],
+    [{ clientId: '${CLIENT_ID}' }, { clientId: '${CLIENT_ID}' }, []],
+    [{ scopes: '  read   write\tadmin ' }, { scopes: 'read write admin' }, []],
+    [{ scopes: ['read', ' write ', 'a b'] }, { scopes: 'read write a b' }, []],
+    [{ scopes: 's'.repeat(1024) }, { scopes: 's'.repeat(1024) }, []],
+    [{ clientId: 'app', scopes: 'read' }, { clientId: 'app', scopes: 'read' }, []],
+    [{}, undefined, []],
+    [{ scopes: '' }, undefined, []],
+    [{ scopes: [] }, undefined, []],
+    [{ clientId: null, scopes: null }, undefined, []],
+    [{ clientId: '' }, undefined, ['warning:ignored-field@s']],
+    [{ clientId: '   ' }, undefined, ['warning:ignored-field@s']],
+    [{ clientId: 'c'.repeat(257) }, undefined, ['warning:ignored-field@s']],
+    [{ clientId: 7 }, undefined, ['warning:ignored-field@s']],
+    [{ clientId: 'a\u0001b' }, undefined, ['warning:ignored-field@s']],
+    [{ scopes: 's'.repeat(1025) }, undefined, ['warning:ignored-field@s']],
+    [{ scopes: ['read', 1] }, undefined, ['warning:ignored-field@s']],
+    [{ scopes: { read: true } }, undefined, ['warning:ignored-field@s']],
+    [{ scopes: 'read\u0000' }, undefined, ['warning:ignored-field@s']],
+    [{ clientId: 'app', scopes: 5 }, { clientId: 'app' }, ['warning:ignored-field@s']],
+  ] as Array<[unknown, unknown, string[]]>)('oauth %j → %j', (oauth, expected, diagnostics) => {
+    const result = parse({ url: 'https://a.example.invalid', oauth })
+    const transport = result.servers[0]?.transport as McpJsonRemoteServer
+    if (expected === undefined)
+      expect(transport).not.toHaveProperty('oauth')
+    else
+      expect(transport.oauth).toEqual(expected)
+    expect(codes(result)).toEqual(diagnostics)
+  })
+
+  it('keeps the server when oauth is not an object', () => {
+    for (const oauth of ['x', 1, true, ['clientId']]) {
+      const result = parse({ type: 'sse', url: 'https://a.example.invalid', oauth })
+      expect(result.servers).toHaveLength(1)
+      expect(result.servers[0]?.transport).not.toHaveProperty('oauth')
+      expect(messages(result)).toEqual(['warning:ignored-field:The OAuth settings must be an object; they are ignored.'])
+    }
+    expect(codes(parse({ url: 'https://a.example.invalid', oauth: null }))).toEqual([])
+  })
+
+  it('reads no variables from oauth and keeps an stdio server without oauth', () => {
+    const transport = remote({ url: 'https://a.example.invalid', oauth: { clientId: '${CLIENT_ID}', scopes: '${SCOPES}' } })
+    expect(serverVariables(transport)).toEqual([])
+    const stdio = parse({ command: 'x', oauth: { clientId: 'app' } })
+    expect(stdio.servers[0]?.transport).toEqual({ type: 'stdio', command: 'x', args: [], env: {} })
+    expect(codes(stdio)).toEqual(['info:ignored-field@s'])
+  })
+
+  it('never throws on random oauth objects and keeps the raw object', () => {
+    const random = prng(0xC49A)
+    const pick = <T>(items: readonly T[]): T => items[Math.floor(random() * items.length)] as T
+    const values: unknown[] = [null, 1, true, '', ' ', 'app', 'read write', '\u0000', 'x'.repeat(300), ['a', 'b'], [1], {}, '${A}']
+    const keys = ['clientId', 'scopes', 'callbackPort', 'clientSecret', '__proto__', 'x']
+    for (let iteration = 0; iteration < 2000; iteration++) {
+      const oauth: Record<string, unknown> = {}
+      for (let index = Math.floor(random() * 4); index > 0; index--)
+        Object.defineProperty(oauth, pick(keys), { value: pick(values), enumerable: true, configurable: true, writable: true })
+      const server = { type: pick(['http', 'sse']), url: 'https://a.example.invalid/mcp', oauth: random() < 0.9 ? oauth : pick(values) }
+      const result = parseMcpJson(JSON.stringify({ mcpServers: { s: server } }))
+      const parsed = result.servers[0]
+      expect(parsed, JSON.stringify(server)).toBeDefined()
+      expect(parsed!.raw).toEqual(JSON.parse(JSON.stringify(server)))
+      const read = (parsed!.transport as McpJsonRemoteServer).oauth
+      if (read !== undefined) {
+        expect(read.clientId !== undefined || read.scopes !== undefined).toBe(true)
+        if (read.clientId !== undefined)
+          expect(read.clientId.length > 0 && read.clientId.length <= MCP_CONFIG_LIMITS.oauthClientIdMaxChars && read.clientId === read.clientId.trim()).toBe(true)
+        if (read.scopes !== undefined)
+          expect(read.scopes.length > 0 && read.scopes.length <= MCP_CONFIG_LIMITS.oauthScopesMaxChars && !/\s{2}|^\s|\s$/.test(read.scopes)).toBe(true)
+      }
+      for (const entry of result.diagnostics) {
+        expect(entry.code).toBe('ignored-field')
+        expect(entry.level === 'error').toBe(false)
+      }
+    }
+  }, 30_000)
 })

@@ -90,8 +90,8 @@ function tableSignatures(): string[] {
 }
 
 describe('route table', () => {
-  it('has 132 routes keyed <module>.<action>', () => {
-    expect(API_ROUTE_KEYS).toHaveLength(132)
+  it('has 141 routes keyed <module>.<action>', () => {
+    expect(API_ROUTE_KEYS).toHaveLength(141)
     for (const key of API_ROUTE_KEYS) {
       const route: ApiRouteDef = apiRoutes[key]
       expect(key.startsWith(`${route.module}.`), key).toBe(true)
@@ -107,7 +107,7 @@ describe('route table', () => {
 
   it('equals the route key index of API.md (key, method, path, module)', () => {
     const index = routeIndex()
-    expect(index).toHaveLength(132)
+    expect(index).toHaveLength(141)
     expect(index.map(row => `${row.key} ${signature(row)}`).sort()).toEqual(
       API_ROUTE_KEYS.map(key => `${key} ${signature(apiRoutes[key])}`).sort(),
     )
@@ -294,7 +294,7 @@ describe('route table', () => {
   })
 
   it('declares the hook, project trust and project MCP routes as the contract says (ADR-048 … ADR-050)', () => {
-    expect(API_MODULES.slice(-7, -3)).toEqual(['hooks', 'projectTrust', 'projectMcp', 'shares'])
+    expect(API_MODULES.slice(-11, -7)).toEqual(['hooks', 'projectTrust', 'projectMcp', 'shares'])
     expect(API_ROUTE_KEYS.filter(key => apiRoutes[key].module === 'hooks')).toEqual(['hooks.list', 'hooks.runs', 'hooks.create', 'hooks.update', 'hooks.remove'])
     expect(API_ROUTE_KEYS.filter(key => apiRoutes[key].module === 'projectTrust')).toEqual(['projectTrust.list', 'projectTrust.approve', 'projectTrust.revoke'])
     expect(API_ROUTE_KEYS.filter(key => apiRoutes[key].module === 'projectMcp')).toEqual(['projectMcp.list', 'projectMcp.setVariables', 'projectMcp.reconnect'])
@@ -321,8 +321,7 @@ describe('route table', () => {
   })
 
   it('declares the marketplace, Claude Code import and project definition routes as the contract says (ADR-054 … ADR-056)', () => {
-    expect(API_MODULES).toHaveLength(36)
-    expect(API_MODULES.slice(-3)).toEqual(['marketplaces', 'claudeImport', 'projectDefinitions'])
+    expect(API_MODULES.slice(-7, -4)).toEqual(['marketplaces', 'claudeImport', 'projectDefinitions'])
     const keysOf = (module: string): ApiRouteKey[] => API_ROUTE_KEYS.filter(key => apiRoutes[key].module === module)
     expect(keysOf('marketplaces')).toEqual(['marketplaces.list', 'marketplaces.add', 'marketplaces.get', 'marketplaces.refresh', 'marketplaces.remove'])
     expect(keysOf('claudeImport')).toEqual(['claudeImport.home', 'claudeImport.scan', 'claudeImport.upload', 'claudeImport.apply'])
@@ -351,6 +350,38 @@ describe('route table', () => {
     expect((apiRoutes['claudeImport.scan'] as ApiRouteDef).body).toBeUndefined()
     // `pluginInstall.inspect` keeps its key and takes the format field in its multipart form.
     expect((apiRoutes['pluginInstall.inspect'] as ApiRouteDef).form).toBeDefined()
+  })
+
+  it('declares the MCP sign-in, elicitation, resource and web search routes as the contract says (ADR-059 … ADR-063)', () => {
+    expect(API_MODULES).toHaveLength(40)
+    expect(API_MODULES.slice(-4)).toEqual(['mcpAuth', 'chatElicitations', 'mcpResources', 'webSearch'])
+    const keysOf = (module: string): ApiRouteKey[] => API_ROUTE_KEYS.filter(key => apiRoutes[key].module === module)
+    expect(keysOf('mcpAuth')).toEqual(['mcpAuth.start', 'mcpAuth.signOut', 'mcpAuth.projectStart', 'mcpAuth.projectSignOut', 'mcpAuth.callback'])
+    expect(keysOf('chatElicitations')).toEqual(['chatElicitations.answer'])
+    expect(keysOf('mcpResources')).toEqual(['mcpResources.list', 'mcpResources.attach'])
+    expect(keysOf('webSearch')).toEqual(['webSearch.test'])
+    const phase14 = [...keysOf('mcpAuth'), ...keysOf('chatElicitations'), ...keysOf('mcpResources'), ...keysOf('webSearch')]
+    expect(phase14).toHaveLength(9)
+    // None needs fresh auth (a sign-in grants nothing on the server host; an answer goes to the server that asked) and
+    // none is public (the OAuth callback is posted by the SPA with the session cookie). The fresh list stays 14.
+    for (const key of phase14) {
+      const route: ApiRouteDef = apiRoutes[key]
+      expect(route.fresh, key).toBeUndefined()
+      expect(route.public, key).toBeUndefined()
+    }
+    expect(API_ROUTE_KEYS.filter(key => (apiRoutes[key] as ApiRouteDef).fresh === true)).toHaveLength(14)
+    // The sign-in starts take an optional body and answer the authorization URL; the sign-outs answer the server DTO.
+    expect(apiRoutes['mcpAuth.projectStart'].response).toBe(apiRoutes['mcpAuth.start'].response)
+    expect((apiRoutes['mcpAuth.start'] as ApiRouteDef).body).toBe((apiRoutes['mcpAuth.projectStart'] as ApiRouteDef).body)
+    expect(apiRoutes['mcpAuth.signOut'].response).toBe(apiRoutes['mcp.reconnect'].response)
+    expect(apiRoutes['mcpAuth.projectSignOut'].response).toBe(apiRoutes['projectMcp.reconnect'].response)
+    expect(apiRoutes['mcpAuth.projectStart'].path.startsWith('/projects/:id/mcp/:serverId/')).toBe(true)
+    // The resource attach answers the upload's `FileRef` like the file mention attach.
+    expect(apiRoutes['mcpResources.attach'].response).toBe(apiRoutes['files.upload'].response)
+    expect(routeSuccessStatus(apiRoutes['mcpResources.attach'])).toBe(201)
+    expect((apiRoutes['mcpResources.list'] as ApiRouteDef).query).toBeDefined()
+    for (const key of ['mcpAuth.start', 'mcpAuth.callback', 'chatElicitations.answer', 'webSearch.test', 'mcpAuth.signOut', 'mcpAuth.projectSignOut'] as const)
+      expect(routeSuccessStatus(apiRoutes[key]), key).toBe(200)
   })
 })
 
@@ -574,6 +605,48 @@ describe('matchApiRoute', () => {
       ['POST', '/claude-import/home'],
       ['POST', `/projects/${project}/definitions/file`],
       ['GET', `/projects/${project}/definitions`],
+    ] as const)
+      expect(matchApiRoute(method, path), `${method} ${path}`).toBeNull()
+  })
+
+  it('matches the Phase 14 routes without shadowing the MCP and chat routes (ADR-059 … ADR-063)', () => {
+    const chat = '0199a8f0-0000-7000-8000-000000000001'
+    const project = 'prj_ABCdef0123456789'
+    const elicitation = 'eli_ABCdef0123456789'
+    expect(matchApiRoute('POST', '/mcp/github/oauth')).toMatchObject({ key: 'mcpAuth.start', params: { id: 'github' } })
+    expect(matchApiRoute('DELETE', '/mcp/github/oauth')).toMatchObject({ key: 'mcpAuth.signOut', params: { id: 'github' } })
+    expect(matchApiRoute('POST', `/projects/${project}/mcp/linear/oauth`)).toMatchObject({ key: 'mcpAuth.projectStart', params: { id: project, serverId: 'linear' } })
+    expect(matchApiRoute('DELETE', `/projects/${project}/mcp/linear/oauth`)?.key).toBe('mcpAuth.projectSignOut')
+    expect(matchApiRoute('POST', '/mcp/oauth/callback')).toMatchObject({ key: 'mcpAuth.callback', params: {} })
+    expect(matchApiRoute('POST', `/chat/${chat}/elicitations/${elicitation}`)).toMatchObject({ key: 'chatElicitations.answer', params: { id: chat, elicitationId: elicitation } })
+    expect(matchApiRoute('GET', '/mcp/resources')?.key).toBe('mcpResources.list')
+    expect(matchApiRoute('POST', '/mcp/resources/attach')?.key).toBe('mcpResources.attach')
+    expect(matchApiRoute('POST', '/web-search/test')?.key).toBe('webSearch.test')
+    // MCP servers named `oauth` and `resources` keep their routes (the ids are not reserved): the static paths differ
+    // in method or in their last segment.
+    expect(matchApiRoute('POST', '/mcp/oauth/oauth')).toMatchObject({ key: 'mcpAuth.start', params: { id: 'oauth' } })
+    expect(matchApiRoute('POST', '/mcp/oauth/reconnect')).toMatchObject({ key: 'mcp.reconnect', params: { id: 'oauth' } })
+    expect(matchApiRoute('PATCH', '/mcp/resources')).toMatchObject({ key: 'mcp.update', params: { id: 'resources' } })
+    expect(matchApiRoute('DELETE', '/mcp/resources')).toMatchObject({ key: 'mcp.remove', params: { id: 'resources' } })
+    expect(matchApiRoute('POST', '/mcp/resources/oauth')).toMatchObject({ key: 'mcpAuth.start', params: { id: 'resources' } })
+    expect(matchApiRoute('DELETE', '/mcp/oauth/oauth')).toMatchObject({ key: 'mcpAuth.signOut', params: { id: 'oauth' } })
+    // The neighbors keep their keys.
+    expect(matchApiRoute('POST', '/mcp/github/reconnect')?.key).toBe('mcp.reconnect')
+    expect(matchApiRoute('POST', `/projects/${project}/mcp/linear/reconnect`)?.key).toBe('projectMcp.reconnect')
+    expect(matchApiRoute('GET', '/mcp')?.key).toBe('mcp.list')
+    expect(matchApiRoute('POST', `/chat/${chat}/stop`)?.key).toBe('chat.stop')
+    for (const [method, path] of [
+      ['GET', '/mcp/github/oauth'],
+      ['GET', '/mcp/oauth/callback'],
+      ['DELETE', '/mcp/oauth/callback'],
+      ['POST', '/mcp/resources'],
+      ['GET', '/mcp/resources/attach'],
+      ['GET', `/chat/${chat}/elicitations`],
+      ['GET', `/chat/${chat}/elicitations/${elicitation}`],
+      ['DELETE', `/chat/${chat}/elicitations/${elicitation}`],
+      ['GET', '/web-search/test'],
+      ['POST', '/web-search'],
+      ['GET', `/projects/${project}/mcp/linear/oauth`],
     ] as const)
       expect(matchApiRoute(method, path), `${method} ${path}`).toBeNull()
   })

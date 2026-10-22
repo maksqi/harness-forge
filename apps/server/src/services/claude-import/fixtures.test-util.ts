@@ -104,7 +104,7 @@ const SET = { set: true, hint: null, source: 'stored' as const }
 function serverDto(input: McpServerInput, pluginId = 'core-mcp'): McpServer {
   const transport: McpServer['transport'] = input.transport.type === 'stdio'
     ? { type: 'stdio', command: input.transport.command, args: [...(input.transport.args ?? [])], env: Object.fromEntries(Object.keys(input.transport.env ?? {}).map(name => [name, SET])) }
-    : { type: input.transport.type, url: input.transport.url, headers: Object.fromEntries(Object.keys(input.transport.headers ?? {}).map(name => [name, SET])) }
+    : { type: input.transport.type, url: input.transport.url, headers: Object.fromEntries(Object.keys(input.transport.headers ?? {}).map(name => [name, SET])), oauth: null }
   return {
     id: input.id,
     name: input.name,
@@ -117,6 +117,7 @@ function serverDto(input: McpServerInput, pluginId = 'core-mcp'): McpServer {
     error: null,
     tools: [],
     connectedAt: null,
+    auth: null,
   }
 }
 

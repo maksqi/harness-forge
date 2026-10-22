@@ -187,6 +187,36 @@ Read this file fully before doing anything. Then read the docs listed in "Where 
   seeds). Every `<Switch>` needs a coarse-pointer hit area of at least 40 px (`pointer-coarse:after:-inset-y-3`,
   `size="sm"`: `-inset-y-3.5`; `apps/web/app/components/switch-hit-areas.test.ts` guards it). The approval card
   reads a call's hook records through the `TOOL_APPROVAL_HOOKS` injection (its props stay frozen).
+- **Plugin API 1.7.0** (Phase 14, additive): `ProviderDefinition.webSearch?(model, { functionTools, maxUses })` →
+  `{ tools?, providerOptions?, exclusive? } | undefined` (`WebSearchRequest` / `WebSearchParams`; synchronous, no I/O;
+  the host accepts only `type: 'provider'` tools), `McpServerDecl.transport.oauth?` (`{ clientId?, scopes? }`,
+  `{{settings.x}}` in `clientId`), the `notification` code hook `type` gains `elicitation_dialog`; `^1.6.0` plugins keep
+  loading. The template mirror (and the examples' `harness-forge.d.ts`) follows.
+- **MCP 2.0 and web search** (Phase 14, ADR-059 … ADR-063): MCP OAuth runs **only** through `@ai-sdk/mcp` `auth()` with
+  one `OAuthClientProvider` per server (modes connect / start / callback; connect never registers a client or
+  redirects) and **never a custom `fetch`** on an MCP transport (the SDK's own fetch is the OAuth URL guard: private and
+  loopback literals refused, DNS pinned); a 401 makes a server `needs-auth`, which is **never retried** and never
+  prompts; signing in starts only from a click (`POST …/oauth` → `authorizationUrl`), the redirect URI is
+  `<request Origin>/oauth/callback` (an SPA page, layout `auth`, that posts `{ state, code | error, iss? }` to
+  `POST /mcp/oauth/callback` with the `SameSite=Strict` session cookie); token records live **only** in `SecretStore`
+  (`mcp:<id>` `oauth.record` / `oauth.clientSecret`, `plugin:<pluginId>` / `project:<projectId>` `mcp-oauth.<serverId>`;
+  redactor, never in a DTO, a log or a backup). Elicitation: an MCP tool's `execute` is an async generator whose
+  preliminary output `{ status: 'input-required', elicitation }` is the form card (re-yielded every 25 s; a reload
+  replays it), answered by `POST /chat/:id/elicitations/:elicitationId`; forms are parsed and answers validated only by
+  `packages/shared/src/util/mcp-elicitation.ts`; the values are **never stored**; sub-agents, background tasks and
+  ambiguous requests are declined; a wait lasts ≤ 480 s and Stop / chat delete / key rotation / shutdown cancel it; ids
+  `eli_` (memory only); MCP tools: 600 s outer timeout, 60 s active budget. Prompts are `/mcp__<serverId>__<prompt>`
+  (`packages/shared/src/util/mcp-prompts.ts`), `prompts/get` runs once and is frozen into `metadata.command.expansion`;
+  resources are `@` mentions attached as uploads (`POST /mcp/resources/attach`; `formatResourceMention` /
+  `parseResourceMention` in `mentions.ts`). Web search is resolved **only** by `resolveWebSearch`
+  (`packages/shared/src/util/web-search.ts`, server and composer); native and builtin search are never in one request; a
+  provider-executed call is `not-applicable` in `createToolApproval` only with `providerExecuted === true` **and** a
+  name in `nativeTools` (no hooks); the builtin tool is `search_web` of `core-search` (Brave / Tavily / Exa keys are
+  `format: 'secret'` settings; never a function tool named `web_search`); `safeFetch` gains POST (≤ 64 KB, no
+  redirects). No migration (`McpTransportRecord.oauth?`, `chats.settings.webSearch` are JSON); settings
+  `webSearchDefault`, `webSearchNative`; mocks `mock:search` / `mock:search-tool`; the OAuth fixture
+  `apps/server/src/mcp/__fixtures__/oauth-mcp-server.mjs`. Tests never contact real MCP, OAuth or search hosts (the
+  fixture on loopback, `createFakeSearchFetch`, `HF_TEST_REMOTE_URL` only with `HF_MOCK_PROVIDER=1`).
 - **vue-tsc 3.3** (vuejs/language-tools#6240, found on 3.3.12): a `//` inside a component prop value in a template (a
   URL literal) corrupts the generated code; put URLs into script constants
   (`apps/web/app/components/template-literals.test.ts` guards it).
@@ -279,9 +309,11 @@ SPA served in production, default `apps/web/.output/public`), `HF_WORKSPACE_ROOT
 Claude Code folder the import scan reads, default `~/.claude`, `0` = off, ADR-055), plus provider key
 fallbacks (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, ...). CLI-only: `HF_NEW_MASTER_KEY` (read by `rotate-key`, ADR-034). Test-only: `HF_LIVE`, `HF_LIVE_PROVIDERS`,
 `HF_LIVE_MAX_COST_USD`, `HF_LIVE_MEDIA`, `HF_TEST_REQUIRE_WEB_BUILD`, `E2E_SCREENSHOTS`, `HF_TEST_FILE_SWEEP_DELAY_MS`
-(only with `HF_MOCK_PROVIDER=1`, ADR-039), `HF_TEST_REMOTE_URL` (loopback fake for GitHub / codeload / archive hosts;
+(only with `HF_MOCK_PROVIDER=1`, ADR-039), `HF_TEST_ELICITATION_WAIT_MS` (Phase 14: replaces the 480 s elicitation
+wait; only with `HF_MOCK_PROVIDER=1`, ADR-060), `HF_TEST_REMOTE_URL` (loopback fake for GitHub / codeload / archive hosts;
 only with `HF_MOCK_PROVIDER=1`, ADR-054), `E2E_MOCK_OPENAI_PORT` (port of the plugin specs' mock OpenAI server,
-default 8894, `0` = any free port; `e2e/README.md`). See `.env.example` and
+default 8894, `0` = any free port; `e2e/README.md`), `E2E_FAKE_REMOTE_PORT` (Phase 14: port of the e2e fake remote
+that serves Brave / Tavily / Exa behind `HF_TEST_REMOTE_URL`; `e2e/README.md`). See `.env.example` and
 `docs/DECISIONS.md` (Contract seed).
 
 **Never run `pnpm test:live` unless your task prompt says so** — it makes paid provider calls with real keys.
@@ -346,6 +378,17 @@ server, use your slot `k` from the task prompt: `HF_PORT=879k HF_DATA_DIR=.tmp/<
   claude-permissions,hooks,trust,definitions,arguments}.ts`, plugin SDK 1.6.0, the props / emits / root test ids of the
   P12-0b stub components, the `marketplaces` store, `useClaudeImport`, the pure-module signatures, the Customize import
   query and the Phase 12 test ids (see `docs/phases/phase-12-v1-8.md` "FREEZE in Phase 12").
+  Added in Phase 14 (after Gate P14-0b): the new `mcp/{oauth,elicitation}/types.ts`, the P14-0b versions of `types.ts`,
+  `mcp/types.ts` and the deps start / stop order, the seams of `mcp/{index,project,errors,stdio-transport}.ts`,
+  `chat/{pipeline,approval,prepare,agent-scope}.ts`, `chat/subagent/{host,index,tools}.ts`, `security/{types,ssrf}.ts`,
+  the mock models (incl. `mock:search`, `mock:search-tool`), the fixtures and fakes (`mcp/__fixtures__/oauth-mcp-server.mjs`,
+  `testing/fake-search.ts`, the fake remote, `e2e/fixtures/fake-remote.mjs`),
+  `packages/shared/src/util/{mcp-elicitation,mcp-prompts,web-search,mentions,mcp-config}.ts`,
+  `packages/shared/src/schemas/mcp.ts`, plugin SDK 1.7.0 and its template mirror, the props / emits / root test ids of
+  the P14-0b stub components (`OAuthCallbackView`, `McpOAuthFields`, `ElicitationCard`, `WebSearchToggle`,
+  `WebSearchToolBody`, `WebSearchSettings`), the `web-search` store, `useMcpSignIn`, `useResourceMentions`, the
+  `TOOL_ELICITATIONS` injection, the `useChatSession` additions and the Phase 14 test ids (see
+  `docs/phases/phase-14-v1-9.md` "FREEZE in Phase 14").
 - **CCR (contract change request)**: if a frozen contract blocks you, write a local adapter inside your owned
   paths, keep working, and add a CCR to your report: file, current shape, proposed shape, reason.
 - **DEPENDENCY REQUEST**: never install packages. Use existing dependencies or Node built-ins; if something is truly

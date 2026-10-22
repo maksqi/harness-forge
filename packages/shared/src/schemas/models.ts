@@ -1,6 +1,6 @@
 // Model catalog DTOs (API.md section 4.5).
 import { z } from 'zod'
-import { modelKindSchema, modelSourceSchema, reasoningEffortSchema } from '../enums.ts'
+import { modelKindSchema, modelSourceSchema, modelWebSearchSchema, reasoningEffortSchema } from '../enums.ts'
 import { modelIdSchema, modelRefSchema, providerIdSchema, timestampSchema } from '../ids.ts'
 import { isUnique } from '../util/text.ts'
 import { queryBooleanSchema } from './common.ts'
@@ -61,6 +61,13 @@ export const catalogModelSchema = z.object({
   lastUsedAt: timestampSchema.nullable(),
   /** `speech` models: voice names suggested by the provider (`ModelInfo.voices`, ADR-029); absent = unknown. */
   voices: z.array(z.string().min(1).max(64)).max(100).optional(),
+  /**
+   * Phase 14 (ADR-062): the model's own web search, computed from the provider's `webSearch` hook (probed with
+   * `{ functionTools: 0 }`): `native`, `exclusive` (only for turns without function tools, Gemini 2.x) or null (none).
+   * Not a `capabilities` flag. Optional so that the model listings cached by v1.8.1 and catalog rows without it still
+   * parse: absent = null (no native search); the v1.9 server always sets it in `GET /models`.
+   */
+  webSearch: modelWebSearchSchema.nullable().optional(),
 })
 export type CatalogModel = z.infer<typeof catalogModelSchema>
 

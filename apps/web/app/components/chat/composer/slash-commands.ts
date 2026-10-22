@@ -94,6 +94,9 @@ export function slashGroupOf(command: Pick<CommandSummary, 'source' | 'kind'>): 
       return 'personal'
     case 'plugin':
       return 'plugin'
+    // Phase 14 (ADR-061): MCP prompts sit with the plugin commands until W14.8 adds the MCP group.
+    case 'mcp':
+      return 'plugin'
   }
 }
 
@@ -108,6 +111,9 @@ function skillSourceText(command: Pick<CommandSummary, 'source' | 'pluginId'>, p
       return command.pluginId === undefined ? 'Plugin' : pluginName(command.pluginId) ?? command.pluginId
     case 'harness':
       return 'Built-in'
+    // Phase 14 (ADR-061): never a skill (MCP prompts are commands); kept for the exhaustive switch.
+    case 'mcp':
+      return 'MCP'
   }
 }
 

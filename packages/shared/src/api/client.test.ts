@@ -61,6 +61,8 @@ const settings: Settings = {
   hooksEnabled: true,
   hookModelRef: null,
   modelAliases: { sonnet: null, opus: null, haiku: null, fable: null },
+  webSearchDefault: 'off',
+  webSearchNative: true,
 }
 
 describe('createApiClient', () => {

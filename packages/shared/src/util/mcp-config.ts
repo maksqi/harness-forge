@@ -14,6 +14,13 @@
  * URL rule: a `url` without variables must parse as an `http:` / `https:` URL; a `url` with variables must start with
  * `http://` / `https://` or with a variable (`${BASE:-https://example.invalid}/mcp`), and the server checks the
  * expanded URL again with `isAllowedMcpUrl` before it connects.
+ *
+ * OAuth (Phase 14, ADR-059, C49): a remote (http / sse) server may carry Claude Code's `oauth` object `{ clientId?,
+ * scopes?, callbackPort? }`: `clientId` (text of 1..256 characters) and `scopes` (text of up to 1024 characters, or a
+ * list of words joined with one space) are read literally (no variables) into `transport.oauth`; `callbackPort` is
+ * ignored with an `info` diagnostic (the harness signs in through its own callback page); any other key, and an
+ * unusable value, is an `ignored-field` diagnostic. A stdio server's `oauth` is an `ignored-field` like any unknown field.
+ * The trust hash covers the raw server object (`McpJsonServer.raw`), so reading `oauth` changes no v1.8 approval.
  */
 
 export const MCP_JSON_TRANSPORTS = ['stdio', 'http', 'sse'] as const
@@ -33,6 +40,10 @@ export const MCP_CONFIG_LIMITS = {
   variablesMax: 50,
   /** Server ids are cut to this many characters. */
   idMaxChars: 32,
+  /** `oauth.clientId` of a remote server (Phase 14). */
+  oauthClientIdMaxChars: 256,
+  /** `oauth.scopes` of a remote server, after joining a list (Phase 14). */
+  oauthScopesMaxChars: 1024,
 } as const
 
 export const MCP_CONFIG_DIAGNOSTIC_CODES = [
@@ -66,10 +77,20 @@ export interface McpJsonStdioServer {
   readonly env: Readonly<Record<string, string>>
 }
 
+/** The usable part of a remote server's `oauth` object (Phase 14); absent when it names neither a client id nor scopes. */
+export interface McpJsonOAuth {
+  /** A pre-registered OAuth client id (1..256 characters). */
+  readonly clientId?: string
+  /** Space-separated scopes to request (≤ 1024 characters). */
+  readonly scopes?: string
+}
+
 export interface McpJsonRemoteServer {
   readonly type: 'http' | 'sse'
   readonly url: string
   readonly headers: Readonly<Record<string, string>>
+  /** Phase 14 (ADR-059): only present when the server's `oauth` names a client id or scopes. */
+  readonly oauth?: McpJsonOAuth
 }
 
 export interface McpJsonServer {
@@ -332,7 +353,8 @@ interface ServerReading {
 }
 
 const STDIO_FIELDS = new Set(['type', 'command', 'args', 'env'])
-const REMOTE_FIELDS = new Set(['type', 'url', 'headers'])
+const REMOTE_FIELDS = new Set(['type', 'url', 'headers', 'oauth'])
+const OAUTH_FIELDS = new Set(['clientId', 'scopes', 'callbackPort'])
 
 function checkValue(value: string, what: string, name: string, diagnostics: McpConfigDiagnostic[], allowedControl = ''): boolean {
   if (value.length > MCP_CONFIG_LIMITS.valueMaxChars) {
@@ -380,15 +402,68 @@ function readStringMap(value: unknown, what: 'env' | 'headers', name: string, di
   return { ...result }
 }
 
-function reportIgnored(server: Record<string, unknown>, known: ReadonlySet<string>, name: string, diagnostics: McpConfigDiagnostic[]): void {
+function reportIgnored(server: Record<string, unknown>, known: ReadonlySet<string>, name: string, diagnostics: McpConfigDiagnostic[], what = 'field'): void {
   let shown = 0
   for (const key of Object.keys(server)) {
     if (known.has(key))
       continue
     shown++
     if (shown <= IGNORED_FIELDS_SHOWN_MAX)
-      diagnostics.push(diagnostic('info', 'ignored-field', `The field "${key.slice(0, 64).replace(/[\p{Cc}\p{Cf}]/gu, '?')}" is ignored.`, name))
+      diagnostics.push(diagnostic('info', 'ignored-field', `The ${what} "${key.slice(0, 64).replace(/[\p{Cc}\p{Cf}]/gu, '?')}" is ignored.`, name))
   }
+}
+
+/** The `scopes` of an `oauth` object: text, or a list of words joined with one space; null when unusable. */
+function readScopes(value: unknown): string | null {
+  let text: string
+  if (typeof value === 'string') {
+    text = value
+  }
+  else if (Array.isArray(value) && value.length <= MCP_CONFIG_LIMITS.oauthScopesMaxChars && value.every(item => typeof item === 'string')) {
+    text = (value as string[]).join(' ')
+  }
+  else {
+    return null
+  }
+  if (hasControl(text, '\t\n\r'))
+    return null
+  const scopes = text.replace(/\s+/g, ' ').trim()
+  return scopes.length <= MCP_CONFIG_LIMITS.oauthScopesMaxChars ? scopes : null
+}
+
+/**
+ * The `oauth` object of a remote server (see the module comment): its client id and scopes, or undefined when it names
+ * neither; diagnostics never quote values.
+ */
+function readOAuth(value: unknown, name: string, diagnostics: McpConfigDiagnostic[]): McpJsonOAuth | undefined {
+  if (value === undefined || value === null)
+    return undefined
+  if (!isRecord(value)) {
+    diagnostics.push(diagnostic('warning', 'ignored-field', 'The OAuth settings must be an object; they are ignored.', name))
+    return undefined
+  }
+  let clientId: string | undefined
+  if (value.clientId !== undefined && value.clientId !== null) {
+    const text = typeof value.clientId === 'string' ? value.clientId.trim() : ''
+    if (text !== '' && text.length <= MCP_CONFIG_LIMITS.oauthClientIdMaxChars && !hasControl(text))
+      clientId = text
+    else
+      diagnostics.push(diagnostic('warning', 'ignored-field', `The OAuth client id must be text of 1 to ${MCP_CONFIG_LIMITS.oauthClientIdMaxChars} characters without control characters; it is ignored.`, name))
+  }
+  let scopes: string | undefined
+  if (value.scopes !== undefined && value.scopes !== null) {
+    const text = readScopes(value.scopes)
+    if (text === null)
+      diagnostics.push(diagnostic('warning', 'ignored-field', `The OAuth scopes must be text or a list of words of up to ${MCP_CONFIG_LIMITS.oauthScopesMaxChars} characters; they are ignored.`, name))
+    else if (text !== '')
+      scopes = text
+  }
+  if (value.callbackPort !== undefined)
+    diagnostics.push(diagnostic('info', 'ignored-field', 'The OAuth callback port is ignored; the harness signs in through its own callback page.', name))
+  reportIgnored(value, OAUTH_FIELDS, name, diagnostics, 'OAuth field')
+  if (clientId === undefined && scopes === undefined)
+    return undefined
+  return { ...(clientId === undefined ? {} : { clientId }), ...(scopes === undefined ? {} : { scopes }) }
 }
 
 function readStdio(server: Record<string, unknown>, name: string): ServerReading {
@@ -462,7 +537,8 @@ function readRemote(server: Record<string, unknown>, name: string): ServerReadin
   if (headers === null)
     return { transport: null, diagnostics }
   reportIgnored(server, REMOTE_FIELDS, name, diagnostics)
-  return { transport: { type, url: url.trim(), headers }, diagnostics }
+  const oauth = readOAuth(server.oauth, name, diagnostics)
+  return { transport: { type, url: url.trim(), headers, ...(oauth === undefined ? {} : { oauth }) }, diagnostics }
 }
 
 function readServer(name: string, value: unknown): ServerReading {

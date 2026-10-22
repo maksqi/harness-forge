@@ -165,13 +165,13 @@ describe('inspectPluginDirectory', () => {
 })
 
 describe('plugin API 1.4.0 manifests (ADR-045)', () => {
-  it.each(['^1.0.0', '^1.3.0', '>=1.3.0 <2', '^1.4.0', '^1.5.0', '1.x'])('engines %s is compatible with this host', async (harness) => {
+  it.each(['^1.0.0', '^1.3.0', '>=1.3.0 <2', '^1.4.0', '^1.5.0', '^1.6.0', '^1.7.0', '1.x'])('engines %s is compatible with this host', async (harness) => {
     const read = await readPluginDirectory(plugin('compat', { 'plugin.json': manifest('compat', { engines: { harness } }) }), { expectedId: 'compat' })
     expect(read.problem).toBeNull()
     expect(read.compatible).toBe(true)
   })
 
-  it.each(['^1.7.0', '^2.0.0', '~1.3.0'])('engines %s is incompatible (needs another plugin API)', async (harness) => {
+  it.each(['^1.8.0', '^2.0.0', '~1.3.0'])('engines %s is incompatible (needs another plugin API)', async (harness) => {
     const read = await readPluginDirectory(plugin('compat', { 'plugin.json': manifest('compat', { engines: { harness } }) }), { expectedId: 'compat' })
     expect(read.compatible).toBe(false)
     expect(read.problem?.state).toBe('incompatible')

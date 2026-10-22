@@ -83,8 +83,11 @@ write hook scripts in POSIX `sh` if you share them (the Docker image has no `pyt
 
 What harness-forge never runs: LSP servers (`.lsp.json`), `bin/` (it is not put on the shell's `PATH`), themes,
 monitors, workflows, the plugin's own `settings.json` and `http` / `mcp_tool` / `agent` hooks; they are listed under
-"Ignored". An MCP server's `oauth` settings and `headersHelper` are dropped (the server connects without them; a note on
-the plugin's Overview), and a server that uses `${CLAUDE_PROJECT_DIR}` is skipped (plugin servers are global).
+"Ignored". An MCP server's `headersHelper` is dropped (the server connects without it; a note on the plugin's
+Overview), and a server that uses `${CLAUDE_PROJECT_DIR}` is skipped (plugin servers are global). v1.9 (ADR-059): an MCP
+server's `oauth` settings are kept: the server shows "Sign in required" on the plugin's Overview until you click **Sign
+in** there (its `callbackPort` is ignored with a note: harness-forge signs in through its own `/oauth/callback` page; see
+[Signing in to remote MCP servers](mcp-oauth.md)). In v1.8 they were dropped.
 
 ## 4. Marketplaces
 
@@ -148,7 +151,8 @@ installed from GitHub updates by installing the repository again (the same id fr
   it with `sh "${CLAUDE_PLUGIN_ROOT}/…"` in `hooks.json`.
 - **GitHub's request limit was reached** (a 429 answer): wait the time shown, or install from a zip.
 - **An MCP server of the plugin is missing or cannot log in**: open the plugin's Overview: a server that uses the
-  project folder (`${CLAUDE_PROJECT_DIR}`) is skipped, and a server that needs OAuth or a `headersHelper` connects
-  without them (a note says so), so its host may refuse it.
+  project folder (`${CLAUDE_PROJECT_DIR}`) is skipped, and a server that needs a `headersHelper` connects without it
+  (a note says so), so its host may refuse it. A server that needs OAuth shows "Sign in required" (v1.9): click **Sign
+  in** on its row ([Signing in to remote MCP servers](mcp-oauth.md)).
 - **My command is not in the slash menu**: type the plugin's prefix (`/review-kit:`); a short name works only when
   nothing has that exact name and no other command ends the same way.

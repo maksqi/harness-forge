@@ -9,6 +9,17 @@ output styles, either from a JSON manifest, from code you edit in the browser or
 a zip, a GitHub repository or a marketplace). The interface is a simplified take on the Claude Code desktop app, and it
 starts in dark mode.
 
+> **In progress:** v1.9 ("MCP 2.0 and web search", Phase 14 of the [roadmap](docs/ROADMAP.md)). Planned: **sign-in
+> (OAuth)** for remote MCP servers of every origin (your servers, plugins, Claude Code plugins and a project's
+> `.mcp.json`: press **Sign in**, sign in on the server's page, come back connected; tokens stored encrypted), a
+> server's **prompts** as slash commands (`/mcp__<server>__<prompt>`), its **resources** in `@` mentions (attached like
+> a file), **elicitation** (a server asks you for details in a form card while its tool runs; the values are never
+> stored), and **web search** per chat: a **Search** toggle in the composer that uses the model's own search (Anthropic,
+> OpenAI, Google, xAI, OpenRouter, Groq gpt-oss) or the builtin `search_web` tool with your Brave Search, Tavily or Exa
+> key, with the sources saved as citations; plugin API 1.7.0. Until the release, the items marked v1.9 below describe
+> the planned behavior; guides: [Signing in to remote MCP servers](docs/guides/mcp-oauth.md) and
+> [Web search](docs/guides/web-search.md).
+>
 > **Status:** v1.8.1, a maintenance release of v1.8 (dependency updates, CI and backlog fixes; plugin API stays
 > 1.6.0). v1.8 ("Claude Code ecosystem"): what you already have in Claude Code works here too. Claude Code plugins
 > install in their own format from a folder, a zip, a GitHub repository or a marketplace entry; their commands, agents,
@@ -194,6 +205,24 @@ starts in dark mode.
     in Settings → General → Agent.
   - Claude Code's newer frontmatter: agents with `disallowedTools`, `maxTurns`, `color` and preloaded `skills`; skills
     and commands with `when_to_use`, named arguments, `$ARGUMENTS[0]`, `context: fork`; plugin API 1.6.0.
+- **MCP 2.0 and web search** (v1.9, in progress; guides: [Signing in to remote MCP servers](docs/guides/mcp-oauth.md),
+  [Web search](docs/guides/web-search.md), [adding an MCP server](docs/guides/adding-an-mcp-server.md)):
+  - MCP sign-in (OAuth) for remote servers: a server that answers "401" shows **Sign in required** and **Sign in**
+    instead of retrying; the sign-in opens the server's page in the same tab and comes back through `/oauth/callback`
+    (discovery, dynamic client registration or your pre-registered client id, PKCE). It works for your servers, plugin
+    and Claude Code plugin servers and a project's approved `.mcp.json` servers (`oauth` key). Tokens are encrypted,
+    refreshed by themselves, never in backups, and **Sign out…** forgets them.
+  - MCP prompts as slash commands: `/mcp__<server>__<prompt>` in the slash menu's **MCP** group, with arguments in
+    order or as `name=value`; the prompt's text is fetched once and kept with the message.
+  - MCP resources in `@` mentions: in every chat with tools on, the mention menu lists the resources of your connected
+    servers ("MCP resources"); picking one attaches it like a file (up to 5 MB).
+  - MCP elicitation: a server asks you for details while its tool runs; a form card under the tool row (with a
+    countdown of 8 minutes, **Submit**, **Decline**) and "Needs your input" in the sidebar. Sub-agents and background
+    agents never ask (declined automatically), and the values you enter are never stored.
+  - Web search: a **Search** toggle per chat (Alt+W) and a default for new chats. Models with their own search
+    (Anthropic, OpenAI, Google, xAI, OpenRouter, Groq gpt-oss) use it; every other model with tools uses the builtin
+    `search_web` tool (the builtin plugin `core-search`) with your Brave Search, Tavily or Exa key (Settings → Web search,
+    with **Test search**). Sources show as domain chips under the answer and are saved, shared and exported.
 - **Images** (with your own keys):
   - Pick an image model (OpenAI GPT Image, xAI Grok Imagine) in the composer and describe a picture: 1 to 4 images
     per turn, an aspect ratio (Auto, 1:1, 3:2, 2:3, 4:3, 3:4, 16:9, 9:16), and follow-ups such as "make it blue" that
@@ -225,14 +254,16 @@ starts in dark mode.
   - A reasoning-effort menu (Auto, Off, Low, Medium, High, Max) and a permission mode for tools (Ask, Accept edits and
     Plan in project chats, Auto, Off; v1.5: Shift+Tab cycles Ask, Accept edits and Plan); image options (count, aspect
     ratio, edit the previous image) for image models.
-  - v1.5: `@` file mentions in project chats, and a queue for messages sent while a reply runs.
+  - v1.5: `@` file mentions in project chats, and a queue for messages sent while a reply runs; v1.9: `@` also lists
+    MCP resources in every chat with tools on.
   - Slash commands: `/explain`, `/review`, `/fix`, `/translate`, `/proofread` and more, plus commands from plugins;
     v1.5: `/compact [focus]`; v1.6: project and personal commands with argument hints, and `/remember`; v1.7: skills
-    and `/output-style`; v1.8: plugin commands as `/plugin:command`.
+    and `/output-style`; v1.8: plugin commands as `/plugin:command`; v1.9: MCP prompts as `/mcp__server__prompt`.
   - v1.7: an output style menu (Automatic, Default, Explanatory, Learning and your styles).
+  - v1.9: a **Search** toggle for web search (Alt+W).
   - A microphone button for dictation.
 - **Sidebar and navigation**: a Chat | Plugins switch, a project switcher, chats grouped by date with live status
-  dots (running, needs approval, unread), a Mod+K command palette, keyboard shortcuts, a Light / Dark / System theme toggle, and 40 px
+  dots (running, needs approval, unread; v1.9: needs your input), a Mod+K command palette, keyboard shortcuts, a Light / Dark / System theme toggle, and 40 px
   touch targets in the collapsed icon rail on tablets.
 - **Providers and models**:
   - 13 builtin BYOK providers. Keys are encrypted at rest, shown only as masked hints, and can fall back to
@@ -255,13 +286,17 @@ starts in dark mode.
     plugins.
     Plugin API 1.6.0 (v1.8) adds Claude Code's frontmatter fields to commands, skills and agents, prompt hooks, five
     hook events and the `args` / `async` / `if` / `statusMessage` handler fields, and the `github` / `marketplace`
-    install sources.
+    install sources. Plugin API 1.7.0 (v1.9, in progress) lets a code provider offer its native web search
+    (`ProviderDefinition.webSearch`), lets an MCP server declaration name an OAuth client (`transport.oauth`) and adds
+    the `elicitation_dialog` notification type.
   - Install from a zip, npm, a URL with an integrity hash, or a local folder (v1.8: also a GitHub repository or a
     marketplace entry, and Claude Code plugins in their own format), with an explicit trust step for code.
 - **Tools and MCP**: MCP servers over stdio, Streamable HTTP and SSE. The builtin tools are `current_time`,
   `web_fetch` (SSRF-guarded) and `generate_image`, plus the seven workspace tools of project chats and (v1.5) the agent
   tools `todo_write`, `exit_plan_mode` and `task` (v1.6: and `skill`). Every tool has an approval policy and a per-tool
   override. v1.7: a project's `.mcp.json` servers add their tools to that project's chats after you approve them.
+  v1.9 (in progress): remote MCP servers sign in with OAuth, their prompts and resources reach the composer, a server
+  can ask you for details while its tool runs, and the builtin `search_web` tool searches the web with your key.
 - **Self-hosting**: SQLite storage, one port, an optional password, a loopback-only bind unless you secure it,
   trusted reverse proxies (`HF_TRUST_PROXY`) so rate limits and Secure cookies see the real clients, and a Docker image
   with a `/data` volume.
@@ -377,7 +412,7 @@ Every variable is optional. [`.env.example`](.env.example) lists them with comme
 | `HF_MOCK_PROVIDER` | unset | `1` registers the dev-only `mock` provider (deterministic models for tests and demos) |
 | `HF_SAFE_MODE` | unset | `1` loads builtin plugins only (recovery when a plugin breaks the start); v1.7: also runs no command hook and starts no project MCP server; v1.8: and no prompt hook |
 | `HF_PLUGIN_WATCH` | unset | `1` hot-reloads code plugins in the data directory when their files change (linked folders always reload) |
-| `HF_OFFLINE` | unset | `1` never downloads the models.dev catalog (the bundled snapshot is used); v1.8: also refuses adding or refreshing GitHub or URL marketplaces and installing from GitHub or from a marketplace entry that needs the network (a folder marketplace, zip, folder, npm and URL installs still work); v1.8.1: and never lists provider models on its own (the cached listing or the seed models stay; **Refresh**, the provider test and saving a key still list). It is a set of switches, not "no network": chats still reach your providers |
+| `HF_OFFLINE` | unset | `1` never downloads the models.dev catalog (the bundled snapshot is used); v1.8: also refuses adding or refreshing GitHub or URL marketplaces and installing from GitHub or from a marketplace entry that needs the network (a folder marketplace, zip, folder, npm and URL installs still work); v1.8.1: and never lists provider models on its own (the cached listing or the seed models stay; **Refresh**, the provider test and saving a key still list). It is a set of switches, not "no network": chats still reach your providers (v1.9: web search and MCP sign-in still work too) |
 | `HF_INSECURE` | unset | `1` allows a non-loopback bind without a password (only behind another authentication layer); it also disables the DNS-rebinding guard that restricts a password-less server to `localhost` host names |
 | `HF_WORKSPACE_ROOTS` | `<data dir>/workspaces` | folders that may hold project folders: a comma list of absolute paths; a relative path, `/`, a missing folder (or a file), the data directory or a folder inside it (other than `<data dir>/workspaces`) stops the start. See [using projects](docs/guides/using-projects.md) |
 | `HF_WORKSPACE_SHELL` | `1` | `0` removes the `shell` tool from every chat (the file tools keep working); v1.7: also runs no command hook and no `` !`cmd` `` line of a command; no setting in the app can turn it back on |
@@ -396,7 +431,8 @@ A key saved in Settings wins over its environment variable; the key dialog shows
 Flags accept `1` / `true` / `yes` / `on` and `0` / `false` / `no` / `off`; an empty value counts as unset, and any
 other invalid value stops the start with a message naming the variable. Test-only variables (`HF_LIVE_PROVIDERS`,
 `HF_LIVE_MAX_COST_USD`, `HF_LIVE_MEDIA`, `HF_TEST_REQUIRE_WEB_BUILD`, `HF_TEST_FILE_SWEEP_DELAY_MS` (only with
-`HF_MOCK_PROVIDER=1`), `HF_TEST_REMOTE_URL` (v1.8, only with `HF_MOCK_PROVIDER=1`), `E2E_SCREENSHOTS`, `E2E_BASE_URL`)
+`HF_MOCK_PROVIDER=1`), `HF_TEST_REMOTE_URL` (v1.8, only with `HF_MOCK_PROVIDER=1`), `E2E_SCREENSHOTS`, `E2E_BASE_URL`,
+`E2E_FAKE_REMOTE_PORT` (v1.9))
 are described in [`.env.example`](.env.example),
 [`docs/PROVIDERS.md`](docs/PROVIDERS.md#12-live-provider-suite), [`e2e/README.md`](e2e/README.md) and
 [`docs/DECISIONS.md`](docs/DECISIONS.md).
@@ -445,6 +481,10 @@ Or develop in your own editor with a linked folder that reloads on save.
 - v1.8: Claude Code plugins install as they are, and **Plugins → Marketplaces** browses Claude Code marketplaces
   ([Claude Code plugins](docs/guides/claude-code-plugins.md); format reference: PLUGINS.md section 17; example:
   [`examples/plugins/claude-review-kit`](examples/plugins/claude-review-kit/)).
+- v1.9 (in progress): plugin API 1.7.0 — a code provider can offer its native web search (`webSearch`), a plugin's
+  remote MCP server can name an OAuth client (`transport.oauth`, `{{settings.*}}` allowed in the client id), and a
+  Claude Code plugin's MCP servers keep their `oauth` settings ([Signing in to remote MCP
+  servers](docs/guides/mcp-oauth.md); reference: [`docs/PLUGINS.md`](docs/PLUGINS.md)).
 
 ## Security
 
@@ -522,6 +562,15 @@ harness-forge is built for **one user** on their own machine or server.
   needs your password to scan or apply, and imports hooks and commands that run shell lines turned off. Saving a
   project file from the app never approves what it runs. Prompt-hook answers can block or continue the agent but never
   approve a call.
+- **MCP sign-in, elicitation and web search (v1.9, in progress).** A sign-in starts only from your click and finishes
+  on the app's own `/oauth/callback` page, which posts the code with your session (PKCE, a one-time state valid for 10
+  minutes); an authorization server on a private address or over plain HTTP is refused unless it is on the MCP
+  server's own address. Tokens, client secrets and codes are stored only encrypted, never returned by the API, logged
+  or put in a backup, and a server that needs sign-in is never retried in the background. Text from MCP servers
+  (prompts, resources, questions) and search results is shown as plain text. A server's question waits at most 8
+  minutes, is declined for sub-agents, background agents and requests harness-forge cannot tie to one chat, and the
+  values you answer are never stored. Web search sends only the query to the provider or to the search API you chose;
+  queries and search keys are never logged.
 - **Microphone and media.** Dictation needs a secure context: browsers allow the microphone only on HTTPS or on
   `localhost`. Opened as plain `http://<lan-address>:8787` from another machine, the mic button stays disabled ("Voice
   input needs HTTPS or localhost"); use the TLS reverse proxy below. The page may use only its own microphone
@@ -627,7 +676,7 @@ Set `HF_PASSWORD` before exposing the server; share links need it.
 
 | Document | Contents |
 |---|---|
-| [`docs/guides/`](docs/guides/) | step-by-step guides: [using projects](docs/guides/using-projects.md), [agent features](docs/guides/agent-features.md) (v1.5: compaction, plan mode, todos, mentions, steering, sub-agents), [customizing the agent](docs/guides/customizing-agents.md) (v1.6: custom agents, commands and skills, background agents, plan files, `/remember`), [hooks and project MCP](docs/guides/hooks-and-project-mcp.md) (v1.7: hooks, project approvals, `.mcp.json`), [output styles](docs/guides/output-styles.md) (v1.7), [Claude Code plugins](docs/guides/claude-code-plugins.md) (v1.8: plugins and marketplaces), [Import from Claude Code](docs/guides/claude-code-import.md) (v1.8), [declarative provider](docs/guides/writing-a-declarative-provider.md), [code plugin](docs/guides/writing-a-code-plugin.md), [MCP server](docs/guides/adding-an-mcp-server.md) |
+| [`docs/guides/`](docs/guides/) | step-by-step guides: [using projects](docs/guides/using-projects.md), [agent features](docs/guides/agent-features.md) (v1.5: compaction, plan mode, todos, mentions, steering, sub-agents), [customizing the agent](docs/guides/customizing-agents.md) (v1.6: custom agents, commands and skills, background agents, plan files, `/remember`), [hooks and project MCP](docs/guides/hooks-and-project-mcp.md) (v1.7: hooks, project approvals, `.mcp.json`), [output styles](docs/guides/output-styles.md) (v1.7), [Claude Code plugins](docs/guides/claude-code-plugins.md) (v1.8: plugins and marketplaces), [Import from Claude Code](docs/guides/claude-code-import.md) (v1.8), [MCP sign-in](docs/guides/mcp-oauth.md) (v1.9: OAuth for remote MCP servers), [web search](docs/guides/web-search.md) (v1.9: the Search toggle, native search, Brave / Tavily / Exa), [declarative provider](docs/guides/writing-a-declarative-provider.md), [code plugin](docs/guides/writing-a-code-plugin.md), [MCP server](docs/guides/adding-an-mcp-server.md) (v1.9: prompts, resources, elicitation) |
 | [`examples/plugins/`](examples/plugins/) | example plugins with READMEs and a test that loads them (v1.6 adds `agent-pack`, v1.7 `hook-pack`, v1.8 `claude-review-kit`, a Claude Code plugin) |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | components, flows, data directory, database, security model, topology |
 | [`docs/API.md`](docs/API.md) | every HTTP endpoint, the error envelope, the chat stream protocol, server events |

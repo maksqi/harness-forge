@@ -20,6 +20,7 @@ import {
   createChangeBatchId,
   createChatId,
   createCustomizationId,
+  createElicitationId,
   createFileId,
   createHookId,
   createHookRecordId,
@@ -30,6 +31,8 @@ import {
   createShellRuleId,
   CUSTOMIZATION_ID_PATTERN,
   customizationIdSchema,
+  ELICITATION_ID_PATTERN,
+  elicitationIdSchema,
   fileIdSchema,
   formatModelRef,
   HARNESS_COMMANDS,
@@ -49,6 +52,7 @@ import {
   messageIdSchema,
   modelIdSchema,
   modelRefSchema,
+  newElicitationId,
   newImportPlanId,
   newMarketplaceId,
   parseModelRef,
@@ -379,5 +383,22 @@ describe('phase 12 ids and qualified catalog names (ADR-053 / ADR-054)', () => {
     for (const args of [['review-kit'], ['Review', 'x'], ['kit', 'a', 'b', 'c', 'd'], ['kit', 'clean_gone'], ['kit', 'x'.repeat(130)]] as const) {
       expect(() => qualifiedName(...(args as unknown as [string, ...string[]])), args.join(':')).toThrow(HarnessError)
     }
+  })
+})
+
+describe('phase 14 ids (ADR-060)', () => {
+  it('creates and validates elicitation ids', () => {
+    const id = createElicitationId()
+    expect(id).toMatch(ELICITATION_ID_PATTERN)
+    expect(elicitationIdSchema.parse(id)).toBe(id)
+    expect(newElicitationId()).toMatch(/^eli_[\dA-Za-z]{16}$/)
+    expect(new Set(Array.from({ length: 200 }, () => createElicitationId())).size).toBe(200)
+    for (const bad of ['eli_short', 'ELI_ABCdef0123456789', 'eli_ABCdef012345678!', 'cip_ABCdef0123456789', ''])
+      expect(elicitationIdSchema.safeParse(bad).success, bad).toBe(false)
+  })
+
+  it('keeps `oauth` and `resources` valid MCP server ids (the static routes never shadow them)', () => {
+    for (const id of ['oauth', 'resources', 'callback', 'attach'])
+      expect(mcpServerIdSchema.safeParse(id).success, id).toBe(true)
   })
 })

@@ -11,6 +11,7 @@ import {
   invocationKindSchema,
   reasoningEffortSchema,
   toolModeSchema,
+  webSearchModeSchema,
 } from './enums.ts'
 import { harnessErrorInitSchema } from './errors.ts'
 import {
@@ -27,6 +28,7 @@ import { LIMITS } from './limits.ts'
 import { todoItemSchema } from './schemas/agent.ts'
 import { taskResultDataSchema } from './schemas/background-tasks.ts'
 import { imageOptionsSchema, imageTurnMetadataSchema } from './schemas/images.ts'
+import { slashCommandNameSchema } from './schemas/mcp.ts'
 import { queueItemSchema, userMessagePartSchema } from './schemas/queue.ts'
 import { messageUsageSchema } from './schemas/usage.ts'
 import { DEFINITION_LIMITS } from './util/definitions.ts'
@@ -41,9 +43,10 @@ export type { MessageUsage } from './schemas/usage.ts'
 export const commandInvocationSchema = z.object({
   /**
    * A command name (up to 32 characters) or, since Phase 11 (ADR-052), a skill name (up to 64); since Phase 12 (ADR-053)
-   * a qualified name of a Claude Code plugin entry (`<pluginId>:<name>`, up to 128; `catalogNameSchema`).
+   * a qualified name of a Claude Code plugin entry (`<pluginId>:<name>`, up to 128; `catalogNameSchema`); since Phase 14
+   * (ADR-061) an MCP prompt command name (`mcp__<serverId>__<prompt>`; `slashCommandNameSchema`).
    */
-  name: catalogNameSchema,
+  name: slashCommandNameSchema,
   /** Text after `/name `. */
   input: z.string(),
   /** `compact`: the harness command `/compact [focus]` (Phase 9, ADR-040), run by the server. */
@@ -53,7 +56,11 @@ export const commandInvocationSchema = z.object({
     .string()
     .refine(value => utf8ByteLength(value) <= LIMITS.commandExpansionBytes, 'Expansions are limited to 64 KB.')
     .optional(),
-  /** Where the command came from (Phase 10, ADR-045; absent in v1.5 messages = a plugin or harness command). */
+  /**
+   * Where the command came from (Phase 10, ADR-045; absent in v1.5 messages = a plugin or harness command); Phase 14
+   * (ADR-061): `mcp`, an MCP prompt whose `prompts/get` result is frozen into `expansion` (a regenerate or a
+   * continuation never calls the server again).
+   */
   source: commandSourceSchema.optional(),
   /**
    * The `model` of a command file (Phase 10): the turn runs on it, the chat keeps its model; a continuation or a
@@ -118,7 +125,9 @@ export const noticeLevelSchema = z.enum(['info', 'warning'])
  * file cannot run, so the chat model answered; Phase 11: `output-style-unavailable` (ADR-051): the effective output
  * style is unknown or inactive, so the run used `default`; `hook-continuation-limit` (ADR-048): `Stop` hooks blocked 5
  * runs in a row, so no further follow-up turn starts; `project-mcp-unavailable` (ADR-050): an approved project MCP server
- * was not ready within 5 s (or failed), so the run has no tools of it.
+ * was not ready within 5 s (or failed), so the run has no tools of it; Phase 14: `web-search-unavailable` (ADR-063): web
+ * search is on for the chat but the turn cannot search (`resolveWebSearch` answered `unavailable`; the message names the
+ * reason; at most once per chat, model and reason).
  */
 export const noticeCodeSchema = z.enum([
   'context-trimmed',
@@ -132,6 +141,7 @@ export const noticeCodeSchema = z.enum([
   'output-style-unavailable',
   'hook-continuation-limit',
   'project-mcp-unavailable',
+  'web-search-unavailable',
 ])
 export type NoticeCode = z.infer<typeof noticeCodeSchema>
 
@@ -390,6 +400,12 @@ export const chatRequestBodySchema = z.strictObject({
    * with notice `output-style-unavailable`.
    */
   outputStyle: catalogNameSchema.nullable().optional(),
+  /**
+   * The web search mode of this turn (Phase 14, ADR-063): the composer sends the effective mode (picked > chat setting >
+   * global `webSearchDefault`); omitted = the chat's `settings.webSearch`, else the global default. Never stored by this
+   * request (the composer persists a change with `PATCH /chats/:id`). Resolved per turn by `resolveWebSearch`.
+   */
+  webSearch: webSearchModeSchema.optional(),
 })
 export type ChatRequestBody = z.infer<typeof chatRequestBodySchema>
 

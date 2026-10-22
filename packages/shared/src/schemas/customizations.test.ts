@@ -109,7 +109,8 @@ describe('enums and limits (Phase 10)', () => {
     expect(customizationSourceSchema.options).toEqual([...CUSTOMIZATION_SOURCES])
     expect(customizationSourceSchema.options).toEqual(['builtin', 'plugin', 'user', 'project'])
     expect(customizationStateSchema.options).toEqual(['active', 'shadowed', 'invalid', 'off'])
-    expect(commandSourceSchema.options).toEqual(['harness', 'plugin', 'user', 'project'])
+    // Phase 14 (ADR-061) appends `mcp` (MCP prompts).
+    expect(commandSourceSchema.options).toEqual(['harness', 'plugin', 'user', 'project', 'mcp'])
     expect(rememberTargetSchema.options).toEqual(['project-file', 'project-instructions', 'global'])
     // Phase 11 (ADR-048) adds `hook`.
     expect(runOriginSchema.options).toEqual(['request', 'queue', 'task', 'hook'])
@@ -117,8 +118,8 @@ describe('enums and limits (Phase 10)', () => {
     expect(taskTypeSchema.options).toEqual(['explore', 'general'])
     expect(taskStatusSchema.options).toEqual(['queued', 'running', 'completed', 'failed', 'aborted', 'limit', 'background'])
     expect(backgroundTaskStatusSchema.options).toEqual(['running', 'completed', 'failed', 'aborted', 'limit'])
-    // Phase 11 adds three notices after `command-model-unavailable` (11).
-    expect(noticeCodeSchema.options).toHaveLength(11)
+    // Phase 11 adds three notices after `command-model-unavailable` (11), Phase 14 one more (12).
+    expect(noticeCodeSchema.options).toHaveLength(12)
     expect(noticeCodeSchema.options[7]).toBe('command-model-unavailable')
     expect(HARNESS_ERROR_CODES).toHaveLength(16)
     expect(CLIENT_COMMANDS).toContain('remember')

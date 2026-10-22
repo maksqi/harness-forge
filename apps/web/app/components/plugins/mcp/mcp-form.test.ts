@@ -35,13 +35,14 @@ function httpServer(overrides: Partial<McpServer> = {}): McpServer {
     name: 'GitHub',
     pluginId: 'core-mcp',
     editable: true,
-    transport: { type: 'http', url: 'https://mcp.example.com/mcp', headers: { Authorization: stored } },
+    transport: { type: 'http', url: 'https://mcp.example.com/mcp', headers: { Authorization: stored }, oauth: null },
     policy: 'ask',
     enabled: true,
     status: 'connected',
     error: null,
     tools: ['mcp__github__search'],
     connectedAt: 1_759_000_000_000,
+    auth: null,
     ...overrides,
   }
 }
@@ -67,8 +68,9 @@ describe('display helpers', () => {
   })
 
   it('maps statuses to dots and names transports and policies', () => {
-    expect(MCP_STATUS_DOTS).toEqual({ connected: 'ok', connecting: 'running', error: 'error', disabled: 'off' })
-    expect(MCP_STATUS_LABELS).toEqual({ connected: 'Connected', connecting: 'Connecting', error: 'Error', disabled: 'Disabled' })
+    // Phase 14 (ADR-059): `needs-auth` is a warning dot, "Sign in required".
+    expect(MCP_STATUS_DOTS).toEqual({ 'connected': 'ok', 'connecting': 'running', 'error': 'error', 'disabled': 'off', 'needs-auth': 'warning' })
+    expect(MCP_STATUS_LABELS).toEqual({ 'connected': 'Connected', 'connecting': 'Connecting', 'error': 'Error', 'disabled': 'Disabled', 'needs-auth': 'Sign in required' })
     expect(toolCountLabel(1)).toBe('1 tool')
     expect(toolCountLabel(12)).toBe('12 tools')
     expect([transportLabel('stdio'), transportLabel('http'), transportLabel('sse')]).toEqual(['stdio', 'HTTP', 'SSE'])

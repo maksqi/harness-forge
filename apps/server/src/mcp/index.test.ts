@@ -335,7 +335,7 @@ describe('user http servers', () => {
         policy: 'always',
         transport: { type: 'http', url: endpoint.url, headers: { Authorization: `Bearer ${SECRET}` } },
       })
-      expect(created.transport).toEqual({ type: 'http', url: endpoint.url, headers: { Authorization: { set: true, hint: expect.any(String), source: 'stored' } } })
+      expect(created.transport).toEqual({ type: 'http', url: endpoint.url, headers: { Authorization: { set: true, hint: expect.any(String), source: 'stored' } }, oauth: null })
       expect(JSON.stringify(created)).not.toContain(SECRET)
       await connected(h, 'remote')
       expect(h.t.deps.registry.tools.get('mcp__remote__plain')?.definition.policy).toBe('always')

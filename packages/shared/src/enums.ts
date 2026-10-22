@@ -11,6 +11,12 @@ import {
 import { HOOK_DIAGNOSTIC_CODES, HOOK_EVENTS, HOOK_SOURCES } from './util/hooks.ts'
 import { MCP_JSON_TRANSPORTS } from './util/mcp-config.ts'
 import { TRUST_ITEM_KINDS } from './util/trust.ts'
+import {
+  MODEL_WEB_SEARCH_KINDS,
+  WEB_SEARCH_BACKENDS,
+  WEB_SEARCH_MODES,
+  WEB_SEARCH_UNAVAILABLE_REASONS,
+} from './util/web-search.ts'
 
 /**
  * Chat permission mode (UI label: permission mode). Default `ask`. `edits` ("Accept edits", Phase 7, ADR-032): safe
@@ -99,7 +105,12 @@ export type TitleSource = z.infer<typeof titleSourceSchema>
 export const secretSourceSchema = z.enum(['stored', 'env'])
 export type SecretSource = z.infer<typeof secretSourceSchema>
 
-export const mcpStatusSchema = z.enum(['disabled', 'connecting', 'connected', 'error'])
+/**
+ * State of a personal or plugin MCP server. Phase 14 (ADR-059): `needs-auth`, an http / sse server answered 401 (or its
+ * stored OAuth sign-in was refused, `invalid_grant`): it is not retried with backoff, its tools are unavailable (also to
+ * sub-agents and background tasks), and nothing prompts; the user signs in from the MCP list (`POST /mcp/:id/oauth`).
+ */
+export const mcpStatusSchema = z.enum(['disabled', 'connecting', 'connected', 'error', 'needs-auth'])
 export type McpStatus = z.infer<typeof mcpStatusSchema>
 
 export const logLevelSchema = z.enum(['debug', 'info', 'warn', 'error'])
@@ -200,8 +211,11 @@ export const customizationSourceSchema = z.enum(CUSTOMIZATION_SOURCES)
 export const customizationStateSchema = z.enum(['active', 'shadowed', 'invalid', 'off'])
 export type CustomizationState = z.infer<typeof customizationStateSchema>
 
-/** Where a server-side slash command comes from (`GET /commands`, ADR-045); `harness` = run by the server itself. */
-export const commandSourceSchema = z.enum(['harness', 'plugin', 'user', 'project'])
+/**
+ * Where a server-side slash command comes from (`GET /commands`, ADR-045); `harness` = run by the server itself. Phase 14
+ * (ADR-061): `mcp`, a prompt of a connected MCP server (`/mcp__<serverId>__<prompt>`, `CommandSummary.mcpServer`).
+ */
+export const commandSourceSchema = z.enum(['harness', 'plugin', 'user', 'project', 'mcp'])
 export type CommandSource = z.infer<typeof commandSourceSchema>
 
 /**
@@ -312,9 +326,10 @@ export const projectMcpTransportSchema = z.enum(MCP_JSON_TRANSPORTS)
  * State of a project MCP server (ADR-050): `pending` (not approved), `needs-variables` (approved, a `${VAR}` without a
  * value or a default), `idle` (approved and ready, not started: servers start lazily for the first run of a project
  * chat, and stop after 10 idle minutes), `connecting`, `connected`, `error` (`error` says why) or `disabled`
- * (`HF_SAFE_MODE`, or the project folder is unavailable).
+ * (`HF_SAFE_MODE`, or the project folder is unavailable). Phase 14 (ADR-059): `needs-auth`, an approved http / sse
+ * server answered 401 (sign in with `POST /projects/:id/mcp/:serverId/oauth`; never retried with backoff).
  */
-export const projectMcpStateSchema = z.enum(['pending', 'needs-variables', 'idle', 'connecting', 'connected', 'error', 'disabled'])
+export const projectMcpStateSchema = z.enum(['pending', 'needs-variables', 'idle', 'connecting', 'connected', 'error', 'disabled', 'needs-auth'])
 export type ProjectMcpState = z.infer<typeof projectMcpStateSchema>
 
 /**
@@ -323,6 +338,55 @@ export type ProjectMcpState = z.infer<typeof projectMcpStateSchema>
  */
 export const invocationKindSchema = z.enum(['command', 'skill'])
 export type InvocationKind = z.infer<typeof invocationKindSchema>
+
+// ---------- MCP 2.0 and web search (Phase 14) ----------
+
+/**
+ * How a pending MCP elicitation ended (ADR-060; MCP `elicitation/create` result actions): `accept` (the user submitted
+ * the form; only then the server receives content), `decline` (the user, or the harness for a request it cannot show)
+ * or `cancel` (dismissed, timed out, stopped).
+ */
+export const elicitationActionSchema = z.enum(['accept', 'decline', 'cancel'])
+export type ElicitationAction = z.infer<typeof elicitationActionSchema>
+
+/**
+ * Why an elicitation ended (ADR-060; the stored record): `user` (the user answered), `timeout` (no answer within
+ * `LIMITS.mcpElicitationWaitMs`), `stopped` (Stop, chat delete, key rotation or shutdown), `not-interactive` (a
+ * sub-agent or background call, or no tool call in flight: declined at once), `ambiguous` (calls of several chats in
+ * flight on the server's connection: declined at once) or `unsupported` (a schema outside the supported subset, or URL
+ * mode: declined at once).
+ */
+export const elicitationReasonSchema = z.enum(['user', 'timeout', 'stopped', 'not-interactive', 'ambiguous', 'unsupported'])
+export type ElicitationReason = z.infer<typeof elicitationReasonSchema>
+
+/**
+ * How an MCP server's OAuth client was obtained (ADR-059; `McpAuthInfo.client`): `dynamic` (dynamic client
+ * registration at the authorization server) or `configured` (a client id from the server's `oauth.clientId`).
+ */
+export const mcpAuthClientKindSchema = z.enum(['dynamic', 'configured'])
+export type McpAuthClientKind = z.infer<typeof mcpAuthClientKindSchema>
+
+/**
+ * The per-chat web search mode (ADR-063; `WEB_SEARCH_MODES` of `util/web-search.ts`, type `WebSearchMode`): `off`, or
+ * `auto` (the turn searches with the model's own search tool or the builtin `search_web`, `resolveWebSearch`). Chat
+ * setting `webSearch`, request body `webSearch`, global setting `webSearchDefault`.
+ */
+export const webSearchModeSchema = z.enum(WEB_SEARCH_MODES)
+
+/**
+ * A model's native web search (ADR-062; `MODEL_WEB_SEARCH_KINDS`, type `ModelWebSearchKind`; `CatalogModel.webSearch`):
+ * `native` (offered next to function tools) or `exclusive` (only for turns without function tools, Gemini 2.x).
+ */
+export const modelWebSearchSchema = z.enum(MODEL_WEB_SEARCH_KINDS)
+
+/** The builtin search backends of `core-search` (ADR-063; `WEB_SEARCH_BACKENDS`, type `WebSearchBackend`). */
+export const webSearchBackendSchema = z.enum(WEB_SEARCH_BACKENDS)
+
+/**
+ * Why a turn with web search on cannot search (ADR-063; `WEB_SEARCH_UNAVAILABLE_REASONS`, type
+ * `WebSearchUnavailableReason`): `tool-mode-off`, `tools-conflict`, `tools-unsupported` or `no-backend`.
+ */
+export const webSearchUnavailableReasonSchema = z.enum(WEB_SEARCH_UNAVAILABLE_REASONS)
 
 // ---------- global settings enums ----------
 

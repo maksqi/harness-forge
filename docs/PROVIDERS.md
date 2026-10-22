@@ -1,8 +1,9 @@
 # Providers
 
 Reference for the builtin BYOK providers of the `core-providers` builtin plugin, the dev-only `mock` provider, the
-declarative provider templates of the provider wizard, provider icons, and (Phase 6) the image, transcription and speech
-models of the builtin providers ([section 13](#13-image-and-voice-models)). The provider contract
+declarative provider templates of the provider wizard, provider icons, (Phase 6) the image, transcription and speech
+models of the builtin providers ([section 13](#13-image-and-voice-models)) and (Phase 14, v1.9) the providers' native web
+search and the backends of the builtin `search_web` tool ([section 14](#14-web-search)). The provider contract
 (`ProviderDefinition`, `CredentialField`, `ModelInfo`, `ReasoningParams`) is defined in
 [PLUGINS.md](./PLUGINS.md#9-api-reference); the model catalog merge rules are in
 [ARCHITECTURE.md](./ARCHITECTURE.md#9-model-catalog). Ids follow [DECISIONS.md](./DECISIONS.md).
@@ -306,6 +307,9 @@ with `capabilities.reasoning`.
   (`http://gpu-box:11434/v1`). `ECONNREFUSED` maps to `provider_unreachable` with the message "Cannot reach Ollama at
   <origin>. Is Ollama running?". The OpenAI-compatible API also accepts `reasoning_effort` (see mapping);
   `stream_options.include_usage` is supported, so `includeUsage: true` is set.
+- **Web search** (Phase 14): Anthropic, OpenAI, Google, xAI, OpenRouter and Groq (gpt-oss) define the `webSearch` hook
+  (native search); the other providers rely on the builtin `search_web`. Tools, versions, model lists and caveats:
+  [section 14](#14-web-search).
 
 ### Error mapping
 
@@ -340,10 +344,11 @@ errors -> `context_overflow`; `ECONNREFUSED` / `ENOTFOUND` -> `provider_unreacha
 Dev and e2e only: the builtin plugin `mock` registers provider `mock` and tool `mock_approval_tool` when
 `HF_MOCK_PROVIDER=1` (`pnpm start:e2e` sets it). Models are `MockLanguageModelV4` instances from `ai/test` streaming
 through `simulateReadableStream`. The provider has no credentials (status `connected`), no icon (monogram),
-`smallModelId: 'echo'`, `listModels` (and `seedModels`) return its twenty-one models (the four chat models of v1, the
+`smallModelId: 'echo'`, `listModels` (and `seedModels`) return its twenty-three models (the four chat models of v1, the
 five models of Phase 6, `workspace` of Phase 7, `checkpoint` and `shell` of Phase 8, `compact`, `plan`, `todo`,
-`subagent` and `steer` of Phase 9, `agents` and `background` of Phase 10, `hooks` of Phase 11 and `prompt-hook` of
-Phase 12), and `validate` always succeeds. Its
+`subagent` and `steer` of Phase 9, `agents` and `background` of Phase 10, `hooks` of Phase 11, `prompt-hook` of
+Phase 12 and `search` and `search-tool` of Phase 14), and `validate` always succeeds. Phase 14: the provider also defines
+`webSearch` (plugin API 1.7.0), which returns a native search tool for `mock:search` only (below). Its
 `reasoning()` maps `off` -> `none`, `low` / `medium` / `high` -> same, `max` -> `xhigh`. Since Phase 6 (manifest
 `engines.harness` `^1.1.0`) it also defines `createImageModel`, `imageParams`, `createTranscriptionModel`,
 `createSpeechModel` and a `transcriptionOptions` that returns nothing (the mock models ignore the language), with models
@@ -355,13 +360,15 @@ id other than the three below rejects with a 404 `APICallError`.
 
 Names: Mock Echo, Mock Reasoning, Mock Tool Approval, Mock Error, Mock Image, Mock Image Chat, Mock Image Tool, Mock
 Transcribe, Mock Speech, Mock Workspace, Mock Checkpoint, Mock Shell, Mock Compact, Mock Plan, Mock Todo, Mock Sub-agent,
-Mock Steer, Mock Agents, Mock Background, Mock Hooks, Mock Prompt Hook. `GET /api/models` shows nineteen of them (the
+Mock Steer, Mock Agents, Mock Background, Mock Hooks, Mock Prompt Hook, (Phase 14) Mock Search, Mock Search Tool.
+`GET /api/models` shows twenty-one of them (the
 four chat models, `image`, `image-chat`, `image-tool`, `workspace`, `checkpoint`, `shell`, `compact`, `plan`, `todo`,
-`subagent`, `steer`, `agents`, `background`, `hooks`, `prompt-hook`); `transcribe` and `speech` are hidden and chosen in
-Settings → Media. The provider's `modelCount` is 18 (visible chat models; the image model is not counted). A data
+`subagent`, `steer`, `agents`, `background`, `hooks`, `prompt-hook`, `search`, `search-tool`); `transcribe` and `speech`
+are hidden and chosen in Settings → Media. The provider's `modelCount` is 20 (visible chat models; the image model is not
+counted; 18 before Phase 14). A data
 directory whose cached mock listing predates a model (the e2e server's `.tmp/e2e`: `workspace` in Phase 7, `checkpoint`
 and `shell` in Phase 8, the five agent mocks in Phase 9, the two customization mocks in Phase 10, `hooks` in Phase 11,
-`prompt-hook` in Phase 12) shows the new models only after a
+`prompt-hook` in Phase 12, `search` and `search-tool` in Phase 14) shows the new models only after a
 refresh: move it aside before a gate. Since v1.8.1 an `HF_OFFLINE=1` server (`pnpm start:e2e`) lists the mock provider
 only on an explicit refresh, so on fresh e2e data its models come from the seeds (`source: 'seed'`, no "Updated …"
 text on the provider row).
@@ -376,11 +383,11 @@ Common behavior (deterministic):
 - **Usage**: `inputTokens` = number of whitespace-separated words in all prompt text parts; `outputTokens` = number of
   streamed text and reasoning words; `reasoningTokens` = reasoning words.
 - **Model info** (the four chat models and `image-chat`, `image-tool`, `workspace`, `checkpoint`, `shell`, `compact`,
-  `plan`, `todo`, `subagent`, `steer`, `agents`, `background`, `hooks`): `contextWindow: 32000` (`compact`: 2000, so a few turns
+  `plan`, `todo`, `subagent`, `steer`, `agents`, `background`, `hooks`, and Phase 14 `search`, `search-tool`): `contextWindow: 32000` (`compact`: 2000, so a few turns
   pass 80 % of it), `maxOutputTokens: 4096`, `cost: { input: 1, output: 2 }` (USD per 1M tokens, so cost displays are
   non-zero); `image-chat`, `image-tool`, `workspace`, `checkpoint`, `shell`, the five Phase 9 models, the two Phase 10
-  models and the Phase 11 model declare `kind: 'chat'` explicitly (an explicit kind wins over `classify()`); the Phase 9,
-  Phase 10 and Phase 11 models have the `tools` capability only. The media
+  models, the Phase 11 model and the two Phase 14 models declare `kind: 'chat'` explicitly (an explicit kind wins over
+  `classify()`); the Phase 9, Phase 10, Phase 11 and Phase 14 models have the `tools` capability only. The media
   models have explicit kinds: `image` (`kind: 'image'`, `capabilities.vision: true`, the same cost, so image turns show
   an estimated cost), `transcribe` (`kind: 'transcription'`) and `speech` (`kind: 'speech'`,
   `voices: ['mock-voice-a', 'mock-voice-b']` so the Voice suggestions can be tested); the last two have no limits and
@@ -645,6 +652,64 @@ holding `[[ph:deny no secrets]]` → 409 `hook-blocked`, nothing stored; a handl
 `hooksEnabled: false` or `HF_SAFE_MODE=1` no prompt hook runs (no usage row; `HF_WORKSPACE_SHELL=0` does not stop
 them).
 
+### MCP and search mocks (Phase 14)
+
+Two chat models, a `webSearch` hook on the mock provider, an OAuth MCP fixture and the search fakes drive MCP sign-in,
+elicitation, MCP prompts and resources, native search and the builtin `search_web` (ADR-059 … ADR-063) without any real
+MCP, OAuth or search host. C53 implements them in P14-0b; they are complete and frozen from Gate P14-0b; **this
+subsection is the contract of the Phase 14 gate probes and e2e specs** (with `mock:hooks` and `mock:echo` above). Mock
+language models: 18 → 20. Model info as in "Common behavior" (`kind: 'chat'`, the `tools` capability only). Details the
+plan leaves open (the two source URLs and titles, the wording of the result list, the fixture's prompt and resource
+names) are fixed by C53 in P14-0b and recorded here by W14.12.
+
+**The mock provider's `webSearch` hook** (plugin API 1.7.0, [PLUGINS.md](./PLUGINS.md#providerdefinition)): for
+`mock:search` it returns the provider-executed tool `web_search` = `{ type: 'provider', id: 'mock.web_search',
+isProviderExecuted: true, args: {} }` (no `exclusive`), so the catalog reports `webSearch: 'native'` for `mock:search`;
+for every other mock model it returns `undefined` (`webSearch: null`).
+
+| Model ref | Behavior |
+|---|---|
+| `mock:search` | When the call offers the native tool `web_search` (the chat's web search mode resolved to native): streams a **provider-executed** `tool-call` `web_search` (input `{ query: <user text> }`), its `tool-result`, two `source` parts (`sourceType: 'url'`, http(s)) and then the text `Search done: 2 sources`. Otherwise (search off, tool mode `off`, the setting `webSearchNative` off, or the builtin `search_web` offered instead) the text `Search off`. It never calls a function tool. |
+| `mock:search-tool` | When the call offers `search_web` (the builtin of `core-search`, a backend key set): one tool call `search_web` with input `{ query: <user text> }` (id `mock_call_<n>`, `finishReason: 'tool-calls'`); after its result, a text that lists the result titles of the output. |
+
+**The OAuth MCP fixture** (`apps/server/src/mcp/__fixtures__/oauth-mcp-server.mjs`; a script and an importable ESM
+module built on `@modelcontextprotocol/sdk` (root dev dependency) and `node:http`, listening on a loopback port 0):
+
+- **MCP endpoint**: stateful Streamable HTTP with SSE responses (needed for a server-to-client request); it answers 401
+  with `WWW-Authenticate` (`resource_metadata`, `scope`) until a request carries a valid Bearer token.
+- **Authorization server**: protected-resource and authorization-server metadata, dynamic client registration,
+  `/authorize` (auto-approve, or an HTML page with an **Approve** button for the e2e specs), `/token` (checks PKCE S256,
+  issues expiring access tokens and refresh tokens, answers `invalid_grant` for a revoked or bad refresh token) and
+  `/revoke` (RFC 7009).
+- **Tools**: `ask` (asks for input through `elicitation/create` with a variable schema and returns the action and the
+  field names, never the values), `ask_echo` (returns the accepted content, for the answer-validation tests), `slow_ask`
+  (waits 2 s, then asks).
+- **Prompts** (with required and optional arguments, one with an assistant message, one with an embedded resource) and
+  **resources** (text, a large one over 5 MiB for the 413 path, an image).
+- **Counters** (connects, `initialize` requests, token, refresh and revoke calls, `prompts/get` and `resources/read`) and
+  **toggles**: a pre-registered client (no registration endpoint), a foreign authorization server (another origin, for
+  the URL guard), no OAuth metadata (a plain 401), a short token life (for the refresh path). A **stdio variant** sends
+  the `list_changed` notifications (prompts, resources).
+- `apps/server/src/mcp/__fixtures__/harness.ts` `callTool` drains async-generator `execute`s (every MCP tool streams
+  since Phase 14).
+
+**Search fakes**: `createFakeSearchFetch()` (`apps/server/src/testing/fake-search.ts`) answers the Brave, Tavily and Exa
+endpoints of section 14 with canned results and has modes for 401, 429, 500, a timeout and an oversized body, plus a
+request log (method, URL, headers without the key value, body); unit tests inject it into `core-search`. The server's
+fake remote (`apps/server/src/testing/fake-remote.ts`) serves POST for its routes and records the bodies. The e2e
+fake remote `e2e/fixtures/fake-remote.mjs` serves the same three backends behind `HF_TEST_REMOTE_URL` (only with
+`HF_MOCK_PROVIDER=1`; `createPluginSourceFetch` reroutes the https backend hosts to it) on the port
+`E2E_FAKE_REMOTE_PORT` (default set in `playwright.config.ts`; see `e2e/README.md`).
+
+**How the probes use them** (ARCHITECTURE.md, Phase 14 flows): `mock:hooks` with `call mcp__<server>__ask {}` in a chat
+with the fixture connected drives an elicitation (accept, decline, cancel, timeout, Stop, a reload replaying the card,
+a second answer 409, an invalid one 400; a sub-agent's call declined); `/mcp__<server>__<prompt> Ada` sent to
+`mock:echo` echoes the frozen expansion (`[files: N]` after a resource attachment); `mock:search` with the chat's web
+search on in Ask and Plan mode gives a provider-executed `tool-web_search` part, at least 2 `source-url` parts, no
+`awaitingApproval` and no `PreToolUse` record, and with search off `Search off`; `mock:search-tool` with Brave on the
+fake remote gives a `search_web` part and `source-url` parts in the stored message, the share snapshot and the Markdown
+export, and the Tavily / Exa backends show a POST with a JSON body in the fake's log.
+
 ## 9. Declarative provider templates (wizard)
 
 Step 2 of the provider wizard offers these templates; each fills a `DeclarativeProvider`
@@ -887,6 +952,16 @@ secret is an empty variable, which the suite reports as SKIP.
 
 Record the results of a run in [section 11](#11-verification-log).
 
+### Web search checks (Phase 14)
+
+W14.4 and W14.5 add live checks for web search (`*.live.test.ts`, run only by `pnpm test:live`, paid, never by agents or
+`pnpm test`): one native search per provider with a key (section 14; for Google one Gemini 3 model and one Gemini 2.5
+model on a turn without function tools), a two-turn replay on Anthropic and OpenAI (the second turn carries the first
+turn's provider-executed parts), a provider switch in one chat (Anthropic → OpenAI → Anthropic), and one `search_web`
+call per builtin backend whose key is set: `BRAVE_SEARCH_API_KEY`, `TAVILY_API_KEY`, `EXA_API_KEY`. These three
+variables are **test-only**: the server never reads them (users store search keys in Settings → Web search). How the
+checks are switched on and budgeted is fixed by W14.4 / W14.5 and recorded here.
+
 ## 13. Image and voice models
 
 Phase 6 (ADR-028 images, ADR-029 voice). The provider members are optional parts of plugin API 1.1.0
@@ -1012,3 +1087,94 @@ with an invalid list fails validation).
 | `gpt-4o-mini-tts`, `gemini-2.5-flash-preview-tts` | audio output with a text input (or the `tts` id fallback) | `speech` |
 | `whisper-large-v3`, `gpt-4o-transcribe` | audio input without a text input and a text output (or the `whisper` / `transcri` id fallback) | `transcription` |
 | `stt`, `tts` (xAI), `voxtral-mini-latest` (Mistral) | the seed's explicit kind (an explicit `kind` of any layer wins over `classify()`) | `transcription` / `speech`, `transcription` |
+
+## 14. Web search
+
+Phase 14 (v1.9, ADR-062, ADR-063). A chat searches the web only while its **web search** is on: the composer's Search
+toggle ([UI.md 7.35](./UI.md)), stored per chat as `webSearch: 'off' | 'auto'` (the request body's `webSearch` wins, then
+the chat's setting, then the global setting `webSearchDefault`, default `off`). A turn with search on then uses exactly
+**one** of two ways, never both in one request:
+
+- **native**: the model's own search, a **provider-executed** tool returned by the provider's `webSearch` hook (plugin API
+  1.7.0, [PLUGINS.md](./PLUGINS.md#providerdefinition)); the provider runs the search and streams the call, its result
+  and its citations;
+- **builtin**: the `search_web` tool of the builtin plugin `core-search`, which calls Brave Search, Tavily or Exa with the
+  user's own key ([PLUGINS.md 1](./PLUGINS.md#builtin-plugins)); the pipeline adds its result URLs as sources.
+
+User guide: [Web search](./guides/web-search.md). Settings: Settings → Web search ([UI.md 9.15](./UI.md)).
+
+### Resolution (`resolveWebSearch`)
+
+One pure rule in `packages/shared/src/util/web-search.ts`, used by the server for every turn (main agent and every
+sub-agent, background ones included, each for its own model) and by the composer for the toggle's state. In order:
+
+1. mode `off` → off;
+2. tool mode `off` → unavailable, reason `tool-mode-off`;
+3. the model has native search (`webSearch: 'native'`) and the setting `webSearchNative` is on (default) → native;
+4. the model's native search is `exclusive` (Gemini 2.x), `webSearchNative` is on and the turn sends no other function
+   tool → native;
+5. `core-search` has a key for its selected backend and the model supports tools → builtin;
+6. otherwise unavailable: `tools-conflict` (an exclusive model with function tools and no backend key),
+   `tools-unsupported` (the model cannot call tools), `no-backend` (no native search and no backend key).
+
+Ask, Accept edits, Plan and Auto all allow search (it only reads). An unavailable turn runs without search and adds the
+info notice `web-search-unavailable` (once per chat, model and reason). The model DTO's `webSearch` (`'native' |
+'exclusive' | null`) comes from probing the provider's hook with `{ functionTools: 0 }` when the catalog is built; it is
+not a `capabilities` flag.
+
+A provider-executed call never reaches the approval card or a hook: the approval function answers `not-applicable` only
+for a call the stream marks `providerExecuted` whose name is one of the turn's native tools (a call of that name without
+the mark is denied). Provider-executed parts stay in the history while the chat stays on the same provider (some APIs
+need them for the next turn) and are removed before a turn on another provider.
+
+### Native search by provider
+
+Read from the installed packages (`@ai-sdk/anthropic` 4.0.85, `@ai-sdk/openai` 4.0.99, `@ai-sdk/google` 4.0.102,
+`@ai-sdk/xai` 5.0.27, `@ai-sdk/groq` 4.0.67, `@openrouter/ai-sdk-provider` 3.1.0) on 2026-10-22; the live behavior is
+**(unverified)** until the live suite runs it (section 12). The model lists are deny-lists: an unknown new model id
+counts as supported. W14.4 implements the hooks in `core-providers`.
+
+| Provider | ToolSet key | Tool (package factory) | Models | Citations | Caveats |
+|---|---|---|---|---|---|
+| `anthropic` | `web_search` | `anthropic.tools.webSearch_20250305({ maxUses: 5 })` | `claude-*` models except the oldest families (no `claude-2*`, `claude-instant*`, plain `claude-3-*`; W14.4 fixes the list) | a `source` part per result and citation | the wire name is always `web_search` (never offer a function tool of that name next to it); results carry `encryptedContent`, kept in the stored message for the next turn, never shown and stripped from share snapshots; `pause_turn` is mapped to `stop`, so a very long server-tool loop ends the turn early; the dynamic-filtering versions (`webSearch_20260209`, `webSearch_20260318`, which add hidden `code_execution` calls) are in the backlog |
+| `openai` | `web_search` | `openai.tools.webSearch({})` (Responses API, the provider's default) | every model except a deny-list of old ids (`o1*`, `o3-mini*`, `*-nano`, `gpt-3.5*`, `gpt-4` / `gpt-4-*` without `o` or `.1`) | `url_citation` annotations → sources | `webSearchPreview` is deprecated and not used |
+| `google` | `google_search` | `google.tools.googleSearch({})` | Gemini 3 and later: native; **Gemini 2.x: `exclusive`**; other models: none | grounding metadata (`groundingChunks`) → sources | before Gemini 3 the API **silently drops function tools** sent next to Google Search (the package only warns), so a 2.x model searches natively only on a turn that sends no function tool; with tools it uses the builtin `search_web`, or search is unavailable (`tools-conflict`) without a backend key |
+| `xai` | `web_search` | `xai.tools.webSearch({})` (Responses API) | every model except `grok-2*` and `grok-3*` | sources from the response | `xSearch` (posts on X) is not offered |
+| `openrouter` | `web_search` | `openrouter.tools.webSearch({ maxResults: 5 })` (sent as `openrouter:web_search`) | models with the `tools` capability; a model without tools gets `providerOptions.openrouter.plugins: [{ id: 'web', max_results: 5 }]` instead (no tool) | `url_citation` annotations → sources | the stream has no tool-call parts for it (only sources); the cost OpenRouter reports (`usage.include`) already includes the search fee |
+| `groq` | `browser_search` | `groq.tools.browserSearch({})` | gpt-oss models only (`openai/gpt-oss-20b`, `openai/gpt-oss-120b`; the provider's `GPT_OSS` pattern) | **none** (no tool-call or source parts) | whether it works next to function tools is **(unverified)** |
+| `mistral`, `deepseek`, `moonshotai`, `alibaba`, `zai`, `minimax`, `ollama`, declarative providers | — | none | — | — | chats on these models use the builtin `search_web`. Mistral's own `webSearch` tools work only with its conversation API (`.conversation()`), and the builtin provider uses the chat API (backlog) |
+
+- **Fees**: native search is billed by the provider per search (on top of tokens) and is **not** in harness-forge's cost
+  estimate (the settings page says so); OpenRouter's reported cost includes it.
+- **`webSearchNative`** (Settings → Web search, "Use the model's own web search when it has one", default on): off =
+  always the builtin `search_web` (when a backend key is set).
+- **Rows in the chat**: a provider-executed call shows as "Searched the web" with its query (`WebSearchToolBody`, UI.md
+  7.35), never an approval card and never `encryptedContent`; the sources show under the reply.
+
+### Builtin backends (`core-search`)
+
+The user picks one backend and stores its key in Settings → Web search (secret settings of `core-search`, scope
+`plugin:core-search`, write-only). Keys are BYOK: get one from the vendor (verify the current plans, free tiers and
+prices on the vendor site). The request shapes below are the design's reading of the vendor docs and are **verified
+against the vendor docs at implementation time (W14.5)**; the fake remote mirrors them.
+
+| Backend (`backend`) | Request | Key goes in | Get a key | Read from the answer |
+|---|---|---|---|---|
+| Brave Search (`brave`, default) | `GET https://api.search.brave.com/res/v1/web/search?q=…&count=…&freshness=pd\|pw\|pm\|py` | header `X-Subscription-Token` | https://brave.com/search/api/ | `web.results[].{ title, url, description, page_age }` |
+| Tavily (`tavily`) | `POST https://api.tavily.com/search`, JSON `{ query, max_results, search_depth: 'basic', time_range? }` | header `Authorization: Bearer <key>` | https://tavily.com | `results[].{ title, url, content, published_date }` |
+| Exa (`exa`) | `POST https://api.exa.ai/search`, JSON `{ query, numResults, type: 'auto', contents: { highlights: true }, startPublishedDate? }` | header `x-api-key` | https://exa.ai | `results[].{ title, url, highlights \| text, publishedDate }` |
+
+- **What is sent**: only the query the model wrote, the result count, the freshness and the key. Never chat messages,
+  files, the model's name or anything about the user.
+- **How**: every request goes through the server's SSRF-guarded fetch (`createPluginSourceFetch`: https only, the
+  vendor's public host, DNS pinned, 10 s, at most 1 MB read, no redirect followed; POST bodies at most 64 KB, Phase 14
+  `safeFetch` POST). Tests and e2e never reach a vendor: `createFakeSearchFetch` and the fake remote (section 8).
+- **Output** (normalized for every backend): `{ query, backend, results: [{ title, url, snippet, published }] }`, at most
+  `count` results (default the setting `maxResults`, 5), titles ≤ 300 and snippets ≤ 800 characters of plain text,
+  http(s) URLs only (≤ 2048), the whole output ≤ 32 KB. Snippets are untrusted text: the UI renders them as plain text.
+- **Errors**: 401 / 403 → `provider_error` saying the key was rejected (the key is never echoed or logged); 429 →
+  `rate_limited`; a network failure or timeout → `provider_unreachable`; any other failure → `provider_error`.
+- **Not blocked by `HF_OFFLINE`** (like `web_fetch`: the search runs only when the user turned search on). Queries and
+  keys are never logged at `info`.
+- **Test search** (Settings → Web search): `POST /api/web-search/test { backend? }` runs one test search with the stored
+  key and answers `{ ok, backend, results, ms }` (the number of results and the time), or the error above.

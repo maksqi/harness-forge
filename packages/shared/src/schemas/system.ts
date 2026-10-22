@@ -8,6 +8,7 @@ import {
   sendKeySchema,
   textSizeSchema,
   toolModeSchema,
+  webSearchModeSchema,
 } from '../enums.ts'
 import { catalogNameSchema, modelRefSchema, timestampSchema } from '../ids.ts'
 import { LIMITS } from '../limits.ts'
@@ -171,6 +172,14 @@ const settingsFields = {
   hookModelRef: modelRefSchema.nullable(),
   /** The models of the Claude model aliases (`sonnet`, `opus`, `haiku`, `fable`); null each = the fallback. */
   modelAliases: modelAliasesSchema,
+  // MCP 2.0 and web search (Phase 14, ADR-062 / ADR-063); neither needs fresh auth.
+  /**
+   * The web search mode of chats without their own `settings.webSearch`; default `off` (a search costs money and sends
+   * the query to the provider or the search backend).
+   */
+  webSearchDefault: webSearchModeSchema,
+  /** Use the model's own (provider-executed) web search when it has one; off = always the builtin `search_web`. */
+  webSearchNative: z.boolean(),
 }
 
 /** `GET /settings`: every key always present (defaults applied by `settingsSchema.parse`). */
@@ -207,6 +216,8 @@ export const settingsSchema = z.object({
   hooksEnabled: settingsFields.hooksEnabled.default(true),
   hookModelRef: settingsFields.hookModelRef.default(null),
   modelAliases: settingsFields.modelAliases.default({ sonnet: null, opus: null, haiku: null, fable: null }),
+  webSearchDefault: settingsFields.webSearchDefault.default('off'),
+  webSearchNative: settingsFields.webSearchNative.default(true),
 })
 export type Settings = z.infer<typeof settingsSchema>
 

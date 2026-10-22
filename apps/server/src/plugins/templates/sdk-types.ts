@@ -77,6 +77,8 @@ declare module '@harness-forge/plugin-sdk' {
   export type InputSchema = LibraryValue
   /** An AI SDK tool result output: { type: 'text', value } or { type: 'json', value } and friends. */
   export type ToolResultOutput = LibraryValue
+  /** An AI SDK tool, e.g. a provider-defined search tool such as ctx.ai.createAnthropic(...).tools.webSearch_20250305(). */
+  export type Tool = LibraryValue
   /** Options per provider, e.g. { openai: { reasoningEffort: 'low' } }. */
   export type ProviderOptions = Record<string, Record<string, any>>
 
@@ -145,6 +147,14 @@ declare module '@harness-forge/plugin-sdk' {
     advanced?: boolean
   }
 
+  /** OAuth settings of an http / sse MCP server (plugin API 1.7.0); plugin servers never carry a client secret. */
+  export interface McpServerDeclOAuth {
+    /** A pre-registered client id (may contain {{settings.<key>}}); omitted: dynamic client registration. */
+    clientId?: string
+    /** The scopes to ask for (space-separated). */
+    scopes?: string
+  }
+
   export interface McpServerDecl {
     /** The plugin id, or the plugin id + "-" + a suffix. */
     id: string
@@ -153,7 +163,7 @@ declare module '@harness-forge/plugin-sdk' {
     policy?: ToolPolicy
     /** Values may contain {{settings.<key>}} placeholders (resolved when connecting). */
     transport:
-      | { type: 'http' | 'sse', url: string, headers?: Record<string, string> }
+      | { type: 'http' | 'sse', url: string, headers?: Record<string, string>, oauth?: McpServerDeclOAuth }
       | { type: 'stdio', command: string, args?: string[], env?: Record<string, string> }
   }
 
@@ -357,6 +367,24 @@ declare module '@harness-forge/plugin-sdk' {
     providerOptions?: ProviderOptions
   }
 
+  /** What a turn asks of a provider's own web search (input of webSearch, plugin API 1.7.0). */
+  export interface WebSearchRequest {
+    /** Function tools the turn sends besides search (0 when the catalog probes the hook). */
+    readonly functionTools: number
+    /** Most searches one turn may run (5). */
+    readonly maxUses: number
+  }
+
+  /** Request additions returned by webSearch (plugin API 1.7.0). */
+  export interface WebSearchParams {
+    /** Provider-defined tools keyed by tool name, e.g. { web_search: anthropic.tools.webSearch_20250305({ maxUses: 5 }) }. */
+    tools?: Record<string, Tool>
+    /** Merged into the provider options of the call. */
+    providerOptions?: ProviderOptions
+    /** The search tool drops function tools: offered only for turns without function tools. */
+    exclusive?: boolean
+  }
+
   /** Hints of a transcription request (input of transcriptionOptions). */
   export interface TranscriptionHints {
     /** ISO 639 code of the spoken language; absent: detect automatically. */
@@ -397,6 +425,8 @@ declare module '@harness-forge/plugin-sdk' {
     createSpeechModel?(modelId: string, rt: ProviderRuntime): SpeechModel
     /** Turns transcription hints into provider options (synchronous). */
     transcriptionOptions?(hints: TranscriptionHints): ProviderOptions | undefined
+    /** Plugin API 1.7.0: the model's own web search (synchronous, no network I/O); undefined: none. */
+    webSearch?(model: ModelInfo, request: WebSearchRequest): WebSearchParams | undefined
   }
 
   // ---------- tools ----------
@@ -606,8 +636,8 @@ declare module '@harness-forge/plugin-sdk' {
     ]
     /** Plugin API 1.5.0: before every compaction (observe only). */
     'compact.before': [HookChatContext & { trigger: 'manual' | 'auto', focus: string | null }, void]
-    /** Plugin API 1.5.0: the agent waits for an approval (observe only). */
-    'notification': [HookChatContext & { type: 'permission_prompt', message: string }, void]
+    /** Plugin API 1.5.0: the agent waits for an approval (observe only); 1.7.0: or for an MCP elicitation answer. */
+    'notification': [HookChatContext & { type: 'permission_prompt' | 'elicitation_dialog', message: string }, void]
   }
   export type HookName = keyof HookMap
   export type HookHandler<K extends HookName> = (...args: HookMap[K]) => unknown

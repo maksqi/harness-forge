@@ -1,11 +1,11 @@
 /**
  * Tool lists of definition files (Phase 10, ADR-044 / ADR-045): Claude Code tool names map to harness tools (Read →
  * read_file, Write → write_file, Edit / MultiEdit → edit_file, Grep → search_files, Glob → find_files, LS →
- * list_directory, Bash → shell, WebFetch → web_fetch); `mcp__*` names are kept; patterns such as `Bash(git:*)` keep the
- * tool and add a `tool-pattern` diagnostic; other names that look like tool names are kept for the catalog to check
- * against the live tool list; anything else is dropped with an `unknown-tool` diagnostic. A list only ever narrows a
- * tool set. Pure and isomorphic; never throws. Phase 12 adds the Claude Code names of the agent tools and agent types
- * (hook matching only; `CLAUDE_TOOL_ALIASES` is unchanged).
+ * list_directory, Bash → shell, WebFetch → web_fetch; Phase 14: WebSearch → search_web); `mcp__*` names are kept;
+ * patterns such as `Bash(git:*)` keep the tool and add a `tool-pattern` diagnostic; other names that look like tool
+ * names are kept for the catalog to check against the live tool list; anything else is dropped with an `unknown-tool`
+ * diagnostic. A list only ever narrows a tool set. Pure and isomorphic; never throws. Phase 12 adds the Claude Code
+ * names of the agent tools and agent types (hook matching only; `CLAUDE_TOOL_ALIASES` is unchanged in Phase 12).
  */
 import type { DefinitionDiagnostic, DefinitionDiagnosticCode, DefinitionDiagnosticLevel } from './definitions.ts'
 import { MCP_TOOL_PREFIX, TOOL_NAME_PATTERN } from '../ids.ts'
@@ -21,6 +21,8 @@ export const CLAUDE_TOOL_ALIASES: Readonly<Record<string, string>> = {
   LS: 'list_directory',
   Bash: 'shell',
   WebFetch: 'web_fetch',
+  // Phase 14 (ADR-063): the builtin search tool of `core-search` (never a function tool named `web_search`).
+  WebSearch: 'search_web',
 }
 
 /**

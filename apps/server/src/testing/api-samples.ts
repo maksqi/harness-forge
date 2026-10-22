@@ -35,6 +35,12 @@ export const SAMPLE_IMPORT_PLAN_ID = 'cip_sample0000000001'
 export const SAMPLE_MARKETPLACE_PATH = '/harness-forge-sample/marketplace'
 /** A project definition file (Phase 12, ADR-056; no project folder is ever touched). */
 export const SAMPLE_DEFINITION_PATH = '.claude/agents/reviewer.md'
+/** A pending MCP elicitation (Phase 14, ADR-060; held in memory by the server). */
+export const SAMPLE_ELICITATION_ID = 'eli_sample0000000001'
+/** An OAuth `state` of a sign-in callback (Phase 14, ADR-059; no flow with it ever exists in a test). */
+export const SAMPLE_OAUTH_STATE = 'sampleState0000000000001'
+/** An MCP resource URI (Phase 14, ADR-061; no server is ever contacted by the samples). */
+export const SAMPLE_RESOURCE_URI = 'file:///harness-forge-sample/README.md'
 /** A project-relative path for the change samples (no project folder is ever touched). */
 export const SAMPLE_CHANGE_PATH = 'src/index.ts'
 /** A folder that does not exist on any test host: the project samples never touch a real folder. */
@@ -316,6 +322,19 @@ export const API_SAMPLES: { readonly [K in ApiRouteKey]: ApiSampleInput<K> } = {
   'projectDefinitions.read': { params: { id: SAMPLE_PROJECT_ID }, query: { path: SAMPLE_DEFINITION_PATH } },
   'projectDefinitions.write': { params: { id: SAMPLE_PROJECT_ID }, body: { path: SAMPLE_DEFINITION_PATH, expectedSha256: null, content: SAMPLE_AGENT_MARKDOWN } },
   'projectDefinitions.remove': { params: { id: SAMPLE_PROJECT_ID }, query: { path: SAMPLE_DEFINITION_PATH, expectedSha256: SAMPLE_TRUST_SHA256 } },
+
+  'mcpAuth.start': { params: { id: SAMPLE_MCP_SERVER_ID }, body: { returnTo: '/plugins?tab=mcp' } },
+  'mcpAuth.signOut': { params: { id: SAMPLE_MCP_SERVER_ID } },
+  'mcpAuth.projectStart': { params: { id: SAMPLE_PROJECT_ID, serverId: SAMPLE_PROJECT_MCP_SERVER_ID }, body: {} },
+  'mcpAuth.projectSignOut': { params: { id: SAMPLE_PROJECT_ID, serverId: SAMPLE_PROJECT_MCP_SERVER_ID } },
+  'mcpAuth.callback': { body: { state: SAMPLE_OAUTH_STATE, code: 'sample-code' } },
+
+  'chatElicitations.answer': { params: { id: SAMPLE_CHAT_ID, elicitationId: SAMPLE_ELICITATION_ID }, body: { action: 'decline' } },
+
+  'mcpResources.list': { query: { q: 'readme' } },
+  'mcpResources.attach': { body: { serverId: SAMPLE_MCP_SERVER_ID, uri: SAMPLE_RESOURCE_URI } },
+
+  'webSearch.test': { body: {} },
 
   'shares.list': { query: { chatId: SAMPLE_CHAT_ID } },
   'shares.create': { body: { chatId: SAMPLE_CHAT_ID, title: 'Sample share', options: { reasoning: true }, expiresAt: null } },

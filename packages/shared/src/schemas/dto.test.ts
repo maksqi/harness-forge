@@ -131,10 +131,13 @@ describe('settings', () => {
       hooksEnabled: true,
       hookModelRef: null,
       modelAliases: { sonnet: null, opus: null, haiku: null, fable: null },
+      webSearchDefault: 'off',
+      webSearchNative: true,
     })
     expect(Object.isFrozen(DEFAULT_SETTINGS)).toBe(true)
-    // Phase 11 adds `outputStyle` and `hooksEnabled` (30 keys); Phase 12 `hookModelRef` and `modelAliases` (32).
-    expect(SETTINGS_KEYS).toHaveLength(32)
+    // Phase 11 adds `outputStyle` and `hooksEnabled` (30 keys); Phase 12 `hookModelRef` and `modelAliases` (32); Phase
+    // 14 `webSearchDefault` and `webSearchNative` (34).
+    expect(SETTINGS_KEYS).toHaveLength(34)
     expect(settingsSchema.parse({ maxSteps: 5, _auth: 'internal' })).toEqual({ ...DEFAULT_SETTINGS, maxSteps: 5 })
   })
 
@@ -175,6 +178,8 @@ describe('settings', () => {
       hooksEnabled: true,
       hookModelRef: null,
       modelAliases: { sonnet: null, opus: null, haiku: null, fable: null },
+      webSearchDefault: 'off',
+      webSearchNative: true,
     })
   })
 
@@ -202,7 +207,17 @@ describe('settings', () => {
       projectMaxSteps: 100,
       fileSweep: 'daily',
     }
-    expect(settingsSchema.parse(v14)).toEqual({ ...v14, autoCompact: true, compactModelRef: null, subagentModelRef: null, subagentMaxSteps: 30, shiftTabModes: true, planFiles: false, planDirectory: '.harness/plans', outputStyle: 'default', hooksEnabled: true, hookModelRef: null, modelAliases: { sonnet: null, opus: null, haiku: null, fable: null } })
+    expect(settingsSchema.parse(v14)).toEqual({ ...v14, autoCompact: true, compactModelRef: null, subagentModelRef: null, subagentMaxSteps: 30, shiftTabModes: true, planFiles: false, planDirectory: '.harness/plans', outputStyle: 'default', hooksEnabled: true, hookModelRef: null, modelAliases: { sonnet: null, opus: null, haiku: null, fable: null }, webSearchDefault: 'off', webSearchNative: true })
+  })
+
+  it('reads settings stored by v1.8.1 (without the Phase 14 keys) with the new defaults', () => {
+    const v181 = { ...DEFAULT_SETTINGS, hooksEnabled: false, modelAliases: { sonnet: 'anthropic:claude-sonnet-5', opus: null, haiku: null, fable: null } } as Record<string, unknown>
+    delete v181.webSearchDefault
+    delete v181.webSearchNative
+    expect(settingsSchema.parse(v181)).toEqual({ ...v181, webSearchDefault: 'off', webSearchNative: true })
+    expect(settingsUpdateSchema.parse({ webSearchDefault: 'auto', webSearchNative: false })).toEqual({ webSearchDefault: 'auto', webSearchNative: false })
+    for (const bad of [{ webSearchDefault: 'on' }, { webSearchDefault: null }, { webSearchNative: 'yes' }])
+      expect(settingsUpdateSchema.safeParse(bad).success, JSON.stringify(bad)).toBe(false)
   })
 
   it('reads settings stored by v1.5 (without the Phase 10 keys) with the new defaults', () => {

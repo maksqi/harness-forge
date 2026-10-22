@@ -230,6 +230,9 @@ describe('sEC-B2: GET and HEAD never change stored state', () => {
       // the samples (a GET never fetches a marketplace, scans the home folder or writes a project file).
       'marketplaces.list': {},
       'claudeImport.home': {},
+      // Phase 14: the MCP resources of the global servers (the only server is disabled: nothing is listed, nothing is
+      // started, no sign-in begins).
+      'mcpResources.list': { query: { q: 'readme' } },
     }
     const before = await storedState(t)
     // The baseline really holds state for the routes to touch.

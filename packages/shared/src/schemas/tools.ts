@@ -10,7 +10,6 @@ import {
 } from '../enums.ts'
 import { harnessErrorInitSchema } from '../errors.ts'
 import {
-  catalogNameSchema,
   mcpServerIdSchema,
   modelRefSchema,
   pluginIdSchema,
@@ -22,6 +21,14 @@ import { LIMITS } from '../limits.ts'
 import { DEFINITION_LIMITS } from '../util/definitions.ts'
 import { hasControlChars } from '../util/text.ts'
 import { secretStateSchema } from './common.ts'
+import {
+  commandMcpServerSchema,
+  mcpAuthInfoSchema,
+  mcpOAuthInputSchema,
+  mcpOAuthUpdateSchema,
+  mcpServerOAuthSchema,
+  slashCommandNameSchema,
+} from './mcp.ts'
 import { envVarNameSchema, httpHeaderNameSchema, httpHeaderValueSchema, httpUrlSchema } from './plugin-data.ts'
 
 export const toolSummarySchema = z.object({
@@ -70,12 +77,17 @@ const stdioCommandSchema = z
 const stdioArgSchema = z.string().max(4096)
 const envValueSchema = z.string().max(32_768)
 
-/** Transport of a user-configured MCP server; header and env values are stored as secrets. */
+/**
+ * Transport of a user-configured MCP server; header and env values are stored as secrets. Phase 14 (ADR-059): an
+ * http / sse server may carry `oauth` (`mcpOAuthInputSchema`: a pre-registered client id, its secret, the scopes);
+ * without it a server that asks for a sign-in uses dynamic client registration.
+ */
 export const mcpTransportInputSchema = z.discriminatedUnion('type', [
   z.strictObject({
     type: z.enum(['http', 'sse']),
     url: httpUrlSchema,
     headers: z.record(httpHeaderNameSchema, httpHeaderValueSchema).optional(),
+    oauth: mcpOAuthInputSchema.optional(),
   }),
   z.strictObject({
     type: z.literal('stdio'),
@@ -99,13 +111,14 @@ export type McpServerInput = z.infer<typeof mcpServerInputSchema>
 
 /**
  * Replacement transport of `PATCH /mcp/:id`: in `headers` / `env` a null value keeps the stored secret and missing keys
- * are removed.
+ * are removed. Phase 14: `oauth.clientSecret: null` keeps the stored client secret (`mcpOAuthUpdateSchema`).
  */
 export const mcpTransportUpdateSchema = z.discriminatedUnion('type', [
   z.strictObject({
     type: z.enum(['http', 'sse']),
     url: httpUrlSchema,
     headers: z.record(httpHeaderNameSchema, httpHeaderValueSchema.nullable()).optional(),
+    oauth: mcpOAuthUpdateSchema.optional(),
   }),
   z.strictObject({
     type: z.literal('stdio'),
@@ -140,6 +153,8 @@ export const mcpServerSchema = z.object({
       type: z.enum(['http', 'sse']),
       url: z.string(),
       headers: z.record(z.string(), secretStateSchema),
+      /** Phase 14 (ADR-059): the OAuth settings (`clientId`, write-only `clientSecret`, `scopes`); null = none. */
+      oauth: mcpServerOAuthSchema.nullable(),
     }),
     z.object({
       type: z.literal('stdio'),
@@ -155,6 +170,11 @@ export const mcpServerSchema = z.object({
   /** Registered tool names. */
   tools: z.array(toolNameSchema),
   connectedAt: timestampSchema.nullable(),
+  /**
+   * Phase 14 (ADR-059): the OAuth sign-in state of an http / sse server (`McpAuthInfo`); null = the server does not use
+   * OAuth (stdio, an `Authorization` header, or it never asked for a sign-in). Never a token.
+   */
+  auth: mcpAuthInfoSchema.nullable(),
 })
 export type McpServer = z.infer<typeof mcpServerSchema>
 
@@ -162,14 +182,16 @@ export type McpServer = z.infer<typeof mcpServerSchema>
  * A server-side slash command (client-only commands are not listed). Phase 10 (ADR-045): the effective commands of a
  * chat's scope, one per name (the precedence of ADR-044 applied): harness commands, project command files, personal
  * commands and plugin commands. Phase 11 (ADR-052): user-invocable skills join the list (`kind: 'skill'`, names up to
- * 64 characters); a command wins a name over a skill.
+ * 64 characters); a command wins a name over a skill. Phase 14 (ADR-061): the prompts of connected MCP servers
+ * (`source: 'mcp'`, `mcpServer`, names `mcp__<serverId>__<prompt>`; project servers only with that project's `projectId`).
  */
 export const commandSummarySchema = z.object({
   /**
    * A command name (up to 32 characters) or a skill name (up to 64); Phase 12 (ADR-053): a qualified name of a Claude
-   * Code plugin entry (`<pluginId>:<name>`, up to 128; `catalogNameSchema`).
+   * Code plugin entry (`<pluginId>:<name>`, up to 128; `catalogNameSchema`); Phase 14: an MCP prompt command name
+   * (`mcp__<serverId>__<prompt>`, up to 64; `slashCommandNameSchema`).
    */
-  name: catalogNameSchema,
+  name: slashCommandNameSchema,
   /** Phase 11: `skill` for a user-invocable skill; absent = a command. */
   kind: invocationKindSchema.optional(),
   description: z.string(),
@@ -183,6 +205,11 @@ export const commandSummarySchema = z.object({
   argumentHint: z.string().max(DEFINITION_LIMITS.argumentHintMaxChars).optional(),
   /** The `model` of a command file: the turn runs on it (the chat keeps its model). */
   modelRef: modelRefSchema.optional(),
+  /**
+   * Phase 14 (ADR-061): `source: 'mcp'` only, the MCP server of the prompt (the composer badge "MCP · {name}");
+   * `argumentHint` is then `<required> [optional]` of the prompt's arguments.
+   */
+  mcpServer: commandMcpServerSchema.optional(),
 })
 export type CommandSummary = z.infer<typeof commandSummarySchema>
 

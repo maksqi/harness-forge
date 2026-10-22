@@ -22,6 +22,7 @@ import { API_BASE_PATH } from './http/route-match.ts'
 import { createAudioRoutes } from './http/routes/audio.ts'
 import { createAuthRoutes } from './http/routes/auth.ts'
 import { createChangesRoutes } from './http/routes/changes.ts'
+import { createChatElicitationsRoutes } from './http/routes/chat-elicitations.ts'
 import { createChatQueueRoutes } from './http/routes/chat-queue.ts'
 import { createChatTasksRoutes } from './http/routes/chat-tasks.ts'
 import { createChatRoutes } from './http/routes/chat.ts'
@@ -38,6 +39,8 @@ import { createHooksRoutes } from './http/routes/hooks.ts'
 import { createIconsRoutes } from './http/routes/icons.ts'
 import { createKeysRoutes } from './http/routes/keys.ts'
 import { createMarketplacesRoutes } from './http/routes/marketplaces.ts'
+import { createMcpAuthRoutes } from './http/routes/mcp-auth.ts'
+import { createMcpResourcesRoutes } from './http/routes/mcp-resources.ts'
 import { createMcpRoutes } from './http/routes/mcp.ts'
 import { createMemoryRoutes } from './http/routes/memory.ts'
 import { createModelsRoutes } from './http/routes/models.ts'
@@ -55,10 +58,11 @@ import { createSettingsRoutes } from './http/routes/settings.ts'
 import { createSharesRoutes } from './http/routes/shares.ts'
 import { createShellRulesRoutes } from './http/routes/shell-rules.ts'
 import { createToolsRoutes } from './http/routes/tools.ts'
+import { createWebSearchRoutes } from './http/routes/web-search.ts'
 import { createStaticRoutes } from './http/static.ts'
 
 /**
- * The 36 route modules (`ApiModule` of the route table -> `http/routes/<kebab-case>.ts`), in mount order. Modules
+ * The 40 route modules (`ApiModule` of the route table -> `http/routes/<kebab-case>.ts`), in mount order. Modules
  * with static `/plugins/<word>` paths are mounted before `plugins` (`/plugins/:id...`); no route shadows another
  * (they differ in method, segment count or static segments, API.md 8), the order is a second line of defense. `shares`
  * also serves the public `/share/:token` routes; `changes` (Phase 8) serves chat-scoped routes under `/chats/:id/...`;
@@ -68,7 +72,10 @@ import { createStaticRoutes } from './http/static.ts'
  * `/hooks/runs` is never taken for an id), `projectTrust` (`/projects/:id/trust...`) and `projectMcp`
  * (`/projects/:id/mcp...`), which differ from `/projects/:id` and `/projects/:id/files...` in their static third segment
  * or their segment count; Phase 12: `marketplaces` (`/marketplaces...`), `claudeImport` (`/claude-import/...`) and
- * `projectDefinitions` (`/projects/:id/definitions/file`, a static third segment again).
+ * `projectDefinitions` (`/projects/:id/definitions/file`, a static third segment again); Phase 14: `mcpResources`
+ * (`/mcp/resources...`) and `mcpAuth` (`/mcp/oauth/callback`, `/mcp/:id/oauth`, `/projects/:id/mcp/:serverId/oauth`),
+ * mounted before `mcp` (no `GET /mcp/:id` exists, and the `POST` paths differ in their third segment), `chatElicitations`
+ * (`/chat/:id/elicitations/:elicitationId`, next to `chatTasks`) and `webSearch` (`/web-search/test`).
  */
 export const ROUTE_MODULES = {
   health: createHealthRoutes,
@@ -83,6 +90,8 @@ export const ROUTE_MODULES = {
   chat: createChatRoutes,
   files: createFilesRoutes,
   tools: createToolsRoutes,
+  mcpResources: createMcpResourcesRoutes,
+  mcpAuth: createMcpAuthRoutes,
   mcp: createMcpRoutes,
   commands: createCommandsRoutes,
   data: createDataRoutes,
@@ -96,12 +105,14 @@ export const ROUTE_MODULES = {
   customizations: createCustomizationsRoutes,
   memory: createMemoryRoutes,
   chatTasks: createChatTasksRoutes,
+  chatElicitations: createChatElicitationsRoutes,
   hooks: createHooksRoutes,
   projectTrust: createProjectTrustRoutes,
   projectMcp: createProjectMcpRoutes,
   marketplaces: createMarketplacesRoutes,
   claudeImport: createClaudeImportRoutes,
   projectDefinitions: createProjectDefinitionsRoutes,
+  webSearch: createWebSearchRoutes,
   shares: createSharesRoutes,
   pluginInstall: createPluginInstallRoutes,
   pluginDrafts: createPluginDraftsRoutes,

@@ -1,6 +1,20 @@
 import type { MatchRange, MentionPathEntry, MentionToken } from './mentions.ts'
 import { describe, expect, it } from 'vitest'
-import { formatMention, isMentionablePath, MENTION_QUERY_MAX_CHARS, mentionTokenAt, parseMentions, rankPaths, scorePath } from './mentions.ts'
+import { MCP_SERVER_ID_PATTERN } from '../ids.ts'
+import { planCommandExpansion } from './command-template.ts'
+import {
+  formatMention,
+  formatResourceMention,
+  isMentionablePath,
+  isResourceMentionPath,
+  MENTION_QUERY_MAX_CHARS,
+  mentionTokenAt,
+  parseMentions,
+  parseResourceMention,
+  rankPaths,
+  RESOURCE_MENTION_URI_MAX_CHARS,
+  scorePath,
+} from './mentions.ts'
 
 /** `mentionTokenAt` with the caret written as `|` in the text. */
 function tokenAt(textWithCaret: string): MentionToken | null {
@@ -467,6 +481,205 @@ describe('fuzzing', { timeout: 30_000 }, () => {
         expect(scores[index - 1]!, context).toBeGreaterThanOrEqual(scores[index]!)
       for (const item of all.items)
         expectValidRanges(item.ranges, item.path.length, context)
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------------------------------------------------
+// MCP resource mentions (Phase 14, ADR-061, C49)
+
+describe('formatResourceMention / parseResourceMention', () => {
+  const valid: Array<[string, string, string]> = [
+    ['github', 'repo://owner/name/README.md', '@github:repo://owner/name/README.md'],
+    ['fs', 'file:///home/me/notes.md', '@fs:file:///home/me/notes.md'],
+    ['my-server', 'https://example.com/a?b=c#d', '@my-server:https://example.com/a?b=c#d'],
+    ['db', 'postgres://localhost/app/table/users', '@db:postgres://localhost/app/table/users'],
+    ['x1', 'urn:isbn:0451450523', '@x1:urn:isbn:0451450523'],
+    ['s', 'a+b.c-d:x', '@s:a+b.c-d:x'],
+    ['docs', 'docs://caf\u00E9/%20page', '@docs:docs://caf\u00E9/%20page'],
+    ['a'.repeat(32), 'z:', `@${'a'.repeat(32)}:z:`],
+  ]
+
+  for (const [serverId, uri, text] of valid) {
+    it(`${serverId} + ${JSON.stringify(uri)} -> ${JSON.stringify(text)}`, () => {
+      expect(formatResourceMention(serverId, uri)).toBe(text)
+      expect(parseResourceMention(text)).toEqual({ serverId, uri })
+      expect(parseResourceMention(text.slice(1))).toEqual({ serverId, uri })
+      expect(isResourceMentionPath(text.slice(1))).toBe(true)
+    })
+  }
+
+  it.each([
+    ['GitHub', 'repo://x'],
+    ['git_hub', 'repo://x'],
+    ['-gh', 'repo://x'],
+    ['', 'repo://x'],
+    ['a'.repeat(33), 'repo://x'],
+    ['gh', ''],
+    ['gh', 'README.md'],
+    ['gh', '//host/x'],
+    ['gh', '1abc://x'],
+    ['gh', 'Repo://x'],
+    ['gh', 'repo'],
+    ['gh', 'repo://a b'],
+    ['gh', 'repo://a\tb'],
+    ['gh', 'repo://a\nb'],
+    ['gh', 'repo://a\u00A0b'],
+    ['gh', 'repo://a\u2028b'],
+    ['gh', 'repo://a"b'],
+    ['gh', 'repo://a\u0000b'],
+    ['gh', 'repo://a\u007Fb'],
+    ['gh', 'repo://a\u0085b'],
+    ['gh', 'repo://a\u200Bb'],
+    ['gh', 'repo://a\u202Eb'],
+    ['gh', `repo://${'x'.repeat(RESOURCE_MENTION_URI_MAX_CHARS)}`],
+  ])('refuses %j + %j', (serverId, uri) => {
+    expect(formatResourceMention(serverId, uri)).toBeNull()
+    expect(parseResourceMention(`@${serverId}:${uri}`)).toBeNull()
+  })
+
+  it('accepts a URI of exactly RESOURCE_MENTION_URI_MAX_CHARS characters', () => {
+    expect(RESOURCE_MENTION_URI_MAX_CHARS).toBe(2048)
+    const uri = `repo://${'x'.repeat(RESOURCE_MENTION_URI_MAX_CHARS - 7)}`
+    expect(uri).toHaveLength(RESOURCE_MENTION_URI_MAX_CHARS)
+    expect(parseResourceMention(formatResourceMention('gh', uri)!)).toEqual({ serverId: 'gh', uri })
+  })
+
+  it('splits at the first colon (server ids never hold one)', () => {
+    expect(formatResourceMention('gh:x', 'repo://x')).toBeNull()
+    expect(parseResourceMention('@gh:x:repo://x')).toEqual({ serverId: 'gh', uri: 'x:repo://x' })
+  })
+
+  it('strips one leading @ only and rejects other input', () => {
+    expect(parseResourceMention('@@gh:repo://x')).toBeNull()
+    expect(parseResourceMention('gh:')).toBeNull()
+    expect(parseResourceMention(':repo://x')).toBeNull()
+    expect(parseResourceMention('@')).toBeNull()
+    expect(parseResourceMention('')).toBeNull()
+    expect(parseResourceMention('src/app.ts')).toBeNull()
+    expect(parseResourceMention(' @gh:repo://x')).toBeNull()
+    expect(parseResourceMention(null as unknown as string)).toBeNull()
+    expect(formatResourceMention(null as unknown as string, 'repo://x')).toBeNull()
+    expect(formatResourceMention('gh', 7 as unknown as string)).toBeNull()
+  })
+})
+
+describe('isResourceMentionPath', () => {
+  it.each([
+    ['github:repo://owner/name/README.md', true],
+    ['fs:file:///x', true],
+    ['a:b:c', true],
+    ['gh:repo:', true],
+    // A shape check: an over-long or odd URI still has the resource shape (and is no file mention).
+    [`gh:repo://${'x'.repeat(5000)}`, true],
+    ['gh:repo://a"b', true],
+    ['src/app.ts', false],
+    ['github:', false],
+    ['github:re', false],
+    ['github:Repo://x', false],
+    ['notes:2024.md', false],
+    ['localhost:8080/x', false],
+    ['c:\\foo', false],
+    ['C:/foo', false],
+    ['@gh:repo://x', false],
+    ['GitHub:repo://x', false],
+    [`${'a'.repeat(33)}:repo://x`, false],
+    ['', false],
+  ])('%j -> %s', (path, expected) => {
+    expect(isResourceMentionPath(path)).toBe(expected)
+  })
+
+  it('rejects non-strings', () => {
+    expect(isResourceMentionPath(undefined as unknown as string)).toBe(false)
+  })
+})
+
+describe('resource mentions are never file mentions', () => {
+  it('parseMentions skips unquoted tokens of the resource shape', () => {
+    expect(parseMentions('@github:repo://owner/name/README.md')).toEqual([])
+    expect(parseMentions('see @github:repo://owner/name/README.md and @src/app.ts')).toEqual([{ path: 'src/app.ts', start: 44, end: 55 }])
+    expect(parseMentions('@a:b:c @fs:file:///x, @gh:repo:')).toEqual([])
+    // Not the resource shape: file mentions as before.
+    expect(parseMentions('@localhost:8080/x @notes:2024.md @C:/x @github:')).toEqual([
+      { path: 'localhost:8080/x', start: 0, end: 17 },
+      { path: 'notes:2024.md', start: 18, end: 32 },
+      { path: 'C:/x', start: 33, end: 38 },
+      { path: 'github:', start: 39, end: 47 },
+    ])
+    // A quoted mention is always a file.
+    expect(parseMentions('@"a:b:c"')).toEqual([{ path: 'a:b:c', start: 0, end: 8 }])
+  })
+
+  it('formatMention quotes a project path of the resource shape, so it still round-trips', () => {
+    for (const path of ['a:b:c', 'github:repo://x', 'gh:repo:'])
+      expect(formatMention(path)).toBe(`@"${path}"`)
+    for (const path of ['a:b:c', 'gh:repo:', 'notes:2024.md', 'src/a:b.ts']) {
+      const text = formatMention(path)!
+      expect(parseMentions(text)).toEqual([{ path, start: 0, end: text.length }])
+    }
+    expect(formatMention('notes:2024.md')).toBe('@notes:2024.md')
+  })
+
+  it('command templates never read a resource mention as a project file', () => {
+    const plan = planCommandExpansion('Review @github:repo://owner/name/README.md against @docs/guide.md now')
+    expect(plan.filePaths).toEqual(['docs/guide.md'])
+    expect(plan.parts[0]).toEqual({ kind: 'text', text: 'Review @github:repo://owner/name/README.md against ' })
+  })
+
+  it('mentionTokenAt still opens the @ menu on a resource token', () => {
+    expect(tokenAt('@github:repo://ow|ner/x')).toEqual({ start: 0, end: 22, query: 'github:repo://ow', quoted: false })
+    expect(tokenAt('see @gh:|')).toEqual({ start: 4, end: 8, query: 'gh:', quoted: false })
+    // Inserting `formatResourceMention(…) + " "` closes the token.
+    expect(mentionTokenAt(`${formatResourceMention('github', 'repo://owner/name/README.md')} `, Number.POSITIVE_INFINITY)).toBeNull()
+  })
+})
+
+describe('fuzzing (resource mentions)', { timeout: 30_000 }, () => {
+  const ID_UNITS = ['a', 'b', 'z', '0', '9', '-', '-', '_', 'A', ':']
+  const URI_UNITS = ['repo', '://', ':', '/', 'a', 'B', '.', '+', '-', '%20', '?', '#', '=', ' ', '"', '\t', '\u00E9', '\u200B', '@', '1']
+  const pick = <T>(random: () => number, items: readonly T[]): T => items[Math.floor(random() * items.length)] as T
+
+  it('round-trips every formatted mention and agrees with the checks', () => {
+    const random = prng(0xC49C)
+    let formatted = 0
+    for (let iteration = 0; iteration < 3000; iteration++) {
+      const serverId = random() < 0.8 ? `${pick(random, ['a', 'b9', 'z-0'])}${randomString(random, ['a', '0', '-a'], 3)}` : randomString(random, ID_UNITS, 8)
+      const uri = `${random() < 0.8 ? pick(random, ['repo://', 'file:///', 'x:', 'a+b.c-d:']) : ''}${randomString(random, URI_UNITS, 8)}`
+      const context = `${JSON.stringify(serverId)} ${JSON.stringify(uri)}`
+      const text = formatResourceMention(serverId, uri)
+      const parsed = parseResourceMention(`@${serverId}:${uri}`)
+      if (text === null) {
+        // Either side may be invalid; parsing the same text agrees unless the id holds a `:` (it splits earlier).
+        if (!serverId.includes(':'))
+          expect(parsed, context).toBeNull()
+        continue
+      }
+      formatted++
+      expect(MCP_SERVER_ID_PATTERN.test(serverId), context).toBe(true)
+      expect(parsed, context).toEqual({ serverId, uri })
+      expect(parseResourceMention(text), context).toEqual({ serverId, uri })
+      expect(isResourceMentionPath(text.slice(1)), context).toBe(true)
+      expect(/\s/.test(text), context).toBe(false)
+      // A resource mention is never a file mention, in any surrounding text.
+      expect(parseMentions(`x ${text} @y`), context).toEqual([{ path: 'y', start: text.length + 3, end: text.length + 5 }])
+    }
+    expect(formatted).toBeGreaterThan(200)
+  })
+
+  it('parseMentions never returns an unquoted path of the resource shape', () => {
+    const random = prng(0xF11E)
+    const alphabet = [...TEXT_ALPHABET, ':', ':', 'gh:', 'repo:', '//', 'file:', '@gh:a:']
+    for (let iteration = 0; iteration < 3000; iteration++) {
+      const text = randomString(random, alphabet, 14)
+      for (const mention of parseMentions(text)) {
+        const quoted = text[mention.start + 1] === '"'
+        if (!quoted)
+          expect(isResourceMentionPath(mention.path), JSON.stringify(text)).toBe(false)
+      }
+      const path = randomString(random, [...PATH_ALPHABET, ':', 'gh:', 'repo:'], 8)
+      const formattedPath = formatMention(path)
+      if (formattedPath !== null)
+        expect(parseMentions(formattedPath), JSON.stringify(path)).toEqual([{ path, start: 0, end: formattedPath.length }])
     }
   })
 })

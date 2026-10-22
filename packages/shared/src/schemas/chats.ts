@@ -1,7 +1,7 @@
 // Chat DTOs (API.md section 4.7). UI messages and the chat request live in `chat.ts`.
 import { z } from 'zod'
 import { harnessUIMessageSchema } from '../chat.ts'
-import { reasoningEffortSchema, titleSourceSchema, toolModeSchema } from '../enums.ts'
+import { reasoningEffortSchema, titleSourceSchema, toolModeSchema, webSearchModeSchema } from '../enums.ts'
 import { catalogNameSchema, chatIdSchema, messageIdSchema, modelRefSchema, projectIdSchema, timestampSchema } from '../ids.ts'
 import { LIMITS } from '../limits.ts'
 import { cursorSchema, queryBooleanSchema, queryIntSchema } from './common.ts'
@@ -28,6 +28,11 @@ export const chatSettingsSchema = z.strictObject({
    * Set by the composer menu and `/output-style`; applies from the next turn.
    */
   outputStyle: catalogNameSchema.optional(),
+  /**
+   * The chat's web search mode (Phase 14, ADR-063): `off` or `auto`; absent = the global `webSearchDefault` (chats of
+   * v1.8.1 and earlier have none). Set by the composer toggle (on = `auto`); applies from the next turn.
+   */
+  webSearch: webSearchModeSchema.optional(),
 })
 export type ChatSettings = z.infer<typeof chatSettingsSchema>
 
@@ -38,6 +43,8 @@ export const chatSettingsUpdateSchema = z.strictObject({
   instructions: instructionsSchema.nullable().optional(),
   /** Phase 11: null = automatic. Phase 12: a style name may be qualified (`<pluginId>:<name>`). */
   outputStyle: catalogNameSchema.nullable().optional(),
+  /** Phase 14: null = back to the global `webSearchDefault`. */
+  webSearch: webSearchModeSchema.nullable().optional(),
 })
 export type ChatSettingsUpdate = z.infer<typeof chatSettingsUpdateSchema>
 
@@ -63,6 +70,11 @@ export const chatSummarySchema = z.object({
   updatedAt: timestampSchema,
   /** Only for `GET /chats?q=`: matching excerpt, plain text. */
   snippet: z.string().max(160).optional(),
+  /**
+   * Phase 14 (ADR-060): an MCP tool call of the chat's run waits for the user's answer to an elicitation (live, from the
+   * elicitation broker; the sidebar shows "Needs your input"). Absent = false (stored snapshots and exports never set it).
+   */
+  awaitingInput: z.boolean().optional(),
 })
 export type ChatSummary = z.infer<typeof chatSummarySchema>
 

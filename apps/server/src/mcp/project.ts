@@ -138,6 +138,7 @@ export function pendingProjectMcpServers(snapshot: ProjectConfigSnapshot): Proje
     sha256: item.sha256,
     tools: [],
     missingVariables: [],
+    auth: null,
   }))
 }
 
@@ -725,6 +726,8 @@ export function createProjectMcpManagerCore(deps: AppDeps, options: ProjectMcpMa
         sha256: item.sha256,
         tools: tools.slice(0, LIMITS.projectMcpToolsMax),
         missingVariables: missing.slice(0, LIMITS.projectMcpVariablesMax),
+        // Phase 14 (ADR-059): the sign-in state lands with W14.1.
+        auth: null,
       }
       if (state === 'error' && runtime?.error)
         view.error = runtime.error

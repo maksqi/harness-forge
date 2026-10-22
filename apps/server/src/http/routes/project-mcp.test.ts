@@ -53,7 +53,7 @@ describe('project MCP routes', () => {
     const listed = await send(app, 'GET', `/api/projects/${app.project.id}/mcp`, session)
     expect(listed.status).toBe(200)
     expect(projectMcpListSchema.parse(listed.body)).toEqual({
-      items: [{ id: 'local', name: 'Local', transport: 'stdio', state: 'pending', sha256: item.sha256, tools: [], missingVariables: ['MCP_TOKEN'] }],
+      items: [{ id: 'local', name: 'Local', transport: 'stdio', state: 'pending', sha256: item.sha256, tools: [], missingVariables: ['MCP_TOKEN'], auth: null }],
       variables: [{ name: 'MCP_TOKEN', set: false, hint: null, usedBy: ['local'] }],
     })
     expect((await send(app, 'GET', `/api/projects/${app.other.id}/mcp`, session)).body).toEqual({ items: [], variables: [] })

@@ -25,6 +25,10 @@ hooks and `.mcp.json` from the UI (section 6). Your hooks from `~/.claude/settin
 [Import from Claude Code](claude-code-import.md); the hooks of Claude Code plugins work too
 ([Claude Code plugins](claude-code-plugins.md)).
 
+v1.9 (ADR-059, ADR-060) lets a remote server of a project's `.mcp.json` **sign in** (an optional `oauth` key; section
+7), and the `Notification` event also runs when an MCP server asks you for details in the chat (`notification_type`
+`elicitation_dialog`; section 3).
+
 Reference: [ARCHITECTURE.md 6.28 – 6.30](../ARCHITECTURE.md#628-hooks-adr-048) (how hooks, project trust and project MCP
 servers work), 6.36 – 6.37 (v1.8: project file editing, prompt hooks, the new events and transcripts) and
 [10.12, 10.13](../ARCHITECTURE.md) (security), [UI.md 7.31, 7.33, 7.34, 9.13, 9.14](../UI.md) (the screens),
@@ -85,7 +89,7 @@ its command handlers.
 | Key | Meaning |
 |---|---|
 | event (`PreToolUse`, …) | one of the thirteen events (section 3; eight in v1.7); an unknown event is ignored (Import… lists it in its notes) |
-| `matcher` | optional; tool names for `PreToolUse`, `PostToolUse`, `PostToolUseFailure` and `PermissionRequest` (section 5); for `SessionStart` it matches the source (`startup` / `compact`), for `PreCompact` and `PostCompact` the trigger (`manual` / `auto`), for `Notification` the type (`permission_prompt`), for `SubagentStart` and `SubagentStop` (v1.8) the agent type (`explore`, `general`, a custom agent's name; `general-purpose` matches `general`, `Explore` matches `explore`), for `SessionEnd` the reason (`other`); `UserPromptSubmit` and `Stop` ignore it |
+| `matcher` | optional; tool names for `PreToolUse`, `PostToolUse`, `PostToolUseFailure` and `PermissionRequest` (section 5); for `SessionStart` it matches the source (`startup` / `compact`), for `PreCompact` and `PostCompact` the trigger (`manual` / `auto`), for `Notification` the type (`permission_prompt`; v1.9: `elicitation_dialog`), for `SubagentStart` and `SubagentStop` (v1.8) the agent type (`explore`, `general`, a custom agent's name; `general-purpose` matches `general`, `Explore` matches `explore`), for `SessionEnd` the reason (`other`); `UserPromptSubmit` and `Stop` ignore it |
 | `type` | `command`, or (v1.8) `prompt` (section 3); `http`, `mcp_tool` and `agent` are skipped with a note |
 | `command` | the shell command, at most 4,096 characters (with `args`: the program) |
 | `timeout` | optional, in seconds, 1 – 600; default 60 (30 for a prompt hook; in a settings file a larger value is cut to 600 and an invalid one uses the default, each with a note; fractions round up) |
@@ -106,7 +110,7 @@ small **hook note** in the reply, or inside the tool's row for tool hooks.
 | `PreToolUse` | before a tool call runs (once per call, also in sub-agents) | **deny** the call, **ask** you (shows the approval card; denied inside a sub-agent), **allow** it without the card (only where section 10 says), or **change its input** |
 | `PostToolUse` | after a tool call succeeded (also in sub-agents) | give the agent **feedback** or context, which it reads at its next step; **stop** the agent |
 | `UserPromptSubmit` | when you send a message, or queue one while the agent works, before anything is stored (not for `/compact` or a message to an image model) | **refuse** the message (it stays in the composer with the reason), or **add context** for the agent |
-| `Notification` | when a reply ends waiting for your approval (`message`: "The agent needs your permission to use Bash.") | nothing (observe it: send yourself a notification) |
+| `Notification` | when a reply ends waiting for your approval (`message`: "The agent needs your permission to use Bash."); v1.9: also when an MCP server asks you for details in a form card while its tool runs (`notification_type` `elicitation_dialog`; main agent only, since sub-agents never ask) | nothing (observe it: send yourself a notification) |
 | `Stop` | when the agent is about to finish a reply | make it **continue** with a reason: harness-forge starts a follow-up turn by itself (at most 5 in a row) |
 | `SubagentStop` | when a sub-agent is about to finish | make it **continue** for one more round (at most 2); nothing is stored |
 | `PreCompact` | before the conversation is compacted (`/compact` or automatically) | nothing (observe it) |
@@ -140,7 +144,7 @@ The event as one JSON object, with Claude Code's field names plus a `harness` ob
 | `stop_hook_active` | `Stop`, `SubagentStop` | `true` when this reply is already a hook continuation: check it to avoid loops |
 | `trigger`, `custom_instructions` | `PreCompact` | `manual` or `auto`; the focus of `/compact <focus>` (empty when there is none) |
 | `source` | `SessionStart` | `startup` or `compact` |
-| `message`, `notification_type` | `Notification` | "The agent needs your permission to use <tools>." (Claude Code names, at most 3, then "and N more"); `permission_prompt` |
+| `message`, `notification_type` | `Notification` | "The agent needs your permission to use <tools>." (Claude Code names, at most 3, then "and N more"); `permission_prompt`. v1.9: for an MCP server's question, a message that names the server and `elicitation_dialog` (never the form's values: you have not entered them yet) |
 | `harness` | all | `{ version: 1, chatId, projectId, messageId?, modelRef, origin, tool?, source }`: `origin` is how the run started (`request`, `queue`, `task`, `hook`), `tool` the harness tool name, `source` where this hook comes from (`personal`, `project`, `plugin`) |
 | `transcript_path` (v1.8) | all | the chat as a Claude Code-style JSONL file (below); left out when it could not be written |
 | `error` (v1.8) | `PostToolUseFailure` | the error text of the failed call (at most 16 KiB) |
@@ -420,6 +424,30 @@ Put a `.mcp.json` at the project root (Claude Code's format):
   (when your last login is more than 10 minutes old), because a value can change what an approved server runs. A
   server with a missing variable (and no default) does not start ("Set {n} variables"); a stored variable no server
   uses any more is still listed, so you can clear it.
+- **Sign-in** (v1.9): a remote server that needs an account signs in with OAuth. The optional `oauth` key names a
+  client you registered with the provider and its scopes:
+
+  ```json
+  {
+    "mcpServers": {
+      "docs": {
+        "type": "http",
+        "url": "https://mcp.example.com/mcp",
+        "oauth": { "clientId": "harness-forge-docs", "scopes": "read" }
+      }
+    }
+  }
+  ```
+
+  Without it the server signs in through dynamic client registration when it supports that. After you approve the
+  server, its row in the project's **MCP servers** dialog shows **Sign in required** and **Sign in** (a pending server
+  shows only **Review…**); **Sign out…** forgets the tokens. A `clientSecret` is never read from the file, and Claude
+  Code's `callbackPort` is ignored with a note: harness-forge signs in through its own callback page
+  (`<the address you use>/oauth/callback`, the redirect URI to register with the provider). The tokens are stored
+  encrypted for the project (scope `project:<projectId>`, name `mcp-oauth.<serverId>`), never in backups, and deleted
+  with the project. The approval covers the whole entry, `oauth` included: v1.8 approvals stay valid, and editing
+  `oauth` makes the server pending again. Details:
+  [Signing in to remote MCP servers](mcp-oauth.md#4-servers-of-a-projects-mcpjson).
 - **Approval**: every server, stdio or remote, needs approval in the review dialog (section 6), which shows the exact
   command or URL and the names of its environment variables and headers (never their values). The hash also covers the
   script files its command and arguments name (`node ./server.js`). A server on a local or private address (or a local
@@ -481,6 +509,7 @@ active.
 | every key of `settings.json` is read | only `hooks` | `permissions` and `env` must not come from a cloned repository |
 | `~/.claude/settings.json` | not read by chats; v1.8: copied once with Import from Claude Code | personal hooks live in Settings → Customize |
 | `.mcp.json` variables from the environment | only from values stored for the project | the server's environment holds its own secrets |
+| `.mcp.json` `oauth.callbackPort` (a local callback server) | v1.9: ignored with a note; sign-in comes back through harness-forge's `/oauth/callback` page | the app is reached at its web address, not at a port on your machine |
 | project hooks run once you trust the folder | each hook, server and `!` command is approved on its own, pinned by hash | per-item consent, re-asked after any change |
 | `UserPromptSubmit` when the agent reads the message | when you send (or queue) it, so a refused message never reaches the chat | the refusal shows in the composer at once |
 | `PreToolUse` per permission check | once per tool call (its decision is kept when you answer the card) | |
@@ -546,6 +575,9 @@ that text at the start of every chat of the project.
   change); move generated files out of the hook's path.
 - **My `.mcp.json` server is missing**: it must be at the project root; it needs approval and its variables; safe mode
   starts none; open the project's **MCP servers** dialog for its status and error, and **Reconnect**.
+- **My `.mcp.json` server shows Sign in required** (v1.9): it answered "401 Unauthorized"; press **Sign in** in the
+  project's **MCP servers** dialog (a server with a token header instead: check the `${VARIABLE}` that holds the token).
+  It is never retried by itself, and its tools stay unavailable until you sign in.
 - **A prompt hook never blocks**: check the **Hook model** (Settings → General → Agent) and the note under the reply
   ("A {event} hook failed": no model could run, the model could not be reached or did not answer in time, or its
   answer could not be read); a hook's `model` that cannot run falls back to the next model (section 3; the note

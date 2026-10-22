@@ -99,7 +99,7 @@ describe('project MCP manager: lazy start, variables, tools', () => {
 
     let list = await app.t.deps.projectMcp.list(app.project.id)
     expect(projectMcpListSchema.parse(list)).toEqual({
-      items: [{ id: 'my-server-v2', name: 'My_Server.v2', transport: 'stdio', state: 'pending', sha256: item.sha256, tools: [], missingVariables: ['MCP_TOKEN'] }],
+      items: [{ id: 'my-server-v2', name: 'My_Server.v2', transport: 'stdio', state: 'pending', sha256: item.sha256, tools: [], missingVariables: ['MCP_TOKEN'], auth: null }],
       variables: [
         { name: 'LABEL', set: false, hint: 'proj', usedBy: ['my-server-v2'] },
         { name: 'MCP_TOKEN', set: false, hint: null, usedBy: ['my-server-v2'] },

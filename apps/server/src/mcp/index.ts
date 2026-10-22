@@ -770,6 +770,8 @@ export function createMcpManagerCore(deps: AppDeps, options: McpManagerOptions =
           type: row.transport.type,
           url: row.transport.url,
           headers: Object.fromEntries(row.transport.headerNames.map(name => [name, secretStateOf(entries.get(`${HEADER_SECRET_PREFIX}${name}`))])),
+          // Phase 14 (ADR-059): OAuth settings land with W14.1; until then none are configured.
+          oauth: null,
         }
     const connected = view.status === 'connected'
     return {
@@ -784,6 +786,8 @@ export function createMcpManagerCore(deps: AppDeps, options: McpManagerOptions =
       error: view.error,
       tools: connected ? registeredToolNames(row.id) : [],
       connectedAt: connected ? servers.get(row.id)?.connectedAt ?? null : null,
+      // Phase 14 (ADR-059): the sign-in state lands with W14.1.
+      auth: null,
     }
   }
 
@@ -801,6 +805,8 @@ export function createMcpManagerCore(deps: AppDeps, options: McpManagerOptions =
           type: decl.transport.type,
           url: decl.transport.url,
           headers: Object.fromEntries(Object.entries(decl.transport.headers ?? {}).map(([name, value]) => [name, state(value)])),
+          // Phase 14 (ADR-059): OAuth settings land with W14.1; until then none are configured.
+          oauth: null,
         }
     const view = runtimeView(servers.get(decl.id))
     const connected = view.status === 'connected'
@@ -816,6 +822,8 @@ export function createMcpManagerCore(deps: AppDeps, options: McpManagerOptions =
       error: view.error,
       tools: connected ? registeredToolNames(decl.id) : [],
       connectedAt: connected ? servers.get(decl.id)?.connectedAt ?? null : null,
+      // Phase 14 (ADR-059): the sign-in state lands with W14.1.
+      auth: null,
     }
   }
 

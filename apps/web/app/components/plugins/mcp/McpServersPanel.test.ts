@@ -23,13 +23,14 @@ function mcpServer(overrides: Partial<McpServer> = {}): McpServer {
     name: 'GitHub',
     pluginId: 'core-mcp',
     editable: true,
-    transport: { type: 'http', url: 'https://mcp.example.com/mcp', headers: { Authorization: { set: true, hint: 'ghp_…9fQ2', source: 'stored' } } },
+    transport: { type: 'http', url: 'https://mcp.example.com/mcp', headers: { Authorization: { set: true, hint: 'ghp_…9fQ2', source: 'stored' } }, oauth: null },
     policy: 'ask',
     enabled: true,
     status: 'connected',
     error: null,
     tools: Array.from({ length: 12 }, (_, index) => `mcp__github__tool_${index}`),
     connectedAt: 1_759_000_000_000,
+    auth: null,
     ...overrides,
   }
 }
@@ -44,7 +45,7 @@ const everything = mcpServer({
   tools: [],
   connectedAt: null,
 })
-const slack = mcpServer({ id: 'slack', name: 'Slack', transport: { type: 'sse', url: 'https://slack.example.com/sse', headers: {} }, status: 'connecting', tools: [], connectedAt: null })
+const slack = mcpServer({ id: 'slack', name: 'Slack', transport: { type: 'sse', url: 'https://slack.example.com/sse', headers: {}, oauth: null }, status: 'connecting', tools: [], connectedAt: null })
 const paused = mcpServer({ id: 'paused', name: 'Paused', enabled: false, status: 'disabled', tools: [], connectedAt: null })
 const acme = mcpServer({ id: 'acme-docs', name: 'Acme docs search', pluginId: 'acme-docs', editable: false, tools: ['mcp__acme-docs__search'] })
 

@@ -122,6 +122,9 @@ export function mcpStatusDot(status: McpStatus): StatusDotStatus {
       return 'error'
     case 'disabled':
       return 'off'
+    // Phase 14 (ADR-059): the server asks for a sign-in.
+    case 'needs-auth':
+      return 'warning'
   }
 }
 
@@ -136,6 +139,8 @@ export function mcpStatusText(server: Pick<McpServer, 'status' | 'tools' | 'erro
       return `Error: ${server.error?.message ?? 'the server did not answer'}`
     case 'disabled':
       return 'Disabled'
+    case 'needs-auth':
+      return 'Sign in required'
   }
 }
 

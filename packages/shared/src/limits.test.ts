@@ -7,6 +7,8 @@ import { COMMAND_TEMPLATE_LIMITS } from './util/command-template.ts'
 import { DEFINITION_LIMITS } from './util/definitions.ts'
 import { HOOK_LIMITS } from './util/hooks.ts'
 import { MCP_CONFIG_LIMITS } from './util/mcp-config.ts'
+import { ELICITATION_MESSAGE_MAX_CHARS } from './util/mcp-elicitation.ts'
+import { MCP_PROMPT_ARGUMENTS_MAX } from './util/mcp-prompts.ts'
 import { TRUST_LIMITS } from './util/trust.ts'
 
 describe('limits', () => {
@@ -132,5 +134,28 @@ describe('limits', () => {
     expect(LIMITS.claudeImportItemsMax).toBe(CLAUDE_HOME_LIMITS.itemsMax)
     expect(LIMITS.claudeImportSkippedMax).toBe(CLAUDE_HOME_LIMITS.skippedMax)
     expect(LIMITS.claudeImportSummaryMaxChars).toBe(CLAUDE_HOME_LIMITS.summaryMaxChars)
+  })
+
+  it('declares the Phase 14 group with the values of the contract seed', () => {
+    expect(LIMITS).toMatchObject({
+      mcpElicitationWaitMs: 480_000,
+      mcpToolActiveMs: 60_000,
+      mcpOAuthFlowMs: 600_000,
+      mcpOAuthFlowsMax: 20,
+      mcpPromptsMax: 200,
+      mcpPromptArgumentsMax: 20,
+      mcpResourcesMax: 1000,
+      mcpReturnToMaxChars: 512,
+      searchWebOutputBytes: 32_768,
+      searchWebFetchBytes: 1_048_576,
+      searchWebTimeoutMs: 10_000,
+    })
+    // A resource attached from an `@` mention obeys the file mention cap (5 MiB).
+    expect(LIMITS.mcpResourceReadBytes).toBe(LIMITS.mentionFileMaxBytes)
+    expect(LIMITS.mcpPromptArgumentsMax).toBe(MCP_PROMPT_ARGUMENTS_MAX)
+    // The elicitation card's message cap is the one of the elicitation schema.
+    expect(ELICITATION_MESSAGE_MAX_CHARS).toBe(2000)
+    // The MCP tool budgets fit the 600 s outer timeout of MCP tools (the tool guard maximum).
+    expect(LIMITS.mcpToolActiveMs + LIMITS.mcpElicitationWaitMs).toBeLessThanOrEqual(600_000)
   })
 })

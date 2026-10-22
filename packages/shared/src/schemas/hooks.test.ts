@@ -106,10 +106,11 @@ describe('enums and counts (Phase 11)', () => {
   })
 
   it('adds 3 notices, 2 conflict reasons and the hook data part', () => {
-    expect(noticeCodeSchema.options.slice(8)).toEqual(['output-style-unavailable', 'hook-continuation-limit', 'project-mcp-unavailable'])
-    // Phase 12 adds `offline` (15).
-    expect(conflictReasonSchema.options).toHaveLength(15)
-    expect(conflictReasonSchema.options.slice(12)).toEqual(['hook-blocked', 'untrusted', 'offline'])
+    // Phase 14 appends `web-search-unavailable` (12).
+    expect(noticeCodeSchema.options.slice(8, 11)).toEqual(['output-style-unavailable', 'hook-continuation-limit', 'project-mcp-unavailable'])
+    // Phase 12 adds `offline` (15), Phase 14 `needs-auth` (16).
+    expect(conflictReasonSchema.options).toHaveLength(16)
+    expect(conflictReasonSchema.options.slice(12, 15)).toEqual(['hook-blocked', 'untrusted', 'offline'])
     expect(Object.keys(harnessDataSchemas)).toHaveLength(6)
     expect(harnessDataSchemas.hook).toBe(hookDataSchema)
   })

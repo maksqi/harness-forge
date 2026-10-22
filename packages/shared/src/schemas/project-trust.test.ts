@@ -68,6 +68,7 @@ const server = {
   tools: [] as string[],
   shadows: 'memory',
   missingVariables: ['MCP_TOKEN'],
+  auth: null,
 }
 
 describe('enums (Phase 11)', () => {
@@ -77,7 +78,8 @@ describe('enums (Phase 11)', () => {
     expect(trustStateSchema.options).toEqual(['approved', 'pending'])
     expect(trustWarningSchema.options).toEqual(['private-network', 'referenced-file-missing', 'runs-repository-code'])
     expect(projectMcpTransportSchema.options).toEqual([...MCP_JSON_TRANSPORTS])
-    expect(projectMcpStateSchema.options).toEqual(['pending', 'needs-variables', 'idle', 'connecting', 'connected', 'error', 'disabled'])
+    // Phase 14 (ADR-059) appends `needs-auth`.
+    expect(projectMcpStateSchema.options).toEqual(['pending', 'needs-variables', 'idle', 'connecting', 'connected', 'error', 'disabled', 'needs-auth'])
   })
 })
 

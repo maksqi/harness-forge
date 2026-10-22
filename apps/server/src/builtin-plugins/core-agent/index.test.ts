@@ -87,12 +87,13 @@ describe('core-agent manifest', () => {
     expect(semver.satisfies('1.2.0', manifest.engines.harness)).toBe(false)
   })
 
-  it('phase 11 / 12: keeps ^1.4.0 under plugin API 1.6.0 (it uses no 1.5.0 or 1.6.0 member; the builtin styles are server-read)', () => {
-    expect(PLUGIN_API_VERSION).toBe('1.6.0')
+  it('phase 11 / 12 / 14: keeps ^1.4.0 under plugin API 1.7.0 (it uses no later member; the builtin styles are server-read)', () => {
+    expect(PLUGIN_API_VERSION).toBe('1.7.0')
     expect(manifest.engines.harness).toBe('^1.4.0')
     expect(semver.satisfies('1.4.0', manifest.engines.harness)).toBe(true)
     expect(semver.satisfies('1.5.0', manifest.engines.harness)).toBe(true)
     expect(semver.satisfies('1.6.0', manifest.engines.harness)).toBe(true)
+    expect(semver.satisfies('1.7.0', manifest.engines.harness)).toBe(true)
   })
 })
 

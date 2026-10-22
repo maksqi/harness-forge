@@ -11,7 +11,15 @@
 // - whitespace is JavaScript `\s`; line breaks are `\n`, `\r`, U+2028 and U+2029.
 // A path is mentionable when it is non-empty and holds no `"` and no line break (`isMentionablePath`); every
 // mentionable path round-trips: `parseMentions(formatMention(path))` is `[{ path, start: 0, end }]`.
+//
+// MCP resource mentions (Phase 14, ADR-061): `@<serverId>:<uri>` (`formatResourceMention` / `parseResourceMention`) is
+// display text only (the picked resource travels as an attached file). An unquoted mention whose path has the resource
+// shape `<MCP server id>:<URI scheme>:…` (`isResourceMentionPath`) is never a file mention: `parseMentions` skips it and
+// `formatMention` quotes a project path of that shape (`@"a:b:c"`, a quoted mention is always a file), so such a token is
+// never read as a project file path and every mentionable path still round-trips. `mentionTokenAt` is unchanged (the
+// composer's `@` menu opens on both kinds of token).
 import type { ProjectFileKind } from '../schemas/project-files.ts'
+import { MCP_SERVER_ID_PATTERN } from '../ids.ts'
 
 /** Longest query `mentionTokenAt` reports (the characters between the `@` or `@"` and the caret). */
 export const MENTION_QUERY_MAX_CHARS = 256
@@ -155,18 +163,20 @@ function hasWhitespace(value: string): boolean {
 }
 
 /**
- * The mention text of a path: `@path`, or `@"path"` when the path contains whitespace. `null` when the path is not
- * mentionable (empty, or holds `"` or a line break; such paths cannot be written as a mention). Never throws.
+ * The mention text of a path: `@path`, or `@"path"` when the path contains whitespace or has the resource shape
+ * (`isResourceMentionPath`). `null` when the path is not mentionable (empty, or holds `"` or a line break; such paths
+ * cannot be written as a mention). Never throws.
  */
 export function formatMention(path: string): string | null {
   if (!isMentionablePath(path))
     return null
-  return hasWhitespace(path) ? `@"${path}"` : `@${path}`
+  return hasWhitespace(path) || isResourceMentionPath(path) ? `@"${path}"` : `@${path}`
 }
 
 /**
  * Every complete mention of `text`, in order (see the grammar at the top of this file). An unclosed `@"` is not a
- * mention (the scan goes on after its `@`); an unquoted run holding `"` is not a mention. Never throws.
+ * mention (the scan goes on after its `@`); an unquoted run holding `"` is not a mention; an unquoted run of the MCP
+ * resource shape (`isResourceMentionPath`) is not a file mention. Never throws.
  */
 export function parseMentions(text: string): ParsedMention[] {
   const mentions: ParsedMention[] = []
@@ -191,11 +201,76 @@ export function parseMentions(text: string): ParsedMention[] {
     }
     const end = runEnd(text, index + 1)
     const path = text.slice(index + 1, end)
-    if (path.length > 0 && !path.includes('"'))
+    if (path.length > 0 && !path.includes('"') && !isResourceMentionPath(path))
       mentions.push({ path, start: index, end })
     index = Math.max(end, index + 1)
   }
   return mentions
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// MCP resource mentions (Phase 14, ADR-061)
+
+/** Longest URI of a resource mention (the resource entry's `uri` cap). */
+export const RESOURCE_MENTION_URI_MAX_CHARS = 2048
+
+/** A URI scheme followed by its `:` (RFC 3986 characters; lower case, the canonical form). */
+const URI_SCHEME = /^[a-z][\d+.a-z-]*:/
+
+/** A server id (`MCP_SERVER_ID_PATTERN`, ≤ 32 characters) right before the first `:`; `-1` when there is none. */
+function serverIdEnd(value: string): number {
+  const colon = value.indexOf(':')
+  if (colon <= 0 || colon > 32 || !MCP_SERVER_ID_PATTERN.test(value.slice(0, colon)))
+    return -1
+  return colon
+}
+
+/**
+ * True when a mention path (or the query of a `mentionTokenAt` token, both without the `@`) has the MCP resource shape:
+ * an MCP server id, `:`, then a URI scheme with its `:` (`github:repo://owner/name/README.md`, `fs:file:///notes.md`).
+ * Such an unquoted token is never a file mention (see the top of this file); the composer uses this to tell a resource
+ * token from a path token. A shape check only: `parseResourceMention` also checks the URI. Never throws.
+ */
+export function isResourceMentionPath(path: string): boolean {
+  if (typeof path !== 'string')
+    return false
+  const end = serverIdEnd(path)
+  return end !== -1 && URI_SCHEME.test(path.slice(end + 1))
+}
+
+/** Characters a resource mention URI never holds: whitespace, control and format characters, `"`. */
+const URI_FORBIDDEN = /[\s"\p{Cc}\p{Cf}]/u
+
+/** A URI a resource mention can hold: 1..2048 characters, a scheme first, nothing of `URI_FORBIDDEN`. */
+function isMentionableUri(uri: string): boolean {
+  return uri.length > 0 && uri.length <= RESOURCE_MENTION_URI_MAX_CHARS && URI_SCHEME.test(uri) && !URI_FORBIDDEN.test(uri)
+}
+
+/**
+ * The display text of an MCP resource mention: `@<serverId>:<uri>`; null when the id does not match
+ * `MCP_SERVER_ID_PATTERN` or the URI is empty, longer than `RESOURCE_MENTION_URI_MAX_CHARS`, does not start with a
+ * URI scheme (`^[a-z][a-z0-9+.-]*:`), or holds whitespace, a control or format character or `"`. The text is display
+ * only: the picked resource is attached as a file. Round-trips through `parseResourceMention`. Never throws.
+ */
+export function formatResourceMention(serverId: string, uri: string): string | null {
+  if (typeof serverId !== 'string' || typeof uri !== 'string' || !MCP_SERVER_ID_PATTERN.test(serverId) || !isMentionableUri(uri))
+    return null
+  return `@${serverId}:${uri}`
+}
+
+/**
+ * The server id and URI of an MCP resource mention (`@<serverId>:<uri>`, the leading `@` optional), the reverse of
+ * `formatResourceMention`; null when the token is not one (the same checks). Never throws.
+ */
+export function parseResourceMention(token: string): { serverId: string, uri: string } | null {
+  if (typeof token !== 'string')
+    return null
+  const text = token.startsWith('@') ? token.slice(1) : token
+  const end = serverIdEnd(text)
+  if (end === -1)
+    return null
+  const uri = text.slice(end + 1)
+  return isMentionableUri(uri) ? { serverId: text.slice(0, end), uri } : null
 }
 
 function plainToken(text: string, start: number, caret: number): MentionToken | null {

@@ -17,6 +17,7 @@ import { harnessErrorInitSchema } from '../errors.ts'
 import { mcpServerIdSchema, projectIdSchema, sha256HexSchema, timestampSchema } from '../ids.ts'
 import { LIMITS } from '../limits.ts'
 import { MCP_VARIABLE_NAME_PATTERN } from '../util/mcp-config.ts'
+import { mcpAuthInfoSchema } from './mcp.ts'
 
 const projectPathSchema = z.string().min(1).max(LIMITS.workspacePathMaxChars)
 const shortTextSchema = z.string().max(200)
@@ -194,6 +195,11 @@ export const projectMcpServerSchema = z.object({
   shadows: mcpServerIdSchema.optional(),
   /** `${VAR}` names without a stored value and without a default (state `needs-variables`). */
   missingVariables: z.array(mcpVariableNameSchema).max(LIMITS.projectMcpVariablesMax),
+  /**
+   * Phase 14 (ADR-059): the OAuth sign-in state of an approved http / sse server (tokens stored as `mcp-oauth.<serverId>`
+   * of secret scope `project:<projectId>`); null = the server does not use OAuth, or it is not approved. Never a token.
+   */
+  auth: mcpAuthInfoSchema.nullable(),
 })
 export type ProjectMcpServer = z.infer<typeof projectMcpServerSchema>
 

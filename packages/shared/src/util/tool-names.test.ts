@@ -19,6 +19,7 @@ describe('cLAUDE_TOOL_ALIASES', () => {
       LS: 'list_directory',
       Bash: 'shell',
       WebFetch: 'web_fetch',
+      WebSearch: 'search_web',
     })
   })
 })
@@ -42,7 +43,7 @@ describe('normalizeToolList', () => {
     ['Read\n  Grep\tGlob', ['read_file', 'search_files', 'find_files']],
     ['Read, Write, Edit, MultiEdit, LS, Bash, WebFetch', ['read_file', 'write_file', 'edit_file', 'list_directory', 'shell', 'web_fetch']],
     ['read_file, shell, ', ['read_file', 'shell']],
-    ['TodoWrite, WebSearch, my-tool', ['TodoWrite', 'WebSearch', 'my-tool']],
+    ['TodoWrite, WebSearch, my-tool', ['TodoWrite', 'search_web', 'my-tool']],
     ['mcp__github__create_issue, mcp__github__*, mcp__slack', ['mcp__github__create_issue', 'mcp__github__*', 'mcp__slack']],
   ])('splits and maps the string %j', (value, tools) => {
     expect(normalizeToolList(value)).toEqual({ tools, diagnostics: [] })
@@ -170,5 +171,23 @@ describe('claude agent names (Phase 12)', () => {
     })
     expect(normalizeToolList(5, { mode: 'allow' }).tools).toEqual([])
     expect(normalizeToolList(null, { mode: 'deny' })).toEqual({ tools: null, diagnostics: [] })
+  })
+})
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Phase 14 (ADR-063, C49)
+
+describe('webSearch alias (Phase 14)', () => {
+  it('maps the Claude Code WebSearch tool to the builtin search_web tool', () => {
+    expect(CLAUDE_TOOL_ALIASES.WebSearch).toBe('search_web')
+    expect(normalizeToolList('WebFetch, WebSearch, search_web')).toEqual({ tools: ['web_fetch', 'search_web'], diagnostics: [] })
+    expect(normalizeToolList(['WebSearch(domain:example.com)'])).toEqual({
+      tools: ['search_web'],
+      diagnostics: [{ level: 'warning', code: 'tool-pattern', message: 'Tool patterns are not supported; search_web is allowed without its pattern.' }],
+    })
+    expect(normalizeToolList('WebSearch', { mode: 'deny' }).tools).toEqual(['search_web'])
+    // Never a function tool named `web_search` (the Anthropic wire name of its native search).
+    expect(Object.values(CLAUDE_TOOL_ALIASES)).not.toContain('web_search')
+    expect(matchToolAllowlist('search_web', normalizeToolList('WebSearch').tools ?? [])).toBe(true)
   })
 })

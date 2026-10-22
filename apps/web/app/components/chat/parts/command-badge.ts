@@ -25,6 +25,9 @@ export function commandSourceText(source: CommandSource, pluginName: string | nu
       return `From ${pluginName ?? 'a plugin'}`
     case 'harness':
       return `Built-in ${kind}`
+    // Phase 14 (ADR-061): an MCP prompt (W14.9 names the server, "MCP · {server}").
+    case 'mcp':
+      return 'MCP prompt'
   }
 }
 

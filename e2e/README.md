@@ -29,7 +29,8 @@ e2e/
   specs/screenshots/  screenshots for the visual review and the README images, opt-in with `E2E_SCREENSHOTS=1` (W5.8,
                       W6.12, W7.14, W8.12, W9.13, W10.13, W11.13, W12.14)
   fixtures/           plugin fixtures used by the plugin specs (W3.6), the stdio MCP echo server (also copied into
-                      project folders by the Phase 11 specs)
+                      project folders by the Phase 11 specs); Phase 14 (planned): `fake-remote.mjs`, the fake Brave
+                      Search, Tavily and Exa APIs (C53), and the OAuth / elicitation MCP fixtures (W14.11)
 ```
 
 ## Running
@@ -75,6 +76,7 @@ E2E_SCREENSHOTS=1 pnpm test:e2e --grep @readme
 | `E2E_SCREENSHOTS` | `1` runs the `@screenshots` spec, `@readme` included (otherwise its tests are skipped) |
 | `E2E_WORKSPACE_ROOT` | optional: the workspace root the Phase 7 specs create their project folders in; it must be one of the server's roots. Default: the first available root the server reports (`GET /api/projects/browse`), e.g. `<dataDir>/workspaces` |
 | `E2E_MOCK_OPENAI_PORT` | optional: the port of the mock OpenAI-compatible server the plugin specs start in the worker (`fixtures/mock-openai-server.ts`: the wizard, zip install, uninstall, code plugin and MCP specs). Default 8894 (the W3.6 slot); `0` = any free port; a busy port is retried for 5 s, then any free port is used; a value that is not a port counts as unset |
+| `E2E_FAKE_REMOTE_PORT` | optional (v1.9, Phase 14): the port of the fake remote (`fixtures/fake-remote.mjs`: the Brave Search, Tavily and Exa routes the builtin `search_web` tool calls) that Playwright starts next to the e2e server; `pnpm start:e2e` points `HF_TEST_REMOTE_URL` (honored only with `HF_MOCK_PROVIDER=1`) at it, so no search ever leaves loopback. Default set in `playwright.config.ts` (a port outside the 879k / 889k agent slots). A server you start yourself for `E2E_BASE_URL` needs `HF_TEST_REMOTE_URL=http://127.0.0.1:<that port>` for the search specs |
 
 Specs assume a server with `HF_MOCK_PROVIDER=1`, no provider keys in its environment and no password. With
 `HF_OFFLINE=1` (`pnpm start:e2e`, `startServer`) the server never lists a provider on its own since v1.8.1, so the mock
@@ -112,6 +114,15 @@ shared server has no password), so they run only in that project's chats. Person
 specs that need the password prompt or turn hooks off for the whole server run on a dedicated password server. Nothing
 ever writes `.claude/`, `.harness/` or `.mcp.json` outside a seeded project folder; the MCP fixtures are copied into the
 project folder and listen on stdio or loopback only.
+
+Phase 14 (v1.9, planned; W14.11, docs/phases/phase-14-v1-9.md): `core/web-search.spec.ts`,
+`core/mcp-elicitation.spec.ts`, `core/mcp-prompts.spec.ts`, `core/mcp-resources.spec.ts`,
+`core/settings-search.spec.ts`, `plugins/mcp-oauth.spec.ts` (also a run with a password: the callback page finishes the
+sign-in with the session cookie), an extended `core/project-mcp.spec.ts`, `mobile/{web-search,elicitation,mcp-oauth}.spec.ts`
+and the tablet touch targets of the Search toggle, the form card's buttons, Sign in and the switches. They use the mocks `mock:search` and
+`mock:search-tool` (docs/PROVIDERS.md "MCP and search mocks (Phase 14)"), the fake remote above and MCP fixtures
+started by the specs on free loopback ports; the fake authorization server listens on `localhost` while the app runs
+on `127.0.0.1`, so the sign-in redirect is a real cross-site navigation.
 
 ## Core specs (`specs/core`)
 

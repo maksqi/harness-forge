@@ -6,7 +6,7 @@ values defined here are **contracts**: several agents build components in parall
 
 - Source of truth for shared names: `docs/DECISIONS.md` (wins on conflict). DTO names come from `docs/API.md`.
 - Owners (C3, C5, W2.x, W3.x, W4.x; Phase 5: C9, W5.x; Phase 6: C12, W6.x; Phase 7: C15, W7.x; Phase 8: C20, W8.x;
-  Phase 9: C25, W9.x; Phase 10: C33, W10.x; Phase 11: C39, W11.x; Phase 12: C46, W12.x) follow the phase tables in `docs/phases/`. A component contract marked **cross-owner** must not change without a CCR.
+  Phase 9: C25, W9.x; Phase 10: C33, W10.x; Phase 11: C39, W11.x; Phase 12: C46, W12.x; Phase 14: C54, W14.x) follow the phase tables in `docs/phases/`. A component contract marked **cross-owner** must not change without a CCR.
 - Everything is English. Every UI string is sentence case (see [Copy guidelines](#15-copy-guidelines)).
 
 Contents: [1 Principles](#1-principles) · [2 Wireframes](#2-wireframes) · [3 Design tokens](#3-design-tokens) ·
@@ -55,7 +55,8 @@ Contents: [1 Principles](#1-principles) · [2 Wireframes](#2-wireframes) · [3 D
    still no side pane for plans, tasks or sub-agents (they render inside the transcript). Phase 10: the background
    agents list joins the dock between the todo strip and the queue (2.17, 7.29); still no side pane. Phase 11: the
    output style picker after the effort menu (7.32) and the project trust chip in the header of project chats with items
-   to review (7.33); still no side pane.
+   to review (7.33); still no side pane. Phase 14: the web search toggle after the output style picker (7.35); an MCP
+   server's questions render as a form card under its tool row (7.35), never as a dialog or a side pane.
 3. **Dark by default.** `html.dark` on first load even when the OS prefers light. Light and System are opt-in.
    No light flash, ever (see [4](#4-theme-behavior)).
 4. **Keyboard-first.** Every action is reachable from the keyboard: palette (Mod+K), new chat (Mod+Shift+O),
@@ -1292,6 +1293,163 @@ Settings → General → Agent with the Phase 12 fields (9.11, 9.14); at 390px t
    runs. A name that isn't set uses the default model, with a note in the chat.          data-slot=settings-model-aliases
 ```
 
+### 2.20 MCP sign-in, MCP questions and web search (Phase 14)
+
+Legend additions: `⇥` sign in (`LogIn`) · `⇤` sign out (`LogOut`) · `⁇` an MCP server's question
+(`MessageCircleQuestion`) · `◷` countdown · `◍` web search (`Globe`) · `Ⓐ` a letter avatar of a source domain ·
+`↗` sources (`Link2`).
+
+Plugins → `core-mcp` → MCP servers (8.12, 8.14), desktop; at 390px **Sign in** moves to its own full-width line under the
+status (40px), the switch and Restart stay on the first line:
+
+```
+┌ MCP servers ──────────────────────────────────────────────────────────────── [+ Add server] ┐ mcp-panel
+│ ● linear  [HTTP]  Sign in required                       [⇥ Sign in]   ◉  [Restart]  ⋯       │ mcp-status[data-status=needs-auth], mcp-sign-in
+│ ┌ ⚠ linear can't sign in: the server sent no sign-in information. ──────────────────────┐   │ mcp-sign-in-error (data-code)
+│ ● github  [HTTP]  Connected · 12 tools · Signed in                    ◉  [Restart]  ⋯       │ ⋯ Edit · Sign out… · Delete
+│ ● fs      [stdio] Connected · 4 tools                                 ◉  [Restart]  ⋯       │                 mcp-sign-out
+└─────────────────────────────────────────────────────────────────────────────────────────────┘
+  Sign out…  →  ┌ Sign out of github? ─────────────────────────────────────────┐
+                │ harness-forge forgets the tokens; the server stays configured. │
+                │                                     [Cancel]  [Sign out]       │
+                └────────────────────────────────────────────────────────────────┘
+```
+
+The add / edit dialog, HTTP tab, with the sign-in section open (8.14); at 390px the fields stack under their labels and
+the footer is sticky:
+
+```
+┌ Edit MCP server ──────────────────────────────────────────────── × ┐ mcp-dialog
+│ Name [ Linear                 ]   ID  linear                       │
+│ [stdio][HTTP][SSE]                                                 │ mcp-transport-tab[data-value=http]
+│ URL [ https://mcp.linear.app/mcp                              ]    │
+│ Headers                                          [+ Add header]    │
+│ ▾ Sign-in (OAuth) · optional                                       │ mcp-oauth-section[data-state=open]
+│   Leave empty to register harness-forge with the server when you   │
+│   sign in.                                                         │
+│   Client ID      [ hf-linear                          ]            │ mcp-oauth-client-id
+│   Client secret  [ •••• · stored            ] [Remove]             │ mcp-oauth-client-secret
+│   Scopes         [ read write                         ]            │ mcp-oauth-scopes
+│   Redirect URI   https://hf.example.com/oauth/callback   [⧉]       │ mcp-oauth-redirect-uri
+│   Register this exact address with the authorization server when   │
+│   you use your own client ID.                                      │
+│ Policy [ Ask ▾ ]                                                   │
+│                                          [Cancel]  [Save server]   │ mcp-save
+└────────────────────────────────────────────────────────────────────┘
+```
+
+The project MCP dialog (7.33, 8.14); pending rows keep **Review…** and never offer Sign in:
+
+```
+│ ● ⎈ docs  [HTTP]  Sign in required                    [⇥ Sign in] [Reconnect] │ project-mcp-server[data-state=needs-auth], project-mcp-sign-in
+│     https://docs.example.com/mcp · Client ID hf-docs                         │ data-slot=project-mcp-oauth
+│ ● ⎈ wiki  [HTTP]  Connected · 3 tools · Signed in    [Sign out…] [Reconnect] │ project-mcp-sign-out
+│ ○ ⎈ jira  [HTTP]  Needs approval                                  [Review…]  │ data-state=pending
+```
+
+The sign-in callback page (`/oauth/callback`, `auth` layout, 8.14), the same at 390px and on desktop:
+
+```
+┌──────────────────────────────────────────────────┐
+│                 ◆ harness-forge                  │
+│            ◌  Finishing sign-in…                 │ oauth-callback[data-state=working] (role=status)
+└──────────────────────────────────────────────────┘
+  success: back to the page that started it (router replace) + toast "Signed in to Linear."   data-state=success
+┌──────────────────────────────────────────────────┐ oauth-callback[data-state=error]
+│ ⚠ Sign-in failed                                 │ oauth-callback-error[data-code=provider_error]
+│ Linear answered: access_denied (The user denied  │ (plain text, at most 300 characters)
+│ the request.)                                    │
+│ [Try again]        [Back to MCP servers]         │ oauth-callback-retry, oauth-callback-back
+└──────────────────────────────────────────────────┘
+  a reused or expired link: "This sign-in link was already used or expired." [Back to MCP servers]   data-code=conflict
+```
+
+An MCP server's question under its running tool row (7.35), desktop:
+
+```
+ ▸ ▣ create_issue  [linear]  "Fix login redirect"                  ● Waiting for your input   tool-row (preliminary output)
+ ┌ ⁇ Linear needs more information                                        ◷ 7:42 left   × ┐ elicitation-card[data-state=pending]
+ │ Which team should the issue go to? Pick a team and a priority.                         │ elicitation-message (plain text)
+ │ Team *         ( ) Platform   (•) Web   ( ) Mobile                                     │ elicitation-field[data-type=enum]
+ │ Priority       [ 2          ]   Whole number, 1 to 4                                    │ data-type=integer
+ │ Due date       [ 2026-11-01 ]                                                           │ data-type=string (format date)
+ │ Labels         [✓] bug  [ ] ux  [✓] auth                                                │ data-type=multi-enum
+ │ Notify me      [✓] Send me an email when it's done                                     │ data-type=boolean
+ │ ⚠ Share only what you would give Linear. Never enter passwords here.                   │
+ │                                                              [Decline]   [Submit]      │ elicitation-decline, elicitation-submit
+ └────────────────────────────────────────────────────────────────────────────────────────┘
+   after an answer:  ✓ You answered Linear's request.                                       elicitation-result[data-action=accept]
+   card off-screen:            ( ⁇ Linear needs your input · Show )                         elicitation-jump (above the composer)
+   sidebar row:  Fix the login bug                              ●   chat-status-dot[data-status=input] "Needs your input"
+```
+
+The same card at 390px (radios one per line, 40px fields, full-width buttons with Submit first):
+
+```
+┌ 390 ──────────────────────────────┐
+│ ⁇ Linear needs more   ◷ 7:42  ×   │ elicitation-dismiss ("Dismiss request")
+│ information                       │
+│ Which team should the issue go to?│
+│ Pick a team and a …    Show more  │
+│ Team *                            │
+│ (•) Web                           │
+│ ( ) Platform                      │
+│ Priority                          │
+│ [ 2                            ]  │
+│ ⚠ Share only what you would give  │
+│ Linear. Never enter passwords …   │
+│ [            Submit            ]  │
+│ [            Decline           ]  │
+└───────────────────────────────────┘
+```
+
+The composer's web search toggle (7.35), its unavailable popover, a search row and the sources row:
+
+```
+ ┌ Reply…                                                                            ┐
+ │ ＋ ✱ Sonnet 5 ▾  High ▾  ✒ Default ▾  [◍ Search]              Ask ▾  ◔  [mic]  (↑) │ composer-web-search[data-state=on][data-mode=native]
+ └───────────────────────────────────────────────────────────────────────────────────┘
+   tooltip "Web search on · Anthropic" (builtin: "Web search on · Brave Search"; off: "Web search off")
+   unavailable (aria-disabled, muted; a click opens):
+   ┌ Web search ──────────────────────────────────┐ web-search-unavailable[data-reason=no-backend]
+   │ This model has no web search of its own. Add │
+   │ a search key in Settings → Web search.       │
+   │ Set up web search                          → │ web-search-setup
+   └──────────────────────────────────────────────┘
+ 390: │ ＋ ✱ Sonnet… ▾ ✒ ◍•       Ask ▾ ◔ [mic] (↑) │  (icon only; the dot = on)
+
+ ▸ ◍ Searched the web  "mcp authorization pkce"                       8 results  ✓   tool-row[data-tool-name=search_web]
+   ▾ "mcp authorization pkce" · 8 results · Brave Search                             web-search-tool[data-mode=builtin]
+     Ⓜ Authorization – Model Context Protocol · modelcontextprotocol.io              web-search-result[data-domain]
+       Authorization for HTTP transports uses OAuth 2.1 with PKCE …
+ ▸ ◍ Searched the web  "weather in Lisbon"                                         ✓   provider-executed (data-mode=native)
+ ↗ 5 sources  (Ⓖ github.com) (Ⓜ modelcontextprotocol.io) (Ⓥ vercel.com) +2           sources-row, sources-chip[data-domain]
+```
+
+Settings → Web search (`/settings/search`, 9.15), desktop; at 390px the labels stack above their controls and each key
+row puts its buttons on a second line:
+
+```
+┌ Settings ───────┬──────────────────────────────────────────────────────────────────────────┐
+│ ← Back to app   │ Web search                                                                │ web-search-settings
+│ Providers       │ Search the web from the chat, with the model's own search or a search API.│
+│ Models          │ Web search in chats                                                       │
+│ Media           │ Use the model's own web search when it has one                        ◉  │ settings-search-native
+│ ◍ Web search ◀  │   Anthropic, OpenAI, Google, xAI, OpenRouter and Groq (gpt-oss) models … │
+│ Projects        │ Turn on web search in new chats                                       ○  │ settings-search-default
+│ …               │   Each chat keeps its own choice. A search sends your query out …        │
+│                 │ Search API                                                                │
+│                 │   For models without their own search, or when the switch above is off. │
+│                 │ Search API   [ Brave Search ▾ ]                                           │ settings-search-backend[data-value=brave]
+│                 │ Brave Search   Key saved                           [Replace]  [Remove]    │ settings-search-key[data-backend=brave][data-state=set]
+│                 │ Tavily         [ Paste a key…                    ]  [Save]   Get a key ↗  │ data-state=missing; -key-input, -key-save
+│                 │ Exa            [ Paste a key…                    ]  [Save]   Get a key ↗  │
+│                 │ Max results  [ 5 ]                                                        │ settings-search-max-results
+│                 │ [Test search]   ✓ 5 results from Brave Search in 412 ms                   │ settings-search-test, -test-result
+│                 │ Only your query goes to the search API. Queries and keys are never logged.│
+└─────────────────┴──────────────────────────────────────────────────────────────────────────┘
+```
+
 
 ---
 
@@ -1639,7 +1797,8 @@ settings) so it applies before boot.
 </SidebarProvider>
 ```
 
-`layouts/auth.vue` (C3): no sidebar; a centered column on `bg-background` for `/login`.
+`layouts/auth.vue` (C3): no sidebar; a centered column on `bg-background` for `/login` (Phase 14: also for
+`/oauth/callback`, 6).
 `layouts/share.vue` (C9, Phase 5): the public share page (7.15). No sidebar, command palette, shortcuts dialog or
 Share dialog: a `min-h-dvh` column on `bg-background` with a header bar (`--header-height`, bottom border) holding
 `BrandMark` + the `harness-forge` wordmark as plain text (not a link: visitors cannot use the app) and
@@ -1669,6 +1828,7 @@ store.
 | `/plugins`, `/plugins/*` | plugins | `PluginsNav` | Plugins active |
 | `/settings/*` | settings | "← Back to app" + `SettingsNav` | tabs hidden |
 | `/login` | — | no sidebar (`auth` layout) | — |
+| `/oauth/callback` (Phase 14) | — | no sidebar (`auth` layout; never remembered as a last route) | — |
 | `/share/*` | — | no sidebar (`share` layout, public) | — |
 
 `AppSidebar` watches the route and remembers the last route per mode in
@@ -1743,6 +1903,10 @@ because the palette reads `SETTINGS_LINKS`). The wireframes 2.5, 2.7 and 2.10 pr
 it); 2.17 shows Customize. Phase 11 adds no entry: Customize gains the Output styles and Hooks tabs (9.13), and
 `/settings/customize?tab=output-styles` / `?tab=hooks` keep Customize active. Phase 12 adds no entry either: the Import
 from Claude Code dialog opens on Customize (`/settings/customize?import=claude`, 9.14), which keeps Customize active.
+Phase 14 (ADR-063) adds **Web search** (`Globe`, right after Media, `/settings/search`, 9.15; key `search`, test id
+`settings-nav-search`; the palette item `go-settings-search` "Web search" comes with it because the palette reads
+`SETTINGS_LINKS`). The order is therefore Providers, Models, Media, Web search, Projects, Customize, General,
+Appearance, Data, About; 2.20 shows it.
 
 ### 5.6 Main header
 
@@ -1803,6 +1967,7 @@ todo strip → background agents → queued messages → composer.
 |---|---|---|
 | `running` | `bg-primary` + `animate-hf-pulse` | a run is streaming for this chat |
 | `approval` | `bg-warning` | the chat waits for a tool approval |
+| `input` (Phase 14) | `bg-warning` | a running tool waits for the user's answer to an MCP server's question (7.35) |
 | `unread` | `bg-foreground` | a run finished while the chat was not open; cleared on open |
 | `ok` | `bg-success` | plugin active, MCP connected |
 | `off` | 1.5px ring `border-muted-foreground`, hollow | disabled |
@@ -1813,6 +1978,9 @@ Chat priority: `approval` > `running` > `unread`. Each dot has a visually hidden
 "Needs approval", "Unread", …) and a tooltip. Chat dots come from the chats store: `running` from
 `ChatSummary.running` and `run.started` / `run.finished`; `approval` from `ChatSummary.pendingApproval` and
 `run.finished` `awaitingApproval` (persisted server-side, so it survives reloads); `unread` is client-side.
+Phase 14 (ADR-060): `input` ("Needs your input") comes from the live `ChatSummary.awaitingInput` (`chat.updated`; not
+stored, so it ends with the run) and from a session whose run state is `input`; the chat priority becomes `input` >
+`approval` > `running` > `unread` (a chat that waits for input is also running).
 
 ---
 
@@ -1834,6 +2002,7 @@ All pages are `ssr: false` SPA routes. C5 creates every page as a stub in Phase 
 | `/settings/providers` | `pages/settings/providers.vue` | provider list, key dialog (`?configure=<providerId>` opens it) | W2.5 |
 | `/settings/models` | `pages/settings/models.vue` | default + title model (chat models only), per-provider model tables | W2.5; W6.10 (Phase 6) |
 | `/settings/media` | `pages/settings/media.vue` → `MediaSettings` | "Images and voice": the Images section (image model of the `generate_image` tool) and the Voice section (speech to text, language, read aloud, voice, speed, test voice), 9.9 | C12 (stub), W6.10 |
+| `/settings/search` | `pages/settings/search.vue` → `WebSearchSettings` | Web search (Phase 14, ADR-062 / ADR-063): the two global switches (`webSearchNative`, `webSearchDefault`), the search API of `core-search` (backend, write-only keys, max results) and **Test search**, 9.15 | C54 (stub), W14.10 |
 | `/settings/projects` | `pages/settings/projects.vue` → `ProjectsSettings` | Projects (Phase 7): the project list with rename, instructions and delete, and the Add project dialog with the folder browser (`?add=1` opens it), 9.10; Phase 8: "Allowed commands…" per project and the global rules section `GlobalAllowlistSection` below the list; Phase 10: "Agents, commands and skills…" per project (links to `/settings/customize?project=<id>`) | C15 (stub), W7.9; W8.11 (Phase 8); W10.12 (Phase 10 menu item) |
 | `/settings/customize` | `pages/settings/customize.vue` → `CustomizeSettings` | Customize (Phase 10, ADR-044 / ADR-045): the sub-agents, slash commands and skills of the user (editable), of a project (read-only, from `.harness/` and `.claude/`), of the plugins and the built-ins, by source, with the editor, the viewer, import and export (9.12); `?tab=agents\|commands\|skills` (default `agents`), `?project=<id>` (default none); Phase 11: `?tab=output-styles\|hooks` (9.13); Phase 12: `?import=claude` opens the Import from Claude Code dialog (9.14), and project rows gain **Edit…** (`ProjectFileEditor`) | C33 (stub), W10.8; W11.8 (Phase 11); W12.10, W12.11 (Phase 12) |
 | `/settings/general` | `pages/settings/general.vue` | display name, send key, defaults, max steps (Phase 7: also in project chats), Alt shortcuts, instructions, password; Phase 9: the Shift+Tab switch and the Agent section (9.11) | W2.5; W7.12 (Phase 7); W9.12 (Phase 9) |
@@ -1842,6 +2011,7 @@ All pages are `ssr: false` SPA routes. C5 creates every page as a stub in Phase 
 | `/settings/data` | `pages/settings/data.vue` → `DataSettings` | summary, export, import, storage cleanup (Phase 7; Phase 8: automatic cleanup), shared links (`SharesSettingsSection`), encryption key (Phase 7), danger zone (9.8) | C9 (stub), W5.5; W5.6 (`SharesSettingsSection`); W7.13 (Phase 7 sections) |
 | `/share/[token]` | `pages/share/[token].vue` (`layout: 'share'`) → `SharedChatView :token` | public, read-only, store-free transcript of the share snapshot; "This link is unavailable" on 404; `noindex` (7.15) | C9 (stub), W5.6 |
 | `/login` | `pages/login.vue` (`layout: 'auth'`) | password form; `?redirect=` | W2.5 |
+| `/oauth/callback` | `pages/oauth/callback.vue` (`layout: 'auth'`) → `OAuthCallbackView` | the end of an MCP sign-in (Phase 14, ADR-059): reads `code`, `state`, `error`, `error_description` and `iss` once, removes them from the URL, posts them to `POST /api/mcp/oauth/callback` with the session cookie and goes back to the page that started the sign-in; errors and a used or expired link show a card (8.14). Not public: without a session the login redirect keeps the query and the page finishes after login | C54 (stub), W14.7 |
 | unknown | `app/error.vue` (`auth` layout) | "Page not found" (404) or "Something went wrong" (other errors, no raw details) + "Back to chats" (`clearError({ redirect: '/' })`) | C5 |
 
 Route middleware `middleware/auth.global.ts` (C5): loads `auth.fetchStatus()` once; when a password is required
@@ -1855,6 +2025,15 @@ redirect, and `plugins/events.client.ts`, which waits for a loaded status, never
 `$api` plugin neither marks the auth store unauthenticated nor redirects to `/login` while the current route (or the
 page being loaded) is under `/share/`. The share page calls only `GET /api/share/:token`.
 
+`/oauth/callback` (Phase 14, ADR-059) is the redirect URI of every MCP sign-in (`<origin>/oauth/callback`, the origin
+the browser uses). The authorization server sends the browser there cross-site, so the `SameSite=Strict` session
+cookie is not sent with that navigation; the SPA page itself loads without it and its own same-origin `fetch` carries
+the cookie. It uses the `auth` layout: no sidebar, so `AppSidebar` (the only caller of `rememberRoute`) never stores the
+`?code=` URL in `hf-last-routes`, and no sidebar store loads. `auth.global.ts` treats it like any app page: with a
+password and no session it redirects to `/login?redirect=/oauth/callback?…` (the query is kept), and the login returns
+there. The page reads the query once, calls `router.replace({ query: {} })` before its request (so the code leaves the
+history), and never renders the code or the state.
+
 Query parameters used by the UI: `/plugins?filter=&q=` (`filter` = `all | providers | tools | mcp | commands | agents |
 disabled`; `agents` = "Agents and skills", Phase 10; not `kind`, which is the plugin kind enum), `/plugins/[id]?tab=`,
 `/plugins/new?type=&edit=`, `/settings/providers?configure=`, `/settings/projects?add=1` (Phase 7: opens the Add
@@ -1864,7 +2043,9 @@ written back with `router.replace` when the tab or the project select changes; P
 `output-styles | hooks`; Phase 12: `import=claude` opens the Import from Claude Code dialog once the page loaded and is
 removed with `router.replace` when the dialog closes, any other value is dropped), `/plugins/marketplaces?m=&q=&category=`
 (Phase 12: `m` = a marketplace id, an unknown one reads as All and is dropped; `q` = the search text; `category` = an
-entry category, an unknown one reads as All; all three written back with `router.replace`), `/login?redirect=`.
+entry category, an unknown one reads as All; all three written back with `router.replace`), `/login?redirect=`,
+`/oauth/callback?code=&state=&iss=` or `?error=&error_description=&state=` (Phase 14: read once and removed with
+`router.replace`, 8.14).
 Model refs and project ids never appear in paths (the project filter lives in `localStorage`, 7.20; the Customize page
 takes its project from the query, never from the sidebar filter).
 
@@ -1885,7 +2066,7 @@ v7 UI message stream; verify the exact names in `node_modules/ai/dist/index.d.ts
 | approval request (tool part in approval state) | `ToolApprovalCard` (`AiConfirmation`) | below its tool row, see 7.3 |
 | `file` (not an image), `reasoning-file` | `FilePart` → `FileChip` | images (a `reasoning-file` holds a model's draft image): 64px thumbnail (`object-cover rounded-md`), click opens a lightbox `Dialog`; other files: chip with `FileText`, name, size |
 | consecutive `file` parts with an `image/*` type (assistant messages) | `ImageGallery` (Phase 6, W6.8, 7.16) | one gallery block per run of images (`chat-format.ts` block kind `gallery`; parts that render nothing, such as `step-start`, never split a run, any rendered block does): generated images of an image turn, of a chat model with image output or of the `generate_image` tool; one image full width, two or more in two columns; a lightbox with previous / next and Download |
-| `source-url` / `source-document` | `SourcesPart` (`AiSources`) | consecutive sources merge into one row "3 sources" (`Link2` icon); expanded: title + hostname links (`target="_blank" rel="noopener noreferrer"`) |
+| `source-url` / `source-document` | `SourcesPart` (`AiSources`) | consecutive sources merge into one row "3 sources" (`Link2` icon); expanded: title + hostname links (`target="_blank" rel="noopener noreferrer"`); Phase 14: up to three domain chips on the row and a letter avatar per source (7.35) |
 | `step-start` | — | renders nothing (no divider) |
 | `data-notice` | `NoticePart` | one muted line with the server's message and an icon per code (codes in API.md 6.4; Phase 6 adds `generated-file-dropped`, icon `ImageOff`, level warning: a generated file that is not a PNG, JPEG, WebP or GIF image, or larger than 20 MB, was not kept; it stands where the file was; Phase 7 adds `workspace-unavailable`, icon `FolderX`, level warning: the chat's project folder could not be opened, so this run has no workspace tools; the message names the folder and the reason, 7.20; Phase 9 adds `compaction-failed`, icon `FoldVertical`, level warning: an automatic compaction failed, so older messages were left out instead, 7.24) |
 | `data-compaction` (Phase 9, ADR-040) | `CompactionDivider` (`chat-format.ts` block kind `compaction`) | a full-width divider at the part's position: "Conversation compacted" / "Conversation compacted automatically" / "Context compacted during this response", "Show summary"; the rows before it are dimmed (7.24). A `/compact` reply holds only this part |
@@ -1930,6 +2111,7 @@ Layout (`--row-height`, `rounded-md`, `hover:bg-accent`, whole row is the collap
 | `approval-responded` | `Spinner` if approved, else like `output-denied` | |
 | `output-available` | `Check` in `text-success` | |
 | `output-available` with `preliminary: true` (Phase 9) | `Spinner` while the message streams; `CircleSlash` + "Stopped" (muted) otherwise | a tool that streams progress (an async-generator `execute`, plugin API 1.3.0; the builtin `task`): the output is a snapshot, not the result |
+| `output-available` with `preliminary: true` and the output `{ status: 'input-required' }` (Phase 14, an MCP tool) | `bg-warning` dot + "Waiting for your input" | `ElicitationCard` renders below (7.35); chat dot = `input` |
 | `output-error` | `X` in `text-destructive` | expanded body shows the error text |
 | `output-denied` | `Ban` + "Denied" (muted) | tooltip "Skipped because you sent a new message" when superseded |
 
@@ -4150,6 +4332,175 @@ dialog's mixed state: 2.19.
   block" when set and the timeout; no script refs. Every hook item also lists its handler fields ("Only when {rule}",
   "In the background"), and an exec-form hook (`args`) shows each word single-quoted, as the shell runs it.
 
+### 7.35 MCP questions, MCP prompts and resources, web search and sources in the chat (`ElicitationCard`, `WebSearchToggle`, `WebSearchToolBody`, `SourcesPart`, `MentionMenu`; W14.8 / W14.9; Phase 14)
+
+Phase 14 (ADR-060 … ADR-063) adds four things to the chat: an MCP server can ask the user a question while its tool
+runs (**elicitation**: the first time a run waits for the user; approvals still end the run, 7.3), MCP prompts are slash
+commands, MCP resources are `@` mentions, and a per-chat **web search** toggle with search rows and source chips.
+Wireframes: 2.20. User guides: `docs/guides/adding-an-mcp-server.md`, `docs/guides/web-search.md`.
+
+**MCP questions (elicitation, ADR-060).** An MCP server sends `elicitation/create` while one of its tools runs. The
+server attributes it to the running call (when every in-flight call of that MCP client belongs to the main agent of one
+chat, the oldest call gets it) and the tool streams the preliminary output `{ status: 'input-required', elicitation:
+McpElicitation }` (`McpElicitation` = `{ id, serverId, serverName, message, form, expiresAt }`, API.md; `form` is the
+parsed, supported subset of the request's schema, `parseElicitationForm` of `util/mcp-elicitation.ts`). There is no new
+data part and no new event: the card is read from the tool part. The tool yields the same request again every 25 s
+(a keep-alive for proxies), so a reload replays it through the run resume (`resumeIfRunning`, 11.1); after the answer
+it yields `{ status: 'running' }` and the card goes away. Requests the server cannot attribute (calls of several chats,
+a sub-agent or a background agent, no call in flight), forms outside the subset and URL-mode requests are declined on
+the server: the user sees no card, only the result line in the tool body (below).
+
+- **Mount**: `ToolPart` renders `ElicitationCard` right under the running row, like `ToolApprovalCard`, while
+  `TOOL_ELICITATIONS.forCall(toolCallId)` (11.10) returns a request. Rows are `v-memo`ed, so the request reaches the row
+  through that injection (`ChatTranscript` provides it from the session) instead of a prop. The row's status cell shows
+  a `bg-warning` dot and "Waiting for your input" instead of the spinner (sr-only ", waiting for your input" in the row's
+  name). A task block (7.27) never shows a card: sub-agents never ask.
+- **Card** (`elicitation-card`, a `<form>` in a `role="region"` named "{server} needs more information", `data-state`
+  `pending | submitting | expired`, `data-server-id`; `rounded-lg border bg-card p-3`, the transcript column's width):
+  - header: `MessageCircleQuestion`, "{server} needs more information" (`text-sm font-medium`), the countdown
+    (`elicitation-countdown`, `tabular-nums`, "{m}:{ss} left" from `expiresAt`, 480 s after the request; `text-warning`
+    under one minute), and × (`elicitation-dismiss`, icon-only, named "Dismiss request": sends `cancel`);
+  - the message (`elicitation-message`): plain text (`whitespace-pre-wrap break-words`, at most 2,000 characters,
+    `elicitationMessageText`), clamped to six lines with **Show more** / **Show less**; never Markdown and never links
+    (the text is untrusted);
+  - the fields (`elicitation-field`, `data-name`, `data-type` = `string | number | integer | boolean | enum |
+    multi-enum`), in the form's order, starting from `elicitationInitialValues(form)` (defaults applied); the label is
+    the field's title, else its name, with " *" and a sr-only "required" for required fields; the description is help
+    text linked by `aria-describedby`; every input has `autocomplete="off"`:
+    - `string` → `Input` (`type` `email` | `url` | `date` | `datetime-local` from `format`, else `text`; `minlength` /
+      `maxlength`);
+    - `number` / `integer` → `Input type="number"` (`min`, `max`, `step` 1 for integers, else `any`; `inputmode`
+      `numeric` / `decimal`), help "Whole number, {min} to {max}" / "Number, {min} to {max}" when bounded;
+    - `boolean` → `Checkbox` with its label;
+    - `enum` → `RadioGroup` for 4 options or fewer, else `Select` ("Choose…"); labels are the options' titles;
+    - `multi-enum` → a group of `Checkbox`es (a `role="group"` named by the label; with more than 8 options inside a
+      `max-h-48` scroll box), help "Choose {min} to {max}" when bounded;
+    - a field that looks like a secret (`isSensitiveField`) gets the line "{server} asks for something that looks like a
+      secret. Answer only if you trust {server}." (`data-slot="elicitation-sensitive"`, `text-warning`);
+  - the caution line (`TriangleAlert`, muted, always): "Share only what you would give {server}. Never enter passwords
+    here.";
+  - the footer: **Decline** (outline, `elicitation-decline`) and **Submit** (primary, `type="submit"`,
+    `elicitation-submit`); at 390px both are full width and stacked, Submit first; 40px tall on coarse pointers, and so
+    are the fields.
+- **Answering**: Enter in a single-line field submits (form semantics). Submit coerces each value
+  (`coerceElicitationValue`) and checks the answer with `validateElicitationAnswer` (the same rules the server applies);
+  issues show under their fields (`elicitation-field-error`, the field `aria-invalid` and described by it) and focus moves
+  to the first invalid field. Submit sends `{ action: 'accept', content }`, Decline `{ action: 'decline' }`, ×
+  `{ action: 'cancel' }` through `TOOL_ELICITATIONS.respond` → `useChatSession().respondElicitation(id, answer)` →
+  `POST /api/chat/:id/elicitations/:elicitationId`. While it posts the card is `submitting` (`aria-busy`, controls
+  disabled). `'answered'` → the card collapses into its result line until the tool's next output arrives; `'gone'`
+  (404 or 409 `stale`: answered in another tab, expired or the run ended) → the card reads "This request is no longer
+  open." and goes away when the part updates; a 400 maps `details.issues` onto the fields.
+- **Expiry and Stop**: at 0:00 the card turns `expired` ("This request expired.", controls disabled); the server has
+  cancelled it (`timeout`). Stop in the composer ends the run, which cancels the request (`stopped`); deleting the chat
+  does too. Leaving the chat keeps the request open until it expires (the sidebar shows it).
+- **Result line** (`elicitation-result`, `data-action` `accept | decline | cancel | timeout`, `CircleCheck` /
+  `CircleSlash`, muted): shown in place of the card right after the answer and, from the stored final output's
+  `elicitations` records (`{ id, message, fields, action, reason }`, never the values), in the tool body: "You answered
+  {server}'s request." · "You declined {server}'s request." · "You dismissed {server}'s request." · "{server}'s request
+  expired." (`timeout`) · "Stopped before you answered." (`stopped`) · "Declined automatically: sub-agents can't ask
+  you." (`not-interactive`) · "Declined automatically: more than one chat was using {server}." (`ambiguous`) ·
+  "Declined automatically: harness-forge can't show this form." (`unsupported`). The body's details list the asked
+  field names, never values. Share pages and exports show the same lines.
+- **Focus and announcements**: the card never takes focus when it appears (the user may be typing); `ChatView`'s polite
+  announcer says "{server} needs your input" once per request per tab, and "{server}'s request expires in 1 minute" once
+  at one minute. **Jump pill** (`elicitation-jump`): while a pending card is outside the viewport, `ChatView` shows a
+  pill above the composer, next to the scroll-to-bottom pill ("{server} needs your input · Show",
+  `MessageCircleQuestion`); a click smooth-scrolls the card into view and focuses its first field (Submit when it has
+  none). With several pending requests it points at the oldest.
+- **Sidebar and run state**: `ChatSummary.awaitingInput` (live, via `chat.updated`) gives the chat row the `input` dot
+  "Needs your input" (5.10); the session's run state is `input` while a request is pending, and such a session is never
+  evicted (11.10).
+- A `Notification` hook with `notification_type` `elicitation_dialog` runs on the server when a request waits; it leaves
+  nothing in the chat.
+
+**MCP prompts in the slash menu (ADR-061).** `GET /api/commands?projectId=` lists the prompts of connected MCP servers
+as commands named `mcp__<serverId>__<prompt>` (`source: 'mcp'`, `mcpServer { id, name }`, `argumentHint` `<required>
+[optional]` from `mcpPromptArgumentHint`). The slash menu (7.8) gets the group **MCP** (`SlashGroup` `mcp`; the order is
+App · Project · Personal · Plugins · MCP · Skills; `slashGroupOf` maps `source: 'mcp'`); rows are
+`slash-menu-item[data-group=mcp]` with `data-value` = the command name, the prompt's description (plain text) and the
+server's name as the muted detail; the argument hint shows as ghost text after the name (`SlashArgumentHint`, 7.28).
+Servers that wait for approval, need sign-in or are not connected list no prompts; a project's servers list theirs only
+in that project's chats, where a project server replaces a personal server with the same id. The composer sends
+`/mcp__<serverId>__<prompt> args` as text; the server binds the words (positional in declared order, or `name=value`;
+the last argument takes the rest of the line), calls `prompts/get` once and freezes the result into the message's
+`metadata.command.expansion`, so regenerating never asks the server again. A missing required argument or a server that
+is not connected gives the usual `failed` command reply (7.28) with the server's text. `CommandBadge` on the user message
+reads "MCP · {server}" (`data-source="mcp"`). `customization.changed` (`kind: 'command'`) refetches the list when a
+server's prompts change.
+
+**MCP resources in `@` mentions (ADR-061).** `@` lists the resources of connected MCP servers in **every chat with
+tools on** (also without a project; tool mode Off or a model without tools lists none), through `useResourceMentions`
+(11.10; the same token as file mentions, `mentionTokenAt`; `GET /api/mcp/resources?projectId=&q=&limit=50` 80 ms after
+the last keystroke; answers younger than 15 s are reused; it refetches when the menu opens). Project servers add theirs
+in project chats; resource templates are not listed.
+
+- `MentionMenu` gains the props `resources` and `resourcesState` and the emit `select-resource`: one listbox with two
+  `role="group"` sections (`mention-menu-section`, `data-value` `files | resources`), headed "Files in {project}" and
+  "MCP resources" (a chat without a project shows only the second), so `aria-activedescendant` keeps working across
+  both. A resource row (`mention-menu-resource`, `role="option"`, `data-server-id`, `data-uri`; 40px on coarse pointers):
+  an icon from the MIME type (`FileText`, `Image`, `FileType`, else `File`), the title (else the name), an outline badge
+  with the server's name, and the MIME type muted. States: "Searching resources…" (after 150 ms without rows), "No
+  matching resources", "Couldn't list MCP resources."; `truncated` → "Showing the first 50 resources. Type more to narrow
+  it down."; `unavailable` servers → "Not listed: {names} (not connected)." (`data-slot="mention-resources-unavailable"`).
+- **Pick**: inserts `formatResourceMention(serverId, uri)` plus one blank (`@<serverId>:<uri>`, display only: the
+  model reads the attachment) and attaches the resource (`POST /api/mcp/resources/attach { serverId, uri, projectId? }`
+  → `FileRef`, a chip like a dropped file through `useComposerAttachments().addResource(fileRef)`; the chip shows its
+  upload state meanwhile). Errors: 413 → "This resource is larger than 5 MB."; 409 `needs-auth` → "Sign in to {server}
+  first."; other failures → "Couldn't attach {name}." (an error chip, like a failed upload).
+- `ComposerAddMenu` gains the prop `mentionResources`: its mention item then reads "Mention a file or resource" (it
+  inserts `@`).
+
+**Web search toggle (ADR-062, ADR-063).** `WebSearchToggle` sits in the composer toolbar right after `OutputStyleMenu`
+and is hidden for image models (and while the model is unknown). It is a `Toggle` (ghost, h-8, 40px on coarse pointers,
+`aria-pressed`) with `Globe` and the label "Search" from `sm` up; below `sm` it is icon-only with a 6px dot when on
+(`aria-hidden`); its accessible name is "Web search".
+
+- **State**: on = `session.webSearch === 'auto'` (the request body's `webSearch`; the toggle maps on → `auto`, off →
+  `off`); the chat's choice wins over the global default `webSearchDefault`, and a choice is saved on the chat like the
+  permission mode (11.10). `availability` is what turning it on would do: `resolveWebSearch({ mode: 'auto', toolMode,
+  native: model.webSearch, preferNative: settings.webSearchNative, builtinAvailable, modelTools:
+  model.capabilities.tools, functionTools: toolMode === 'off' ? 0 : 1 })` from `util/web-search.ts`, the same rule the
+  server applies to the turn. `data-state` `off | on | unavailable`, `data-mode` `native | builtin` while available.
+- **Tooltip**: "Web search on · {via}" (via = the model's provider name for native search, the search API's name, e.g.
+  "Brave Search", for the builtin), "Web search off"; plus "Alt+W" while `altShortcuts` is on.
+- **Click**: when available it toggles and the composer's live region says "Web search on" / "Web search off". When
+  unavailable it is `aria-disabled="true"` (not `disabled`, so it stays focusable) and a click opens a `Popover`
+  (`web-search-unavailable`, `data-reason`) titled "Web search" with the reason and **Set up web search**
+  (`web-search-setup`, a link to `/settings/search`): `no-backend` "This model has no web search of its own. Add a
+  search key in Settings → Web search."; `tools-unsupported` "This model can't use tools."; `tool-mode-off` "Tools are
+  off in this chat."; `tools-conflict` "This model can't search while tools are on. Add a search key in Settings → Web
+  search to search with tools.". Focus returns to the toggle when the popover closes. A toggle that is on and becomes
+  unavailable (another model, tools off) stays pressed with `data-state="unavailable"`; the server then searches nothing
+  and adds the notice `web-search-unavailable` once per chat, model and reason.
+- **Alt+W** toggles it (12); it obeys `altShortcuts`.
+- The notice `web-search-unavailable` (`NoticePart`, icon `SearchX`, level info, the server's text, e.g. "Web search is
+  off for this reply: Gemini 2.5 Flash can't search while tools are on.").
+
+**Search rows** (`WebSearchToolBody`, store-free, also on share pages):
+
+- **`search_web`** (the builtin tool of `core-search`): icon `Globe`, the label "Searching the web…" while it runs and
+  "Searched the web" after, the query as the first argument, and "{n} results" ("1 result", "No results") before the
+  status icon. The body (`web-search-tool`, `data-mode="builtin"`, `data-state` `running | done | error`) replaces the
+  Input / Output blocks ("Raw input and output" stays behind its toggle): the query (`data-slot="web-search-query"`),
+  "{n} results · {search API}", then the results (`web-search-result`, `data-domain`): a letter avatar, the title as a
+  link (`safeExternalUrl`, `target="_blank" rel="noopener noreferrer"`), the domain muted, the snippet as plain text
+  (two lines, then clamped) and the published date when known.
+- **Provider-executed search** (`isProviderExecutedPart`: Anthropic, OpenAI, xAI and OpenRouter `web_search`, Google
+  `google_search`, Groq `browser_search`): the same row ("Searched the web", the query when the input has one) with
+  `data-mode="native"`. It **never** shows an approval card, "Needs approval" or hook badges (the provider already ran
+  it); the body shows the query, "The model's provider ran this search." and the result titles and links the output
+  lists. Encrypted content (`encryptedContent`) is never shown and never copied.
+- The sources of a search arrive as source parts: native ones from the provider, builtin ones from the server's sources
+  transform after each `search_web` result (deduplicated, http(s) only).
+
+**Sources** (`SourcesPart`, 7.1): the collapsed row "{n} sources" (`sources-row`) gains up to three domain chips
+(`sources-chip`, `data-domain` = `sourceDomain(url)`, unique, in order; `aria-hidden`) and "+{m}" for the rest; the
+trigger's accessible name is "{n} sources: {a}, {b} and {m} more". Expanded, each source (`source-item`,
+`data-domain`) shows a letter avatar (`Avatar` / `AvatarFallback`: the domain's first letter, uppercase, on one of the
+`chart-1` … `chart-5` tokens chosen by a stable hash of the domain; the CSP blocks external favicons), the title as a
+link and the domain muted. Share pages and exports keep the sources (http(s) URLs only).
+
 ---
 
 ## 8. Plugins UX spec
@@ -4462,7 +4813,8 @@ transport badge (stdio / HTTP / SSE) · status text ("Connected · 12 tools", "C
 id (slug), transport `Tabs` — stdio (command, args one per line, env `KEY=value` rows; values stored as secrets
 in scope `mcp:<id>`), HTTP (URL, headers), SSE (URL, headers) — and policy `Select` Safe / Ask / Always ask
 (default Ask). stdio shows the note "Runs a local command on your server."; saving a stdio server is a fresh-auth
-action (8.4).
+action (8.4). Phase 14: the status `needs-auth` ("Sign in required") with **Sign in**, "Signed in" rows with **Sign
+out…**, and the dialog's "Sign-in (OAuth) · optional" section (8.14).
 
 ### 8.13 Marketplaces and Claude Code plugins (`MarketplacesView`, `MarketplaceInstallDialog`, `InstallReview`, W12.8 / W12.9, Phase 12)
 
@@ -4635,6 +4987,91 @@ and the errors show the server's message.
 
 **What the pages never do**: fetch anything before a click (the suggestion included), refresh on a timer, install or
 update without a review, read `~/.claude/plugins`, or run anything a plugin brings before its trust pin.
+
+### 8.14 MCP sign-in (`McpServersPanel`, `McpServerDialog`, `McpOAuthFields`, `ProjectMcpServerRow`, `OAuthCallbackView`, W14.7, Phase 14)
+
+Remote MCP servers (HTTP and SSE) of every origin can sign in with OAuth (ADR-059): personal servers, plugin servers,
+Claude Code plugin servers and project `.mcp.json` servers. harness-forge discovers the server's authorization server,
+registers itself (dynamic client registration) or uses a configured client ID, and sends the browser there in the same
+tab; the authorization server sends it back to `/oauth/callback`, which finishes the sign-in. Tokens are encrypted on the
+server and never reach the browser. Wireframes: 2.20. User guide: `docs/guides/mcp-oauth.md`.
+
+**Status `needs-auth`** ("Sign in required"; dot `warning`, sr-only "Sign in required"): the server answered 401 and
+nothing is stored, or its stored tokens were rejected (`invalid_grant`). It is never retried in the background and
+nothing prompts by itself: its tools are unavailable (`GET /api/tools` lists them `available: false`), also to
+sub-agents and background agents, until the user signs in. v1.8 servers that answered 401 with a wrong header key now
+show this status instead of "Error: …" with retries. `MCP_STATUS_DOTS` / `MCP_STATUS_LABELS` (`mcp-form.ts`) carry the
+entry; the project dialog's status words gain "Sign in required".
+
+**Rows** (`McpServersPanel`, 8.12; the same controls on a plugin's Overview → MCP servers rows, 8.8, which have no
+OAuth fields because the plugin declares its client):
+
+- `needs-auth`: the status "Sign in required" (`mcp-status[data-status=needs-auth]`) and **Sign in** (`mcp-sign-in`,
+  `LogIn`, outline `sm`, named "Sign in to {name}") between the status and the Switch; hidden while the server is off.
+  Servers with an `Authorization` header and stdio servers never show it (the server refuses them: 400).
+- Signed in (`server.auth?.signedIn`): "Connected · {n} tools · Signed in" (a tooltip "Signed in · token renews
+  automatically" or "Signed in · expires {relative time}" from `auth.expiresAt`; never a token or a scope value beyond
+  `auth.scope`). The row's `⋯` menu gains **Sign out…** (`mcp-sign-out`, `LogOut`) between Edit and Delete →
+  `ConfirmDialog` "Sign out of {name}?" · "harness-forge forgets the tokens; the server stays configured." · **Sign out**
+  → `useMcpSignIn().signOut({ kind: 'global', serverId })` (`DELETE /api/mcp/:id/oauth`) → toast "Signed out of
+  {name}."; the row turns "Sign in required" once the server reconnects.
+- **Sign in** → `useMcpSignIn().start({ kind: 'global', serverId })` (`POST /api/mcp/:id/oauth { returnTo }`, `returnTo`
+  = the current `route.fullPath` through `safeRedirectPath`). The button shows a spinner and "Signing in…" until the
+  page leaves. `authorizationUrl: null` (already authorized; the server reconnected) → toast "Signed in to {name}.";
+  otherwise `window.location.assign(authorizationUrl)` in the **same tab** after checking that it is an http(s) URL. Not a
+  popup: COOP `same-origin` and a cross-origin authorization server cut `window.opener`, a popup opened after an `await`
+  is blocked, and the same tab works at 390px. Running chats keep running on the server and resume when the user comes
+  back.
+- Errors of Sign in and Sign out show inline under the row in a `HarnessErrorAlert` (`mcp-sign-in-error`, `data-code`,
+  `data-server-id`) with the server's message ("{name} can't sign in: the server sent no sign-in information.", "Turn
+  the server on first." for 409 `disabled`, …); a new attempt clears it.
+
+**Dialog** (`McpServerDialog`, personal servers only): the HTTP and SSE tabs render `McpOAuthFields`, a collapsible
+section "Sign-in (OAuth) · optional" (`mcp-oauth-section`, `data-state` `open | closed`; open when a value is set),
+with the help "Leave empty to register harness-forge with the server when you sign in.":
+
+- **Client ID** (`mcp-oauth-client-id`, at most 256 characters, placeholder "Registered automatically");
+- **Client secret** (`mcp-oauth-client-secret`, write-only like `McpSecretRows`: an empty password input with the
+  placeholder "•••• · stored" when one is stored, **Remove** (`data-action="remove-secret"`, `aria-pressed`) to drop
+  it; enabled only with a client ID; the value is never read back);
+- **Scopes** (`mcp-oauth-scopes`, space-separated, at most 1,024 characters, placeholder "Server default");
+- **Redirect URI** (`mcp-oauth-redirect-uri`): read-only mono text with a `CopyButton` "Copy redirect URI"; the value
+  `window.location.origin + '/oauth/callback'` is built in script (`redirectUriFor`, vue-tsc #6240), with the line
+  "Register this exact address with the authorization server when you use your own client ID."
+- With an `Authorization` header row the section shows "Servers with an Authorization header don't sign in." and its
+  fields are disabled. Saving sends `oauth: { clientId?, scopes?, clientSecret? }` (on an update a `null` secret keeps
+  the stored one); while signed in, changing the URL, the transport or the client ID shows "Saving signs you out of
+  {name}." under the footer (the server drops the tokens).
+
+**Project servers** (`ProjectMcpDialog` / `ProjectMcpServerRow`, 7.33): `needs-auth` rows read "Sign in required" with
+**Sign in** (`project-mcp-sign-in`, named "Sign in to {name}") → `useMcpSignIn().start({ kind: 'project', projectId,
+serverId })` (`POST /api/projects/:id/mcp/:serverId/oauth`); signed-in rows read "Connected · {n} tools · Signed in"
+with **Sign out…** (`project-mcp-sign-out`, ghost, named "Sign out of {name}") and the same confirmation. Pending rows
+keep **Review…** and never show Sign in (409 `untrusted`). The `.mcp.json` `oauth` values show read-only under the
+command (`data-slot="project-mcp-oauth"`: "Client ID {id}" · "Scopes {scopes}"); a `callbackPort` there is ignored with
+the parser's info diagnostic (harness-forge signs in through its own callback page). Signing in never approves
+anything.
+
+**Callback page** (`OAuthCallbackView`, root `oauth-callback`, `data-state` `working | success | error`; the
+`auth` layout's centered column; route 6):
+
+1. On mount it reads `code`, `state`, `error`, `error_description` and `iss` from the query **once**
+   (`readCallbackQuery`) and calls `router.replace({ query: {} })` before anything else.
+2. `working`: a `role="status"` spinner "Finishing sign-in…".
+3. `useMcpSignIn().complete({ state, code, iss } | { state, error, errorDescription })` → `POST
+   /api/mcp/oauth/callback` (same-origin, so the `SameSite=Strict` cookie goes along) → `{ target, status, returnTo }`.
+   The store of the target refetches (`plugins.fetchMcp()` or `projectMcp.fetch(projectId)`).
+4. `success`: `navigateTo(returnTo ?? fallback, { replace: true })` (fallback `/plugins/core-mcp` for a global server,
+   `/settings/projects` for a project server) and the toast "Signed in to {server}.".
+5. `error` (`oauth-callback-error`, `data-code`, `role="alert"`, focused): "Sign-in failed" and the provider's or the
+   server's text as plain text (at most 300 characters, never Markdown); a used, expired or unknown state (409) reads
+   "This sign-in link was already used or expired."; a page without `state` reads "This page finishes a sign-in to an
+   MCP server. Start it from the MCP servers list." **Try again** (`oauth-callback-retry`; only when the answer's
+   `details.serverId` names the server) starts a new sign-in for it; **Back to MCP servers** (`oauth-callback-back`)
+   goes to `/plugins/core-mcp` (a project server: `/settings/projects`).
+
+**What these screens never do**: show a token, a code, a state value or a client secret; start a sign-in by themselves
+(only a click does); open a popup; sign in a server that waits for approval; or keep the callback URL in the history.
 
 ---
 
@@ -5712,6 +6149,60 @@ with the line "Agents, commands, skills, hooks and MCP servers from a Claude Cod
 **What these pages never do**: approve anything when they save (a saved hook, server or `!` command is pending until
 the trust dialog's Approve), read a `.claude` folder the user did not pick or the server's `HF_CLAUDE_HOME`, show a
 file's content or a secret from the import, or write outside `.claude/`, `.harness/` and `.mcp.json` of the project.
+
+### 9.15 Web search (`/settings/search`, `WebSearchSettings`, W14.10, Phase 14)
+
+Web search (ADR-062, ADR-063). `WebSearchSettings` (`web-search-settings`) in the usual `SettingsPage` frame: the page
+(`pages/settings/search.vue`) renders the `PageHeader` "Web search" with the description "Search the web from the chat,
+with the model's own search or a search API.", `WebSearchSettings` is the body. Wireframe: 2.20. Nav label "Web search"
+(5.5). On mount it loads the settings (unless loaded) and the search API configuration
+(`useWebSearchStore().fetch({ maxAgeMs: 15_000 })`, i.e. `GET /api/plugins/core-search/settings`); the sections render
+right away, and a failed load shows `SettingsLoadError` "Could not load the web search settings" with the server message
+and **Retry**. Switches and selects save on change, optimistically (a failure shows an error toast with the 7.4 title
+and rolls back); text fields save on blur or Enter. Every `Switch` keeps the 40px coarse-pointer hit area
+(`pointer-coarse:after:-inset-y-3`, 14.5). User guide: `docs/guides/web-search.md`.
+
+**Web search in chats** (`SettingsSection`, description "Whether chats search the web and how."):
+
+- "Use the model's own web search when it has one" (`settings-search-native`, `Switch`, `data-state`; default on) →
+  `settings.update({ webSearchNative })`; help: "Anthropic, OpenAI, Google, xAI, OpenRouter and Groq (gpt-oss) models
+  search with their provider. Off: chats always use the search API below. The provider bills its searches; they aren't
+  in harness-forge's cost estimate."
+- "Turn on web search in new chats" (`settings-search-default`, `Switch`; default off) → `settings.update({
+  webSearchDefault: on ? 'auto' : 'off' })`; help: "Each chat keeps its own choice (the Search button in the composer).
+  A search sends your query to the model's provider or the search API."
+
+**Search API** (`SettingsSection` "Search API", description "For models without their own search, or when the switch
+above is off."; the agent then searches with the builtin `search_web` tool); it writes the settings of the builtin
+plugin `core-search` through
+`PUT /api/plugins/core-search/settings` (the store, never `SchemaForm`):
+
+- "Search API" (`settings-search-backend`, `Select`, `data-value` `brave | tavily | exa`): **Brave Search** (default),
+  **Tavily**, **Exa** → `webSearch.save({ backend })`. There is no "None": the builtin tool is off while the selected
+  API has no key (the composer's toggle then reports `no-backend` for models without native search).
+- One key row per backend (`settings-search-key`, `data-backend`, `data-state` `set | missing`; the selected backend
+  first, the others below the label "Other search APIs"): the name, "Get a key" (an external link to the vendor's API
+  page, `rel="noopener noreferrer"`; the URLs live in script constants, vue-tsc #6240), then either "Key saved" with
+  **Replace** (shows the input) and **Remove** (`settings-search-key-remove` → `webSearch.setKey(backend, null)`, toast
+  "Removed the {backend} key"), or a password input (`settings-search-key-input`, placeholder "Paste a key…",
+  `autocomplete="off"`, always empty: the key is never read back) with **Save** (`settings-search-key-save`, disabled
+  while empty) → `webSearch.setKey(backend, value)` → toast "Saved the {backend} key". No password prompt (plugin
+  settings are not a fresh-auth action).
+- "Max results" (`settings-search-max-results`, `Input` `inputmode="numeric"`, 1–10, default 5): results per search;
+  error "Enter a whole number from 1 to 10."; saves on blur or Enter → `webSearch.save({ maxResults })`.
+- **Test search** (`settings-search-test`, outline, `Search` icon, `aria-busy` while it runs; disabled while the
+  selected API has no key) → `webSearch.test(backend)` (`POST /api/web-search/test { backend }`) → the result line
+  (`settings-search-test-result`, `role="status"`, `data-state` `ok | error`): "{n} results from {backend} in {ms} ms"
+  ("1 result …"), or the error: "{backend} rejected the key." (`provider_error` 401 / 403), "{backend} is limiting
+  requests. Try again later." (`rate_limited`), "Couldn't reach {backend}." (`provider_unreachable`), else the server's
+  message.
+- The note (muted): "Only your query, the number of results and the time filter go to {backend}. Queries and keys are
+  never logged."
+- When `core-search` is disabled (Plugins), the section shows the alert "The core-search plugin is turned off, so the
+  search API isn't used." with **Open plugin** (`/plugins/core-search`), and its controls are disabled.
+
+**What this page never does**: show a stored key, send a search on load (only **Test search** sends one), or change a
+chat's own choice.
 
 ---
 
@@ -7423,6 +7914,114 @@ defineEmits<{
 //                             reconnect calls its refreshLoaded()
 ```
 
+### 10.10 Phase 14 contracts (MCP 2.0 and web search: W14.7 – W14.10; C54 ships the stubs)
+
+The components below are created by C54 in P14-0b with exactly these props, emits and root test ids and are frozen
+from Gate P14-0b (a change is a CCR); P14-A implements them behind those contracts. Types from `@harness-forge/shared`
+(names as C47 lands them in API.md): `McpServer` (+ `transport.oauth`, `auth: McpAuthInfo | null`), `ProjectMcpServer`
+(+ `auth`), `McpAuthInfo` (`{ signedIn, expiresAt, scope, client: 'dynamic' | 'configured' | null, issuer }`),
+`McpAuthStart` (`{ authorizationUrl, redirectUri, expiresAt }`), `McpAuthCallbackBody`, `McpAuthCallbackResult` (`{
+target: { kind: 'global', serverId } | { kind: 'project', projectId, serverId }, status, returnTo }`), `McpElicitation`
+(`{ id, serverId, serverName, message, form, expiresAt }`), `McpElicitationRecord`, `McpElicitationAnswerBody`
+(`{ action: 'accept', content } | { action: 'decline' } | { action: 'cancel' }`), `McpToolProgress`, `McpResourceEntry`,
+`McpResourceList`, `SearchWebOutput`, `WebSearchTestResult`, `CatalogModel` (+ `webSearch`), `ChatSummary` (+
+`awaitingInput?`), `Settings` (+ `webSearchDefault`, `webSearchNative`); from `util/web-search.ts` `WebSearchMode`,
+`WebSearchResolution`, `WebSearchUnavailableReason`, `WebSearchBackend`; from `util/mcp-elicitation.ts`
+`ElicitationForm`, `ElicitationField`, `ElicitationFieldIssue`, `ElicitationRawValue`. Web types: `McpOAuthDraft`
+(`plugins/mcp/mcp-form.ts`), `McpSignInTarget` (`composables/useMcpSignIn.ts`), `WebSearchConfig`
+(`stores/web-search.ts`); 11.10. Every component is imported by path.
+
+```ts
+// OAuthCallbackView (W14.7; stub; pages/oauth/callback.vue mounts it with layout 'auth') — 8.14
+// no props, no emits. Root oauth-callback (data-state = working | success | error); oauth-callback-error (data-code;
+// role="alert"), oauth-callback-retry, oauth-callback-back. Reads the query once (readCallbackQuery), router.replace
+// ({ query: {} }) first, then useMcpSignIn().complete(); never renders the code or the state.
+
+// McpOAuthFields (W14.7; stub; McpServerDialog renders it in the HTTP and SSE tabs) — 8.14
+defineProps<{
+  modelValue: McpOAuthDraft
+  secretState: SecretState | null      // the stored client secret (null for a new server)
+  redirectUri: string                  // redirectUriFor(window.location.origin), built by the dialog in script
+  disabled?: boolean                   // an Authorization header row is set (the note replaces the help)
+  signedIn?: boolean                   // shows "Saving signs you out of {name}." when the URL / type / client ID change
+}>()
+defineEmits<{ 'update:modelValue': [value: McpOAuthDraft] }>()
+// Root mcp-oauth-section (a Collapsible, data-state = open | closed); mcp-oauth-client-id, mcp-oauth-client-secret
+// (Remove: data-action="remove-secret", aria-pressed), mcp-oauth-scopes, mcp-oauth-redirect-uri (its CopyButton
+// "Copy redirect URI").
+
+// ElicitationCard (W14.9; stub; ToolPart renders it under the running MCP tool row) — 7.35
+defineProps<{
+  request: McpElicitation
+  busy?: boolean                                        // the answer is being posted (data-state=submitting)
+  issues?: readonly ElicitationFieldIssue[]             // a 400 answer's field issues
+  gone?: boolean                                        // 'gone' answer: "This request is no longer open."
+}>()
+defineEmits<{ respond: [answer: McpElicitationAnswerBody] }>()
+defineExpose<{ focusFirst: () => void }>()              // the jump pill: first field, else Submit
+// Root elicitation-card (data-state = pending | submitting | expired, data-server-id; a role="region" named
+// "{server} needs more information" around the <form>); elicitation-message, elicitation-field (data-name,
+// data-type), elicitation-field-error, elicitation-submit, elicitation-decline, elicitation-dismiss,
+// elicitation-countdown; data-slot elicitation-sensitive. Never takes focus by itself; plain text only.
+
+// WebSearchToggle (W14.8; stub; ChatComposer renders it after OutputStyleMenu) — 7.35
+defineProps<{
+  modelValue: boolean                       // on = the session's webSearch is 'auto'
+  availability: WebSearchResolution         // resolveWebSearch({ …, mode: 'auto' }): never 'off'
+  via: string | null                        // the provider's name (native) or the search API's name (builtin)
+  disabled?: boolean                        // the composer is disabled
+  returnFocusTo?: HTMLElement | null        // the textarea, after a pick on desktop
+}>()
+defineEmits<{ 'update:modelValue': [value: boolean] }>()
+defineExpose<{ activate: () => void }>()    // Alt+W: what a click does (toggle, or open the unavailable popover)
+// Root composer-web-search (data-state = off | on | unavailable, data-mode = native | builtin while available;
+// aria-pressed; aria-disabled when unavailable); web-search-unavailable (the popover content, data-reason),
+// web-search-setup (its link to /settings/search).
+
+// WebSearchToolBody (W14.9; stub; store-free: ToolPart and ShareToolRow render it for search_web and
+// provider-executed search parts) — 7.35
+defineProps<{ input: unknown; output: unknown; native: boolean; running: boolean }>()   // parsed inside;
+                                                                                      // unparsable → nothing
+// Root web-search-tool (data-mode = builtin | native, data-state = running | done | error); web-search-result
+// (data-domain) per result; data-slot web-search-query. Never renders encryptedContent.
+
+// WebSearchSettings (W14.10; stub; pages/settings/search.vue mounts it) — 9.15
+// no props, no emits. Root web-search-settings; settings-search-native, settings-search-default (Switch, data-state),
+// settings-search-backend (data-value), settings-search-key (data-backend, data-state = set | missing),
+// settings-search-key-input, settings-search-key-save, settings-search-key-remove, settings-search-max-results,
+// settings-search-test, settings-search-test-result (data-state = ok | error).
+
+// Prop, emit and type additions (C54 declares them in P14-0b; the owners use them in P14-A)
+// McpServersPanel (W14.7):    needs-auth rows: mcp-sign-in (data-server-id), mcp-sign-in-error (data-code,
+//                             data-server-id); the row menu's Sign out… (mcp-sign-out) and its ConfirmDialog
+// McpServerDialog (W14.7):    renders McpOAuthFields in the HTTP and SSE tabs; the body gains oauth (oauthInputOf /
+//                             oauthUpdateOf of mcp-form.ts)
+// PluginDetailView MCP rows (W14.7): the same Sign in / Sign out controls for plugin servers (8.8)
+// ProjectMcpServerRow (W14.7): + emits signIn: [], signOut: []; project-mcp-sign-in, project-mcp-sign-out;
+//                             data-state gains needs-auth; data-slot project-mcp-oauth
+// ProjectMcpDialog (W14.7):   handles signIn / signOut through useMcpSignIn (ConfirmDialog for Sign out)
+// MentionMenu (W14.8):        + props resources?: readonly McpResourceEntry[], resourcesState?: 'idle' | 'loading' |
+//                             'ready' | 'error'; + emit select-resource: [entry: McpResourceEntry]; one listbox, two
+//                             role="group" sections (mention-menu-section, data-value = files | resources);
+//                             mention-menu-resource (data-server-id, data-uri); data-slot mention-resources-unavailable
+// ComposerAddMenu (W14.8):    + prop mentionResources?: boolean ("Mention a file or resource")
+// ChatComposer (W14.8):       + v-model webSearch: WebSearchMode (mapped to the toggle's boolean); mounts
+//                             WebSearchToggle and calls its activate() for Alt+W; mounts the resource mentions
+// SlashMenu, slash-commands.ts (W14.8): SlashGroup + 'mcp' (label "MCP"; order App · Project · Personal · Plugins ·
+//                             MCP · Skills); rows carry data-group="mcp"; the row detail is mcpServer.name
+// CommandBadge, command-badge.ts (W14.9): source 'mcp' → "MCP · {server}" (data-source="mcp")
+// ToolPart (W14.9):           injects TOOL_ELICITATIONS; renders ElicitationCard under a running MCP row with a
+//                             pending request (status "Waiting for your input"); WebSearchToolBody for search_web and
+//                             provider-executed search parts (never ToolApprovalCard for those); the result lines
+//                             (elicitation-result, data-action) from the final output's elicitations
+// ChatTranscript, ChatView (W14.9): ChatTranscript provides TOOL_ELICITATIONS from the session; ChatView renders the
+//                             jump pill (elicitation-jump) and the announcements
+// SourcesPart (W14.9):        domain chips (sources-chip, data-domain), source-item (data-domain), letter avatars
+// ShareToolRow (W14.9):       WebSearchToolBody and the elicitation result lines on share pages
+// ChatNavRow (C54, complete): the input status (chat-status-dot[data-status=input], "Needs your input")
+// SettingsNav / navigation.ts (C54): SETTINGS_LINKS + search (Globe, "Web search", settings-nav-search)
+```
+
 ---
 
 ## 11. Pinia stores and composables
@@ -8882,6 +9481,176 @@ const BACKGROUND_STOPPED_LINGER_MS = 3000
 The `marketplaces` store is the only reader of the marketplace routes, `useClaudeImport` the only caller of the import
 routes, and the customizations and hooks stores the only callers of the project definition routes.
 
+### 11.10 Phase 14 modules
+
+C54 creates these in P14-0b with exactly these signatures (frozen from Gate P14-0b) and inert bodies, except the
+`useChatSession` additions, `TOOL_ELICITATIONS`, the chats store's `input` state, `useServerEvents` and `ChatNavRow`,
+which are complete; P14-A implements the rest. Owners: W14.7 the `plugins` / `project-mcp` store additions,
+`useMcpSignIn`, `mcp-form.ts` and `oauth-callback.ts`; W14.8 `useResourceMentions`, the `useComposerAttachments` and
+`slash-commands.ts` additions and `composer/web-search.ts`; W14.9 `parts/elicitation.ts` and `parts/web-search.ts`;
+W14.10 the `web-search` store. The shared helpers are the only implementation of their rules on the web:
+`resolveWebSearch`, `isProviderExecutedPart`, `sourceDomain`, `SEARCH_WEB_TOOL_NAME` (`util/web-search.ts`);
+`parseElicitationForm`, `elicitationMessageText`, `validateElicitationAnswer`, `isSensitiveField`,
+`elicitationInitialValues`, `coerceElicitationValue` (`util/mcp-elicitation.ts`); `mcpPromptArgumentHint`,
+`isMcpPromptCommandName` (`util/mcp-prompts.ts`); `formatResourceMention`, `parseResourceMention`, `mentionTokenAt`
+(`util/mentions.ts`). Owners may add helpers to their modules (additive, listed in their reports).
+
+```ts
+// composables/useChatSession.ts — additions (C54, complete)
+webSearch: WritableComputedRef<WebSearchMode>   // the picked value > the chat's settings.webSearch > the global
+                                                // webSearchDefault; writing records the pick and, for a persisted chat,
+                                                // saves it (PATCH /chats/:id { settings: { webSearch } }, like toolMode);
+                                                // buildChatRequestBody sends it as `webSearch`
+elicitations: ComputedRef<readonly McpElicitation[]>   // the pending requests: the latest preliminary output
+                                                // { status: 'input-required' } of each running MCP tool part of the
+                                                // streaming message, minus the ones answered in this session; oldest first
+respondElicitation: (id: string, answer: McpElicitationAnswerBody) => Promise<'answered' | 'gone'>
+                                                // POST /chat/:id/elicitations/:elicitationId; 404 and 409 stale → 'gone';
+                                                // a 400 throws the HarnessError (details.issues)
+// ChatSessionRunState + 'input' (streaming with a pending request); toListRunState('input') = 'input'; a session with
+// a pending request is never evicted. A reload shows the card again through resumeIfRunning (the resume replays the
+// stream; the tool re-yields the request every 25 s).
+
+// stores/chats.ts — additions (C54, complete)
+type ChatRunState = 'running' | 'approval' | 'input'      // input from ChatSummary.awaitingInput (chat.updated) or a
+                                                          // session in run state 'input'; priority input > approval >
+                                                          // running (5.10); ChatListStatus follows
+
+// components/chat/parts/tool-elicitation-context.ts (C54, complete)
+interface ToolElicitationContext {
+  forCall(toolCallId: string): McpElicitation | null      // the pending request of that call, else null
+  busy(elicitationId: string): boolean                    // an answer is being posted
+  issues(elicitationId: string): readonly ElicitationFieldIssue[]   // of a 400 answer
+  gone(elicitationId: string): boolean                    // a 'gone' answer
+  respond(elicitationId: string, answer: McpElicitationAnswerBody): Promise<'answered' | 'gone'>
+}
+const TOOL_ELICITATIONS: InjectionKey<ToolElicitationContext>   // ChatTranscript provides it from useChatSession;
+                                                                // ToolPart injects it (rows are v-memo'ed)
+
+// stores/plugins.ts — additions (W14.7)
+actions: signInMcp(id: string, returnTo?: string): Promise<McpAuthStart>   // POST /mcp/:id/oauth { returnTo }
+         signOutMcp(id: string): Promise<McpServer>                         // DELETE /mcp/:id/oauth; replaces the row
+
+// stores/project-mcp.ts — additions (W14.7)
+actions: signIn(projectId: string, serverId: string, returnTo?: string): Promise<McpAuthStart>
+                                    // POST /projects/:id/mcp/:serverId/oauth { returnTo } (409 untrusted / disabled)
+         signOut(projectId: string, serverId: string): Promise<ProjectMcpServer>
+                                    // DELETE /projects/:id/mcp/:serverId/oauth; replaces the row
+
+// composables/useMcpSignIn.ts (W14.7; no store of its own)
+type McpSignInTarget = { kind: 'global'; serverId: string } | { kind: 'project'; projectId: string; serverId: string }
+function useMcpSignIn(): {
+  start(target: McpSignInTarget, opts?: { returnTo?: string; name?: string }): Promise<'redirected' | 'authorized'>
+                                    // the store's sign-in action through useFreshAuth().run (the routes are not fresh;
+                                    // it works either way); returnTo = safeRedirectPath(opts.returnTo ?? route.fullPath);
+                                    // authorizationUrl null → toast "Signed in to {name}." and 'authorized'; else an
+                                    // http(s) check and window.location.assign(url) (same tab) → 'redirected'
+  signOut(target: McpSignInTarget, name?: string): Promise<void>   // the store's sign-out action; toast "Signed out of {name}."
+  complete(body: McpAuthCallbackBody): Promise<McpAuthCallbackResult>
+                                    // POST /mcp/oauth/callback, then plugins.fetchMcp() or projectMcp.fetch(projectId)
+  busyKey: Readonly<Ref<string | null>>   // "global:<id>" / "project:<projectId>:<id>" while a start runs
+}
+
+// components/plugins/mcp/mcp-form.ts — additions (W14.7; C47 adds the needs-auth map entries in P14-0a)
+// MCP_STATUS_DOTS['needs-auth'] = 'warning'; MCP_STATUS_LABELS['needs-auth'] = 'Sign in required';
+// mcpStatusText(server) appends " · Signed in" for a connected server with auth.signedIn
+const OAUTH_CALLBACK_PATH = '/oauth/callback'
+function redirectUriFor(origin: string): string             // origin + OAUTH_CALLBACK_PATH
+interface McpOAuthDraft { clientId: string; scopes: string; clientSecret: string; removeSecret: boolean }
+function oauthDraftOf(server: McpServer | null): McpOAuthDraft
+function oauthInputOf(draft: McpOAuthDraft): McpServerInput['transport']['oauth'] | undefined   // create
+function oauthUpdateOf(server: McpServer, draft: McpOAuthDraft): unknown   // update: only changed fields; a kept
+                                                                           // secret is null
+function signsOut(server: McpServer, next: { url: string; type: string; clientId: string }): boolean
+function canSignIn(server: Pick<McpServer, 'status' | 'enabled' | 'transport'>): boolean   // needs-auth, on, remote,
+                                                                                           // no Authorization header
+
+// components/oauth/oauth-callback.ts — pure (W14.7)
+function readCallbackQuery(query: LocationQuery): McpAuthCallbackBody | null   // null without a state
+function callbackErrorText(error: Pick<HarnessError, 'code' | 'message' | 'details'>): string   // ≤ 300 characters;
+                                                                     // 409 → "This sign-in link was already used or expired."
+function callbackFallback(target: McpAuthCallbackResult['target'] | null): string   // /plugins/core-mcp or
+                                                                                    // /settings/projects
+
+// composables/useResourceMentions.ts (W14.8)
+function useResourceMentions(opts: {
+  projectId: MaybeRefOrGetter<string | null>
+  text: Ref<string>
+  caret: Ref<number>
+  enabled: MaybeRefOrGetter<boolean>          // tools available and toolMode !== 'off'
+}): {
+  token: ComputedRef<MentionToken | null>     // mentionTokenAt(text, caret), null while disabled
+  items: ComputedRef<readonly McpResourceEntry[]>
+  state: ComputedRef<'idle' | 'loading' | 'ready' | 'error'>
+  truncated: ComputedRef<boolean>
+  unavailable: ComputedRef<McpResourceList['unavailable']>
+  attach(entry: McpResourceEntry): Promise<FileRef>   // POST /mcp/resources/attach { serverId, uri, projectId? }
+  refresh(): Promise<void>                             // when the menu opens (answers younger than 15 s are reused)
+}
+// GET /mcp/resources?projectId=&q=&limit=50, 80 ms after the last keystroke, the previous request aborted
+
+// composables/useComposerAttachments.ts — addition (W14.8)
+addResource(fileRef: FileRef): void                    // a chip for an attached MCP resource (like addProject)
+
+// components/chat/composer/slash-commands.ts — additions (W14.8)
+type SlashGroup = 'app' | 'project' | 'personal' | 'plugin' | 'mcp' | 'skill'   // SLASH_GROUPS.mcp = 'MCP'
+// slashGroupOf: source 'mcp' → 'mcp'; serverSlashItems: the detail is mcpServer.name; names may match
+// MCP_PROMPT_NAME_PATTERN
+
+// components/chat/composer/web-search.ts — pure (W14.8)
+const WEB_SEARCH_BACKEND_LABELS: Readonly<Record<WebSearchBackend, string>>   // Brave Search, Tavily, Exa
+const WEB_SEARCH_REASON_TEXT: Readonly<Record<WebSearchUnavailableReason, string>>   // 7.35
+function webSearchAvailability(input: Omit<WebSearchResolveInput, 'mode'>): WebSearchResolution   // mode 'auto'
+function webSearchVia(availability: WebSearchResolution, providerName: string | null,
+  backend: WebSearchBackend | null): string | null
+function webSearchTooltip(on: boolean, via: string | null, altShortcuts: boolean): string
+const WEB_SEARCH_SHORTCUT_KEYS = 'alt+code:KeyW'
+
+// components/chat/parts/elicitation.ts — pure (W14.9)
+function countdownText(msLeft: number): string                  // "7:42 left"
+function elicitationResultText(record: Pick<McpElicitationRecord, 'action' | 'reason'>, server: string): string   // 7.35
+function elicitationResultAction(record: McpElicitationRecord): 'accept' | 'decline' | 'cancel' | 'timeout'
+function elicitationRecordsOf(output: unknown): McpElicitationRecord[]   // the final output's elicitations, parsed
+function pendingElicitationOf(part: ToolPartLike): McpElicitation | null  // a preliminary { status: 'input-required' }
+const ELICITATION_CAUTION = 'Share only what you would give {server}. Never enter passwords here.'
+
+// components/chat/parts/web-search.ts — pure (W14.9)
+interface WebSearchView { query: string | null; backend: string | null; results: { title: string; url: string;
+  domain: string; snippet: string; published: string | null }[]; native: boolean }
+function webSearchView(input: unknown, output: unknown, native: boolean): WebSearchView | null
+function isWebSearchPart(part: ToolPartLike, nativeNames?: readonly string[]): boolean   // search_web or provider-executed
+const SOURCE_AVATAR_TOKENS = ['chart-1', 'chart-2', 'chart-3', 'chart-4', 'chart-5'] as const
+function sourceAvatar(domain: string): { letter: string; token: (typeof SOURCE_AVATAR_TOKENS)[number] }   // stable hash
+function sourceChips(urls: readonly string[], max?: number): { domains: string[]; more: number }   // 3 by default
+function sourcesTriggerName(count: number, chips: { domains: string[]; more: number }): string
+
+// stores/web-search.ts — useWebSearchStore (+ Phase 14, ADR-063; 9.15)
+interface WebSearchConfig {
+  backend: WebSearchBackend
+  keys: Readonly<Record<WebSearchBackend, SecretState>>   // from PluginSettingsView.secrets (braveApiKey, …)
+  maxResults: number
+  pluginActive: boolean                                   // core-search is on
+}
+state:   { config: WebSearchConfig | null; loadedAt: number | null; saving: boolean; testing: boolean
+           lastTest: WebSearchTestResult | null; testError: HarnessError | null }
+getters: builtinAvailable: boolean                        // pluginActive and the selected backend's key is set
+         backendLabel(backend?: WebSearchBackend): string
+actions: fetch(opts?: { maxAgeMs?: number }): Promise<WebSearchConfig>   // GET /plugins/core-search/settings;
+                                                                         // single-flight
+         save(patch: { backend?: WebSearchBackend; maxResults?: number }): Promise<WebSearchConfig>
+                                                                         // PUT /plugins/core-search/settings, optimistic
+         setKey(backend: WebSearchBackend, key: string | null): Promise<WebSearchConfig>   // null → '' (clears)
+         test(backend?: WebSearchBackend): Promise<WebSearchTestResult>  // POST /web-search/test
+         applyEvent(event: ServerEvent): void   // plugin.changed for core-search: refetch quietly when loaded
+
+// composables/useServerEvents.ts — additions (C54, complete): plugin.changed also → the web-search store;
+// chat.updated carries awaitingInput into the chats store (no new event type)
+```
+
+The `web-search` store is the only reader of `core-search`'s settings and of `POST /web-search/test` on the web;
+`useMcpSignIn` (through the two stores) the only caller of the sign-in routes; `useResourceMentions` the only caller of
+the resource routes; `respondElicitation` the only caller of the answer route.
+
 ---
 
 ## 12. Keyboard shortcuts
@@ -8900,6 +9669,7 @@ routes, and the customizations and hooks stores the only callers of the project 
 | Alt+P | open permission menu (when tools exist; Phase 7: with Accept edits in project chats) | chat pages, also in inputs | W2.3 (`alt+code:KeyP`, `alt: true`) |
 | Alt+V | what a click on the mic does (7.17): start dictation; while recording: stop and transcribe; while transcribing: cancel; without a speech-to-text model: the setup popover | chat pages with the composer, also in inputs; not while focus is in a dialog, menu or listbox; only where the browser can record in a secure context; with a disabled composer only while dictation runs | W6.9 (id `composer-dictate`, `alt+code:KeyV`, `alt: true`; calls `MicButton.activate()`; Phase 6) |
 | Alt+C | show or hide the changes panel (Phase 8, 7.21); opening it focuses the active view tab; closing it while focus is inside returns focus to the toggle | project chat pages, also in inputs; not while focus is in another dialog, menu or listbox (it works inside the changes sheet) | W8.8 (id `toggle-changes`, `alt+code:KeyC` = `CHANGES_SHORTCUT_KEYS`, `alt: true`, `allowInInputs`, group Chat, described "Show or hide changes"; registered by `ChatWorkspace` while the chat has a project) |
+| Alt+W | what a click on the web search toggle does (Phase 14, 7.35): turn web search on or off for this chat; when it is unavailable, open the popover with the reason | chat pages with the composer and a chat model (the toggle is shown), also in inputs; not while focus is in a dialog, menu or listbox | W14.8 (id `composer-web-search`, `alt+code:KeyW` = `WEB_SEARCH_SHORTCUT_KEYS`, `alt: true`, `allowInInputs`, group Composer, described "Turn web search on or off"; calls `WebSearchToggle.activate()`) |
 | Shift+Tab | switch the permission mode: Ask → Accept edits → Plan → Ask in project chats; from Auto or Off → Ask (Phase 9, 7.11); otherwise the native reverse focus move | the composer textarea only, while the permission menu shows, no slash or mention menu is open, no IME composition, `shiftTabModes` on, and the next mode differs | W9.10 (`useModeCycle`, called by the textarea's keydown after the menus; display-only registry entry `composer-cycle-mode`, `shift+tab`, group Composer, "Switch the permission mode") |
 | Enter | send (`sendKey = enter`); Phase 9: while a response runs, queue the message (7.26) | composer | W2.3; W9.8 |
 | Mod+Enter | send (`sendKey = mod-enter`); Phase 9: while a response runs, queue the message | composer | W2.3; W9.8 |
@@ -8922,7 +9692,8 @@ Rules:
   Mod+Tab, Mod+L, Mod+R, Mod+D, Mod+P, Mod+Q. New chat is therefore Mod+Shift+O (as on claude.ai); the page calls
   `preventDefault()` so Chrome's Ctrl+Shift+O (bookmarks manager) and Firefox's Ctrl+K / Ctrl+B do not fire.
 - Alt shortcuts match `event.code` (Option+M types `µ` on macOS), are ignored when Ctrl or Meta is also pressed,
-  and can be turned off in Settings → General (`altShortcuts`, which covers Alt+V too). Alt+V calls
+  and can be turned off in Settings → General (`altShortcuts`, which covers Alt+V too; Phase 8: Alt+C; Phase 14:
+  Alt+W). Alt+V calls
   `preventDefault()` like every matched shortcut, which should keep Firefox on Windows from opening its View menu
   (unverified). Phase 6 kept Alt+V; the Alt+J fallback of the plan was not needed.
 - Esc priority: close an open overlay (Phase 9: in the composer the mention menu first, then the slash menu) → cancel a
@@ -8965,6 +9736,14 @@ Rules:
   Enter or Space picks); Mod+Enter saves inside the project file editor and adds inside the Add marketplace dialog
   (component keydown). The install review's Install, the import wizard's Import and the trust dialog's Approve are never
   default buttons; the only Enter that installs is the one in the review's password field (8.3).
+- Phase 14 adds **Alt+W** (the web search toggle, 7.35). It follows the Alt rule above: it matches `event.code`
+  (Option+W on macOS types `∑`, so `event.key` would fail), obeys `altShortcuts` (the General setting's help names it),
+  is ignored with Ctrl or Meta, calls `preventDefault()`, and its `when` skips it while focus is in a dialog, menu or
+  listbox and while the toggle is hidden (image models). Rejected: Alt+S (opens the History menu of Firefox), Mod+Shift+S
+  (screenshot tools on several systems). The elicitation card adds no shortcut: Enter in a field submits it (form
+  semantics), Tab reaches Decline and ×, and **Esc in the composer never dismisses a question** (it keeps the priority
+  above; only the card's × or Stop cancels it). The jump pill, the MCP slash group, the resource rows and the sign-in
+  buttons have no shortcuts of their own.
 - `KbdCombo` renders hints: `⌘⇧O` / `⌘K` on macOS, `Ctrl Shift O` / `Ctrl K` elsewhere. Hints are hidden below `lg`
   and on touch devices.
 
@@ -8993,11 +9772,12 @@ galleries and adds no new attribute name; Phase 7 adds `data-project-id` and `da
 `data-view`, `data-rule-id` and `data-variant`; Phase 9 adds `data-compacted`; Phase 10 adds `data-group`,
 `data-agent-type`, `data-background`, `data-source`, `data-name`, `data-customization-id`, `data-task-id`, `data-mode`,
 `data-target` and `data-total`; Phase 11 adds `data-event`, `data-outcome`, `data-hook-id`, `data-key`, `data-trust`,
-`data-reason` and `data-transport`; Phase 12 adds `data-marketplace-id` and `data-version`). Playwright uses `getByTestId()` plus
+`data-reason` and `data-transport`; Phase 12 adds `data-marketplace-id` and `data-version`; Phase 14 adds `data-backend`,
+`data-uri` and `data-domain`, and uses `data-type`, which Phase 12 introduced on `project-trust-item`). Playwright uses `getByTestId()` plus
 attribute filters. Ids are never reused for a different element; removing one is a CCR. The Phase 5 ids are collected
 in 13.6, except the two Settings → Models ids added in P5-B (`model-select-option`, `model-row-menu`, 13.4); the Phase 6
 ids in 13.7; the Phase 7 ids in 13.8; the Phase 8 ids in 13.9; the Phase 9 ids in 13.10; the Phase 10 ids in 13.11; the
-Phase 11 ids in 13.12; the Phase 12 ids in 13.13.
+Phase 11 ids in 13.12; the Phase 12 ids in 13.13; the Phase 14 ids in 13.14.
 
 ### 13.1 Shell and navigation
 
@@ -9011,7 +9791,7 @@ Phase 11 ids in 13.12; the Phase 12 ids in 13.13.
 | `chat-list` | chat list container | |
 | `chat-group` | date group | `data-value` (group label) |
 | `chat-row` | chat row link | `data-chat-id`, `data-active` |
-| `chat-status-dot` | status dot in a row | `data-status` (running / approval / unread) |
+| `chat-status-dot` | status dot in a row | `data-status` (running / approval / unread; Phase 14: input) |
 | `chat-row-menu` | row `⋯` trigger | |
 | `chat-row-rename` · `chat-row-export-md` · `chat-row-export-json` · `chat-row-delete` | row menu items | |
 | `chat-row-rename-input` | inline rename input | |
@@ -9805,6 +10585,76 @@ E2e hooks that are not test ids (Phase 12, no CCR needed; all `data-slot` unless
 
 Stored in `localStorage`: `hf-marketplace-suggestion-dismissed` (`'1'` once the official suggestion was dismissed).
 
+### 13.14 MCP 2.0 and web search (Phase 14)
+
+The 45 new ids of Phase 14. C54 copies this table verbatim into `utils/testids.ts` in P14-0b (the key column is the
+`testIds` key) under the comment `// MCP 2.0 and web search (Phase 14)`; the file stays frozen through P14-A (a new id is
+a CCR). New attribute names: `data-backend`, `data-uri`, `data-domain`. Reused ids with new values:
+`mcp-status[data-status=needs-auth]` (the server's enum, kebab case), `project-mcp-server[data-state=needs-auth]`,
+`chat-status-dot[data-status=input]`, `slash-menu-item[data-group=mcp]` (with `data-value` = `mcp__<server>__<prompt>`),
+`tool-row[data-tool-name=search_web]` and the provider-executed search rows (`data-tool-name` = `web_search`,
+`google_search` or `browser_search`), `notice-part[data-code=web-search-unavailable]` (a `data-slot`), and the existing
+`sources-row` (its trigger now also holds the chips). There is no id for a message-level elicitation card: requests
+that cannot be tied to a tool call are declined on the server.
+
+| Id | Key (`testIds.*`) | Element | Data attributes |
+|---|---|---|---|
+| `mcp-sign-in` | `mcpSignIn` | "Sign in" on a `needs-auth` MCP server row (personal or plugin) | `data-server-id` |
+| `mcp-sign-out` | `mcpSignOut` | "Sign out…" in a signed-in row's `⋯` menu | |
+| `mcp-sign-in-error` | `mcpSignInError` | the row's inline error of a sign-in or sign-out (`HarnessErrorAlert`) | `data-code`, `data-server-id` |
+| `mcp-oauth-section` | `mcpOauthSection` | `McpOAuthFields` root ("Sign-in (OAuth) · optional", a collapsible) | `data-state` (`open` / `closed`) |
+| `mcp-oauth-client-id` | `mcpOauthClientId` | the Client ID input | |
+| `mcp-oauth-client-secret` | `mcpOauthClientSecret` | the write-only Client secret input | |
+| `mcp-oauth-scopes` | `mcpOauthScopes` | the Scopes input | |
+| `mcp-oauth-redirect-uri` | `mcpOauthRedirectUri` | the read-only Redirect URI text | |
+| `project-mcp-sign-in` | `projectMcpSignIn` | "Sign in" on a `needs-auth` project server row | |
+| `project-mcp-sign-out` | `projectMcpSignOut` | "Sign out…" on a signed-in project server row | |
+| `oauth-callback` | `oauthCallback` | `OAuthCallbackView` root | `data-state` (`working` / `success` / `error`) |
+| `oauth-callback-error` | `oauthCallbackError` | the callback page's error card (`role="alert"`) | `data-code` |
+| `oauth-callback-retry` | `oauthCallbackRetry` | "Try again" | |
+| `oauth-callback-back` | `oauthCallbackBack` | "Back to MCP servers" | |
+| `mention-menu-section` | `mentionMenuSection` | a `role="group"` section of the mention menu | `data-value` (`files` / `resources`) |
+| `mention-menu-resource` | `mentionMenuResource` | an MCP resource row of the mention menu (`role="option"`) | `data-server-id`, `data-uri` |
+| `elicitation-card` | `elicitationCard` | `ElicitationCard` root | `data-state` (`pending` / `submitting` / `expired`), `data-server-id` |
+| `elicitation-message` | `elicitationMessage` | the request's message (plain text) | |
+| `elicitation-field` | `elicitationField` | one form field's wrapper | `data-name`, `data-type` (`string` / `number` / `integer` / `boolean` / `enum` / `multi-enum`) |
+| `elicitation-field-error` | `elicitationFieldError` | a field's error line | |
+| `elicitation-submit` | `elicitationSubmit` | "Submit" | |
+| `elicitation-decline` | `elicitationDecline` | "Decline" | |
+| `elicitation-dismiss` | `elicitationDismiss` | × "Dismiss request" (sends cancel) | |
+| `elicitation-countdown` | `elicitationCountdown` | the "{m}:{ss} left" countdown | |
+| `elicitation-result` | `elicitationResult` | the one-line result after an answer (in place of the card, and in the tool body) | `data-action` (`accept` / `decline` / `cancel` / `timeout`) |
+| `elicitation-jump` | `elicitationJump` | the "{server} needs your input · Show" pill above the composer | |
+| `composer-web-search` | `composerWebSearch` | `WebSearchToggle` root (the toggle button) | `data-state` (`off` / `on` / `unavailable`), `data-mode` (`native` / `builtin`, while available) |
+| `web-search-unavailable` | `webSearchUnavailable` | the toggle's popover content when search is unavailable | `data-reason` (`tool-mode-off` / `tools-conflict` / `tools-unsupported` / `no-backend`) |
+| `web-search-setup` | `webSearchSetup` | the popover's "Set up web search" link | |
+| `web-search-tool` | `webSearchTool` | `WebSearchToolBody` root (a search row's body) | `data-mode` (`builtin` / `native`), `data-state` (`running` / `done` / `error`) |
+| `web-search-result` | `webSearchResult` | one result in a search row's body | `data-domain` |
+| `sources-chip` | `sourcesChip` | a domain chip in the sources row's trigger (`aria-hidden`) | `data-domain` |
+| `source-item` | `sourceItem` | one source in the expanded sources row | `data-domain` |
+| `settings-nav-search` | `settingsNavSearch` | the "Web search" entry of `SettingsNav` | |
+| `web-search-settings` | `webSearchSettings` | `WebSearchSettings` root | |
+| `settings-search-native` | `settingsSearchNative` | "Use the model's own web search when it has one" switch | `data-state` (reka) |
+| `settings-search-default` | `settingsSearchDefault` | "Turn on web search in new chats" switch | `data-state` (reka) |
+| `settings-search-backend` | `settingsSearchBackend` | the "Search API" select trigger | `data-value` (`brave` / `tavily` / `exa`) |
+| `settings-search-key` | `settingsSearchKey` | one search API key row | `data-backend`, `data-state` (`set` / `missing`) |
+| `settings-search-key-input` | `settingsSearchKeyInput` | a key row's password input | `data-backend` |
+| `settings-search-key-save` | `settingsSearchKeySave` | a key row's "Save" | `data-backend` |
+| `settings-search-key-remove` | `settingsSearchKeyRemove` | a key row's "Remove" | `data-backend` |
+| `settings-search-max-results` | `settingsSearchMaxResults` | the "Max results" input | |
+| `settings-search-test` | `settingsSearchTest` | "Test search" | |
+| `settings-search-test-result` | `settingsSearchTestResult` | the test's result line (`role="status"`) | `data-state` (`ok` / `error`) |
+
+E2e hooks that are not test ids (Phase 14, no CCR needed; all `data-slot` unless named otherwise):
+- MCP sign-in: `project-mcp-oauth` (a project server's `.mcp.json` client ID and scopes); `data-action="remove-secret"`
+  (the client secret's Remove, `aria-pressed`).
+- Chat: `elicitation-sensitive` (the warning under a secret-looking field), `web-search-query` (the query in a search
+  row's body), `mention-resources-unavailable` (the mention menu's "Not listed" line).
+
+The palette item of the new settings entry is `go-settings-search` (a command id, like `go-settings-customize`). Nothing
+new is stored in `localStorage` (a chat's web search choice lives on the chat; the last-route memory never sees
+`/oauth/callback`).
+
 ---
 
 ## 14. Accessibility and responsiveness
@@ -9920,6 +10770,19 @@ Stored in `localStorage`: `hf-marketplace-suggestion-dismissed` (`'1'` once the 
   focused button or during an IME composition does nothing; Space or a click acts. The one exception is Enter in the
   review's "Confirm your password" field, which acts like clicking Install (8.3); a wrong password puts the focus back
   in that field with its text selected. `TrustDialog` keeps its form: Enter in its password field submits Trust.
+- Phase 14: an elicitation card **never takes focus** when it appears (it is announced instead; the user may be typing
+  in the composer); the jump pill scrolls to the card and focuses its first field (Submit when it has none); an invalid
+  Submit focuses the first invalid field; after an answer focus moves to the card's result line (`tabindex="-1"`) when
+  it was inside the card, else it stays where it was; an expired or gone card keeps focus on its own container. The
+  web search toggle keeps focus after a click (after Alt+W from the textarea, focus stays in the textarea:
+  `returnFocusTo`); its unavailable popover opens with focus on its content and returns focus to the toggle when it
+  closes ("Set up web search" navigates away). **Sign in** keeps focus while the start request runs (then
+  the page leaves); a sign-in error alert takes focus; **Sign out…** opens the `ConfirmDialog` (focus on Cancel) and
+  returns focus to the row's `⋯` trigger (project rows: the next focusable control of the row). The callback page puts
+  focus on its status text while working and on the error card's heading when it fails; after success the target page
+  handles focus as on any navigation. Settings → Web search: Replace moves focus into the key input; Save and Remove
+  move it to the row's next control (Replace or the input); Test search keeps focus and its result line is announced.
+  The resource rows join the mention menu's listbox (one `aria-activedescendant` chain, files first).
 
 ### 14.2 Semantics and labels
 
@@ -10061,6 +10924,27 @@ Stored in `localStorage`: `hf-marketplace-suggestion-dismissed` (`'1'` once the 
   Skills picker is a combobox named "Skills, {n} skills chosen" whose chips' × are named "Remove {skill}". The agent
   color dots are `aria-hidden` (the text says it). The trust dialog's mixed select-all is announced as "mixed" by reka;
   a prompt hook item's `pre` is named "Prompt".
+- Phase 14: the elicitation card is a `role="region"` named "{server} needs more information" holding a `<form>`; its
+  message is plain text (no links, no Markdown); each field has a visible label (" *" plus the sr-only "required" on
+  required fields), its description and its error linked by `aria-describedby`, and `aria-invalid` while invalid; a
+  multi-select is a `role="group"` named by its label; the countdown is `aria-hidden` (its minute warning is announced
+  instead: "{server}'s request expires in 1 minute"); × is named "Dismiss request"; the result line is a
+  `role="status"`; `ChatView` announces "{server} needs your input" once per request per tab; the jump pill is a button
+  named "{server} needs your input, show the request"; the tool row's name gains ", waiting for your input"; the sidebar
+  dot's hidden label is "Needs your input". The web search toggle is a `Toggle` named "Web search" with `aria-pressed`;
+  when unavailable it is `aria-disabled="true"` (still focusable) and described by the reason
+  (`aria-describedby` → a sr-only copy of the popover text); toggling announces "Web search on" / "Web search off" in
+  the composer's live region. A search row's results are a list named "Search results"; each result's title is a link
+  (named by the title, with the domain as its description); provider-executed rows read "Searched the web, {query}".
+  The sources trigger is named "{n} sources: {a}, {b} and {m} more" (the chips are `aria-hidden`); letter avatars are
+  `aria-hidden`. The mention menu's two sections are `role="group"` elements labelled by their headers ("Files in
+  {project}", "MCP resources"); a resource option's name is "{title}, {server}, {mime type}". MCP rows: **Sign in** is
+  named "Sign in to {name}", the status words "Sign in required" and "Signed in" are text (never color alone);
+  `McpOAuthFields` is a disclosure (`aria-expanded`) labelled "Sign-in (OAuth) · optional"; the redirect URI is
+  read-only text with its Copy button named "Copy redirect URI". The callback page has one `h1` ("Signing in to an MCP
+  server", sr-only while working), a `role="status"` while working and a `role="alert"` error card. Settings → Web
+  search has one `h1` ("Web search"); the key rows are a list named "Search API keys", each key input named "{backend}
+  key" and described by its state ("Key saved" / "No key"); the test result is a `role="status"`.
 
 ### 14.3 Contrast targets
 
@@ -10159,6 +11043,15 @@ instant scroll instead of smooth, no sheet slide (fade only).
   commands" wraps long commands. On touch screens the marketplace chips and the `Select`, the entry
   buttons, the row menu, Refresh, the suggestion's buttons, the import radios, checkboxes, Select all, resolution
   selects and switches, the editor's Load from disk / Overwrite / Save file and the Type toggle are at least 40px.
+- Phase 14 screens: at 390px the elicitation card fits the transcript column (radios one per line, a long message
+  clamped with Show more, the buttons full width and stacked with Submit first, no horizontal scroll); the composer's
+  web search toggle is icon-only with its dot (the model name truncates first) and its popover fits the screen width;
+  search rows wrap their query and their results' snippets (long URLs truncate in the middle); the sources row shows at
+  most two chips plus "+{m}"; the MCP rows put **Sign in** on its own full-width line; the add / edit dialog's sign-in
+  section stacks its labels above the fields (the redirect URI wraps, Copy stays next to it); the callback page is one
+  centered card; Settings → Web search stacks labels above controls and each key row puts its buttons on a second line.
+  On touch screens the toggle, the card's fields, Submit, Decline and ×, the jump pill, Sign in, Sign out…, the
+  callback page's buttons, the key rows' buttons, Test search and every Switch (40px hit area) are at least 40px.
 - Phase 6 screens: galleries keep their two columns at 390px (tiles never overflow the column); the recording composer
   keeps the 390px layout without horizontal scroll (the indicator shows the dot, the timer and Cancel); the Media page
   stacks labels above controls below `sm`.
@@ -10197,7 +11090,10 @@ trust and MCP dialogs fit with a sticky footer and no horizontal scroll; and `mo
 toolbar with the icon-only style trigger at 390px and a refusal that fits. Phase 12 adds `mobile/marketplaces.spec.ts`
 and `mobile/claude-import.spec.ts` (W12.14): no horizontal scroll on `/plugins/marketplaces` (a local-folder
 marketplace), the chip `Select`, an install dialog and the import wizard that fit with their footers visible, and the
-project file editor sheet at 390px.
+project file editor sheet at 390px. Phase 14 adds `mobile/web-search.spec.ts`, `mobile/elicitation.spec.ts` and
+`mobile/mcp-oauth.spec.ts` (W14.11): the icon-only toggle and its popover fit, a `mock:search` reply with its sources
+row causes no horizontal scroll, the elicitation card fits with stacked 40px buttons and Submit works, the MCP row's
+Sign in and the callback page fit, and `/settings/search` has no horizontal scroll.
 
 ### 14.7 Tablet e2e and media permissions (Phase 6)
 
@@ -10211,7 +11107,8 @@ toggle, the task trigger, the plan buttons and the mention rows; Phase 10 (W10.1
 Stop all, the Customize row menus, the Remember radios and the editor's footer buttons; Phase 11 (W11.13) to the hook
 row menus, the trust dialog's checkboxes and Approve, Reconnect, the trust chip and the style trigger; Phase 12
 (W12.14) to the marketplace chips and entry buttons, the import wizard's checkboxes and Import, the project file
-editor's buttons and the hook editor's Type toggle.
+editor's buttons and the hook editor's Type toggle; Phase 14 (W14.11) to the web search toggle, the elicitation card's
+buttons, Sign in and the Web search settings switches.
 
 Every project runs with `use.permissions: ['microphone']` and the Chromium flags `--use-fake-ui-for-media-stream`,
 `--use-fake-device-for-media-stream` and `--autoplay-policy=no-user-gesture-required`, so the voice spec records from a
@@ -10292,6 +11189,21 @@ fake device and read-aloud plays without a gesture. If the flags fail in headles
     in UI copy.
   - **project file**: a definition, settings or `.mcp.json` file of a project edited in the UI ("Edit…", "Save file");
     "changed on disk" for a stale file; **Review** stays the word for approving what a saved file runs.
+- **Terms** (Phase 14):
+  - **sign in** / **sign out** / **signed in** (verbs and state of an MCP server's OAuth; "Sign in required", "Sign in to
+    {server}", "Signed in to {server}."); never "log in", "authorize", "connect your account" or "OAuth" alone in
+    buttons (the dialog section is "Sign-in (OAuth) · optional" so people who know the term find it). **Redirect URI**
+    and **Client ID** / **Client secret** / **Scopes** keep the OAuth names (users copy them into the authorization
+    server's console). Tokens are "tokens" ("harness-forge forgets the tokens").
+  - **question** / **request** of an MCP server (docs: elicitation; never "elicitation" in UI copy): "{server} needs more
+    information", "{server} needs your input", "You answered {server}'s request."; the user **answers**, **declines** or
+    **dismisses** it.
+  - **web search** (the feature, the toggle's name, the settings page) and **Search** (the toggle's short label); the
+    model's **own web search** (docs: native search) and the **search API** (docs: the builtin backend: Brave Search,
+    Tavily, Exa); never "grounding", "browse" or "internet access" in UI copy. Results are **results**; what the reply
+    cites are **sources**.
+  - **MCP prompt** (docs only; in the UI an MCP prompt is a command of the **MCP** group) and **MCP resource** ("MCP
+    resources", "Mention a file or resource").
 
 Key strings:
 
@@ -10389,3 +11301,10 @@ Key strings:
 | Hook events (Phase 12) | PostToolUseFailure: "After a tool call failed. It can give the agent feedback." · PermissionRequest: "When harness-forge is about to ask you to approve a tool call. It can allow or deny the call." · SubagentStart: "When a sub-agent starts. It can add context for the sub-agent." · PostCompact: "After the conversation was compacted." · SessionEnd: "When you delete a chat." |
 | Frontmatter fields (Phase 12) | "Tools not allowed" · "Tools not allowed in this turn" · "Removed after the allowed tools. A rule with arguments, like Bash(rm *), removes the whole tool." · "Max turns" · "At most this many steps; the sub-agent step limit still applies." · "Enter a whole number from 1 to 200." · "Color" · "None" · "Red" · "Blue" · "Green" · "Yellow" · "Purple" · "Orange" · "Pink" · "Cyan" · "Marks this agent's runs in the chat." · "Skills" · "Loaded into the sub-agent's instructions when it starts." · "Choose at most 5 skills." · "When to use" · "Added to the description the agent reads." · "Run in a sub-agent" · "The skill runs as a sub-agent and only its report comes back." ("The command runs …") · "Agent" · "Choose skills…" · "{n} skills chosen" ("1 skill chosen") · "Search skills…" · "No skills yet." · "No skills found." · "Remove {skill}" · "Not available now" · "Allowed tools" · "No restriction" · "The chat's model" (skills) · row meta "Runs in a sub-agent" · viewer "Runs in" · "A sub-agent ({agent})" · "{name} (Claude model name)" · body help "$ARGUMENTS[0] or $0 is the first argument when the file uses them or declares arguments; $name reads a named argument; ${CLAUDE_SKILL_DIR} is the skill's folder." |
 | Settings → Data (Phase 12) | "Import from Claude Code…" · "Agents, commands, skills, hooks and MCP servers from a Claude Code folder." · "{t} commands turned off (they run shell lines)" ("1 command turned off (it runs shell lines)") |
+| MCP sign-in (Phase 14) | "Sign in required" · "Sign in" · "Sign in to {name}" · "Signing in…" · "Connected · {n} tools · Signed in" ("Connected · 1 tool · Signed in") · "Signed in · token renews automatically" · "Signed in · expires {time}" · "Sign out…" · "Sign out of {name}?" · "harness-forge forgets the tokens; the server stays configured." · "Sign out" · "Signed in to {name}." · "Signed out of {name}." · "Turn the server on first." · dialog: "Sign-in (OAuth) · optional" · "Leave empty to register harness-forge with the server when you sign in." · "Client ID" · "Registered automatically" (placeholder) · "Client secret" · "•••• · stored" · "Remove" · "Scopes" · "Server default" (placeholder) · "Redirect URI" · "Copy redirect URI" · "Register this exact address with the authorization server when you use your own client ID." · "Servers with an Authorization header don't sign in." · "Saving signs you out of {name}." · project rows "Client ID {id}" · "Scopes {scopes}" · status word "Sign in required" |
+| Sign-in callback (Phase 14) | "Finishing sign-in…" · "Signing in to an MCP server" (sr-only heading) · "Sign-in failed" · "{server} answered: {error}" · "This sign-in link was already used or expired." · "This page finishes a sign-in to an MCP server. Start it from the MCP servers list." · "Try again" · "Back to MCP servers" |
+| MCP questions (Phase 14) | "{server} needs more information" · "{m}:{ss} left" · "Dismiss request" · "Show more" · "Show less" · "Share only what you would give {server}. Never enter passwords here." · "{server} asks for something that looks like a secret. Answer only if you trust {server}." · "Choose…" · "Whole number, {min} to {max}" · "Number, {min} to {max}" · "Choose {min} to {max}" · "required" (sr-only) · "Submit" · "Decline" · "This request is no longer open." · "This request expired." · status "Waiting for your input" · ", waiting for your input" (sr-only) · results "You answered {server}'s request." · "You declined {server}'s request." · "You dismissed {server}'s request." · "{server}'s request expired." · "Stopped before you answered." · "Declined automatically: sub-agents can't ask you." · "Declined automatically: more than one chat was using {server}." · "Declined automatically: harness-forge can't show this form." · announcements "{server} needs your input" · "{server}'s request expires in 1 minute" · pill "{server} needs your input · Show" · sidebar "Needs your input"; field errors come from `validateElicitationAnswer` (e.g. "Enter an email address.") |
+| MCP prompts and resources (Phase 14) | slash group "MCP" · badge "MCP · {server}" · mention sections "Files in {project}" · "MCP resources" · "Searching resources…" · "No matching resources" · "Couldn't list MCP resources." · "Showing the first 50 resources. Type more to narrow it down." · "Not listed: {names} (not connected)." · "This resource is larger than 5 MB." · "Sign in to {server} first." · "Couldn't attach {name}." · "Mention a file or resource" |
+| Web search in the chat (Phase 14) | toggle "Search" · "Web search" (name) · "Web search on · {via}" · "Web search off" · "Web search on" / "Web search off" (announcements) · popover title "Web search" · "This model has no web search of its own. Add a search key in Settings → Web search." · "This model can't use tools." · "Tools are off in this chat." · "This model can't search while tools are on. Add a search key in Settings → Web search to search with tools." · "Set up web search" · rows "Searching the web…" · "Searched the web" · "{n} results" ("1 result") · "No results." · "{n} results · {search API}" · "The model's provider ran this search." · "Search results" (list name) · sources "{n} sources: {a}, {b} and {m} more" · "+{m}" · notice `web-search-unavailable` (text from the server) |
+| Settings → Web search (Phase 14) | nav "Web search" · "Web search" · "Search the web from the chat, with the model's own search or a search API." · "Web search in chats" · "Whether chats search the web and how." · "Use the model's own web search when it has one" · "Anthropic, OpenAI, Google, xAI, OpenRouter and Groq (gpt-oss) models search with their provider. Off: chats always use the search API below. The provider bills its searches; they aren't in harness-forge's cost estimate." · "Turn on web search in new chats" · "Each chat keeps its own choice (the Search button in the composer). A search sends your query to the model's provider or the search API." · "Search API" · "For models without their own search, or when the switch above is off." · "Brave Search" · "Tavily" · "Exa" · "Other search APIs" · "Get a key" · "Key saved" · "No key" · "Replace" · "Remove" · "Paste a key…" · "Save" · "{backend} key" · "Saved the {backend} key" · "Removed the {backend} key" · "Max results" · "Enter a whole number from 1 to 10." · "Test search" · "{n} results from {backend} in {ms} ms" ("1 result …") · "{backend} rejected the key." · "{backend} is limiting requests. Try again later." · "Couldn't reach {backend}." · "Only your query, the number of results and the time filter go to {backend}. Queries and keys are never logged." · "The core-search plugin is turned off, so the search API isn't used." · "Open plugin" · "Could not load the web search settings" · "Search API keys" (list name) |
+| General (Phase 14) | "Use Alt+M, Alt+R and Alt+P for composer menus, Alt+V to dictate, Alt+C for changes and Alt+W for web search." |

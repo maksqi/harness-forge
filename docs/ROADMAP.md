@@ -393,7 +393,45 @@ Wave M1 (D1 docs + code agents, no phase doc). Plugin API stays 1.6.0 (`Reasonin
   24.04, `ubuntu-26.04` is a separate image and actionlint 1.7.12 does not know its label)
 - [x] Tag `v1.8.1` (on `27699db`, after a green CI run)
 
-## Backlog (not in v1.8.1)
+## Phase 14 — v1.9: MCP 2.0 and web search
+
+Details, owned paths and acceptance criteria: `docs/phases/phase-14-v1-9.md`. Decisions: ADR-059 … ADR-063 (and
+amendment notes on ADR-008, ADR-012, ADR-017, ADR-024, ADR-034, ADR-042 … ADR-046, ADR-048, ADR-050, ADR-052, ADR-053).
+Plan: OAuth sign-in for remote MCP servers of every origin, MCP elicitation (a form card in the chat; the first run that
+waits for the user), MCP prompts as slash commands and MCP resources in `@` mentions, provider-native web search as a
+per-chat toggle plus the builtin `search_web` tool (`core-search`: Brave, Tavily or Exa with the user's key; sources as
+citations); plugin API 1.7.0, no new dependency, no migration.
+
+- [x] P14-00 Stabilization start (coordinator): design reports in `.tmp/p14-designs`, baseline 13815 tests (`git status`
+  unchanged), CI + Audit on `8108c56` green, no open PRs, the two ignored advisories re-checked 2026-10-22 (still
+  unpatched), `.tmp/v181` worktree of `v1.8.1` built, old `.tmp` content moved to `.tmp/_archive`
+- [x] P14-0a Decisions, docs, contracts
+  - [x] K1 DECISIONS (ADR-059 … ADR-063, contract seed), ROADMAP, AGENT.md (coordinator); K2 no new dependency
+  - [x] Contract skeletons (`packages/shared/src/util/{mcp-elicitation,mcp-prompts,web-search}.ts`) (coordinator)
+  - [x] C47 contracts: shared DTOs + plugin SDK 1.7.0, 9 new routes (141), `docs/API.md`, 501 stubs
+  - [x] C48 elicitation + web search helpers (`packages/shared/src/util/{mcp-elicitation,web-search}.ts`)
+  - [x] C49 prompt, mention and config helpers (`packages/shared/src/util/{mcp-prompts,mentions,mcp-config,tool-names}.ts`)
+  - [x] D18 phase doc `phase-14-v1-9.md` · [x] D19 docs: UI.md, ARCHITECTURE.md, PLUGINS.md, PROVIDERS.md, guides, README
+  - [x] K3S v1.8.1 upgrade seed (`.tmp/upgrade-v181`)
+  - [x] Gate + checkpoint commit
+- [~] P14-0b Skeletons, seams, FREEZE (no migration)
+  - [ ] K4 e2e fake remote in Playwright `webServer` + `start:e2e` (`HF_TEST_REMOTE_URL`), `pnpm db:generate` = no
+    changes (coordinator)
+  - [ ] C50 server skeleton + `safeFetch` POST · [ ] C51 MCP seams · [ ] C52 chat seams · [ ] C53 mocks, fixtures, fakes
+  - [ ] C54 web skeleton
+  - [ ] Gate (incl. v1.8.1 data upgrade probe, by G14B) + FREEZE + checkpoint commit
+- [ ] P14-A Features (10 agents + gate probes)
+  - [ ] W14.1 mcp-oauth-server · [ ] W14.2 mcp-prompts-resources-server · [ ] W14.3 elicitation-server
+  - [ ] W14.4 search-native-server · [ ] W14.5 search-builtin-server · [ ] W14.6 chat-records-server
+  - [ ] W14.7 mcp-web · [ ] W14.8 composer-web · [ ] W14.9 transcript-web · [ ] W14.10 settings-web
+  - [ ] G14P gate probes
+  - [ ] Gate + checkpoint commit
+- [ ] P14-B Feature e2e, docs, fix-ups, final gate
+  - [ ] W14.11 e2e-features · [ ] W14.12 docs-final (W14.13 / W14.14 fix-ups only if the P14-A gate is red) · [ ] G14D
+    Docker probe
+  - [ ] Final gate (e2e ×3, screenshots, audit, v1.8.1 → v1.9 upgrade, Docker, version 1.9.0) + checkpoint commit
+
+## Backlog (not in v1.9)
 
 Multi-user accounts · child-process isolation for code plugins · a harness plugin registry index (Claude Code marketplaces: Phase 12) ·
 knowledge/RAG · desktop/CLI clients · audio attachments to chat models · declarative image and voice providers ·
@@ -412,11 +450,14 @@ tasks that survive a server restart · a sidebar activity dot for background age
 custom agents, skills and background agents with real models · an OS-level sandbox for hooks and project MCP servers · run the live provider suite for hooks, project MCP servers and output styles with real models · project plugin recommendations (`enabledPlugins` / `extraKnownMarketplaces` in a project's settings) ·
 git clone plugin and marketplace sources (non-GitHub git hosts, `git-subdir`, sparse checkouts) · a GitHub token for
 private repositories and higher rate limits · Claude Code LSP servers, themes, monitors, workflows and a plugin's `bin/`
-on the shell `PATH` · `http`, `mcp_tool` and `agent` hook handlers · OAuth-only remote MCP servers of Claude Code
-plugins · editing Claude Code plugins in the plugin editor · run the live provider suite for prompt hooks and Claude
+on the shell `PATH` · `http`, `mcp_tool` and `agent` hook handlers · editing Claude Code plugins in the plugin editor · run the live provider suite for prompt hooks and Claude
 Code plugins with real models · pnpm 12 (the Rust CLI) · TypeScript 7 (blocked by ADR-013: `.vue` files that import
 prop types break) · move the CI runners to `ubuntu-26.04` once `ubuntu-latest` points at it and actionlint knows the
-label (checked 2026-10-22: `ubuntu-latest` is still 24.04).
+label (checked 2026-10-22: `ubuntu-latest` is still 24.04) · MCP Apps (interactive UI from MCP servers) · an MCP Registry
+browser · deferred tool loading (tool search) · MCP resource templates · inline citations · Anthropic's dynamic-filtering
+web search versions · native search fee accounting · elicitation URL mode · elicitation for MCP servers on protocol
+`2026-07-28` (multi round-trip requests) · a SearXNG search backend · Mistral conversation-API search · run the live
+provider suite for web search and MCP OAuth with real keys.
 
 ## Wave log
 
@@ -477,3 +518,5 @@ label (checked 2026-10-22: `ubuntu-latest` is still 24.04).
 | P12-B | W12.14 (e2e), W12.15 (docs-final), W12.18 / W12.19 (fix-ups), W12.20 (investigation), G12D (Docker probe) (+ coordinator: resumed W12.14 / W12.15 / G12D after an account usage-limit stop; the `mock:hooks` turn-rule CCR (a request right after a tool result opens the turn: an ended or superseded turn was misread, pre-existing since Phase 7); the five e2e `fixme`s re-enabled after the fixes; `renderCommandExpansion` variables, comments, the two Phase 12 switches 40 px, the `hookEntrySchema` untrusted-Claude-plugin comment; DECISIONS ADR-053 / ADR-057 / ADR-058 + `HF_TEST_REMOTE_URL` wording, AGENT.md exec-form fact, Dockerfile two-mount recipe, README images; refused: re-running W12.1's denied `chmod`) | audit ok; e2e 221 tests (W12.14: 3 green runs of the new specs, `mobile/agent.spec.ts:191` 10/10); docs reconciled (API, ARCHITECTURE, UI, PLUGINS, PROVIDERS, guides, README "v1.8") | `b9216f5` (with the final gate) |
 | Final gate v1.8 | coordinator | frozen install ok (TypeScript 6.0.3); 13740 tests, `git status` unchanged by `pnpm check`, the only `.claude*` path in the repository is `examples/plugins/claude-review-kit/.claude-plugin/plugin.json`; build ok; CSP 38/38; G12P probes 360/360 on the final build (the missing-handler-model check updated to the decided fallback) + regressions P11-A copy / P10-A copy / P9-A / P8-A passed; e2e 215 passed ×3 (chromium + mobile + tablet, 6 screenshot tests skipped); `@screenshots` dark + light (152 per theme) reviewed for the new screens (Marketplaces desktop + 390 px, GitHub tab, Claude preview, import wizard, project file editor, hook editor Prompt type, partial trust selection), README images refreshed + `marketplaces-dark`, `claude-import-dark`; `pnpm audit --prod` clean (6 ignored, still unpatched; katex low via mermaid); real v1.7 → v1.8 upgrade on a fresh seed by the `b3fa452` build: G12B 98/98 + G12P upgrade 69/69 (every v1.7 approval kept, nothing new ran before approval, approving the new prompt hook works); Docker (G12D) 63/63: scan off by default, a read-only mounted home scanned as uid 1000 without opening the canaries, Claude plugin scripts 0755 and hooks / MCP only after trust as uid 1000, no orphans after `docker stop` | `b9216f5` |
 | M1 (v1.8.1) | A1 – A4, B1 – B5, D1, F1 (+ coordinator: dependency updates, the `vue-stick-to-bottom` pnpm patch, the katex and esbuild overrides, the `@ai-sdk/mcp` `createMCPClient` overload, Vitest 5) | check green (13815 tests, 668 files, no Vue / pinia / unhandled warnings in the log), e2e 215 + 221 with screenshots, built-page CSP 38/38, `pnpm audit` only the two ignored, `db:generate` no changes, Docker image (`/api/health` 1.8.1), actionlint clean; mermaid streaming check 15/15 (was 3/5 failing, also on v1.7) | `934d909`, `e72d611`, `27699db` (tag `v1.8.1`) |
+| P14-00 | coordinator | baseline 13815 tests, `git status` unchanged; CI + Audit on `8108c56` green, no open PRs; advisories unchanged (node-forge / braces still unpatched, the two ignores kept); `.tmp/v181` built; design reports in `.tmp/p14-designs`; old `.tmp` content archived | — |
+| P14-0a | K1 (agent for the coordinator), coordinator (contract skeletons), C47, C48, C49, D18, D19, K3S (+ coordinator: the examples' `harness-forge.d.ts` regenerated for 1.7.0; C48 follow-up (Pydantic optional fields, punycode source domains); decisions at the gate: open points 1, 2, 4–7, 9–17 confirmed, 3 accepted (`HF_TEST_ELICITATION_WAIT_MS`), 8 changed to the seeded `OAUTH_MCP_PORT` repointing; OAuth state replay → 409 `stale`, elicitation cancel reason `stopped`) | audit ok (99 paths; 20 C47 compile-fix files accepted); frozen install ok (TypeScript 6.0.3 only); 14537 tests, `git status` unchanged by the gate; build ok; CSP 38/38; `pluginApiVersion` 1.7.0, 9 new routes answer 400 / 501; e2e 215 passed on a fresh `.tmp/e2e`; `pnpm audit --prod` clean (2 ignored); v1.8.1 seed `.tmp/upgrade-v181` (32 chats / 164 messages / 17 approved trust items) | (next row) |

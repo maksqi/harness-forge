@@ -42,6 +42,8 @@ flowchart LR
   Proj["Project folders<br/>(inside HF_WORKSPACE_ROOTS)"]
   LLM["LLM provider APIs<br/>(Anthropic, OpenAI, ..., Ollama)"]
   MCPS["MCP servers<br/>(stdio child processes, http, sse)"]
+  AS["OAuth authorization servers<br/>of remote MCP servers (Phase 14)"]
+  Search["Search APIs: Brave, Tavily, Exa<br/>(HTTPS only, Phase 14)"]
   MD["models.dev api.json"]
 
   SPA -- "fetch JSON, UI message stream (SSE),<br/>GET /api/events (SSE)" --> API
@@ -60,6 +62,9 @@ flowchart LR
   Cat -- "live /models listing" --> LLM
   Cat -- "weekly refresh unless HF_OFFLINE=1" --> MD
   MCPM --> MCPS
+  MCPM -- "discovery, registration, token, refresh<br/>(@ai-sdk/mcp auth(), Phase 14)" --> AS
+  SPA -. "sign-in: same-tab redirect,<br/>back to /oauth/callback (Phase 14)" .-> AS
+  Host -- "search_web (core-search, safeFetch, Phase 14)" --> Search
   Chat -- "project .mcp.json servers (Phase 11)" --> MCPM
   Chat -- "core-workspace tools, command hooks (Phase 11)" --> WS
   WS -- "hooks outside projects" --> HDir
@@ -135,6 +140,16 @@ Key properties:
   run (6.36); hooks gain prompt handlers answered by a model (the hook model setting, else the run provider's small
   model), five more events, Claude Code's handler fields and a `transcript_path` file (6.37); and definitions accept
   Claude Code's newer frontmatter, 0-based arguments and model aliases (6.38). The security model is in 10.13.
+- **MCP 2.0 and web search** (Phase 14, v1.9; ADR-059 … ADR-063): remote MCP servers of every origin (personal,
+  plugin, Claude Code plugin, project `.mcp.json`) can sign in with OAuth: a click sends the browser to the server's
+  authorization server in the same tab and back to the SPA page `/oauth/callback`, which hands the code to the
+  authenticated API; tokens live only in the encrypted secret store and a server that needs a sign-in shows
+  `needs-auth` instead of retrying (6.39). An MCP tool can ask the user for input while it runs: the run **waits** (the
+  first live wait of the harness) and a form card answers it (6.40). MCP prompts become `/mcp__<server>__<prompt>`
+  slash commands whose expansion is frozen into the message (6.41), and MCP resources join the `@` menu as uploads
+  (6.42). Web search is a per-chat toggle: one shared resolver picks the model's own provider-executed search tool or the
+  builtin `search_web` tool of `core-search` (Brave, Tavily or Exa with the user's key), never both, and sources become
+  citations (6.43, 6.44). No migration, no new dependency, plugin API 1.7.0; the security model is in 10.14.
 
 ## 2. Packages
 
@@ -155,13 +170,13 @@ boundary and `plugin-sdk` re-exports the plugin data shapes (API.md 3.2).
 |---|---|
 | `main.ts` | Process entry: dispatches the `rotate-key` CLI (Phase 7, 6.14) before anything boots; otherwise installs the signal handlers for graceful shutdown (before the boot starts, Phase 6 hotfix), then runs the boot sequence (section 5) with the key recovery and the `server.lock` hooks (Phase 7). |
 | `env.ts` | Loads `<repo root>/.env`, parses and validates `HF_*` environment variables (zod) into a frozen `Env` object; resolves `HF_DATA_DIR` and `HF_WEB_DIR`; bind-safety check; Phase 7: the syntax of `HF_WORKSPACE_ROOTS` (`Env.workspaceRoots`, `workspaceRootsDefault`) and `HF_WORKSPACE_SHELL` (`Env.workspaceShell`), `DataPaths.workspaces`; Phase 8: `DataPaths.checkpoints` and the test-only `Env.testFileSweepDelayMs` (`HF_TEST_FILE_SWEEP_DELAY_MS`, honored only with `HF_MOCK_PROVIDER=1`, else null; `envBootWarnings(env)` then returns the warning "the test-only automatic file sweep delay is ignored: it is honored only with HF_MOCK_PROVIDER=1", which `startDeps` logs first; the text names the variable in words because the log redactor masks `HF_` followed by 16 or more word characters). Phase 12: `HF_CLAUDE_HOME` (`Env.claudeHome`: unset = `os.homedir()/.claude`, `0` = the scan is off (null), else an absolute path normalized with `resolve`; a relative path or a NUL fails the boot; the folder itself is never touched at boot; the Docker image and `start:e2e` set `0`) and the test-only `HF_TEST_REMOTE_URL` (`Env.testRemoteUrl`: any value other than `http://127.0.0.1:<port>` fails the boot, also without `HF_MOCK_PROVIDER=1`; a valid one is honored only with `HF_MOCK_PROVIDER=1`, else null and `envBootWarnings` returns `TEST_REMOTE_URL_IGNORED_WARNING`), `DataPaths.transcripts` (not created by `ensureDataDir`: the first hook that needs a transcript creates it). |
-| `deps.ts` | Composition root: `createDeps()` builds every service (eagerly, so a failing factory fails the boot), `startDeps()` / `stopDeps()` run the boot and shutdown steps (section 5; Phase 8: `checkpoints.start()` right after `projects.start()`, before the staging recovery and the plugins, and `data.start()` last; `data.stop()` first, `checkpoints.stop()` right after the runs stopped; Phase 10: `runs.boot()` right after `checkpoints.start()` (the boot sweep of `background_tasks`; `runs.start()` is `POST /chat`), and `runs.stopAll()` stops the queues, then the background tasks, then the runs; `customizations.stop()` right after the runs; the frozen orders are `BOOT_STEPS` and `SHUTDOWN_STEPS`). Phase 11 (frozen from P11-0b): the services `hooks`, `projectConfig`, `projectTrust` and `projectMcp` (`AppDeps`); no new boot step (hook snapshots, the project config reader and the project MCP runtimes are lazy); shutdown runs data → runs (queues → background tasks → runs) → **hooks** → **projectMcp** → customizations → **projectConfig** → projectFiles → checkpoints → plugins → mcp → catalog → events (`projectTrust` keeps no state to stop). Phase 12 (frozen from P12-0b): the services `marketplaces`, `claudeImport` and `projectDefinitions` (`AppDeps`); no new boot step (marketplaces are read from the database on use, import plans live in memory, project files are read on request); shutdown adds `claudeImport.stop()` (drops every plan and aborts a scan in flight) as the first step, before `data.stop()`, and `marketplaces.stop()` (aborts the fetches in flight) right before the plugins, and `hooks.stop()` also stops the prompt-hook calls, the detached `async` and `SessionEnd` hooks and the transcript writer (`projectDefinitions` keeps no state to stop); `SHUTDOWN_STEPS` = claudeImport, data, runs, hooks, projectMcp, customizations, projectConfig, projectFiles, checkpoints, marketplaces, plugins, mcp, catalog, events. `pluginSourceFetch(env)` builds the one plugin-source fetch (`createPluginSourceFetch`, with the test remote when `env.testRemoteUrl` is set) that the installer and the marketplace service share. |
+| `deps.ts` | Composition root: `createDeps()` builds every service (eagerly, so a failing factory fails the boot), `startDeps()` / `stopDeps()` run the boot and shutdown steps (section 5; Phase 8: `checkpoints.start()` right after `projects.start()`, before the staging recovery and the plugins, and `data.start()` last; `data.stop()` first, `checkpoints.stop()` right after the runs stopped; Phase 10: `runs.boot()` right after `checkpoints.start()` (the boot sweep of `background_tasks`; `runs.start()` is `POST /chat`), and `runs.stopAll()` stops the queues, then the background tasks, then the runs; `customizations.stop()` right after the runs; the frozen orders are `BOOT_STEPS` and `SHUTDOWN_STEPS`). Phase 11 (frozen from P11-0b): the services `hooks`, `projectConfig`, `projectTrust` and `projectMcp` (`AppDeps`); no new boot step (hook snapshots, the project config reader and the project MCP runtimes are lazy); shutdown runs data → runs (queues → background tasks → runs) → **hooks** → **projectMcp** → customizations → **projectConfig** → projectFiles → checkpoints → plugins → mcp → catalog → events (`projectTrust` keeps no state to stop). Phase 12 (frozen from P12-0b): the services `marketplaces`, `claudeImport` and `projectDefinitions` (`AppDeps`); no new boot step (marketplaces are read from the database on use, import plans live in memory, project files are read on request); shutdown adds `claudeImport.stop()` (drops every plan and aborts a scan in flight) as the first step, before `data.stop()`, and `marketplaces.stop()` (aborts the fetches in flight) right before the plugins, and `hooks.stop()` also stops the prompt-hook calls, the detached `async` and `SessionEnd` hooks and the transcript writer (`projectDefinitions` keeps no state to stop); `SHUTDOWN_STEPS` = claudeImport, data, runs, hooks, projectMcp, customizations, projectConfig, projectFiles, checkpoints, marketplaces, plugins, mcp, catalog, events. `pluginSourceFetch(env)` builds the one plugin-source fetch (`createPluginSourceFetch`, with the test remote when `env.testRemoteUrl` is set) that the installer and the marketplace service share. Phase 14 (frozen from P14-0b): the services `mcpAuth` (`McpAuthService`, `mcp/oauth/types.ts`: the OAuth flows and token records, 6.39) and `elicitations` (the elicitation broker, `mcp/elicitation/types.ts`, 6.40) (`AppDeps`); no new boot step (both live in memory and start empty); shutdown stops `elicitations` (every pending wait answers `cancel`, reason `stopped`) before the MCP managers (`projectMcp`, `mcp`) and `mcpAuth` (drops the pending flows) after them; C50 fixes the exact place in `SHUTDOWN_STEPS`. `getBuiltinPlugins` takes `Pick<Env, 'mockProvider' \| 'testRemoteUrl'>`, so `core-search` gets the same plugin-source fetch (with the test remote). |
 | `app.ts` | `createApp(deps)` app factory: mounts middleware and every route module under `/api`; used by `main.ts` and `createTestApp()`. |
 | `paths.ts`, `logger.ts` | Package-relative locations (server package root, migrations, bundled assets, the SPA build, installed package versions); JSON-lines logger with redaction. |
 | `http/middleware/` | Request id, structured access log (share tokens masked; it also runs the untrusted-proxy hint of `proxy-warning.ts`), secure headers + CSP, Origin check on non-GET, session auth, fresh auth (ADR-017), login rate limiter, body-size and content-type gate, the global error handler that renders `HarnessErrorEnvelope`; `request-info.ts` resolves the client address and scheme, trusting forwarded headers only from `HF_TRUST_PROXY` peers (section 10.6). |
-| `http/routes/` | One Hono module per API area (`health`, `auth`, `settings`, `events`, `providers`, `credentials`, `models`, `icons`, `chats`, `chat`, `files`, `tools`, `mcp`, `commands`, `plugins`, `plugin-install`, `plugin-drafts`, `plugin-files`, `data`, `audio`, `shares`; Phase 7: `projects`, `keys`; Phase 8: `changes` (7 chat-scoped routes: changes, diff, git, revert, undo, rewind preview and apply; 6.16, 6.17) and `shell-rules` (3; 6.13); Phase 9: `chat-queue` (module `chatQueue`, 3 routes under `/chat/:id/queue`; 6.20) and `project-files` (module `projectFiles`, 2 routes under `/projects/:id/files`; 6.21); Phase 10: `customizations` (6 routes; 6.23), `memory` (1 route, `POST /memory`; 6.27) and `chat-tasks` (module `chatTasks`, 2 routes under `/chat/:id/tasks`; 6.26), and `commands` gains `?projectId=`; Phase 11: `hooks` (5 routes: list, runs, create, update, remove; 6.28), `project-trust` (module `projectTrust`, 3 routes under `/projects/:id/trust`; 6.29) and `project-mcp` (module `projectMcp`, 3 routes under `/projects/:id/mcp`; 6.30); Phase 12: `marketplaces` (5 routes: list, add, get, refresh, remove; 6.34), `claude-import` (module `claudeImport`, 4 routes: home, scan, upload, apply; 6.35) and `project-definitions` (module `projectDefinitions`, 3 routes under `/projects/:id/definitions/file`; 6.36), and the `pluginInstall` inspect / install bodies gain the `github` and `marketplace` sources and `format`: 132 routes in 36 modules, 14 of them fresh; `plugins-detail.ts` is a helper of the plugin routes, not a module: the Phase 12 fields of the plugin DTOs, `format`, `origin` without the entry overlay, `claude` and `editable: false` for a Claude Code plugin); thin: validate (`http/validate.ts` maps zod issues to `validation_error`), call services, map DTOs. `shares.ts` also serves the public `/share/:token` routes; `audio.ts` (Phase 6) parses the multipart recording of `POST /audio/transcriptions` itself and answers `POST /audio/speech` with audio bytes (section 6.12). |
+| `http/routes/` | One Hono module per API area (`health`, `auth`, `settings`, `events`, `providers`, `credentials`, `models`, `icons`, `chats`, `chat`, `files`, `tools`, `mcp`, `commands`, `plugins`, `plugin-install`, `plugin-drafts`, `plugin-files`, `data`, `audio`, `shares`; Phase 7: `projects`, `keys`; Phase 8: `changes` (7 chat-scoped routes: changes, diff, git, revert, undo, rewind preview and apply; 6.16, 6.17) and `shell-rules` (3; 6.13); Phase 9: `chat-queue` (module `chatQueue`, 3 routes under `/chat/:id/queue`; 6.20) and `project-files` (module `projectFiles`, 2 routes under `/projects/:id/files`; 6.21); Phase 10: `customizations` (6 routes; 6.23), `memory` (1 route, `POST /memory`; 6.27) and `chat-tasks` (module `chatTasks`, 2 routes under `/chat/:id/tasks`; 6.26), and `commands` gains `?projectId=`; Phase 11: `hooks` (5 routes: list, runs, create, update, remove; 6.28), `project-trust` (module `projectTrust`, 3 routes under `/projects/:id/trust`; 6.29) and `project-mcp` (module `projectMcp`, 3 routes under `/projects/:id/mcp`; 6.30); Phase 12: `marketplaces` (5 routes: list, add, get, refresh, remove; 6.34), `claude-import` (module `claudeImport`, 4 routes: home, scan, upload, apply; 6.35) and `project-definitions` (module `projectDefinitions`, 3 routes under `/projects/:id/definitions/file`; 6.36), and the `pluginInstall` inspect / install bodies gain the `github` and `marketplace` sources and `format`: 132 routes in 36 modules, 14 of them fresh; Phase 14: `mcp-auth` (module `mcpAuth`, 5 routes: start, signOut, projectStart, projectSignOut, callback; 6.39), `chat-elicitations` (module `chatElicitations`, 1 route: answer; 6.40), `mcp-resources` (module `mcpResources`, 2 routes: list, attach; 6.42) and `web-search` (module `webSearch`, 1 route: test; 6.44), none fresh and none public: 141 routes in 40 modules, still 14 fresh; `plugins-detail.ts` is a helper of the plugin routes, not a module: the Phase 12 fields of the plugin DTOs, `format`, `origin` without the entry overlay, `claude` and `editable: false` for a Claude Code plugin); thin: validate (`http/validate.ts` maps zod issues to `validation_error`), call services, map DTOs. `shares.ts` also serves the public `/share/:token` routes; `audio.ts` (Phase 6) parses the multipart recording of `POST /audio/transcriptions` itself and answers `POST /audio/speech` with audio bytes (section 6.12). |
 | `http/static.ts` | Production SPA serving from `HF_WEB_DIR` (default `apps/web/.output/public`) with `200.html` fallback for client routes. |
-| `security/` | `keyring.ts` (master key + HKDF subkeys; Phase 7: one frozen keyring whose key and `keyVersion` swap in place during a rotation, with the module-private controls `swapMasterKey`, `beginKeyChange`, `whenKeyStable`, 6.14), `password.ts` (scrypt), `session.ts` (HMAC session tokens + cookie), `headers.ts` (CSP/secure headers; Phase 6: `microphone=(self)` and the SPA's `media-src`, section 10.2), `ssrf.ts` (outbound URL guard), `redact.ts` (secret redactor for logs and errors; also masks share tokens), `proxy-trust.ts` (the `HF_TRUST_PROXY` matcher, section 10.6). Phase 8: `process-spawn.test.ts` fails when a non-test file other than `workspace/shell.ts`, `workspace/git.ts` and `mcp/stdio-transport.ts` imports `node:child_process`. Phase 11: the list stays at these three modules: command hooks and command `!` spans run through `workspace/shell.ts`, project stdio MCP servers through `mcp/stdio-transport.ts`. Phase 12: still three modules (no git, no download shell, prompt hooks call a model, not a process); `ssrf.ts` gains `createPluginSourceFetch` (the https-only `SafeFetch` of plugin sources and marketplaces) and honors the test-only `HF_TEST_REMOTE_URL`: every plugin-source and marketplace fetch goes to `<base>/<host>/<path>`, and only that loopback base is allowed (6.34). |
+| `security/` | `keyring.ts` (master key + HKDF subkeys; Phase 7: one frozen keyring whose key and `keyVersion` swap in place during a rotation, with the module-private controls `swapMasterKey`, `beginKeyChange`, `whenKeyStable`, 6.14), `password.ts` (scrypt), `session.ts` (HMAC session tokens + cookie), `headers.ts` (CSP/secure headers; Phase 6: `microphone=(self)` and the SPA's `media-src`, section 10.2), `ssrf.ts` (outbound URL guard), `redact.ts` (secret redactor for logs and errors; also masks share tokens), `proxy-trust.ts` (the `HF_TRUST_PROXY` matcher, section 10.6). Phase 8: `process-spawn.test.ts` fails when a non-test file other than `workspace/shell.ts`, `workspace/git.ts` and `mcp/stdio-transport.ts` imports `node:child_process`. Phase 11: the list stays at these three modules: command hooks and command `!` spans run through `workspace/shell.ts`, project stdio MCP servers through `mcp/stdio-transport.ts`. Phase 12: still three modules (no git, no download shell, prompt hooks call a model, not a process); `ssrf.ts` gains `createPluginSourceFetch` (the https-only `SafeFetch` of plugin sources and marketplaces) and honors the test-only `HF_TEST_REMOTE_URL`: every plugin-source and marketplace fetch goes to `<base>/<host>/<path>`, and only that loopback base is allowed (6.34). Phase 14 (complete and frozen from P14-0b): `safeFetch` gains `method: 'POST'` with a `body` (a string or bytes, at most 64 KB, sent with `content-length`; a POST never follows a redirect: a 3xx is the result), the SSRF guard and the DNS pinning unchanged; users are the `core-search` backends (6.44) and the OAuth token revocation (6.39); the test fake remote serves POST for its routes and records the bodies. MCP transports never get a custom `fetch` (6.39). |
 | `db/` | Drizzle schema (`schema.ts`), libsql client, `migrate()` at boot, pragmas (WAL, foreign keys, busy timeout), transaction helper. |
 | `services/settings/` | Typed global settings (defaults, validation, cache) over the `settings` table. |
 | `services/secrets/` | Encrypted secret store (AES-256-GCM) over the `secrets` table: `get/set/delete/list(scope)`, masked hints, env fallback lookup. Phase 11 (ADR-050, frozen `types.ts` edit): the scope `project:<projectId>` holds the project MCP variables (names `mcp.var.<NAME>`; 6.30); it is deleted with its project, and a key rotation re-encrypts it with every other row. |
@@ -185,7 +200,7 @@ boundary and `plugin-sdk` re-exports the plugin data shapes (API.md 3.2).
 | `services/images/` | `ImageService` (Phase 6, ADR-028, section 6.11): `generate()` runs `generateImage` with the provider's `imageParams`, writes the one usage row of a generation (`purpose: 'image'`), records the provider outcome and stores every image through `files.saveGenerated`; `generation.ts` holds the pure helpers (the checked `imageParams` result, token usage, estimated cost, revised prompt). Used by image turns and by `ctx.images` (the `generate_image` tool). |
 | `services/audio/` | `AudioService` (Phase 6, ADR-029, section 6.12): `transcribe()` (type allowlist + magic-byte sniffing in `sniff.ts`, `transcribe()` of the AI SDK) and `speak()` (`generateSpeech()`); a usage row (`transcription` / `speech`) and the provider outcome only for a call that answers; one info log line per call; stores nothing. |
 | `services/events/` | In-process event bus + SSE fan-out for `/api/events` (section 6.7); Phase 7: `disconnectAll()` (flushes queued events, then closes every stream; after a key rotation and a password change). |
-| `registry/` | Typed registries for providers, models, tools, MCP server declarations, commands and hooks; every registration returns a `Disposable` and is tagged with its owner plugin id. Phase 10 (plugin API 1.4.0): the kinds `agent` and `skill` (`registry.agents`, `registry.skills`; name pattern, reserved names, 64 KiB bodies, tool names and model refs checked at registration, a duplicate name across plugins is a `conflict`), and the contributions `agents` / `skills` of a plugin summary. Phase 11 (plugin API 1.5.0, frozen `types.ts` edit): `registry.styles` (plugin output styles, `contributes.outputStyles` and `ctx.outputStyles.register`) and `registry.hookCommands` (the command hooks of `contributes.hooks`, only while their plugin is active and trusted), the new code hook events of `HookMap` (`prompt.submit`, `session.start`, `run.stop`, `subagent.stop`, `compact.before`, `notification`; `tool.after` may set `context`), and the contributions `commandHooks` (a count; `hooks` keeps listing the code hook names) / `outputStyles` (names). Phase 12 (plugin API 1.6.0, frozen `types.ts` edit): qualified names (`<pluginId>:<name>`, accepted only when the first segment is the owner's id; 6.33), markdown command syntax (`syntax: 'markdown'`), skill `baseDir`, prompt handlers and the five new events in `contributes.hooks`, `HookCommandsRegistration.env` (`CLAUDE_PLUGIN_DATA`, `CLAUDE_PLUGIN_OPTION_<KEY>`; the registered exec-form `args` keep `${user_config.KEY}` as written, filled at spawn) and `.prompts`, and `McpServerRegistry.register(…, { claudeName })` (the `mcp__plugin_<name>_<server>` alias hooks and tool lists can use). |
+| `registry/` | Typed registries for providers, models, tools, MCP server declarations, commands and hooks; every registration returns a `Disposable` and is tagged with its owner plugin id. Phase 10 (plugin API 1.4.0): the kinds `agent` and `skill` (`registry.agents`, `registry.skills`; name pattern, reserved names, 64 KiB bodies, tool names and model refs checked at registration, a duplicate name across plugins is a `conflict`), and the contributions `agents` / `skills` of a plugin summary. Phase 11 (plugin API 1.5.0, frozen `types.ts` edit): `registry.styles` (plugin output styles, `contributes.outputStyles` and `ctx.outputStyles.register`) and `registry.hookCommands` (the command hooks of `contributes.hooks`, only while their plugin is active and trusted), the new code hook events of `HookMap` (`prompt.submit`, `session.start`, `run.stop`, `subagent.stop`, `compact.before`, `notification`; `tool.after` may set `context`), and the contributions `commandHooks` (a count; `hooks` keeps listing the code hook names) / `outputStyles` (names). Phase 12 (plugin API 1.6.0, frozen `types.ts` edit): qualified names (`<pluginId>:<name>`, accepted only when the first segment is the owner's id; 6.33), markdown command syntax (`syntax: 'markdown'`), skill `baseDir`, prompt handlers and the five new events in `contributes.hooks`, `HookCommandsRegistration.env` (`CLAUDE_PLUGIN_DATA`, `CLAUDE_PLUGIN_OPTION_<KEY>`; the registered exec-form `args` keep `${user_config.KEY}` as written, filled at spawn) and `.prompts`, and `McpServerRegistry.register(…, { claudeName })` (the `mcp__plugin_<name>_<server>` alias hooks and tool lists can use). Phase 14 (plugin API 1.7.0): `validate.ts` whitelists the optional provider hook `webSearch` (6.43); MCP server declarations may carry `transport.oauth` (`clientId` may use `{{settings.x}}`; 6.39); the `notification` code hook gains the type `elicitation_dialog` (6.40). |
 | `plugins/host.ts` | Plugin host: discovery, load order, lifecycle state machine, enable/disable/reload, boot sentinel, safe mode. Phase 12: dispatches by `plugins.format` through `formats.ts` (`readPluginDirectoryFor(format, dir, opts)`; `inspectDirectoryFor` answers `inspectDirectory` for both formats; `detectFolderFormat` for a hand-placed folder): a Claude Code plugin's trust requirement and hash come from its reader (the whole-tree hash), its contributions from the Claude registration, a hand-placed folder's format is detected, saving its settings reloads it, and it is never editable (6.33). |
 | `plugins/claude/` | Claude Code plugins (Phase 12, ADR-053, section 6.33): `detect.ts` (layout and root prefix), `reader.ts` (`readClaudePluginDirectory` → `PluginDirectoryRead` + `ClaudePluginRead`), `layout.ts` (component path rules: replace / add / merge, `./` paths inside the root), `files.ts` (definition files through `readDefinitionFile` with the plugin root), `tree-hash.ts` (`hf-claude-plugin/v1`), `variables.ts`, `user-config.ts`, `mcp.ts`, `hooks.ts`, `register.ts` (`registerClaudeContributions(ctx, read, runtime)`), `skill-files.ts` (the `skill` tool's `file` reads), `info.ts` (the inspection's `claude` block), `trust.ts` (v1.8.1: `verifyClaudePluginTree` / `createClaudeTrustGuard` before every command hook spawn, stdio MCP connect and `!` span run, `readClaudePluginHooks` for the pending rows of `GET /hooks`) and `types.ts` (frozen from P12-0b); `plugin.json` and `marketplace.json` are parsed only by the shared `util/claude-plugins.ts`. |
 | `plugins/marketplaces/` | Marketplaces (Phase 12, ADR-054, section 6.34; `types.ts` frozen, `AppDeps.marketplaces`): `MarketplaceService { list, add, get, refresh, remove, stop }` (`index.ts`) over the `marketplaces` table (`store.ts`), `fetch.ts` (the GitHub / URL / folder source readers), `github.ts` (ref → commit, a file of a commit, the GitHub error mapping; shared with the installer), `catalog.ts` (the validated, normalized catalog), `sources.ts` (an entry → a staged source or an unsupported reason), `updates.ts` (update availability) and `testing.ts` (`createSourcesTestApp`); `marketplace.changed` events. |
@@ -200,19 +215,20 @@ boundary and `plugin-sdk` re-exports the plugin data shapes (API.md 3.2).
 | `plugins/drafts/` | Declarative plugins created and edited in the browser (provider wizard): draft validation, SVG icon sanitizing, credentials saved as provider credentials, temporary-provider draft test. |
 | `plugins/scaffold/` | Code plugins created from a template (`POST /plugins/scaffold`) and the traversal-safe files API: tree, read, atomic write, delete, build + reload, trust re-pinning of `created` plugins. |
 | `plugins/templates/` | Template sources (tool, provider, MCP bridge, command pack): a JSDoc-typed `index.mjs` or a TypeScript `index.ts`, the vendored API types `harness-forge.d.ts` and a README. |
-| `catalog/` | Model catalog: live listings with 24 h cache (`model_cache`), models.dev snapshot + weekly refresh, seeds, plugin models, custom ids, prefs, `classify()` (model kinds incl. `image`, `transcription`, `speech`; `imageOutput`), cost lookup (section 9). |
+| `catalog/` | Model catalog: live listings with 24 h cache (`model_cache`), models.dev snapshot + weekly refresh, seeds, plugin models, custom ids, prefs, `classify()` (model kinds incl. `image`, `transcription`, `speech`; `imageOutput`), cost lookup (section 9). Phase 14: `merge.ts` computes `CatalogModel.webSearch` (`native` / `exclusive` / null) by probing the provider's `webSearch` hook with `{ functionTools: 0 }` (section 9, 6.43). |
 | `providers/` | Model resolution: `modelRef` -> provider -> credentials (stored or env) -> `LanguageModel` (`resolveModel`), and since Phase 6 image, transcription and speech models (`resolveImageModel`, `resolveTranscriptionModel`, `resolveSpeechModel`); provider test; provider status; error mapping to `HarnessError`; the LobeHub icon service (`/api/icons/lobe`). |
-| `chat/` | Chat pipeline: runs registry (one active run per chat, stop, resume buffer), history assembly, approvals, slash commands, tool assembly, context trimming, titles, usage/cost, persistence; Phase 6: image turns (`images.ts`), generated-file storage for every run (`generated-files.ts`), the history carry-forward of generated images (`files.ts`), the run notices incl. `generated-file-dropped` (`notices.ts`); Phase 7: the project of a new chat, `openWorkspace` + the `workspace-unavailable` notice, the workspace tool filter and `ToolCallContext.workspace`, the `edits` approval mode, the instruction order with the workspace block and the project file, `projectMaxSteps` (6.13). Phase 8: `scope.ts` (`createRunScope`: chat, assistant message id, journal, shell rules, sticky folder, built once per run) bound to every tool call context and to policy contexts (`AssembledTools.scope`), `shell` / `untracked` journal rows after each settled workspace call (`settledCallRecord` in `tools.ts`), `effectiveOverride` in `approval.ts` (a stored `allow` override on an `execute` tool is ignored), and the workspace block says that `cd` persists (6.2, 6.13, 6.16). Phase 9 (ADR-040 … ADR-043, sections 6.18 – 6.22): `steps.ts` (`createPrepareStep`: the one step-boundary composer: context guard → steer → sub-agent finalize nudge), `model-history.ts` (`buildModelHistory`: compaction → steer split → task output reduction → command expansions → summary merge), `markers.ts` (the instruction markers of the summarizer and of sub-agents), `agent-scope.ts` (`agentScopeOf(c)`: the private side channel of `core-agent`, a WeakMap bound to the tool call context like the run scope), `compaction/` (`history.ts`, `guard.ts`, `stream.ts`, `summarize.ts`, `prompt.ts`), `queue.ts` (the in-memory steer queue), `steer.ts` (`createSteerStep`, `stepInjector`), `modes.ts` (the plan-mode tool set and `activeTools`), `subagent/` (`index.ts` `createSubagentRunner`, `tools.ts` the child tool set and its approval, `history.ts`), plus `RunSession.inject` / `addExtraCost` / `writeTransient` and `RunContext.onReleased` in `pipeline.ts`, the `/compact` branch of `commands.ts`, the streaming tool wrapper of `tools.ts`, `case 'plan'` and the `exit_plan_mode` rule of `approval.ts`. Phase 10 (ADR-045 … ADR-047, sections 6.23 – 6.27): `PreparedRun.catalog` (one catalog per run), `requestModelRef` (a command's model never becomes the chat's model) and `turnRestriction` (a command's `allowed-tools`); `commands.ts` resolves file commands (`resolveCommand(…, { catalog })`, `isServerCommandFor`) and `prepare.ts` resolves the request's model first, then the command's `model` override (`resolveTurnModel`); `tools.ts` applies `allowedTools` after the mode and drops `skill` without skills; `params.ts` adds the agent-types and skills blocks; `subagent/` runs custom agent types (`host.ts`: the structural `ChildSession` shared with detached children); `background/` (the per-chat manager of background tasks: launch, caps, persistence in `background_tasks`, `task.changed`, the result inbox, idle delivery, guards, the boot sweep; 6.26); `steer.ts` also takes finished background results; `model-history.ts` gains the `splitTaskResults` stage; `skills.ts` (`loadSkill`) and `plan-file.ts` (`savePlan`), both reached through `agent-scope.ts`. Phase 11 (ADR-048 … ADR-052, sections 6.28 – 6.32; the seams complete and frozen from P11-0b): `hooks.ts` (`RunHooks`, the per-run hook runtime over a `HookSnapshot`: `record(data)` injects a `data-hook` part, queued contexts for the next step, the answered / replayed PreToolUse decisions of a continuation, the record of a plugin's `tool.after` `context`, `forChild(prefix)` for sub-agents and `detachedHooks` for background children, and the `hookGate` transform that holds `finish` for the `Stop` hooks), `hooks-prompt.ts` (`SessionStart` and `UserPromptSubmit` at submit; `UserPromptSubmit` also at enqueue), `prepare.ts` (`TurnWorkspace`: the project folder opened at most once per turn, shared by the command expansion and `openRunWorkspace`), `output-style.ts` (`resolveRunOutputStyle` → `PreparedRun.outputStyle` → `RunParamsInput.outputStyle`; `agentBlocks(…, { codingHints })`), `inline/` (the `!` span runner and the `@path` reader behind `CommandContext.expansion`); `approval.ts` runs `PreToolUse` after the unknown-tool and `exit_plan_mode` rules (skipped for answered tool call ids and replayed from the stored part); `tools.ts` applies a hook's `updatedInput` in `prepareInput` (before `tool.before`, re-validated), runs `PostToolUse` after `tool.after`, and `assembleTools({ extraTools, shadowedMcpServers })` adds the project MCP tools; the step composer runs context guard → **hooks** → steer → finalize; `model-history.ts` gains the `splitHooks` stage after `splitTaskResults`; `RunContext.origin` gains `hook`, `onReleased(ending, awaitingApproval, followUp)` and `startHookTurn` start a hook continuation, and `carrierParts` accepts `data-hook` carriers; `pipeline.ts` fires `Notification` when a run is released waiting for an approval; `modelStream` asks `projectMcp.toolsFor` for project chats (tools on, a tool-capable model). Phase 12 (ADR-053, ADR-057, ADR-058, sections 6.33 – 6.38; the seams complete and frozen from P12-0b): `hooks.ts` gains `ToolHooks.permissionRequest`, `ToolHooks.postToolUseFailure`, `settle(callId, { harnessAsked })`, `RunHooks.postCompact` and `ChildHooks.subagentStart`; `approval.ts` runs the `PermissionRequest` step after the combination and settles the PreToolUse record; `tools.ts` runs `PostToolUseFailure` in the catch paths of `runToolCall` and `streamToolCall`; `subagent/index.ts` (behind the `subagent/host.ts` seams `ChildAgentSpec`, `childMaxSteps`, `childFirstMessage`; `childSpec`) runs `SubagentStart` before the child's step 0 and applies `maxTurns`, `disallowedTools` and the skills preload; `compaction/{guard,stream}.ts` run `PostCompact` after the marker; `model-aliases.ts` (`resolveClaudeModel`); `skills-call.ts` (the scope of one `skill` call: the chat id and the run's `runSubagent` for a fork skill, bound to `LoadSkillOptions` through a module-private `WeakMap`); `commands.ts` and `skills.ts` resolve qualified names and the bare alias, run markdown plugin commands through the command-file path and serve the `skill` tool's `file` and fork skills; `inline/shell.ts` gives a plugin's `!` spans `CLAUDE_PLUGIN_ROOT`, `HARNESS_PLUGIN_ROOT` and `CLAUDE_PLUGIN_DATA` (never a `CLAUDE_PLUGIN_OPTION_*`); `DELETE /chats/:id` starts the detached `SessionEnd` hooks. |
-| `mcp/` | MCP manager: one client per enabled server (`@ai-sdk/mcp`), status, reconnect with backoff, tool naming `mcp__<serverId>__<tool>`, hint -> policy mapping, close on disable; `{{settings.*}}` templating of plugin-declared servers; its own stdio transport (minimal environment, stderr lines in the owning plugin's log); the user-configured servers of the MCP panel (`mcp_servers`). Phase 8: `tools.ts` (`ToolService.update`) refuses `override: 'allow'` for tools with workspace access `execute` (400 on `['override']`, "Shell commands can't be always allowed. Add a shell rule instead."), and `GET /tools` shows `policy: null` for a tool whose policy is a function (the shell's `shellPolicy`). Phase 11 (ADR-050, section 6.30): `project*.ts` (the `ProjectMcpManager` of `.mcp.json` servers, interface in the frozen `mcp/types.ts`: lazy runtimes per project and server id, the variables, `toolsFor`, shadowing, idle and revoke stops, `project-mcp.changed`); the stdio transport gains `processGroup` (the child starts detached and is killed with its whole process group on close), used for **every** stdio server, global and project. |
+| `chat/` | Chat pipeline: runs registry (one active run per chat, stop, resume buffer), history assembly, approvals, slash commands, tool assembly, context trimming, titles, usage/cost, persistence; Phase 6: image turns (`images.ts`), generated-file storage for every run (`generated-files.ts`), the history carry-forward of generated images (`files.ts`), the run notices incl. `generated-file-dropped` (`notices.ts`); Phase 7: the project of a new chat, `openWorkspace` + the `workspace-unavailable` notice, the workspace tool filter and `ToolCallContext.workspace`, the `edits` approval mode, the instruction order with the workspace block and the project file, `projectMaxSteps` (6.13). Phase 8: `scope.ts` (`createRunScope`: chat, assistant message id, journal, shell rules, sticky folder, built once per run) bound to every tool call context and to policy contexts (`AssembledTools.scope`), `shell` / `untracked` journal rows after each settled workspace call (`settledCallRecord` in `tools.ts`), `effectiveOverride` in `approval.ts` (a stored `allow` override on an `execute` tool is ignored), and the workspace block says that `cd` persists (6.2, 6.13, 6.16). Phase 9 (ADR-040 … ADR-043, sections 6.18 – 6.22): `steps.ts` (`createPrepareStep`: the one step-boundary composer: context guard → steer → sub-agent finalize nudge), `model-history.ts` (`buildModelHistory`: compaction → steer split → task output reduction → command expansions → summary merge), `markers.ts` (the instruction markers of the summarizer and of sub-agents), `agent-scope.ts` (`agentScopeOf(c)`: the private side channel of `core-agent`, a WeakMap bound to the tool call context like the run scope), `compaction/` (`history.ts`, `guard.ts`, `stream.ts`, `summarize.ts`, `prompt.ts`), `queue.ts` (the in-memory steer queue), `steer.ts` (`createSteerStep`, `stepInjector`), `modes.ts` (the plan-mode tool set and `activeTools`), `subagent/` (`index.ts` `createSubagentRunner`, `tools.ts` the child tool set and its approval, `history.ts`), plus `RunSession.inject` / `addExtraCost` / `writeTransient` and `RunContext.onReleased` in `pipeline.ts`, the `/compact` branch of `commands.ts`, the streaming tool wrapper of `tools.ts`, `case 'plan'` and the `exit_plan_mode` rule of `approval.ts`. Phase 10 (ADR-045 … ADR-047, sections 6.23 – 6.27): `PreparedRun.catalog` (one catalog per run), `requestModelRef` (a command's model never becomes the chat's model) and `turnRestriction` (a command's `allowed-tools`); `commands.ts` resolves file commands (`resolveCommand(…, { catalog })`, `isServerCommandFor`) and `prepare.ts` resolves the request's model first, then the command's `model` override (`resolveTurnModel`); `tools.ts` applies `allowedTools` after the mode and drops `skill` without skills; `params.ts` adds the agent-types and skills blocks; `subagent/` runs custom agent types (`host.ts`: the structural `ChildSession` shared with detached children); `background/` (the per-chat manager of background tasks: launch, caps, persistence in `background_tasks`, `task.changed`, the result inbox, idle delivery, guards, the boot sweep; 6.26); `steer.ts` also takes finished background results; `model-history.ts` gains the `splitTaskResults` stage; `skills.ts` (`loadSkill`) and `plan-file.ts` (`savePlan`), both reached through `agent-scope.ts`. Phase 11 (ADR-048 … ADR-052, sections 6.28 – 6.32; the seams complete and frozen from P11-0b): `hooks.ts` (`RunHooks`, the per-run hook runtime over a `HookSnapshot`: `record(data)` injects a `data-hook` part, queued contexts for the next step, the answered / replayed PreToolUse decisions of a continuation, the record of a plugin's `tool.after` `context`, `forChild(prefix)` for sub-agents and `detachedHooks` for background children, and the `hookGate` transform that holds `finish` for the `Stop` hooks), `hooks-prompt.ts` (`SessionStart` and `UserPromptSubmit` at submit; `UserPromptSubmit` also at enqueue), `prepare.ts` (`TurnWorkspace`: the project folder opened at most once per turn, shared by the command expansion and `openRunWorkspace`), `output-style.ts` (`resolveRunOutputStyle` → `PreparedRun.outputStyle` → `RunParamsInput.outputStyle`; `agentBlocks(…, { codingHints })`), `inline/` (the `!` span runner and the `@path` reader behind `CommandContext.expansion`); `approval.ts` runs `PreToolUse` after the unknown-tool and `exit_plan_mode` rules (skipped for answered tool call ids and replayed from the stored part); `tools.ts` applies a hook's `updatedInput` in `prepareInput` (before `tool.before`, re-validated), runs `PostToolUse` after `tool.after`, and `assembleTools({ extraTools, shadowedMcpServers })` adds the project MCP tools; the step composer runs context guard → **hooks** → steer → finalize; `model-history.ts` gains the `splitHooks` stage after `splitTaskResults`; `RunContext.origin` gains `hook`, `onReleased(ending, awaitingApproval, followUp)` and `startHookTurn` start a hook continuation, and `carrierParts` accepts `data-hook` carriers; `pipeline.ts` fires `Notification` when a run is released waiting for an approval; `modelStream` asks `projectMcp.toolsFor` for project chats (tools on, a tool-capable model). Phase 12 (ADR-053, ADR-057, ADR-058, sections 6.33 – 6.38; the seams complete and frozen from P12-0b): `hooks.ts` gains `ToolHooks.permissionRequest`, `ToolHooks.postToolUseFailure`, `settle(callId, { harnessAsked })`, `RunHooks.postCompact` and `ChildHooks.subagentStart`; `approval.ts` runs the `PermissionRequest` step after the combination and settles the PreToolUse record; `tools.ts` runs `PostToolUseFailure` in the catch paths of `runToolCall` and `streamToolCall`; `subagent/index.ts` (behind the `subagent/host.ts` seams `ChildAgentSpec`, `childMaxSteps`, `childFirstMessage`; `childSpec`) runs `SubagentStart` before the child's step 0 and applies `maxTurns`, `disallowedTools` and the skills preload; `compaction/{guard,stream}.ts` run `PostCompact` after the marker; `model-aliases.ts` (`resolveClaudeModel`); `skills-call.ts` (the scope of one `skill` call: the chat id and the run's `runSubagent` for a fork skill, bound to `LoadSkillOptions` through a module-private `WeakMap`); `commands.ts` and `skills.ts` resolve qualified names and the bare alias, run markdown plugin commands through the command-file path and serve the `skill` tool's `file` and fork skills; `inline/shell.ts` gives a plugin's `!` spans `CLAUDE_PLUGIN_ROOT`, `HARNESS_PLUGIN_ROOT` and `CLAUDE_PLUGIN_DATA` (never a `CLAUDE_PLUGIN_OPTION_*`); `DELETE /chats/:id` starts the detached `SessionEnd` hooks. Phase 14 (ADR-060 … ADR-063, sections 6.40 – 6.44; the seams complete and frozen from P14-0b): `search/` (`resolve.ts`: `providerWebSearch` and `applyWebSearch`, the merged tools, `byName`, `activeTools`, `nativeTools` and provider options of a turn; `history.ts`: the history stage that drops another provider's provider-executed parts; `sources.ts`: the transform that emits `source-url` chunks after each `search_web` output); `approval.ts` gains `ToolApprovalContext.nativeTools` and its first rule (a provider-executed native call is `not-applicable`); `pipeline.ts` resolves the turn's web search, merges the tools and provider options into `streamText`, runs the history stage and the sources transform (after `generatedFiles`), writes the `web-search-unavailable` notice and binds `agentScope.notify` to the `Notification` hooks; `prepare.ts` computes the effective mode (body > chat > global); `subagent/{host,index,tools}.ts` resolve the mode again for the child's model; `commands.ts` gains the MCP branches of `resolveCommand`, `isServerCommandFor` and `listServerCommands` (`CommandServices.mcp` / `projectMcp`, `CommandContext.projectId`); `agent-scope.ts` gains `notify?`; the chat routes decorate summaries with `awaitingInput` (`deps.elicitations.pendingCount`). |
+| `mcp/` | MCP manager: one client per enabled server (`@ai-sdk/mcp`), status, reconnect with backoff, tool naming `mcp__<serverId>__<tool>`, hint -> policy mapping, close on disable; `{{settings.*}}` templating of plugin-declared servers; its own stdio transport (minimal environment, stderr lines in the owning plugin's log); the user-configured servers of the MCP panel (`mcp_servers`). Phase 8: `tools.ts` (`ToolService.update`) refuses `override: 'allow'` for tools with workspace access `execute` (400 on `['override']`, "Shell commands can't be always allowed. Add a shell rule instead."), and `GET /tools` shows `policy: null` for a tool whose policy is a function (the shell's `shellPolicy`). Phase 11 (ADR-050, section 6.30): `project*.ts` (the `ProjectMcpManager` of `.mcp.json` servers, interface in the frozen `mcp/types.ts`: lazy runtimes per project and server id, the variables, `toolsFor`, shadowing, idle and revoke stops, `project-mcp.changed`); the stdio transport gains `processGroup` (the child starts detached and is killed with its whole process group on close), used for **every** stdio server, global and project. Phase 14 (ADR-059 … ADR-061, sections 6.39 – 6.42): `oauth/` (`types.ts` frozen: `McpAuthService` = `deps.mcpAuth` with `start`, `complete`, `signOut`, `provider`, `info`, `stop`; `provider.ts`, the `OAuthClientProvider` in three modes; `store.ts`, the token records and their redactor registration; `flows.ts`, the pending sign-ins; `probe.ts`, the pre-sign-in probe; `guard.ts`, the authorization-server URL checks; `revoke.ts`, RFC 7009 revocation), `elicitation/` (`types.ts` frozen, `broker.ts`: `deps.elicitations` with `begin`, `handler`, `answer`, `pendingCount`, `cancelChat`, `stop`), `prompts.ts` and `resources.ts` (the per-server caches, `getPrompt`, `readResource`), `content.ts` (MCP content → text for prompt expansions and tool results); `index.ts` / `project.ts` give http / sse transports without an `Authorization` header the connect-mode `authProvider`, declare `capabilities: { elicitation: {} }`, classify auth failures as `needs-auth` (no backoff retry) and fill the prompt and resource caches; `mcp-tools.ts` turns `execute` into an async generator with the 600 s outer timeout and the pausable 60 s active budget; manager members `prompts()`, `getPrompt`, `resources()`, `readResource`, `authTarget(id)` (frozen `types.ts`). |
 | `builtin-plugins/index.ts` | Static list of builtin plugin modules, loaded first and trusted. |
-| `builtin-plugins/core-providers/` | The 13 builtin providers (see PROVIDERS.md): definitions, seeds, reasoning mapping, error mapping; Phase 6 (version 1.1.0, `engines ^1.1.0`): the image, transcription and speech factories of OpenAI, xAI, Google, Mistral and Groq, `imageParams`, `transcriptionOptions` and the media seeds (`lib/media.ts`; PROVIDERS.md 13). |
+| `builtin-plugins/core-providers/` | The 13 builtin providers (see PROVIDERS.md): definitions, seeds, reasoning mapping, error mapping; Phase 6 (version 1.1.0, `engines ^1.1.0`): the image, transcription and speech factories of OpenAI, xAI, Google, Mistral and Groq, `imageParams`, `transcriptionOptions` and the media seeds (`lib/media.ts`; PROVIDERS.md 13). Phase 14 (ADR-062): the `webSearch` hooks of Anthropic, OpenAI, Google, xAI, OpenRouter and Groq (their native search tools, deny-lists of old models, `exclusive` for Gemini 2.x, OpenRouter's `plugins` fallback; PROVIDERS.md native search matrix; 6.43). |
 | `builtin-plugins/core-tools/` | Builtin tools (version 1.2.0 since Phase 7, `engines ^1.2.0`): `current_time` (policy `safe`), `web_fetch` (policy `ask`, SSRF guard; setting "Allow localhost in web_fetch") and `generate_image` (Phase 6, `generate-image.ts`, policy `ask`, the `imageModelRef` setting; Phase 7: its output names the model with `modelName`; section 6.11). |
 | `builtin-plugins/core-workspace/` | Phase 7 (ADR-032, version 1.0.0, `engines ^1.2.0`, permission `process`): the workspace tools `read_file`, `list_directory`, `find_files`, `search_files`, `write_file`, `edit_file` (one module each) and `shell` (`shell-tool.ts`; not on Windows, removed by `HF_WORKSPACE_SHELL=0`); `policies.ts` (the policy functions of the file tools), `common.ts` (guard timeouts, the model text helper); every tool declares its workspace access (section 6.13). Phase 8: `write_file` and `edit_file` write through `journaledWrite` (snapshot first; parallel edits of one file serialize), and `shell` gets the sticky working folder, the `shellPolicy` of the shell rules and the output fields `endCwd`, `cwdNote`, `allowedBy`. |
 | `builtin-plugins/core-agent/` | Phase 9 (ADR-041, ADR-043; version 1.0.0, `engines ^1.3.0`): the agent tools `todo_write` (`todo-write.ts`, policy `safe`), `exit_plan_mode` (`exit-plan-mode.ts`, policy `always`) and `task` (`task.ts`, policy `safe`, an async-generator `execute`); `common.ts` (the model texts). They reach server internals (the run's tool mode, the sub-agent runner) only through `chat/agent-scope.ts`; server code recognizes them by `pluginId === 'core-agent'` (sections 6.19, 6.22). Phase 10 (`engines ^1.4.0`): `task` takes any catalog agent type and `background`, the fourth tool `skill` (`skill.ts`, policy `safe`, offered only when the catalog has skills, never in a sub-agent; 6.25), `exit_plan_mode` saves the approved plan through `savePlan` when `planFiles` is on (6.27), and the module declares the built-in agent definitions (`explore`, `general`). Phase 11: `skill` refuses a skill with `disable-model-invocation` (it is not listed to the model either; 6.32), and the built-in output styles `default`, `explanatory` and `learning` (texts from the shared `BUILTIN_OUTPUT_STYLES`) are listed by the catalog as `builtin` entries, like the built-in agent types (6.31). Phase 12 (6.33, 6.38): `skill` gains the input `file?` (a supporting file of a plugin or project skill, read inside its folder) and runs a `context: fork` skill as a sub-agent of its `agent` type (so its timeout is the `task` tool's 600 s, `SKILL_TOOL_TIMEOUT_MS = TASK_TIMEOUT_MS`); `file` is ≤ 512 characters; `task.type` and `skill.name` accept qualified plugin names. |
+| `builtin-plugins/core-search/` | Phase 14 (ADR-063, section 6.44; loaded after `core-tools`): the builtin search tool `search_web` (`search-web.ts`, policy `safe`, registered only while the selected backend has a key) and its backends `backends/{brave,tavily,exa}.ts`; settings `backend` (`brave` / `tavily` / `exa`), the secret settings `braveApiKey`, `tavilyApiKey`, `exaApiKey` and `maxResults`; every request through `createPluginSourceFetch` (https only). |
 | `builtin-plugins/core-commands/` | Builtin server-side slash commands (prompt templates such as `/explain`, `/review`, `/commit`; list in PLUGINS.md). |
 | `builtin-plugins/core-mcp/` | Owns the user-configured MCP servers (`mcp_servers` table): they are declared as its contributions, so disabling `core-mcp` closes them. Its settings (reconnect automatically, connect timeout) apply to every MCP server. |
-| `builtin-plugins/mock/` | Dev-only `mock` provider (`HF_MOCK_PROVIDER=1`): `mock:echo`, `mock:reasoning`, `mock:tool-approval`, `mock:error` on `MockLanguageModelV4`, the Phase 6 media models `mock:image`, `mock:image-chat`, `mock:image-tool`, `mock:transcribe`, `mock:speech` (a PNG encoder and a silent WAV), plus the tool `mock_approval_tool`; Phase 7: `mock:workspace`, which walks through the workspace tools; Phase 8: `mock:checkpoint` (an edit per turn plus shell steps for rewind and the sticky folder) and `mock:shell` (runs the user text as one shell command); Phase 9: `mock:compact`, `mock:plan`, `mock:todo`, `mock:subagent` and `mock:steer` (scripts for compaction, plan mode, todos, sub-agents and the steer queue; `MockPlan` gains parallel `toolCalls` and `stepDelayMs`); Phase 10: `mock:agents` (custom agent types, the agent-types and skills blocks, `skill` calls, command expansions) and `mock:background` (background tasks: idle and in-run delivery); Phase 11: `mock:hooks` (scripted tool calls, hook context and continuation reports, output style and MCP tool reports); Phase 12: `mock:prompt-hook` (answers prompt hooks from `[[ph:…]]` markers) (behavior in PROVIDERS.md section 8). |
-| `testing/` | In-process test harness: `createTestApp()` (real composition over an in-memory database) and fakes (Phase 6: `fake-media.ts` with fake image and audio services; the fake media resolvers live in `providers/testing.ts`, and `chat/testing.ts` has `createMediaTestApp()`; Phase 7: `fake-keyring.ts`, a deterministic, rotatable keyring; Phase 8: `fake-checkpoints.ts` (an in-memory `CheckpointBlobStore`, a test row writer and journal-row helpers) and `fake-shell-rules.ts`; Phase 10: `fake-customizations.ts` and `createTestApp({ customizations, backgroundTasks })`; Phase 11: `fake-hooks.ts`, `createTestApp({ hooks, projectTrust, projectMcp })`, `hook-scripts.ts` (POSIX `sh` hook scripts written into a temp project: `deny`, `ask`, `allow`, `rewrite`, `context`, `exit2`, `error`, `sleep`, `record`, `env`, `stop-once`, `prompt-block`) and the MCP fixtures in `mcp/__fixtures__/` (the echo server with `pid` / `env` tools, a dependency-free stdio server and a grandchild fixture for the process-group checks); Phase 12: `fake-remote.ts` (a loopback server for `api.github.com`, `raw.githubusercontent.com`, `codeload.github.com` and archive hosts under host prefixes, every request logged; used with `HF_TEST_REMOTE_URL` or `createFakeSafeFetch`), `claude-fixtures.ts` (builders of Claude Code plugins, a marketplace and a fake home in `realpath(mkdtemp())` folders; nothing is committed), `createTestApp({ marketplaces, claudeImport, projectDefinitions })` (`'fake'` = `fake-marketplaces.ts`, `fake-claude-import.ts`, `fake-project-definitions.ts`; `HF_CLAUDE_HOME` defaults to `<dataDir>/claude-home`, never created, so no test reads the real `~/.claude`), the hook scripts `permission-allow`, `permission-deny`, `print-args` and `agent-context`, and `githubZipOf` in `plugins/install/testing.ts`; `createSourcesTestApp` in `plugins/marketplaces/testing.ts`). |
+| `builtin-plugins/mock/` | Dev-only `mock` provider (`HF_MOCK_PROVIDER=1`): `mock:echo`, `mock:reasoning`, `mock:tool-approval`, `mock:error` on `MockLanguageModelV4`, the Phase 6 media models `mock:image`, `mock:image-chat`, `mock:image-tool`, `mock:transcribe`, `mock:speech` (a PNG encoder and a silent WAV), plus the tool `mock_approval_tool`; Phase 7: `mock:workspace`, which walks through the workspace tools; Phase 8: `mock:checkpoint` (an edit per turn plus shell steps for rewind and the sticky folder) and `mock:shell` (runs the user text as one shell command); Phase 9: `mock:compact`, `mock:plan`, `mock:todo`, `mock:subagent` and `mock:steer` (scripts for compaction, plan mode, todos, sub-agents and the steer queue; `MockPlan` gains parallel `toolCalls` and `stepDelayMs`); Phase 10: `mock:agents` (custom agent types, the agent-types and skills blocks, `skill` calls, command expansions) and `mock:background` (background tasks: idle and in-run delivery); Phase 11: `mock:hooks` (scripted tool calls, hook context and continuation reports, output style and MCP tool reports); Phase 12: `mock:prompt-hook` (answers prompt hooks from `[[ph:…]]` markers); Phase 14: `mock:search` (the mock provider's `webSearch` hook offers a provider-executed `web_search` tool; the model answers with a provider-executed call, its result, two sources and "Search done: 2 sources", else "Search off") and `mock:search-tool` (calls `search_web` with the user's text, then lists the result titles): 20 mock models (behavior in PROVIDERS.md section 8 and "MCP and search mocks (Phase 14)"). |
+| `testing/` | In-process test harness: `createTestApp()` (real composition over an in-memory database) and fakes (Phase 6: `fake-media.ts` with fake image and audio services; the fake media resolvers live in `providers/testing.ts`, and `chat/testing.ts` has `createMediaTestApp()`; Phase 7: `fake-keyring.ts`, a deterministic, rotatable keyring; Phase 8: `fake-checkpoints.ts` (an in-memory `CheckpointBlobStore`, a test row writer and journal-row helpers) and `fake-shell-rules.ts`; Phase 10: `fake-customizations.ts` and `createTestApp({ customizations, backgroundTasks })`; Phase 11: `fake-hooks.ts`, `createTestApp({ hooks, projectTrust, projectMcp })`, `hook-scripts.ts` (POSIX `sh` hook scripts written into a temp project: `deny`, `ask`, `allow`, `rewrite`, `context`, `exit2`, `error`, `sleep`, `record`, `env`, `stop-once`, `prompt-block`) and the MCP fixtures in `mcp/__fixtures__/` (the echo server with `pid` / `env` tools, a dependency-free stdio server and a grandchild fixture for the process-group checks); Phase 12: `fake-remote.ts` (a loopback server for `api.github.com`, `raw.githubusercontent.com`, `codeload.github.com` and archive hosts under host prefixes, every request logged; used with `HF_TEST_REMOTE_URL` or `createFakeSafeFetch`), `claude-fixtures.ts` (builders of Claude Code plugins, a marketplace and a fake home in `realpath(mkdtemp())` folders; nothing is committed), `createTestApp({ marketplaces, claudeImport, projectDefinitions })` (`'fake'` = `fake-marketplaces.ts`, `fake-claude-import.ts`, `fake-project-definitions.ts`; `HF_CLAUDE_HOME` defaults to `<dataDir>/claude-home`, never created, so no test reads the real `~/.claude`), the hook scripts `permission-allow`, `permission-deny`, `print-args` and `agent-context`, and `githubZipOf` in `plugins/install/testing.ts`; `createSourcesTestApp` in `plugins/marketplaces/testing.ts`); Phase 14 (complete and frozen from P14-0b): `fake-search.ts` (`createFakeSearchFetch()`: Brave, Tavily and Exa answers plus 401, 429, 500, timeout and oversize modes, with a request log), the fake remote's POST routes (bodies recorded), `createTestApp({ mcpAuth, elicitations })`, and in `mcp/__fixtures__/` the OAuth MCP server `oauth-mcp-server.mjs` (a script and an importable module on `@modelcontextprotocol/sdk` and `node:http`: stateful Streamable HTTP with SSE answers, a 401 with `WWW-Authenticate` until a valid Bearer, authorization-server metadata, dynamic registration, `/authorize`, `/token` with PKCE, expiry, refresh and `invalid_grant`, `/revoke`; tools `ask`, `ask_echo`, `slow_ask`; prompts and resources; counters and toggles; a stdio variant with `list_changed`); `harness.ts` `callTool` drains async-generator tools. |
 | `live/` | Opt-in live provider suite (`*.live.test.ts`, `pnpm test:live`, ADR-027): real provider calls with the keys in the environment; the image and voice checks only with `HF_LIVE_MEDIA=1`; excluded from `pnpm test` (PROVIDERS.md section 12). |
 | `assets/catalog/models-dev.json` (package root) | Bundled models.dev snapshot (updated by `pnpm catalog:update`); read at runtime, so it ships next to `dist/` (section 11). |
 | `drizzle/` (package root) | Generated SQL migrations, applied by `migrate()` at boot; ship next to `dist/`. |
@@ -246,6 +262,7 @@ Dependency direction (no cycles): `http/routes` -> `services`, `chat`, `catalog`
 | `components/settings/customize/`, `components/chat/background/`, `components/common/MarkdownEditor.vue` | Phase 10 (UI.md 7.28 – 7.30, 9.12): `CustomizeSettings`, `CustomizationSection`, `CustomizationRow`, `CustomizationEditor`, `CustomizationViewer`, `ToolMultiSelect`, `customize.ts`; `BackgroundAgents`, `BackgroundAgentRow`, `background-agents.ts`; in `chat/agent/`: `TaskResultNote`, `SkillToolBody`, `PlanFileChip`; in `composer/`: `SlashArgumentHint`, `RememberDialog`, `remember.ts`; `plugins/detail/PluginCustomizationList`; `utils/download.ts`. Definitions are parsed and formatted in the browser only with the shared `parseDefinition` / `formatDefinition` (import and export need no route). |
 | `components/settings/customize/` (Phase 11), `components/projects/{trust,mcp}/`, `components/chat/hooks/` | Phase 11 (UI.md 7.31 – 7.33, 9.13): the Customize tabs Output styles and Hooks (`HooksPanel`, `HookSection`, `HookRow`, `HookEditor`, `HookImportDialog`, `StyleScopeBar`, pure `hooks.ts`: event copy, the matcher preview over the shared matcher, the Claude JSON import over the shared reader); `trust/` (`ProjectTrustDialog`, `ProjectTrustItem`, `ProjectTrustChip`, pure `project-trust.ts`) and `mcp/` (`ProjectMcpDialog`, `ProjectMcpServerRow`); `chat/hooks/HookNote` with the pure `hook-notes.ts` (`toolHooksOf`, `isHookCarrierMessage`, the outcome texts), `chat/parts/tools/ToolHookBadge`, `chat/composer/OutputStyleMenu` and `ComposerRefusal` with the pure `output-style.ts` (`styleOptions`, `automaticStyle`, `refusalOf`), `plugins/detail/PluginHookList`. Hook configurations are parsed in the browser only with the shared `util/hooks.ts` (the import needs no route). |
 | `components/plugins/marketplaces/`, `components/settings/claude-import/`, `components/settings/customize/ProjectFileEditor.vue` | Phase 12 (UI.md 7.34, 8.13, 9.14): `MarketplacesView`, `MarketplaceSuggestion`, `MarketplaceStrip`, `MarketplaceAddDialog`, `MarketplaceEntryRow`, `MarketplaceInstallDialog` and the pure `marketplaces.ts`; `plugins/install/InstallReview` (the preview, trust and install steps shared by the install dialog and the marketplace dialog, so the fresh-auth flow exists once) and the GitHub tab; `plugins/detail/PluginUpdateBanner`; the import wizard (`ClaudeImportDialog`, `ClaudeImportSource`, `ClaudeImportPreview`, `ClaudeImportGroup`, `ClaudeImportItem`, `ClaudeImportResult`, pure `claude-import.ts`: `pickClaudeFiles`, the allowlist filter of a picked folder over the shared `classifyClaudeHomePath` and the caps, selections and result lines; the browser never opens a zip and never sees a file's content or an env value of the plan); `ProjectFileEditor` (the raw editor of a project's definition files and `.mcp.json`), the hook editor's Prompt type and project mode, `plugins/install/TrustConsent` (Enter in its password field emits `confirm`: the install review then logs in and installs, as a click on Install does; the plugin trust dialog's form still submits Trust), `plugins/detail/PluginClaudeInfo` and `plugins/list/PluginFormatBadge`, `settings/agent/AgentSettingsSection` (Hook model, Claude model names), the agent colors (`AGENT_COLOR_TOKENS` of `chat/agent/agent-tools.ts`) in `TaskBlock` and the Customize rows, qualified names in the slash menu, the hook notes and still-asks state of `chat/hooks/`, the 3 s linger of a stopped row in `chat/background/BackgroundAgents` (`BACKGROUND_STOPPED_LINGER_MS`) and the mixed select-all of the trust dialog. |
+| `pages/oauth/callback.vue`, `components/oauth/`, `pages/settings/search.vue`, `components/settings/search/` | Phase 14 (UI.md 7.35, 8.14, 9.15): the OAuth callback page (`auth` layout, `OAuthCallbackView`: reads the query once, removes it, posts it, returns to `returnTo`; 6.39), `McpOAuthFields` and the sign-in rows of `components/plugins/mcp/` and `components/projects/mcp/` (`useMcpSignIn`), `ElicitationCard` under a running MCP tool row (`TOOL_ELICITATIONS`; 6.40), the MCP group of the slash menu and the resource section of the mention menu (`useResourceMentions`; 6.41, 6.42), `WebSearchToggle` in the composer, `WebSearchToolBody` and the source chips (6.43, 6.44), and Settings → Web search (`WebSearchSettings`, the `web-search` store). |
 | `components/plugins/*` | `list`, `detail`, `forms`, `install`, `wizard`, `code`, `mcp` component groups. |
 | `components/share/` | `ShareDialog`, `SharesSettingsSection`, `SharedChatView`, `ShareToolRow`; the share page renders generated images as a gallery (Phase 6). |
 | `components/settings/`, `components/settings/{data,media,images,voice}/`, `components/providers/`, `components/common/` | Settings forms (incl. the Data and Media pages; Phase 7: `data/EncryptionKeySection`, `RotateKeyDialog`, `StorageCleanupSection` and `data/data-context.ts`, which lets the sections reload the summary and Shared links after a cleanup or a rotation; `voice/voice-settings.ts`: the dictation languages, speeds, voice field rules and the Test voice text), `ProviderIcon`, shared pieces (`Markdown.vue`, empty states). |
@@ -356,7 +373,14 @@ Notes:
   defaults (`hookModelRef` null, `modelAliases` all null), and **every v1.7 approval still matches** (a trust item
   without the new hook fields keeps its v1 hash bytes, 6.37); project hooks with v1.8-only keys (a prompt hook, a
   `SessionEnd` hook, `args` / `async` / `if`) are now parsed and show as pending until approved, so nothing new runs
-  before a review (new definition keys such as an agent's `disallowedTools` only restrict, 6.38).
+  before a review (new definition keys such as an agent's `disallowedTools` only restrict, 6.38). The first boot of
+  v1.9 on a v1.8 data directory applies **no migration** (the latest stays `0009`, 23 tables): the two new settings take
+  their defaults (`webSearchDefault` `off`, `webSearchNative` true), every chat without `webSearch` in its settings
+  searches nothing, `core-search` loads without a key and registers no tool, no server has a token record, and **every
+  v1.8 approval still matches** (the trust hash of a `.mcp.json` server already covered its raw object, an `oauth` key
+  included, 6.39). A remote server that answers 401 (an approved `.mcp.json` server with `oauth`, an OAuth-only server
+  of a Claude Code plugin, a personal server whose header key is wrong) now shows `needs-auth` once instead of
+  reconnecting with backoff, and nothing new runs before the user signs in or approves.
 - A failed boot prune of the checkpoint store is logged (`checkpoint prune failed`) and never fails the boot; the store
   folder itself must be creatable (a failing `mkdir` fails the boot like any other step).
 - Phase 10: the boot sweep of background tasks is `runs.boot()` (`ChatRunner.boot()` → `BackgroundTasks.start()`; not
@@ -371,6 +395,10 @@ Notes:
   Claude Code plugins load with the other user plugins (their whole-tree hash is computed then and cached; 6.33), the
   import keeps its plans in memory (6.35), and `<dataDir>/transcripts` (0700) is created the first time a hook needs a
   transcript; its orphan sweep runs on that first use (6.37).
+- Phase 14 adds no boot step: the OAuth flows and the pending elicitations live in memory and start empty (6.39,
+  6.40); connecting an MCP server reads its token record (never starts a sign-in), and the prompt and resource caches
+  fill when a server connects (6.41, 6.42). Shutdown cancels every pending elicitation (`cancel`, reason `stopped`)
+  before the MCP managers close, and drops the pending sign-ins after them.
 - Graceful shutdown (`SIGINT`/`SIGTERM`, `stopDeps()`): stop accepting connections, stop the automatic file sweep
   first (Phase 8, `data.stop()`: clears its timer and aborts a sweep in flight between batches), then `runs.stopAll()`:
   (Phase 9) clear every chat's steer queue (items removed with reason `stopped`, so no run ends by starting a queued
@@ -4247,6 +4275,317 @@ report followed by `FORK_LIMIT_NOTE` ("(The sub-agent stopped at its limit; this
 `/name` of one expands with a delegation directive that asks the main agent to call `task` (a user turn never starts a
 child by itself).
 
+### 6.39 OAuth for remote MCP servers (ADR-059)
+
+Phase 14 (v1.9). A remote MCP server (Streamable HTTP or SSE) that answers 401 can be **signed in to** with OAuth, for
+every origin of a server: personal servers (the MCP panel), plugin servers (`contributes.mcpServers`,
+`ctx.mcp.register`), Claude Code plugin servers and approved project `.mcp.json` servers. The protocol is the MCP
+authorization flow implemented by `@ai-sdk/mcp` (`auth()` with one `OAuthClientProvider` per server: protected-resource
+and authorization-server discovery, dynamic client registration or a configured client id, PKCE S256, resource
+indicators, `state` and issuer checks, refresh). The harness adds the browser round trip, the token storage and the
+status. User guide: `docs/guides/mcp-oauth.md`; UI: UI.md 8.14 (sign-in on the MCP panel and the project MCP dialog,
+the callback page), the route `/oauth/callback` in UI.md 6, wireframes in 2.20.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant W as Web (MCP panel / project MCP dialog)
+  participant A as /api (mcpAuth)
+  participant M as mcpAuth + MCP manager
+  participant S as MCP server
+  participant AS as Authorization server
+  participant C as Web (/oauth/callback, auth layout)
+  W->>A: POST /mcp/:id/oauth { returnTo } (project: /projects/:id/mcp/:serverId/oauth), session + Origin check
+  A->>M: start(target, redirectUri = <request Origin>/oauth/callback, returnTo)
+  M->>S: probe: one unauthenticated initialize POST (redirect: 'error', 20 s)
+  S-->>M: 401 + WWW-Authenticate (resource_metadata, scope)
+  M->>AS: auth() in start mode: resource + AS metadata, DCR or the configured client id (SDK URL guard)
+  M->>M: pending flow { state, code verifier, client, AS pin, target, returnTo } in memory (10 min, one per server)
+  A-->>W: { authorizationUrl (S256 challenge, state, resource, redirect_uri), redirectUri, expiresAt }
+  W->>AS: location.assign(authorizationUrl) (same tab)
+  AS-->>C: redirect to <origin>/oauth/callback?code&state&iss (a cross-site navigation: no hf_session cookie)
+  C->>C: read the query once, router.replace({ query: {} })
+  C->>A: POST /mcp/oauth/callback { state, code | error, iss? } (same-origin fetch: hf_session is sent)
+  A->>M: complete(): take the flow by state (single use), auth() in callback mode
+  M->>AS: token request (code + verifier + resource, issuer checked)
+  M->>M: store the token record (SecretStore, redactor), reconnect the server
+  A-->>C: { target, status, returnTo }
+  C->>W: navigateTo(returnTo, { replace: true }), toast "Signed in to {server}."
+```
+
+- **Why a page, not a server callback route.** The session cookie `hf_session` is `SameSite=Strict` (10.1): the
+  browser does not send it on the cross-site redirect from the authorization server, so a server route at the redirect
+  URI could not tell the user's browser from anyone else's. The redirect therefore lands on the SPA page
+  `/oauth/callback` (layout `auth`: no sidebar, so `AppSidebar`'s `rememberRoute` never records the `?code=` URL and no
+  sidebar store loads); the page removes the query from the history at once and posts it with its own **same-origin**
+  fetch, which carries the cookie and passes the Origin check like every other request. With an expired session the
+  auth middleware sends the page to `/login?redirect=<path with the query>`, so the code and state survive the login and
+  the page finishes afterwards (inside the 10-minute flow). The route is neither public nor fresh-auth.
+- **Redirect URI** = `<request Origin>/oauth/callback`: the Origin of the start request already passed the origin check
+  (the server origin, or the dev origins `localhost:3000` / `127.0.0.1:3000`, 10.2); there is no public-URL setting.
+  The callback must reach the same origin, so a pre-registered client must list that exact URI (the UI shows it with
+  Copy; an authorization server that refuses an `http:` LAN origin needs HTTPS in front of the server, guide
+  `mcp-oauth.md`). Same tab, never a popup: COOP `same-origin` cuts `window.opener`, a popup opened after an `await` is
+  blocked, and a phone has no room for one; a running chat keeps going on the server and resumes when the user returns.
+- **Pending flows** (`mcp/oauth/flows.ts`, memory only): keyed by `state`, one per server (a new start replaces the old
+  flow), at most 20 (`mcpOAuthFlowsMax`), 10 minutes (`mcpOAuthFlowMs`), single use; the code verifier, the dynamically
+  registered client and the authorization-server pin live on the flow, never in a log or a DTO. `returnTo` (`/`-relative,
+  not `//`, at most 512 characters) stays on the server and comes back with the callback answer, so it never travels to
+  the authorization server.
+- **The provider** (`mcp/oauth/provider.ts`), one `OAuthClientProvider` per server in three modes:
+  - **connect** (background connects and reconnects, the transport's own 401 handling): returns the stored tokens and
+    saves refreshed ones; `clientInformation()` throws `McpAuthRequired` when no record is stored, so the background
+    **never registers a client** and never starts a sign-in; `state()` and `redirectToAuthorization` throw.
+  - **start**: a fresh `state` and code verifier on the flow; `clientInformation()` omits a `client_secret` on first use
+    (a confidential client must be tied to its authorization server, or `auth()` throws); `redirectToAuthorization`
+    captures the URL instead of navigating.
+  - **callback**: the flow's client (with its secret for a personal server) and authorization-server pin.
+  Before a sign-in, `mcp/oauth/probe.ts` sends one unauthenticated `initialize` POST to the MCP URL (`redirect: 'error'`,
+  20 s) and reads `resource_metadata` and `scope` from `WWW-Authenticate` (the transport keeps them private), passing
+  them to `auth()`; a 401 without any OAuth metadata gives a clearer error ("This server asks for credentials but offers
+  no sign-in. Add an Authorization header instead.", W14.1 fixes the text).
+- **The SDK URL guard.** `auth()` checks every cross-origin OAuth URL itself (it refuses private and loopback literals
+  and pins DNS, provider-utils `createSafeNodeFetch`) **only while no custom `fetch` is passed**: the harness never
+  passes `fetch` to an MCP transport or to `auth()` (a test pins the transport config). On top, `mcp/oauth/guard.ts`:
+  `validateAuthorizationServerURL` accepts an authorization server on `https:` only, unless it shares the MCP server's
+  origin or both are loopback; the authorization URL handed to the browser must be `http(s):`; `validateResourceURL`
+  follows the SDK's check and records whether discovery succeeded. MCP requests keep `redirect: 'error'`.
+- **Status `needs-auth`.** A 401, an `UnauthorizedError` or `McpAuthRequired` while connecting (or from a tool call) is
+  the permanent error `auth_invalid { status: 401 }`: the server's status becomes `needs-auth` (`mcpStatusSchema`, and
+  the project state of `projectMcpStateSchema`), it is **not retried with backoff**, its tools are unavailable (also to
+  sub-agents and background tasks; `GET /tools` lists them `available: false`) and nothing prompts by itself: only the
+  user's **Sign in** starts a flow. A refresh token renews the access token inside the transport (the provider saves
+  it); `invalid_grant` drops the tokens and gives `needs-auth`. Upgrade note: a server that used to answer 401 because
+  of a wrong header key now shows `needs-auth` instead of reconnecting forever.
+- **Where sign-in applies.** HTTP and SSE servers without an `Authorization` header; a stdio server or one with that
+  header answers 400 (`validation_error`); a disabled server 409 `disabled` (also every project server in safe mode); a
+  project server that is not approved 409 `untrusted` (approve first, 6.29). `HF_OFFLINE` and `HF_SAFE_MODE` change
+  nothing else (personal servers still sign in in safe mode).
+- **Client configuration** (optional; dynamic registration is the default): personal HTTP / SSE servers take `oauth {
+  clientId?, scopes?, clientSecret? }` in their transport input and update (a null `clientSecret` in an update keeps the
+  stored one; the DTO shows `transport.oauth { clientId, clientSecret: SecretState, scopes }` and never the value);
+  plugin declarations `transport.oauth { clientId?, scopes? }` (`{{settings.x}}` allowed in `clientId`, resolved by
+  `templating.ts`); Claude Code plugin servers keep their `oauth` object (`clientId`; `callbackPort` reads as the info
+  "signs in through its own callback page"); project `.mcp.json` remote servers gain `oauth { clientId, scopes }`
+  (`parseMcpJson`; `callbackPort` gives the same info; the trust hash already covered the raw server object, `oauth`
+  included, so v1.8 approvals stay valid). A client secret exists only for personal servers. Every DTO (`McpServer`,
+  `ProjectMcpServer`) gains `auth: { signedIn, expiresAt, scope, client: dynamic | configured | null, issuer } | null`.
+- **Sign out** (`DELETE …/oauth`): deletes the token record, then makes a best-effort RFC 7009 revocation of the
+  refresh token (else the access token) at the authorization server's `revocation_endpoint` through `safeFetch` POST
+  (`mcp/oauth/revoke.ts`; under the authorization-server rule above, 10 s; a failure is only logged at `debug`); the
+  server reconnects without tokens and shows `needs-auth`. The server stays configured.
+
+| Route (module `mcpAuth`) | Answer |
+|---|---|
+| `POST /mcp/:id/oauth` | `{ authorizationUrl \| null, redirectUri, expiresAt }` for any server of `GET /mcp` (personal, plugin, Claude Code plugin; the manager's `authTarget(id)` finds its origin); body `{ returnTo? }`; `authorizationUrl: null` = already authorized (a refresh worked; the server reconnected); 400 / 404 / 409 as above |
+| `DELETE /mcp/:id/oauth` | the `McpServer` after the sign-out |
+| `POST /projects/:id/mcp/:serverId/oauth` | as `POST /mcp/:id/oauth` for an approved project server; 409 `untrusted` for a pending one |
+| `DELETE /projects/:id/mcp/:serverId/oauth` | the `ProjectMcpServer` after the sign-out |
+| `POST /mcp/oauth/callback` | body (strict) `{ state (16 – 256), code?, iss?, error?, errorDescription? }` with exactly one of `code` / `error`; answer `{ target: { kind: 'global', serverId } \| { kind: 'project', projectId, serverId }, status, returnTo \| null }`; an unknown, used or expired `state` is 409 `stale` ("This sign-in link was already used or expired." in the UI); an authorization-server `error` or a failed token exchange is an error whose message carries the provider's description as plain text (capped) and whose details name the server, so the page can offer **Try again** |
+
+None of the nine Phase 14 routes needs fresh auth or is public (API.md, "MCP OAuth" and the `mcpAuth` route sections).
+State changes reach the web through the existing `plugin.changed` (global servers) and `project-mcp.changed` (project
+servers) events; there is no new SSE event. Token storage, redaction, backups and key rotation: 10.14.
+
+### 6.40 MCP elicitation: the first live wait (ADR-060)
+
+Phase 14. An MCP server can ask the user for structured input in the middle of a tool call (`elicitation/create`). This
+is the first time a harness run **waits for the user**: approvals still end the run and continue in a new request (6.2),
+but an elicitation keeps the tool call, and so the run, open while a form card waits in the chat. UI: UI.md 7.35 (the
+card, the countdown, the sidebar's "Needs your input").
+
+- **Capability.** Every MCP client declares `capabilities: { elicitation: {} }` (form mode) and registers
+  `onElicitationRequest(ElicitationRequestSchema, broker.handler(runtimeKey))`; the broker is `deps.elicitations`
+  (`mcp/elicitation/broker.ts`). Server requests reach the handler on every transport (an HTTP server needs a stateful
+  session with SSE answers to send one; HTTP and SSE clients still drop server notifications). A server on the
+  protocol `2026-07-28` cannot elicit through the AI SDK (its multi-round-trip requests are not supported yet): such a
+  server is reconnected once without the capability, and that is remembered for the server while the process runs.
+- **Attribution.** The SDK hands the handler only the request, with no request id and no link to the tool call that
+  caused it, and one client serves every chat. So `mcp-tools.ts` registers each call before `callTool`
+  (`elicitations.begin(call)` → a handle with the chat id, the tool call id and whether a main agent, a sub-agent or a
+  background task made it) and the broker looks at the client's calls in flight when a request arrives:
+  - every call in flight comes from **one chat** and from its **main agent** → the oldest of them gets the request;
+  - calls from more than one chat → `decline`, reason `ambiguous`;
+  - a sub-agent or background call in flight, or no call at all → `decline`, reason `not-interactive` (sub-agents and
+    background tasks never elicit, as they never ask for approval);
+  - a schema outside the supported subset (`parseElicitationForm` in `packages/shared/src/util/mcp-elicitation.ts`: a
+    flat object of at most 20 fields: strings with length bounds and the formats `email` / `uri` / `date` /
+    `date-time`, numbers and integers with bounds, booleans, single-select enums (`enum` / `enumNames` / `oneOf`) and
+    multi-select arrays of an enum) or URL mode → `decline`, reason `unsupported`.
+- **The card travels in the tool part.** `mcpToolDefinition`'s `execute` is an async generator (the streaming tool path
+  of 6.22: the first preliminary output at once, then at most one per 250 ms, the latest winning). While a request
+  waits, the call yields the preliminary output `{ status: 'input-required', elicitation }` (`mcpToolProgressSchema`;
+  `elicitation` = `McpElicitation { id (eli_…, memory only), serverId, serverName, message (≤ 2,000 characters, cleaned
+  by elicitationMessageText), form, expiresAt }`) and **yields it again every 25 s** as a keep-alive, so a reverse proxy
+  with an idle timeout (nginx: 60 s) does not cut the stream; after the answer it yields `{ status: 'running' }`, then
+  the final output. There is no new data part and no new SSE event: a reloaded tab or a second tab gets the card from
+  the run's resume buffer, which replays the stream from its first chunk (6.3).
+- **The answer.** `POST /chat/:id/elicitations/:elicitationId { action: accept | decline | cancel, content? }`
+  (`content` only with `accept`; values string, number, boolean or string[]): validated with
+  `validateElicitationAnswer` against the request's form (400 `validation_error` with the field issues); 404 for an
+  unknown id or another chat's; 409 `stale` when it was already answered, expired or its run ended. The answer resolves
+  the handler (the MCP server gets `{ action, content }`) and the route answers `{ action }`.
+- **Waits are bounded.** 480 s (`mcpElicitationWaitMs`) → `cancel`, reason `timeout`; the chat's Stop, deleting the
+  chat, a key rotation and the shutdown → `cancel`, reason `stopped`. MCP tools get an outer timeout of 600 s and a
+  **pausable active budget** of 60 s (`mcpToolActiveMs`) on the `callTool` signal that does not count the time spent
+  waiting for the user (before Phase 14 an MCP call had the 60 s tool guard; now every MCP call runs through the
+  streaming path).
+- **Values are never stored.** The final output adds `elicitations: [{ id, message, fields (names only), action,
+  reason }]` (`mcpElicitationRecordSchema`; `mcpModelOutput` strips it from the model's view); the values the user typed
+  go only to the MCP server, never into `messages`, a log line, a backup or a share. `isSensitiveField` marks fields
+  that look like secrets so the card warns.
+- **Side signals.** While a chat has a pending request, `ChatSummary.awaitingInput` is true (`pendingCount(chatId) >
+  0`; set in `GET /chats`, `GET /chats/:id` and every `chat.updated`, which the broker emits when a wait begins and
+  ends), so the sidebar shows "Needs your input" (live only, never persisted: after a restart nothing waits). The
+  `Notification` hooks run with `notification_type: 'elicitation_dialog'` (Claude Code's type) through
+  `agentScope.notify` (bound in `pipeline.ts`). A tool call that needs approval still asks first and ends the run; its
+  continuation then executes the call, which may elicit.
+
+### 6.41 MCP prompts as slash commands (ADR-061)
+
+Phase 14. The prompts of connected MCP servers become slash commands named like Claude Code's:
+`/mcp__<serverId>__<prompt>` (`mcpPromptCommandName`, sanitized like `mcpToolName`: characters outside `[\w-]` become
+`_`, longer names are cut to 55 characters plus `_` and an 8-hex hash, at most 64; `MCP_PROMPT_NAME_PATTERN =
+/^mcp__[\w-]{1,59}$/` is accepted next to `catalogNameSchema` by `commandInvocationSchema.name`,
+`commandSummarySchema.name` and `parseSlashCommand`).
+
+- **Cache** (`mcp/prompts.ts`): per connected server with the `prompts` capability, `prompts/list` (paged; at most 200
+  prompts, `mcpPromptsMax`, and 20 arguments each, `mcpPromptArgumentsMax`) when it connects, again on a stdio
+  `notifications/prompts/list_changed` and on a listing when the cache is older than 60 s (HTTP and SSE servers cannot
+  notify); a change emits `customization.changed { kind: 'command' }` so the slash menus refetch.
+- **Listing** (`GET /commands?projectId=`, `listServerCommands` with `CommandServices.mcp` / `projectMcp`): the prompts
+  of connected global servers and, with `projectId`, of that project's connected servers (a project server shadows a
+  global server with the same id, as for tools, 6.30), each with `source: 'mcp'`, `mcpServer { id, name }`, the prompt's
+  description and `argumentHint` (`mcpPromptArgumentHint`: `<required> [optional]` in declared order). Servers that are
+  pending, `needs-auth` or not connected list nothing.
+- **Invocation** (`resolveCommand`'s MCP branch, `CommandContext.projectId`): the text after the name binds to the
+  declared arguments (`bindMcpPromptArguments`: shell-like words, `name=value` by name, the rest positionally, the last
+  argument takes the rest of the line); `prompts/get` runs **once** (`getPrompt(serverId, name, args, signal)`) and its
+  result is **frozen** into `metadata.command.expansion` (at most 64 KB, `source: 'mcp'`, type `prompt`), so
+  regenerate and continuation never call the server again (`applyCommandExpansions`, 6.24). A missing required
+  argument, an unknown prompt or a server that is not connected (or needs a sign-in) gives a `failed` resolution: a
+  `reply` invocation with the error, no model call.
+- **Content mapping** (`mcp/content.ts`): text of user messages only is joined as it is; when the result has an
+  assistant message, every message is wrapped as `<prompt-message role="user|assistant">…</prompt-message>`; embedded
+  text resources become `<resource uri="…" mimeType="…">…</resource>` blocks; images, binary contents and resource
+  links become one-line placeholders. Prompt results are untrusted text (10.14).
+
+### 6.42 MCP resources in `@` mentions (ADR-061)
+
+Phase 14. The `@` menu of every chat with tools on (not only project chats) lists the resources of connected global
+servers, plus the project's servers in a project chat (templates are not listed). Picking one reads it once and
+attaches it as a normal upload, so the model sees a file, not a live link.
+
+- **Cache** (`mcp/resources.ts`): per connected server with the `resources` capability, `resources/list` (paged, at
+  most 1,000 per server, `mcpResourcesMax`) under the same refresh rules as prompts (6.41).
+- `GET /mcp/resources?projectId&q&limit` → `{ items, truncated, unavailable: [{ serverId, status }] }`: entries `{
+  serverId, serverName, scope: global | project, uri (≤ 2,048), name, title?, description?, mimeType?, size?, mention }`
+  ranked by `q` (≤ 256 characters), `limit` 1 – 100 (50); `unavailable` names the servers that could not answer
+  (`needs-auth`, connecting, error) so the menu can say why.
+- `POST /mcp/resources/attach { serverId, uri, projectId? }` → `readResource(serverId, uri, signal)` → 201 `FileRef`
+  through the upload path (`files.upload`): text contents become `text/plain` (or the server's `text/*` type), several
+  text contents are joined; a binary content must be an image or a PDF; more than 5 MiB (`mcpResourceReadBytes` =
+  `mentionFileMaxBytes`) answers 413; a server that needs a sign-in answers 409 `needs-auth`, one that is not connected
+  `provider_unreachable`.
+- **Text**: the composer inserts `@<serverId>:<uri>` (`formatResourceMention`; `parseResourceMention` reads it; both in
+  `packages/shared/src/util/mentions.ts`, the file-mention grammar and its golden tests unchanged); the text is display
+  only, the attachment is what counts.
+- **Tool results**: `resource` and `resource_link` items in MCP tool results become readable text for the model through
+  `mcp/content.ts` instead of raw JSON.
+
+### 6.43 Web search: the per-chat mode, one resolver, native search (ADR-062, ADR-063)
+
+Phase 14. Web search is a per-chat toggle. A turn with search on uses **either** the model's own provider-executed
+search tool (native) **or** the builtin `search_web` tool of `core-search` (6.44), **never both** in one request. User
+guide: `docs/guides/web-search.md`; UI: UI.md 7.35 (the composer toggle, the search rows, the source chips) and 9.15
+(Settings → Web search).
+
+- **Mode**: chat setting `webSearch: 'off' | 'auto'` (`chats.settings`, set through `PATCH /chats/:id`; null removes
+  it), request body `webSearch?`, and the global settings `webSearchDefault` (`off`, because a search costs money and
+  sends the query out) and `webSearchNative` (true; false = always the builtin): **body > chat > global** (34 settings;
+  the web toggle maps on → `auto`).
+- **Native support**: `ProviderDefinition.webSearch?(model, { functionTools, maxUses })` (plugin API 1.7.0; synchronous,
+  no I/O, called inside try/catch like `reasoning`; `providerWebSearch` in `chat/search/resolve.ts`) returns `{ tools?,
+  providerOptions?, exclusive? }` or undefined. The host accepts only tools of `type === 'provider'` whose key does not
+  collide with a function tool. The catalog probes the hook with `{ functionTools: 0 }` and lists the answer as
+  `CatalogModel.webSearch`: `native`, `exclusive` (Gemini 2.x: a Google tool makes the model drop every function tool) or
+  null. The builtin providers' choices (tools, versions, deny-lists, citations) are in PROVIDERS.md's native search
+  matrix; `maxUses` is `WEB_SEARCH_MAX_USES` (5).
+- **One resolver** (`resolveWebSearch`, `packages/shared/src/util/web-search.ts`, used by the server for every turn
+  and by the composer for the toggle's state): mode `off` → off; tool mode `off` → unavailable `tool-mode-off`; native
+  support with `webSearchNative` → native; `exclusive` support with `webSearchNative` and no other function tool this
+  turn → native (exclusive); the builtin is available (a backend key is set) and the model supports tools → builtin;
+  otherwise unavailable: `tools-conflict`, `tools-unsupported` or `no-backend`. Ask, Accept edits, Plan and Auto all
+  allow search (it only reads). An unavailable result writes the notice `web-search-unavailable` (info, `details.reason`;
+  once per chat, model and reason; 12 notice codes).
+- **Applying it** (`applyWebSearch`): **native** adds the provider tools to the turn's tool set and `nativeTools`,
+  appends their names to `activeTools` when that list is set (plan mode), merges the provider options (OpenRouter
+  models without tool support search through `providerOptions.openrouter.plugins: [{ id: 'web', max_results: 5 }]`
+  and no tool) and removes `search_web`; **builtin** keeps `search_web` and adds no provider tool; **off** and
+  **unavailable** remove `search_web` (so the builtin tool is offered only while search is on). Sub-agents, background
+  ones included, inherit the chat's mode and resolve it again for the child's own model (`subagent/{index,tools}.ts`).
+- **Approval of provider-executed calls.** The AI SDK runs the approval function for every tool call whose name is a
+  key of the tool set, **provider-executed calls included** (`ai/dist/index.js:7898-7951`): `not-applicable` never
+  re-executes a provider-executed call, while `denied` would emit `tool-output-denied` for a search the provider
+  already ran. So the very first rule of `createToolApproval` is: a name in `ToolApprovalContext.nativeTools` **and**
+  `providerExecuted === true` → `not-applicable`, before the plan-exit card, the hooks and the records; a native name
+  without `providerExecuted` (a model calling it as a function) → denied; unknown names stay denied. No `PreToolUse`,
+  `PermissionRequest`, `tool.approve`, `PostToolUse` or `tool.after` runs for a provider-executed call (it cannot be
+  blocked after the fact, so it is not observed either). Calls whose name is not in the tool set (Google's dynamic
+  `server:*` calls, Anthropic's hidden `code_execution`) skip the approval function in the SDK.
+- **History stage** (`chat/search/history.ts`, before `toolPartsAsText`): provider-executed parts
+  (`isProviderExecutedPart`) of an assistant message are kept only when that message's provider (`metadata.modelRef`)
+  is the current provider, which keeps Anthropic's encrypted search results and thought signatures intact; after a
+  switch to another provider they are removed. The builtin tool is named `search_web`, never `web_search`: Anthropic's
+  server tool always uses the wire name `web_search`, and a function tool of that name in the history next to a declared
+  server tool is a likely 400 after a model switch.
+- **Sources**: the providers' citations stream as `source` parts (`sendSources: true`) and are saved, shared (http(s),
+  ≤ 2,048 characters) and exported ("Source:" lines) as before; Groq's browser search gives none. There is no fee
+  accounting: native search fees are billed by the provider and are not in the cost estimate (OpenRouter's reported
+  cost already includes them). Anthropic's `encryptedContent` is stored in the message (`maxUses` 5 bounds it) and
+  stripped from share snapshots; Anthropic's `pause_turn` maps to `stop`, so a very long server-tool loop ends the
+  turn.
+
+### 6.44 The builtin `search_web` tool (`core-search`, ADR-063) and `safeFetch` POST
+
+Phase 14. The builtin plugin `core-search` (loaded after `core-tools`) owns the tool `search_web`, backed by a search API
+the user brings a key for: **Brave Search**, **Tavily** or **Exa**.
+
+- **Settings** (Settings → Web search writes them through `/plugins/core-search/settings`): `backend` (`brave` |
+  `tavily` | `exa`, default `brave`), the `format: 'secret'` settings `braveApiKey`, `tavilyApiKey`, `exaApiKey`
+  (encrypted, scope `plugin:core-search`, write-only) and `maxResults` (1 – 10, default 5).
+- **Registration**: `search_web` is registered only while the selected backend has a key; `ctx.settings.onChange`
+  registers or disposes it, so `GET /tools` lists it only then and the resolver's `builtinAvailable` follows. Policy
+  `safe`: the composer toggle is the consent (tool preferences can still set ask or deny).
+- **Tool**: input `{ query (1 – 400 characters), count? (1 – 10, default `maxResults`), freshness?: day | week | month |
+  year }`; output `{ query, backend, results: [{ title (≤ 300), url (http(s), ≤ 2,048), snippet (≤ 800), published |
+  null }] }`, at most 32 KB serialized (`searchWebOutputBytes`; results are dropped from the end until it fits).
+- **Request path**: `search_web` → the backend module → `createPluginSourceFetch` (https only; with the test-only
+  `HF_TEST_REMOTE_URL` and `HF_MOCK_PROVIDER=1`, `<base>/<host>/<path>` on loopback, 6.34) → `safeFetch` with a 10 s
+  timeout (`searchWebTimeoutMs`), a 1 MB answer cap (`searchWebFetchBytes`) and no redirect. Planned shapes, verified
+  against the vendors' documentation when W14.5 implements them: Brave `GET
+  https://api.search.brave.com/res/v1/web/search?q&count&freshness` with `X-Subscription-Token`; Tavily `POST
+  https://api.tavily.com/search` with `Authorization: Bearer` and a JSON body (`query`, `max_results`, `search_depth`,
+  `time_range`); Exa `POST https://api.exa.ai/search` with `x-api-key` and a JSON body (`query`, `numResults`, `type`,
+  `contents`, `startPublishedDate`). Only the query, the count and the freshness reach the vendor.
+- **`safeFetch` POST** (P14-0b): `method: 'GET' | 'HEAD' | 'POST'` and `body?: string | Uint8Array` (POST only, at most
+  64 KB, sent with `content-length`); a POST never follows a redirect (the 3xx is the result); the SSRF guard (10.4)
+  and the DNS pinning are unchanged.
+- **Errors**: 401 / 403 → `provider_error` "{backend} rejected the search key." (the key is never echoed); 429 →
+  `rate_limited` (with `retryAfterMs` when given); other statuses and unreadable answers → `provider_error`; network
+  failures and timeouts → `provider_unreachable`. A failing call is a tool error the model sees; nothing is retried.
+- **Sources transform** (`chat/search/sources.ts`, after `generatedFiles` in the pipeline's transform chain, inside the
+  same `createUIMessageStream` wrapper so the chunks reach the saved message, 6.11): after each final `search_web`
+  output of `core-search` (the owner is checked; tool names come from `tool-input-available` chunks and, for a
+  continuation, from the continued message), it emits a `source-url` chunk per result (http(s) only, deduplicated by URL
+  within the message). The saved message, the share snapshot and the Markdown export therefore carry the builtin
+  search's sources like a provider's citations.
+- **Test route** `POST /web-search/test { backend? }` (module `webSearch`): one search with the stored key of that
+  backend (default the selected one) → `{ ok: true, backend, results (count), ms }`; failures answer with the error
+  codes above. **Test search** on Settings → Web search calls it.
+- `HF_OFFLINE=1` does not block `search_web` (like `web_fetch`: it is a list of switches, not "no network"); a search
+  runs only in a turn where the user turned search on. Queries and keys are never logged at `info` (12).
+
 ## 7. Data directory
 
 ```
@@ -4293,7 +4632,9 @@ run live in the project folders. Phase 12 adds only `transcripts/` (derived from
 marketplaces are rows of the database (their catalogs included); a Claude Code plugin lives in `plugins/<id>/` in its
 own layout, byte for byte with its exec bits, and `plugins/.data/<id>/` is its `${CLAUDE_PLUGIN_DATA}` (kept across
 updates, removed on uninstall unless `keepData`); import plans live in memory only; nothing is ever written into a
-Claude Code home folder.
+Claude Code home folder. Phase 14 adds no folder: MCP OAuth token records are encrypted secrets (10.14), pending
+sign-ins, pending elicitations and the MCP prompt and resource caches live in memory, an attached MCP resource is a
+normal upload in `files/`, and the search keys are secret settings of `core-search`.
 
 ## 8. Data model
 
@@ -4333,7 +4674,7 @@ diskBytes }` of the automatic sweep, and the public key `fileSweep`).
 | Column | Type | Constraints |
 |---|---|---|
 | `scope` | text | NOT NULL; `provider:<id>` \| `plugin:<id>` \| `mcp:<id>` \| `auth` |
-| `name` | text | NOT NULL; e.g. `apiKey`, `settings.<key>`, `header.<Name>`, `env.<NAME>`, `password` |
+| `name` | text | NOT NULL; e.g. `apiKey`, `settings.<key>`, `header.<Name>`, `env.<NAME>`, `password`; Phase 14: `oauth.record`, `oauth.clientSecret` (scope `mcp:<id>`) and `mcp-oauth.<serverId>` (scopes `plugin:<id>`, `project:<projectId>`), 10.14 |
 | `ciphertext` | bytes | NOT NULL; `iv (12 B) \|\| AES-256-GCM ciphertext \|\| tag (16 B)` |
 | `hint` | text | NULL; masked hint computed at write time (`sk-…9fQ2`), never the value |
 | `key_version` | integer | NOT NULL DEFAULT 1; equals `_keys.version` after a rotation (6.14); a row of another version cannot be read |
@@ -4486,7 +4827,7 @@ a compaction summary or a sub-agent); kept when a chat is deleted.
 |---|---|---|
 | `id` | text | PK; `^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$` |
 | `name` | text | NOT NULL |
-| `transport` | json | NOT NULL; `{ type: 'http' \| 'sse', url, headerNames[] }` or `{ type: 'stdio', command, args[], envNames[] }` |
+| `transport` | json | NOT NULL; `{ type: 'http' \| 'sse', url, headerNames[] }` or `{ type: 'stdio', command, args[], envNames[] }`; Phase 14: http / sse may add `oauth { clientId?, scopes? }` (a TypeScript-only change of `McpTransportRecord`, no migration; the client secret and the token record are secrets, 6.39) |
 | `policy` | text | NOT NULL DEFAULT `ask`; `ToolPolicy` |
 | `enabled` | boolean | NOT NULL DEFAULT 1 |
 | `created_at` | timestamp | NOT NULL |
@@ -4775,6 +5116,11 @@ checks 23 tables, the tags `0000` … `0009`, the old rows intact, `format = 'ha
 `integrity_check` / `foreign_key_check` stay clean. Every new column is in `UNSCANNED_COLUMNS` (sources, refs,
 catalogs, prompts, model refs, options: never a `data/files` id).
 
+Phase 14 (ADR-059 … ADR-063) adds **no migration** (the latest stays `0009`, 23 tables): the chat's `webSearch` lives in
+the `chats.settings` JSON, the two new settings are rows of `settings`, `mcp_servers.transport` (JSON) may carry
+`oauth`, OAuth token records and client secrets are `secrets` rows, and pending sign-ins and elicitations live in
+memory. `pnpm db:generate` must report no changes after the `McpTransportRecord` type edit (Gate P14-0b).
+
 Not stored in the DB: sessions (stateless HMAC cookie), active runs and resume buffers (memory), plugin logs
 (memory ring buffer), SSE subscribers (memory), share tokens (recomputed from the share id), rate-limit counters and
 the maintenance lock (memory; Phase 7, it replaced the import / delete-all mutex), the file cleanup's pins (memory),
@@ -4796,6 +5142,10 @@ at most 4, with their payloads), the file digests behind the whole-tree hashes o
 path, size, mtime, ctime, inode and device, at most 20,000 files; the pin itself is `plugins.trusted_hash`), the
 transcripts (`transcripts/`, rebuilt from the messages), the in-flight prompt-hook calls and detached `async` /
 `SessionEnd` hooks (memory, tracked), and the Claude Code home folder (read on request, never copied as a whole).
+Phase 14: the pending OAuth sign-ins (memory, 10 minutes, at most 20, with their code verifiers), the pending
+elicitations and each MCP client's calls in flight (memory; a restart loses them, and it ends every run anyway), the
+MCP prompt and resource caches (memory, per server), the `2026-07-28` capability fallback per server (memory), and the
+resolved web search of a turn (derived per run; the provider-executed parts and sources it produced are message parts).
 
 ## 9. Model catalog
 
@@ -4858,6 +5208,10 @@ Summary; the full rules (per-provider listing quirks, seeds, reasoning mapping) 
   tokens x `cost.input` + output tokens x `cost.output`) / 1,000,000 of the image model, rounded to 1e-10, and are shown
   as estimates; no catalog price, no reported token counts (xAI) or a used token kind without a price gives no cost
   (6.11); transcription and speech rows carry no cost.
+- **Native web search** (Phase 14, ADR-062): `CatalogModel.webSearch` is `native`, `exclusive` or null, computed in
+  `merge.ts` for chat models by calling the provider's `webSearch` hook with `{ functionTools: 0, maxUses: 5 }` (no
+  I/O; a throwing hook counts as null). It is not a `capabilities` flag and is not stored: it follows the provider code
+  of the running version. The composer feeds it to the shared resolver (6.43); PROVIDERS.md has the matrix.
 - Changes emit `catalog.changed` (`{ providerId? }`); the web refetches `GET /api/models`.
 
 ## 10. Security model
@@ -4866,8 +5220,9 @@ Threat model: a single trusted user; the server may be reachable from a LAN or t
 attackers may control web pages the user visits (CSRF/XSS), model output (prompt injection), MCP servers,
 third-party plugins and (Phase 7 on) the content of the project folders the user opens, including (Phase 11) the hooks,
 `.mcp.json` servers and command lines a cloned repository ships (10.12), and (Phase 12) Claude Code plugins,
-marketplaces and GitHub archives from the network and the files of an imported Claude Code home folder (10.13).
-Multi-user isolation is out of scope (ADR-012).
+marketplaces and GitHub archives from the network and the files of an imported Claude Code home folder (10.13), and
+(Phase 14) the authorization servers of remote MCP servers, the prompts, resources and elicitation requests MCP servers
+send, and the results of web searches (10.14). Multi-user isolation is out of scope (ADR-012).
 
 ### 10.1 Authentication and sessions
 
@@ -4881,7 +5236,7 @@ Multi-user isolation is out of scope (ADR-012).
 | Revocation | `epoch` must equal the internal setting `_auth.sessionEpoch`; changing or removing the password increments it, which invalidates every session (the caller gets a fresh cookie). Logout clears the cookie. Phase 7: a master-key rotation also invalidates every session (cookies are signed with the `session` subkey; the rotating caller gets a new cookie that keeps its `authAt`), and both the rotation and a password change close every event stream (`events.disconnectAll()`, 6.14). |
 | Fresh auth | ADR-017. When a password is set, sensitive operations require `now - authAt <= 10 min`, else `403 forbidden` with `action: 'login'` (the web asks for the password — inline in the install and trust dialogs, else in `ConfirmPasswordDialog` — calls `POST /api/auth/login` and retries): installing a plugin that requires trust (code or stdio MCP, with or without `trust`), `POST /api/plugins/:id/trust`, scaffolding a code plugin, `POST /api/plugins/:id/build`, `POST /api/plugins/:id/reload` of a code plugin, writing or deleting files of a plugin that runs code (`PUT` / `DELETE /api/plugins/:id/files/*`), creating or changing a stdio MCP server (also inside a created declarative plugin), `PUT /api/auth/password`, creating or updating a share link (`POST /api/shares`, `PATCH /api/shares/:id`), deleting all data (`POST /api/data/delete`) and, since Phase 7, creating a project (`POST /api/projects`) and rotating the master key (`POST /api/keys/rotate`); since Phase 11 (10.12), creating a personal hook (`POST /api/hooks`), changing one (`PATCH /api/hooks/:id`, unless the body only turns it off), approving project items (`POST /api/projects/:id/trust`) and setting project MCP variables (`PUT /api/projects/:id/mcp/variables`); installing a declarative plugin with command hooks or `!` spans in a command template counts as installing one that requires trust. The window is 10 minutes, so the editor asks at most once per window; such an editor save also re-pins a trusted `created` plugin (10.4). |
 | Login rate limit | Failed password checks (`POST /api/auth/login` and the current-password check of `PUT /api/auth/password`): 5 per 15 min per client address and 50 per 15 min globally, then `429 rate_limited` with `retryAfterMs` and a `Retry-After` header. A successful login resets the per-address counter. The client address is the TCP peer, or, when the peer is a proxy listed in `HF_TRUST_PROXY`, the client named by `X-Forwarded-For` (10.6); a forwarded header from any other peer is ignored because any client can forge it. **Without `HF_TRUST_PROXY`** every client behind a proxy shares the proxy's address, so 5 failed attempts from anyone lock out every client (including you) for up to 15 minutes: set `HF_TRUST_PROXY` for your proxy, and limit access at the proxy (IP allow list, VPN, basic auth) when the server is reachable from the internet. The global cap stays the backstop against forged addresses. |
-| Public endpoints | `GET /api/health`, `GET /api/auth/status`, `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/icons/lobe`, `GET /api/icons/lobe/:slug`, the share routes `GET /api/share/:token` and `GET /api/share/:token/files/:fileId` (a valid share token is the credential; rate-limited; 10.7), and the SPA static files (the `/share/<token>` page is a client route of the SPA). Everything else returns `401 unauthorized` without a valid session. |
+| Public endpoints | `GET /api/health`, `GET /api/auth/status`, `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/icons/lobe`, `GET /api/icons/lobe/:slug`, the share routes `GET /api/share/:token` and `GET /api/share/:token/files/:fileId` (a valid share token is the credential; rate-limited; 10.7), and the SPA static files (the `/share/<token>` page is a client route of the SPA). Everything else returns `401 unauthorized` without a valid session. Phase 14 adds no public route: the OAuth callback of remote MCP servers is the SPA page `/oauth/callback`, which posts the code with the session cookie to `POST /api/mcp/oauth/callback` (6.39). |
 
 ### 10.2 CSRF and headers
 
@@ -4928,7 +5283,10 @@ Multi-user isolation is out of scope (ADR-012).
   `HF_NEW_MASTER_KEY`, never generated or printed). A rotation invalidates every session, share URL and pending
   approval (all keyed by subkeys), and v1.2 cannot read the secrets afterwards (no downgrade).
 - Secret scopes: `provider:<id>`, `plugin:<id>`, `mcp:<id>`, `auth` and, since Phase 11, `project:<projectId>` (the
-  project MCP variables, names `mcp.var.<NAME>`; deleted with the project, re-encrypted by a rotation; 6.30).
+  project MCP variables, names `mcp.var.<NAME>`; deleted with the project, re-encrypted by a rotation; 6.30). Phase 14
+  adds no scope: MCP OAuth token records and client secrets use the names of 10.14 in the scopes `mcp:<id>`,
+  `plugin:<id>` and `project:<projectId>`, and the search keys are the secret settings of `core-search`
+  (`plugin:core-search`, `settings.braveApiKey`, …).
 - The secrets API is **write-only**: credentials, plugin secret settings, MCP headers/env are never returned; DTOs
   carry `{ set, hint, source }` only. Values are decrypted only in memory at the point of use (provider call, MCP
   connect, `ctx.secrets.get` of the owning plugin).
@@ -4959,7 +5317,11 @@ Multi-user isolation is out of scope (ADR-012).
   redirects, each re-checked; 10 s timeout; response body capped (2 MB for `web_fetch`, 20 MB for installs).
   The `core-tools` setting "Allow localhost in web_fetch" (default off) lets `web_fetch` reach loopback addresses
   only; private, link-local and metadata addresses stay blocked. Provider base URLs are exempt (local providers such
-  as Ollama are legitimate) but are set only by the user or a plugin manifest they reviewed.
+  as Ollama are legitimate) but are set only by the user or a plugin manifest they reviewed. Phase 14: `safeFetch`
+  also sends `POST` (a body of at most 64 KB; a POST never follows a redirect), used by the `core-search` backends
+  (https only through `createPluginSourceFetch`) and the OAuth token revocation; OAuth discovery, registration and
+  token requests go through the AI SDK's own guard (no custom `fetch`), and MCP URLs themselves keep their Phase 11
+  rules (6.39, 10.14).
 - **Limits**: JSON bodies 1 MB (plugin file writes: 1 MB of content, the JSON body up to twice that + 64 KiB for
   string escaping; chat requests 2 MB, chat imports 20 MB), uploads
   20 MB per file (`image/*`, `application/pdf`, `text/*`), plugin zips 20 MB compressed / 100 MB expanded / 2000
@@ -5246,6 +5608,43 @@ the browser or the log, and saving a file never approves it.
   and the import apply; adding, refreshing or removing a marketplace and saving a project file need none (they run
   nothing).
 
+### 10.14 MCP 2.0 and web search security (Phase 14, ADR-059 … ADR-063)
+
+Phase 14 adds long-lived credentials (OAuth tokens of MCP servers), a browser round trip through a third-party
+authorization server, a run that waits for the user, and two new ways untrusted text reaches the model (MCP prompts and
+resources, search results). The rules: tokens exist only in the encrypted secret store, the background never starts a
+sign-in, every OAuth URL passes the AI SDK's guard plus the harness's own, what the user types into an elicitation form
+goes only to the MCP server, and search queries and keys never reach the log.
+
+| Threat | Mitigation | Accepted risk |
+|---|---|---|
+| OAuth tokens leaking (logs, DTOs, backups, plugins) | one token record per server, `{ v: 1, resource, clientId, client?, as?, tokens? { …, obtainedAt } }`, stored only through `SecretStore` (AES-256-GCM): personal servers scope `mcp:<id>` names `oauth.record` and `oauth.clientSecret`; plugin and Claude Code plugin servers `plugin:<pluginId>` name `mcp-oauth.<serverId>`; project servers `project:<projectId>` name `mcp-oauth.<serverId>`; every value is registered with the redactor when read or written; DTOs carry only `auth { signedIn, expiresAt, scope, client, issuer }` and `clientSecret` as a `SecretState`; plugin code cannot read the records (`ctx.secrets` is limited to its own prefix); never in a backup (a restored server must sign in again); re-encrypted by a key rotation; kept by delete-all (it deletes chats, not configuration); deleted with the server, the plugin (unless `keepData`) or the project; a record whose `resource` or `clientId` no longer matches the server is ignored; `PATCH /mcp/:id` keeps the `oauth.*` secrets unless the URL, the transport type or the client id changed | a token the authorization server issued with a wider scope than needed |
+| A sign-in started without the user, or a forged callback | the background (connect mode) only reads stored tokens: no client registration, no redirect, no prompt; a sign-in starts only from `POST …/oauth` (session + Origin check); the callback needs the session cookie and the Origin check, a `state` of a pending flow (random, single use, 10 minutes, one flow per server) and, when the authorization server sends one, a matching issuer; PKCE S256 binds the code to the verifier that never leaves the server; `returnTo` is kept server-side and must be `/`-relative (not `//`) | a user who signs in to an authorization server they do not trust |
+| SSRF through OAuth endpoints (metadata URLs, a `token_endpoint` or `registration_endpoint` on a private address) | the harness never passes a custom `fetch` to an MCP transport or `auth()`, so the AI SDK's guard checks every cross-origin OAuth URL (private and loopback literals refused, DNS pinned); `validateAuthorizationServerURL` requires `https:` unless the authorization server shares the MCP server's origin or both are loopback; the authorization URL handed to the browser must be `http(s):`; confidential clients are tied to their authorization server; MCP requests keep `redirect: 'error'`; the revocation uses `safeFetch` POST under the same rule | an MCP server the user added on a private address may name an authorization server on the same origin (that is the user's own choice of server) |
+| An old v1.8 approval silently widened by `oauth` | the trust hash of a `.mcp.json` server always covered its raw object, `oauth` included, so an approval stays valid exactly when the file did not change; signing in needs an approved server (409 `untrusted` otherwise) | — |
+| A 401 loop hammering a server or an authorization server | a 401 is the permanent `needs-auth` (no backoff retry); `invalid_grant` drops the tokens; at most 20 pending flows | — |
+| Elicitation phishing (a server asks for a password or a card number) | the card shows the server's name, renders the message and the field labels as plain text (no Markdown, no links, no `v-html`), warns "Share only what you would give {server}. Never enter passwords here." and adds a warning to fields `isSensitiveField` flags; only the restricted form subset is shown (else declined `unsupported`); URL mode is declined | a user who types a secret anyway: it goes to that MCP server, as the user chose |
+| Elicitation values persisted or misrouted | the values go only into the answer to the MCP server: the stored output keeps the message, the field names, the action and the reason; requests are attributed only when unambiguous (one chat, main agent), otherwise declined (`ambiguous`, `not-interactive`); sub-agents and background tasks never elicit; the answer route checks the chat and the elicitation id (404 otherwise) and validates the content against the form (400) | a heuristic attribution: two calls of one chat to the same server get the card on the oldest call |
+| A run held open forever | every wait is bounded (480 s), cancelled by Stop, chat delete, key rotation and shutdown; the outer MCP tool timeout is 600 s with a 60 s active budget; a 25 s keep-alive keeps proxies from cutting the stream | a reverse proxy with an idle timeout under 25 s |
+| Prompt injection through MCP content and search results | prompt results, resource contents, tool results, elicitation messages and search snippets are capped (expansion 64 KB, resources 5 MiB as uploads, messages 2,000 characters, snippets 800, `search_web` output 32 KB) and are model input or plain text in the UI, never HTML; an expansion is frozen once, so a server cannot change a past turn; `search_web` only reaches the chosen vendor's fixed host | a server or a web page that writes instructions the model follows (as with any tool result) |
+| Native search bypassing approvals | a provider-executed call is `not-applicable` only when its name is one of the turn's native tools **and** `providerExecuted === true`; a native name the model calls as a function is denied; native and builtin search are never offered together; search runs only when the user turned it on for the chat | the provider runs the search before anything on the server sees it (the toggle is the consent; no hook can block it) |
+| Search keys and queries leaking | the keys are `format: 'secret'` settings (encrypted, write-only, redacted) sent only as the vendor's auth header over https; error texts never echo a key; queries and snippets are never logged at `info` | the vendor sees the query (privacy note in the guide) |
+| Search cost run-away | `search_web` runs only in turns with search on; `count` ≤ 10; native search uses `maxUses` 5; sub-agents inherit the mode (and can multiply searches) | native search fees are not in the cost estimate |
+
+- **Logging rules** (12): never at any level: OAuth tokens, authorization codes, code verifiers, `state` values, client
+  secrets, search keys and elicitation values; never at `info`: search queries, result snippets, elicitation messages,
+  prompt results, resource contents and authorization URLs (their query strings carry `state` and the code challenge).
+  OAuth lines carry the server id, the origin kind, the authorization server's host and the outcome; elicitation lines
+  the elicitation id, the server id, the field count, the action and the reason; search lines the backend, the result
+  count, the status and the duration.
+- **Fresh auth**: none of the nine Phase 14 routes needs it (signing in hands the server only a token for itself; the
+  configuration that makes a server run keeps its own rules: a stdio server needs fresh auth, a project server needs an
+  approval). `HF_OFFLINE` and `HF_SAFE_MODE` keep their meanings: `HF_OFFLINE` blocks neither a sign-in nor
+  `search_web`, safe mode still starts no project MCP server.
+- **No new dependency and no migration**: `@ai-sdk/mcp` 2.0.81 provides the OAuth flow and elicitation, the installed
+  `@ai-sdk/*` providers the native search tools; `@modelcontextprotocol/sdk` 1.32.1 is a root dev dependency for the
+  test fixtures only.
+
 ## 11. Topology
 
 ### Development (`pnpm dev`, coordinator only)
@@ -5324,6 +5723,12 @@ flowchart LR
   ~/.claude:/home/node/.claude:ro -v ~/.claude.json:/home/node/.claude.json:ro -e HF_CLAUDE_HOME=/home/node/.claude`
   (both readable by uid 1000), or upload `.claude.json` in the browser. Hook scripts of Claude Code plugins run as uid
   1000 with the image's tools: POSIX `sh` works, `python3` and `jq` are not installed.
+- MCP sign-in and web search behind a proxy or in Docker (Phase 14): the OAuth redirect URI is the origin the browser
+  uses plus `/oauth/callback` (the proxy must forward the original `Host`, as above), so a pre-registered OAuth client
+  must list exactly that URI; some authorization servers refuse an `http:` redirect URI on a LAN address, which the TLS
+  proxy solves. A proxy must not cut an SSE response that is idle for 25 s (an elicitation re-sends its card every
+  25 s; nginx's default `proxy_read_timeout` of 60 s is enough). Token records and search keys are encrypted in the
+  `/data` volume like every secret; `search_web` and OAuth requests leave the container over HTTPS.
 
 ## 12. Observability
 
@@ -5534,6 +5939,36 @@ flowchart LR
     1 MiB, plans 10 minutes and 4 at once; prompt hooks 30 s by default, prompts 16,384 characters, 8 calls at once,
     512 output tokens; transcripts 8 MiB; `SessionEnd` 1.5 s; agent skills preload 5 skills, 32 KiB; the `skill` tool
     600 s (a fork skill runs a sub-agent).
+- **MCP 2.0 and web search** (Phase 14, 6.39 – 6.44): counts, ids, server ids, backends, codes, durations and outcomes
+  only at `info`; never an OAuth token, authorization code, code verifier, `state` value or client secret, a search key
+  or an elicitation value (at no level: the token record and the client secret are registered with the redactor as they
+  are read or written, and the values typed into a form never reach a logger); never at `info` a search query, a result
+  snippet, an authorization URL, an elicitation message, a prompt result or a resource content (at `debug` only where
+  the existing rules allow tool inputs and outputs, redacted). W14.12 records the final line texts; the planned lines:
+  - OAuth (component `mcp-auth`): `info` when a sign-in starts (server id, origin kind `personal` / `plugin` /
+    `project`, `client` `dynamic` / `configured`, the authorization server's host), completes (the same, `scope`
+    present or not, `expiresIn`), is signed out (`revoked` true / false) or a flow expires; `warn` for a refused
+    authorization-server URL and a failed token exchange (`code`, the provider's `error` code, never its description at
+    `info`); a server that turns `needs-auth` logs one `info` line (server id, `reason` `unauthorized` / `invalid-grant`
+    / `no-record`), never a retry line.
+  - Elicitation (component `elicitations`): `info` when a request is shown (`chatId`, `toolCallId`, elicitation id,
+    server id, the field count, `sensitive` count) and when it ends (`action`, `reason`, `waitMs`); `info` for a request
+    declined without a card (`reason` `ambiguous` / `not-interactive` / `unsupported`, server id); `debug` for the
+    `2026-07-28` fallback (server id). The message and the values never.
+  - Prompts and resources: `debug` `mcp prompts listed` / `mcp resources listed` (server id, count, `truncated`, `ms`);
+    `info` `mcp prompt expanded` (server id, the prompt name's hash prefix, `bytes`, `messages`); `info` `mcp resource
+    attached` (server id, `fileId`, `mime`, `size`); the URI only at `debug`.
+  - Web search: the turn's resolution at `debug` (`kind`, `reason`, provider id); `search_web` logs one `info` line per
+    call through the `core-search` plugin logger (`backend`, `results`, `status`, `ms`, `code` on failure; never the
+    query or the key); the sources transform logs nothing on success.
+  - **Limits at a glance** (`LIMITS`, Phase 14 group): an elicitation wait 480 s (`mcpElicitationWaitMs`), the MCP tool
+    active budget 60 s (`mcpToolActiveMs`) under a 600 s outer timeout, a keep-alive every 25 s, 20 form fields and 100
+    options per field, messages 2,000 characters; OAuth flows 10 minutes (`mcpOAuthFlowMs`) and 20 at once
+    (`mcpOAuthFlowsMax`), `returnTo` 512 characters (`mcpReturnToMaxChars`); 200 prompts per server
+    (`mcpPromptsMax`) with 20 arguments (`mcpPromptArgumentsMax`), a prompt expansion 64 KB; 1,000 resources per server
+    (`mcpResourcesMax`), a resource read 5 MiB (`mcpResourceReadBytes`); native search 5 uses per turn
+    (`WEB_SEARCH_MAX_USES`); `search_web` queries 400 characters, 10 results, an answer of 1 MB (`searchWebFetchBytes`)
+    within 10 s (`searchWebTimeoutMs`), an output of 32 KB (`searchWebOutputBytes`); a `safeFetch` POST body 64 KB.
 - **Proxy trust** (texts in section 10.6): the boot log line `trusting reverse proxies (HF_TRUST_PROXY)` lists the
   canonical entries and the trusted ranges; one warning per untrusted peer address that sends a forwarded header the
   server would honor from a trusted proxy (header names only, at most 256 addresses); failed-login warnings carry the

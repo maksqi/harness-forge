@@ -154,8 +154,21 @@ describe('with a password and no session', () => {
     // and rewind (ADR-036, ADR-037) and the shell rules (ADR-038); Phase 9: the steer queue and the file mentions
     // (ADR-042); Phase 10: the customizations, Remember and the background tasks (ADR-044 … ADR-047); Phase 11: the
     // hooks, the project trust and the project MCP servers (ADR-048 … ADR-050); Phase 12: the marketplaces, the Claude
-    // Code import and the project definition files (ADR-054 … ADR-056).
+    // Code import and the project definition files (ADR-054 … ADR-056); Phase 14: the MCP sign-in routes, the OAuth
+    // callback included (the SPA posts it with the session cookie, ADR-059), the elicitation answer (ADR-060), the MCP
+    // resources (ADR-061) and the search test (ADR-063).
     expect(PRIVATE_KEYS).toEqual(expect.arrayContaining(['audio.transcribe', 'audio.speech', 'chats.deleteMessage']))
+    expect(PRIVATE_KEYS).toEqual(expect.arrayContaining([
+      'mcpAuth.start',
+      'mcpAuth.signOut',
+      'mcpAuth.projectStart',
+      'mcpAuth.projectSignOut',
+      'mcpAuth.callback',
+      'chatElicitations.answer',
+      'mcpResources.list',
+      'mcpResources.attach',
+      'webSearch.test',
+    ]))
     expect(PRIVATE_KEYS).toEqual(expect.arrayContaining([
       'changes.list',
       'changes.diff',

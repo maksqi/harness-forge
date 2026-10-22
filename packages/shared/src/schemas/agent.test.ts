@@ -51,15 +51,15 @@ describe('enums (Phase 9)', () => {
     expect(toolModeSchema.options).toEqual(['off', 'ask', 'edits', 'plan', 'auto'])
     expect(todoStatusSchema.options).toEqual(['pending', 'in_progress', 'completed'])
     expect(taskTypeSchema.options).toEqual(['explore', 'general'])
-    // Phase 10 adds `command-model-unavailable` (8 codes), Phase 11 three more (11).
-    expect(noticeCodeSchema.options).toHaveLength(11)
+    // Phase 10 adds `command-model-unavailable` (8 codes), Phase 11 three more (11), Phase 14 `web-search-unavailable` (12).
+    expect(noticeCodeSchema.options).toHaveLength(12)
     expect(noticeCodeSchema.options).toContain('compaction-failed')
     expect(commandInvocationSchema.parse({ name: 'compact', input: 'tests', type: 'compact' }).type).toBe('compact')
     // The error codes stay 16; the queue conflicts are reasons.
     expect(HARNESS_ERROR_CODES).toHaveLength(16)
     expect(conflictReasonSchema.options).toEqual(expect.arrayContaining(['run-idle', 'queue-full']))
-    // Phase 11 adds `hook-blocked` and `untrusted` (14); Phase 12 `offline` (15).
-    expect(conflictReasonSchema.options).toHaveLength(15)
+    // Phase 11 adds `hook-blocked` and `untrusted` (14); Phase 12 `offline` (15); Phase 14 `needs-auth` (16).
+    expect(conflictReasonSchema.options).toHaveLength(16)
   })
 
   it('declares the Phase 9 limits', () => {

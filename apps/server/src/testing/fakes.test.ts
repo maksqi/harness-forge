@@ -1184,7 +1184,7 @@ describe('phase 11 fakes: project config, trust and MCP', () => {
       tools: { [PROJECT]: fakeProjectMcpTools([tool], { shadowed: ['docs'], unavailable: ['Slow Server'], names: { docs: 'Docs' } }) },
       lists: {
         [PROJECT]: {
-          items: [{ id: 'docs', name: 'Docs', transport: 'http', state: 'connected', sha256: 'a'.repeat(64), tools: ['mcp__docs__search'], missingVariables: [] }],
+          items: [{ id: 'docs', name: 'Docs', transport: 'http', state: 'connected', sha256: 'a'.repeat(64), tools: ['mcp__docs__search'], missingVariables: [], auth: null }],
           variables: [{ name: 'DOCS_TOKEN', set: false, hint: null, usedBy: ['docs'] }],
         },
       },

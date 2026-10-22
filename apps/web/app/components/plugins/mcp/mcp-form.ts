@@ -65,18 +65,21 @@ export function policyLabel(policy: ToolPolicy): string {
 
 /** Status dot per connection status (docs/UI.md 5.10). */
 export const MCP_STATUS_DOTS: Readonly<Record<McpStatus, StatusDotStatus>> = {
-  connected: 'ok',
-  connecting: 'running',
-  error: 'error',
-  disabled: 'off',
+  'connected': 'ok',
+  'connecting': 'running',
+  'error': 'error',
+  'disabled': 'off',
+  // Phase 14 (ADR-059): the server asks for a sign-in (W14.7 adds the Sign in action).
+  'needs-auth': 'warning',
 }
 
 /** Short tooltip / screen reader label of the status dot (the row shows the full status line next to it). */
 export const MCP_STATUS_LABELS: Readonly<Record<McpStatus, string>> = {
-  connected: 'Connected',
-  connecting: 'Connecting',
-  error: 'Error',
-  disabled: 'Disabled',
+  'connected': 'Connected',
+  'connecting': 'Connecting',
+  'error': 'Error',
+  'disabled': 'Disabled',
+  'needs-auth': 'Sign in required',
 }
 
 /** "1 tool" / "12 tools". */
@@ -93,6 +96,8 @@ export function mcpStatusText(server: Pick<McpServer, 'status' | 'tools' | 'erro
       return 'Connecting…'
     case 'error':
       return `Error: ${server.error?.message?.trim() || 'The server could not be reached.'}`
+    case 'needs-auth':
+      return 'Sign in required'
     default:
       return 'Disabled'
   }

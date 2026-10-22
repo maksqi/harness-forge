@@ -377,6 +377,34 @@ export const LIMITS = {
   agentMaxTurnsMax: 200,
   /** Named `arguments` of a command or skill. */
   definitionArgumentsMax: 9,
+
+  // MCP 2.0 and web search (Phase 14): MCP OAuth (ADR-059), elicitation (ADR-060), prompts and resources (ADR-061),
+  // the builtin `search_web` tool of `core-search` (ADR-063). Mirrors: `ELICITATION_*` (`util/mcp-elicitation.ts`),
+  // `MCP_PROMPT_ARGUMENTS_MAX` (`util/mcp-prompts.ts`), `WEB_SEARCH_MAX_USES` (`util/web-search.ts`).
+  /** Longest wait of one MCP elicitation for the user (8 min; then `cancel`, reason `timeout`). */
+  mcpElicitationWaitMs: 480_000,
+  /** "Active" time budget of one MCP tool call, waiting for the user excluded (60 s; the outer timeout is 600 s). */
+  mcpToolActiveMs: 60_000,
+  /** Lifetime of a pending MCP OAuth sign-in flow (10 min; held in memory, single use). */
+  mcpOAuthFlowMs: 600_000,
+  /** Pending MCP OAuth sign-in flows of the server (one per MCP server; the oldest is dropped above it). */
+  mcpOAuthFlowsMax: 20,
+  /** Prompts kept per MCP server (the rest are left out of `GET /commands`). */
+  mcpPromptsMax: 200,
+  /** Arguments of one MCP prompt (= `MCP_PROMPT_ARGUMENTS_MAX`). */
+  mcpPromptArgumentsMax: 20,
+  /** Resources listed per MCP server (the rest are cut, `truncated`). */
+  mcpResourcesMax: 1000,
+  /** Bytes of one MCP resource attached through `POST /mcp/resources/attach` (= `mentionFileMaxBytes`, 5 MiB). */
+  mcpResourceReadBytes: 5_242_880,
+  /** Characters of the `returnTo` path of an MCP sign-in. */
+  mcpReturnToMaxChars: 512,
+  /** Serialized bytes of one `search_web` output (32 KiB; results are dropped from the end to fit). */
+  searchWebOutputBytes: 32_768,
+  /** Bytes of one search backend response (1 MiB). */
+  searchWebFetchBytes: 1_048_576,
+  /** Timeout of one search backend request (10 s). */
+  searchWebTimeoutMs: 10_000,
 } as const
 
 /** MIME families accepted by `POST /files` (the server also checks the content). */

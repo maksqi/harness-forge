@@ -8,8 +8,10 @@ the plugin host (`apps/server/src/plugins/`) implements the behavior. Plugin aut
 
 Related: [PROVIDERS.md](./PROVIDERS.md) (builtin providers, reasoning mappings, wizard templates),
 [API.md](./API.md) (endpoints and DTOs), [ARCHITECTURE.md](./ARCHITECTURE.md) (sections 6.2 approvals, 6.4 lifecycle,
-6.5 install, 6.13 agent workspace; Phase 12: 6.33 Claude Code plugins, 6.34 marketplaces),
-[DECISIONS.md](./DECISIONS.md) (contract seed; wins on conflict).
+6.5 install, 6.13 agent workspace; Phase 12: 6.33 Claude Code plugins, 6.34 marketplaces; Phase 14: the MCP sign-in,
+elicitation, MCP prompts and resources and web search flows), [DECISIONS.md](./DECISIONS.md) (contract seed; wins on
+conflict). Phase 14 (v1.9, plugin API 1.7.0, ADR-059 … ADR-063) user guides: [MCP sign-in](./guides/mcp-oauth.md),
+[Web search](./guides/web-search.md).
 
 Contents: [1 Concepts](#1-concepts) · [2 Directory layout](#2-plugin-directory-layout) ·
 [3 Manifest](#3-manifest-reference-pluginjson) · [4 Declarative providers](#4-declarative-providers) ·
@@ -41,6 +43,8 @@ A **plugin** is a directory with a `plugin.json` manifest. It can contribute:
 | Output styles: how the agent writes its replies (API 1.5.0) | `contributes.outputStyles` | `ctx.outputStyles.register()` |
 | Prompt hooks, five more hook events and the handler fields `args` / `async` / `if` / `statusMessage` (API 1.6.0) | `contributes.hooks` | — |
 | Commands written as markdown command files, skills with a folder of supporting files, commands and skills that run as a sub-agent (`context: 'fork'`), and the agent keys `disallowedTools` / `maxTurns` / `color` / `skills` (API 1.6.0) | `contributes.skills[].baseDir` | `ctx.commands.register({ syntax: 'markdown', … })`, `ctx.skills.register({ baseDir, context: 'fork', … })`, `ctx.agents.register({ … })` |
+| The provider's own (native) web search for its models (API 1.7.0) | — (declarative providers have none) | `ProviderDefinition.webSearch()` |
+| Sign-in (OAuth) for a plugin's remote MCP server (API 1.7.0) | `contributes.mcpServers[].transport.oauth` | `ctx.mcp.register({ transport: { …, oauth } })` |
 | A settings form | `settings` | `settings` (read with `ctx.settings.get()`) |
 
 ### Plugin kinds (`PluginKind`)
@@ -70,10 +74,11 @@ part of the server they may import server dependencies (for example the official
 | `core-providers` (Core providers) | the 13 builtin providers ([PROVIDERS.md](./PROVIDERS.md)), since Phase 6 with image, transcription and speech models ([PROVIDERS.md 13](./PROVIDERS.md#13-image-and-voice-models)) | individual providers can be disabled (`PATCH /api/providers/:id`) |
 | `core-tools` (Core tools) | 3 tools: `current_time` (policy `safe`), `web_fetch` (policy `ask`, SSRF guard) and `generate_image` (Phase 6, policy `ask`) | setting `allowLocalhost` (below); `generate_image` uses the image model of Settings → Media (`imageModelRef`) |
 | `core-commands` (Core commands) | 10 template slash commands (below) | client-only commands (`/new`, `/model`, `/effort`, `/mode`, `/help`; Phase 10: `/remember`; Phase 11: `/output-style`) never reach the server |
-| `core-mcp` (MCP servers) | MCP servers configured in the MCP panel (`mcp_servers` table); the panel is its Overview | settings `autoReconnect`, `connectTimeoutSeconds` (below) |
+| `core-search` (Web search, Phase 14) | 1 tool: `search_web` (policy `safe`, below), backed by Brave Search, Tavily or Exa with the user's own key | settings `backend`, `braveApiKey`, `tavilyApiKey`, `exaApiKey`, `maxResults` (below), edited in Settings → Web search ([UI.md 9.15](./UI.md)); the tool is registered only while the selected backend has a key |
+| `core-mcp` (MCP servers) | MCP servers configured in the MCP panel (`mcp_servers` table); the panel is its Overview | settings `autoReconnect`, `connectTimeoutSeconds` (below). Phase 14: http / sse servers can sign in (OAuth, status `needs-auth` until then), their prompts are slash commands and their resources `@` mentions (below) |
 | `core-workspace` (Workspace tools, Phase 7) | 7 workspace tools: `read_file`, `list_directory`, `find_files`, `search_files`, `write_file`, `edit_file`, `shell` (below) | offered only in chats whose project folder opened; `shell` is not registered on Windows, and `HF_WORKSPACE_SHELL=0` keeps it from every chat (it stays registered and listed in the tools table); no settings. Phase 8: writes are journaled and restorable (rewind, revert), and `shell` keeps its working folder between calls and runs commands that match the user's shell rules without a card (below) |
 | `core-agent` (Agent tools, Phase 9) | 3 agent tools: `todo_write`, `exit_plan_mode`, `task` (below); Phase 10: the fourth tool `skill` and the built-in agent types `explore` and `general`; Phase 12: `skill` takes `file` (a supporting file of a plugin or project skill), runs a `context: fork` skill as a sub-agent (its timeout is 600 s, the `task` tool's), and `task` / `skill` accept qualified names | offered in every chat with tools (`exit_plan_mode` only in plan mode, `skill` only when the chat's catalog has skills; none of them inside a sub-agent); no settings (the agent settings live in Settings → General: `autoCompact`, `compactModelRef`, `subagentModelRef`, `subagentMaxSteps`, Phase 10 `planFiles`, `planDirectory`) |
-| `mock` (Mock provider) | provider `mock` (chat models, and since Phase 6 image, transcription and speech models; Phase 7 adds `mock:workspace`, Phase 8 `mock:checkpoint` and `mock:shell`, Phase 9 `mock:compact`, `mock:plan`, `mock:todo`, `mock:subagent` and `mock:steer`, Phase 10 `mock:agents` and `mock:background`, Phase 11 `mock:hooks`, Phase 12 `mock:prompt-hook`, the model that answers prompt hooks: [PROVIDERS.md 8](./PROVIDERS.md#8-mock-provider)) and tool `mock_approval_tool` | registered only with `HF_MOCK_PROVIDER=1` (dev / e2e) |
+| `mock` (Mock provider) | provider `mock` (chat models, and since Phase 6 image, transcription and speech models; Phase 7 adds `mock:workspace`, Phase 8 `mock:checkpoint` and `mock:shell`, Phase 9 `mock:compact`, `mock:plan`, `mock:todo`, `mock:subagent` and `mock:steer`, Phase 10 `mock:agents` and `mock:background`, Phase 11 `mock:hooks`, Phase 12 `mock:prompt-hook`, the model that answers prompt hooks, Phase 14 `mock:search` and `mock:search-tool` with a `webSearch` hook on the provider: [PROVIDERS.md 8](./PROVIDERS.md#8-mock-provider)) and tool `mock_approval_tool` | registered only with `HF_MOCK_PROVIDER=1` (dev / e2e) |
 
 Builtin manifests in v1.3: `core-tools` is version 1.2.0 and declares `engines.harness` `"^1.2.0"` (its
 `generate_image` output carries the 1.2 `modelName`); `core-workspace` is version 1.0.0 with `"^1.2.0"` and the
@@ -83,10 +88,14 @@ with `"^1.1.0"`; `mock` stays version 1.0.0 with `"^1.1.0"`; `core-commands` and
 `execute`); v1.6 moves `core-agent` to `"^1.4.0"` (its `task` tool takes `background` and any agent type of the
 catalog, and it adds `skill`), and v1.7 and v1.8 keep it there (it uses no 1.5.0 or 1.6.0 member). The built-in agent types `explore` and `general` are not registry contributions: the
 catalog lists them as `builtin` entries (`core-agent/agents.ts`), and the `agent` registry refuses their names (and the
-alias `general-purpose`) for every plugin. Load order: `core-providers`, `core-tools`, `core-commands`, `core-mcp`, `core-workspace`, `core-agent`, then
+alias `general-purpose`) for every plugin. Load order: `core-providers`, `core-tools`, (Phase 14) `core-search`,
+`core-commands`, `core-mcp`, `core-workspace`, `core-agent`, then
 `mock`. Likewise (v1.7) the builtin **output styles** `default`, `explanatory` and `learning` are not registry
 contributions: the catalog lists them as `builtin` entries from the shared `BUILTIN_OUTPUT_STYLES`, and the style
-registry refuses their names for every plugin.
+registry refuses their names for every plugin. v1.9 (Phase 14): `core-providers` gains the `webSearch` hook on six of
+its providers ([PROVIDERS.md 14](./PROVIDERS.md#14-web-search)) and `mock` one for `mock:search`, so by the rule of the
+API version section both move to `"^1.7.0"`; the new `core-search` uses only 1.0 members (a tool, settings and
+`ctx.settings.onChange`). The manifests are updated in P14-0b (C50, C53) and P14-A (W14.4).
 
 Builtin tools (`core-tools`):
 
@@ -99,6 +108,28 @@ Builtin tools (`core-tools`):
 `web_fetch` goes through the SSRF guard: public addresses only, every redirect re-checked (at most 5), 10 s timeout,
 2 MB body. The `core-tools` setting **Allow localhost in web_fetch** (`allowLocalhost`, default off) also admits
 loopback addresses (a local dev server); private, link-local and cloud metadata addresses stay blocked.
+
+Builtin search tool (`core-search`, Phase 14, ADR-063; behavior in [ARCHITECTURE.md](./ARCHITECTURE.md) (web search
+resolution), user guide [Web search](./guides/web-search.md)). The plugin loads after `core-tools` and registers its
+one tool **only while the selected backend has a key** (re-checked in `ctx.settings.onChange`), so without a key
+`search_web` is not in `GET /api/tools` and no chat offers it:
+
+| Tool | Policy / timeout | Input | Output |
+|---|---|---|---|
+| `search_web` | `safe` (the composer's Search toggle is the consent; tool preferences can still set Ask or Deny) / 10 s per backend request | `{ query, count?, freshness? }`: `query` 1-400 characters; `count` 1-10 (default: the setting `maxResults`); `freshness` `day` \| `week` \| `month` \| `year` | `{ query, backend, results: [{ title, url, snippet, published }] }`: `backend` `brave` \| `tavily` \| `exa`; `title` ≤ 300 characters, `url` http(s) only, ≤ 2048 characters, `snippet` ≤ 800 characters (plain text), `published` an ISO date or null; the whole output ≤ 32 KB |
+
+Settings of `core-search` (Settings → Web search writes them through `/api/plugins/core-search/settings`, [UI.md
+9.15](./UI.md)): **Backend** (`backend`, `brave` \| `tavily` \| `exa`, default `brave`), **Brave Search API key**
+(`braveApiKey`), **Tavily API key** (`tavilyApiKey`), **Exa API key** (`exaApiKey`) (all three `format: 'secret'`, scope
+`plugin:core-search`, write-only toward the client) and **Max results** (`maxResults`, 1-10, default 5). Every backend
+request goes through the server's SSRF-guarded fetch (`createPluginSourceFetch`: https only, 10 s, 1 MB, no redirect;
+POST bodies since Phase 14); a 401 / 403 is `provider_error` "key rejected" (the key is never echoed), a 429
+`rate_limited`, a network failure `provider_unreachable`. `HF_OFFLINE` does not block it (like `web_fetch`). Queries
+and keys are never logged at `info`. After every final `search_web` output the chat pipeline adds the result URLs as
+`source-url` parts (deduplicated, http(s) only), so they show as the reply's sources and reach shares and exports. The
+backends, their endpoints and what is sent: [PROVIDERS.md 14](./PROVIDERS.md#14-web-search). The chat's web search
+mode decides whether `search_web` or the model's native search is offered (never both in one request; the shared
+`resolveWebSearch`).
 
 Builtin workspace tools (`core-workspace`, Phase 7, ADR-032 / ADR-033; behavior in
 [ARCHITECTURE.md 6.13](./ARCHITECTURE.md#613-agent-workspace-projects-workspace-tools-and-the-shell-adr-031-adr-032-adr-033),
@@ -269,17 +300,36 @@ the command wins. `GET /api/commands` items gain `kind` (`command` or `skill`), 
 default on: retries a failed or dropped connection with increasing delays, up to about 9 minutes) and **Connect
 timeout (seconds)** (`connectTimeoutSeconds`, 5-120, default 20).
 
+Phase 14 (ADR-059 … ADR-061) adds to every MCP server, the panel's, plugin servers, Claude Code plugin servers and
+project `.mcp.json` servers alike:
+
+- **Sign-in (OAuth)** for http / sse servers without an `Authorization` header: a server that answers 401 is
+  `needs-auth` ("Sign in required"; never retried with backoff, its tools unavailable, also to sub-agents and
+  background agents) until the user clicks **Sign in** (Plugins → MCP servers, the plugin's MCP section, or a project's
+  MCP servers dialog; [UI.md 8.14](./UI.md)). The browser goes to the server's authorization server and comes back to
+  `<origin>/oauth/callback`; the tokens are stored encrypted on the server, refreshed by the MCP transport and removed
+  with **Sign out**. A sign-in never starts in the background. Guide: [MCP sign-in](./guides/mcp-oauth.md).
+- **Prompts as slash commands**: the prompts of a connected server are listed as `/mcp__<serverId>__<prompt>` (named
+  like MCP tools, ≤ 64 characters) with `source: 'mcp'` in the slash menu's **MCP** group; the arguments follow the
+  command (positional in declared order, or `name=value`); the server's answer is fetched once and frozen into the
+  message (a regenerate never asks the server again).
+- **Resources in `@` mentions**: in every chat with tools on, `@` lists the resources of connected servers (a project's
+  servers only in its chats); picking one reads it and attaches it as a file (≤ 5 MiB).
+- **Elicitation**: a server may ask the user for input while one of its tools runs; the chat shows a form card under
+  the running tool row, the run waits up to 8 minutes, and the values are sent to the server but never stored.
+  Sub-agents and background agents never ask (the request is declined). [UI.md 7.35](./UI.md).
+
 ### API version
 
 ```ts
-export const PLUGIN_API_VERSION = '1.6.0'
+export const PLUGIN_API_VERSION = '1.7.0'
 ```
 
 `PLUGIN_API_VERSION` versions the plugin API (not the app). Minor versions only add; a major version breaks. A
 manifest declares the API range it supports in `engines.harness`; the host checks
 `semver.satisfies(PLUGIN_API_VERSION, engines.harness)` and marks the plugin `incompatible` when it fails. Use
-`"^1.0.0"`, or `"^1.1.0"` / `"^1.2.0"` / `"^1.3.0"` / `"^1.4.0"` / `"^1.5.0"` / `"^1.6.0"` when the plugin uses a
-member of that version.
+`"^1.0.0"`, or `"^1.1.0"` / `"^1.2.0"` / `"^1.3.0"` / `"^1.4.0"` / `"^1.5.0"` / `"^1.6.0"` / `"^1.7.0"` when the plugin
+uses a member of that version. `GET /api/health` reports `pluginApiVersion` (`1.7.0` since v1.9).
 
 | Version | Changes |
 |---|---|
@@ -290,11 +340,12 @@ member of that version.
 | `1.4.0` | Phase 10 (additive, ADR-045): **agents** and **skills** as contributions. Declarative: `contributes.agents` (`DeclarativeAgent[]`, <= 50) and `contributes.skills` (`DeclarativeSkill[]`, <= 50); code: `ctx.agents.register(AgentDefinition)` and `ctx.skills.register(SkillDefinition)` (each returns a `Disposable`). `AgentDefinition { name, description, instructions, tools?, model? }` is a sub-agent type the main agent can start with `task`; `SkillDefinition { name, description, content }` is a set of instructions the agent loads with the `core-agent` tool `skill`. Registry kinds `agent` / `skill`; `PluginSummary.contributions` gains `agents` and `skills` (names). Reserved names: the agents `explore`, `general`, `general-purpose`; the command name `remember` (a client command since v1.6) is refused for every plugin, whatever its `engines` range. No new `ToolCallContext` or hook member |
 | `1.5.0` | Phase 11 (additive, ADR-048, ADR-051, ADR-052): **command hooks** and **output styles** as contributions. Declarative: `contributes.hooks` (the Claude Code `hooks` object, `HooksConfig`, <= 50 handlers; a plugin with command hooks needs trust like one with a stdio MCP server) and `contributes.outputStyles` (`DeclarativeOutputStyle[]`, the fields of `OutputStyleDefinition`, <= 20 per plugin with the registered ones); code: `ctx.outputStyles.register(OutputStyleDefinition)` (returns a `Disposable`). `OutputStyleDefinition { name, description, content, keepCodingInstructions? }`. Six new code hook events in `HookMap`: `prompt.submit`, `session.start`, `run.stop`, `subagent.stop`, `compact.before`, `notification`; the output of `tool.after` gains `context?` (text the model reads at its next step). Registry kinds `style` and `hookCommands` (`registry.styles`, `registry.hookCommands`); `PluginSummary.contributions` gains `commandHooks` (the number of command hooks; `hooks` still lists the code hook names) and `outputStyles` (names). A command template with a `` !`cmd` `` span makes the plugin require trust too. The command name `output-style` (a client command since v1.7) is refused for every plugin, whatever its `engines` range |
 | `1.6.0` | Phase 12 (additive, ADR-053, ADR-057, ADR-058): `CommandDefinition` gains `syntax?: 'template' \| 'markdown'` (a markdown command body, ≤ 64 KiB, expanded like a command file: `$ARGUMENTS`, `$ARGUMENTS[N]`, `$N`, `$name`, `` !`cmd` `` spans, `@path`), `argumentHint?`, `model?` (a model ref or a Claude model name), `allowedTools?` and `disallowedTools?` (only narrow), `arguments?` (≤ 9 names), `whenToUse?`, `context?: 'fork'` and `agent?`; `SkillDefinition` gains `baseDir?` (a folder of supporting files relative to the plugin, read by the `skill` tool's `file` input), `argumentHint?`, `userInvocable?`, `modelInvocable?`, `allowedTools?`, `disallowedTools?`, `model?`, `arguments?`, `whenToUse?`, `context?: 'fork'` (the `skill` tool runs it as a sub-agent) and `agent?`; `contributes.skills[].baseDir?`; `AgentDefinition` gains `disallowedTools?`, `maxTurns?` (1 – 200), `color?` (`AgentColor`) and `skills?` (≤ 5), and its `model` may be a Claude model name; `HookEventName` gains `PostToolUseFailure`, `PermissionRequest`, `SubagentStart`, `PostCompact` and `SessionEnd` (13 events); command hook handlers gain `args?`, `async?`, `if?` and `statusMessage?`, and `contributes.hooks` accepts **prompt handlers** (`PromptHookSpec`: `type: 'prompt'`, `prompt`, `model?`, `timeout?`, `continueOnBlock?`, `if?`, `statusMessage?`; a plugin with only prompt hooks needs no trust); commands, agents, skills and output styles may have **qualified** names that start with the plugin's own id (`<pluginId>:<seg>…:<name>`, 1 – 3 segments, ≤ 128 characters; harness plugins keep bare names, which also answer as `<pluginId>:<name>`); `PluginSource` gains `github` and `marketplace`; `PluginSummary` / `PluginDetail` gain `format` (and the detail `origin`, `claude`). New exports: the types `PromptHookSpec`, `HookHandlerSpec`, `AgentColor`, `PluginFormat` and the schema `pluginFormatSchema`. Claude Code plugins (section 17) report `engines.harness: '^1.6.0'` in their synthesized manifest |
+| `1.7.0` | Phase 14 (additive, ADR-059, ADR-060, ADR-062): `ProviderDefinition` gains `webSearch?(model, request)` (the provider's own web search: returns provider-executed tools, provider options and an `exclusive` flag for a model, or `undefined`; [`ProviderDefinition`](#providerdefinition)) with the types `WebSearchRequest { functionTools, maxUses }` and `WebSearchParams { tools?, providerOptions?, exclusive? }`; `McpServerDecl.transport` (http / sse) gains `oauth?: { clientId?, scopes? }` for `contributes.mcpServers` and `ctx.mcp.register` (sign-in, [section 5](#5-declarative-mcp-servers)); the `notification` code hook's `type` gains `'elicitation_dialog'` (an MCP server asks the user for input), like the `notification_type` of the `Notification` command hook. Model DTOs gain `webSearch: 'native' \| 'exclusive' \| null` (computed by the host from the hook; not a `capabilities` flag). No new `ToolCallContext` or `PluginContext` member. Claude Code plugins keep reporting `'^1.6.0'` |
 
-A plugin written for 1.0 keeps working unchanged (`"^1.0.0"` accepts `1.1.0`, `1.2.0`, `1.3.0`, `1.4.0` and `1.5.0`; a plugin that
+A plugin written for 1.0 keeps working unchanged (`"^1.0.0"` accepts `1.1.0` through `1.7.0`; a plugin that
 catches the old `not_found` of an unknown provider should also accept `provider_not_configured`; a hook or policy that
 switches on `toolMode` should treat an unknown value like `ask`, since 1.3 adds `plan`). A plugin that uses a newer
-member should declare that version (`"^1.1.0"`, `"^1.2.0"`, `"^1.3.0"`, `"^1.4.0"`, `"^1.5.0"`, `"^1.6.0"`), so an older host
+member should declare that version (`"^1.1.0"`, `"^1.2.0"`, `"^1.3.0"`, `"^1.4.0"`, `"^1.5.0"`, `"^1.6.0"`, `"^1.7.0"`), so an older host
 reports it `incompatible` instead of silently ignoring the member: a 1.1 host would offer a tool with `workspace` in
 every chat and never fill `c.workspace`, a 1.2 host would treat an async-generator `execute` as a plain function whose
 result is an iterator object, a 1.3 host refuses a manifest with `contributes.agents` (unknown key) and has no
@@ -302,7 +353,9 @@ result is an iterator object, a 1.3 host refuses a manifest with `contributes.ag
 has no `ctx.outputStyles` and never calls a handler of the 1.5 hook events, and a 1.5 host refuses a manifest whose
 `contributes.hooks` has a prompt handler, a 1.6 event or a 1.6 handler field or whose skill has a `baseDir`, throws
 `validation_error` for a qualified name and for the 1.6 fields of `ctx.agents.register` / `ctx.skills.register`, and ignores
-the 1.6 fields of `ctx.commands.register` (a `syntax: 'markdown'` body would be expanded as a `{{input}}` template). The
+the 1.6 fields of `ctx.commands.register` (a `syntax: 'markdown'` body would be expanded as a `{{input}}` template), and a
+1.6 host refuses a manifest (and `ctx.mcp.register` throws `validation_error`) whose http / sse MCP server declares
+`oauth` (an unknown key of the strict transport) and never calls `webSearch` (its models never search natively). The
 builtins follow the same rule:
 `core-agent` declares `"^1.4.0"` (v1.6), `core-tools` (1.2.0) and `core-workspace` `"^1.2.0"`, `core-providers` and
 `mock` `"^1.1.0"`. The in-browser templates and the example plugins still declare `"^1.0.0"` (they use no newer
@@ -314,7 +367,13 @@ client-only command (…)"), and `ctx.commands.register({ name: 'remember', … 
 loads unchanged on a 1.5.0 host unless it uses the command name `output-style` (refused the same way), or a command
 template of a declarative plugin holds a `` !`cmd` `` span: such a plugin now needs trust (it becomes `untrusted` until
 the user trusts it; before v1.7 the span was sent to the model as text). A 1.5.0 plugin loads unchanged on a 1.6.0 host:
-`^1.5.0` accepts `1.6.0`, every 1.5 member keeps its meaning, and its trust pin is unchanged.
+`^1.5.0` accepts `1.6.0`, every 1.5 member keeps its meaning, and its trust pin is unchanged. A 1.6.0 plugin loads
+unchanged on a 1.7.0 host (v1.9): `^1.6.0` accepts `1.7.0`, its trust pin is unchanged and nothing new runs. Two
+behavior changes reach existing plugins without a code change: an http / sse MCP server of the plugin that answers 401
+(for example a header with a bad key) is now `needs-auth` instead of being retried with backoff, and every MCP tool
+call runs through the streaming path with an outer timeout of 600 s and a 60 s active budget (time spent waiting for
+the user's input does not count); a `notification` code hook that switches on `type` should ignore values it does not
+know.
 
 ## 2. Plugin directory layout
 
@@ -593,8 +652,8 @@ With `openai-responses`, the adapter also sets `providerOptions.openai.forceReas
 
 | `transport.type` | Fields | Behavior |
 |---|---|---|
-| `http` | `url`, `headers?` | Streamable HTTP (`createMCPClient` from `@ai-sdk/mcp`); redirects are rejected |
-| `sse` | `url`, `headers?` | legacy HTTP+SSE transport |
+| `http` | `url`, `headers?`, `oauth?` (1.7.0) | Streamable HTTP (`createMCPClient` from `@ai-sdk/mcp`); redirects are rejected |
+| `sse` | `url`, `headers?`, `oauth?` (1.7.0) | legacy HTTP+SSE transport |
 | `stdio` | `command`, `args?`, `env?` | child process via `Experimental_StdioMCPTransport` from `@ai-sdk/mcp/mcp-stdio`; **requires trust** |
 
 stdio details:
@@ -621,6 +680,42 @@ Connection lifecycle: servers connect in the background after the plugin is `act
 **Restart**, `POST /api/mcp/:id/reconnect`), retry a failed or dropped connection with increasing delays (unless the
 `core-mcp` setting `autoReconnect` is off), and are closed when their plugin is disabled. Tool names are
 `mcp__<serverId>__<tool>` ([section 14](#14-naming-rules)). Step-by-step: [Adding an MCP server](./guides/adding-an-mcp-server.md).
+
+**Sign-in (OAuth, plugin API 1.7.0, ADR-059)**: a remote server that needs the user's own account declares
+`transport.oauth` (`"engines": { "harness": "^1.7.0" }`):
+
+```json
+{
+  "id": "acme-docs",
+  "name": "Acme docs",
+  "transport": {
+    "type": "http",
+    "url": "https://mcp.acme.example/mcp",
+    "oauth": { "clientId": "{{settings.oauthClientId}}", "scopes": "docs:read" }
+  }
+}
+```
+
+| `oauth` field | Validation / meaning |
+|---|---|
+| `clientId` | optional, 1-256 characters, `{{settings.<key>}}` allowed (resolved like the URL); a client registered in advance with the authorization server. Without it the server registers a client itself (dynamic client registration) when the authorization server offers it |
+| `scopes` | optional, at most 1024 characters, space-separated scopes to request; without it the scopes of the server's `WWW-Authenticate` answer, else its metadata |
+
+- A plugin server never has a client secret (only a server of the MCP panel can store one); a pre-registered client
+  must accept the redirect URI `<origin>/oauth/callback` (the address the user opens harness-forge at; the dialog shows
+  it with Copy).
+- An `oauth` object is optional: every http / sse server without an `Authorization` header can sign in when it answers
+  401 with OAuth metadata (the MCP authorization spec); `oauth` only pins the client id or the scopes. A server with an
+  `Authorization` header never signs in (400 on Sign in).
+- Until the user signs in the server is `needs-auth` (its tools are unavailable, no retry loop); the user clicks
+  **Sign in** on the plugin's MCP servers ([UI.md 8.14](./UI.md)); nothing prompts in a chat.
+- Tokens and the registered client live encrypted under the plugin's secret scope (`plugin:<pluginId>`, name
+  `mcp-oauth.<serverId>`), bound to the server URL and client id (a changed URL or client id means a new sign-in). The
+  plugin's own `ctx.secrets` cannot read them (its names start with `kv.`). They are never in a backup, are re-encrypted
+  by a key rotation, and are removed with the plugin unless it is uninstalled with `keepData`; **Sign out** removes them
+  (and asks the authorization server to revoke them, best effort).
+- The plugin's prompts and resources join the slash menu and the `@` menu like every connected server's (section 1,
+  `core-mcp`).
 
 ## 6. Declarative commands
 
@@ -965,7 +1060,7 @@ import type {
   ModelMessage, Tool, UIMessage,
 } from 'ai'
 
-export const PLUGIN_API_VERSION = '1.6.0'
+export const PLUGIN_API_VERSION = '1.7.0'
 
 /** Same type as the AI SDK `ProviderOptions` (`ai` does not re-export it). */
 export type ProviderOptions = SharedV4ProviderOptions
@@ -1042,7 +1137,8 @@ export interface McpServerDecl {
   name: string
   policy?: ToolPolicy                             // default 'ask'
   transport:
-    | { type: 'http' | 'sse'; url: string; headers?: Record<string, string> }
+    | { type: 'http' | 'sse'; url: string; headers?: Record<string, string>
+        oauth?: { clientId?: string; scopes?: string } }   // 1.7.0 (Phase 14): sign-in; clientId may be templated
     | { type: 'stdio'; command: string; args?: string[]; env?: Record<string, string> }
 }
 export interface DeclarativeCommand { name: string; description: string; template: string }
@@ -1111,6 +1207,16 @@ export interface ImageParamsResult {              // call additions returned by 
 export interface TranscriptionHints {             // input of ProviderDefinition.transcriptionOptions()
   language?: string                               // ISO 639 code of the spoken language; absent = detect automatically
 }
+// ---------- 1.7.0: native web search (Phase 14) ----------
+export interface WebSearchRequest {               // input of ProviderDefinition.webSearch()
+  readonly functionTools: number                  // function tools this turn sends besides search (0 = none)
+  readonly maxUses: number                        // most searches per turn (WEB_SEARCH_MAX_USES, 5)
+}
+export interface WebSearchParams {                // result of ProviderDefinition.webSearch()
+  tools?: Record<string, Tool>                    // provider-defined tools only (type 'provider'); key = the ToolSet name
+  providerOptions?: ProviderOptions               // deep-merged into the call's provider options
+  exclusive?: boolean                             // the model drops function tools next to this search tool
+}
 export interface ProviderDefinition {
   id: string
   name: string
@@ -1131,6 +1237,8 @@ export interface ProviderDefinition {
   createTranscriptionModel?(modelId: string, rt: ProviderRuntime): TranscriptionModelV4 | TranscriptionModelV3
   createSpeechModel?(modelId: string, rt: ProviderRuntime): SpeechModelV4 | SpeechModelV3
   transcriptionOptions?(hints: TranscriptionHints): ProviderOptions | undefined
+  // ---------- 1.7.0 (Phase 14, optional) ----------
+  webSearch?(model: ModelInfo, request: WebSearchRequest): WebSearchParams | undefined
 }
 
 // ---------- tools ----------
@@ -1281,7 +1389,8 @@ export interface HookMap {                        // [input, output]; handlers m
   'subagent.stop': [C & { type: string; toolCallId: string; report: string; hookActive: boolean },
     { continue?: string }]
   'compact.before': [C & { trigger: 'manual' | 'auto'; focus: string | null }, void]
-  'notification': [C & { type: 'permission_prompt'; message: string }, void]
+  'notification': [C & { type: 'permission_prompt' | 'elicitation_dialog'; message: string }, void]
+                                                  // 1.7: 'elicitation_dialog' (an MCP server asks the user for input)
 }
 export type HookName = keyof HookMap
 // RunOrigin = 'request' | 'queue' | 'task' | 'hook' (run.started.origin, from shared)
@@ -1395,9 +1504,11 @@ re-exported from shared; the manifest shapes of `contributes.hooks` /
 and the `context` output of `tool.after`. Plugin API 1.6.0 adds the type exports `PromptHookSpec`, `HookHandlerSpec`,
 `AgentColor` and `PluginFormat` and the value export `pluginFormatSchema`, the optional fields of `CommandDefinition`,
 `SkillDefinition` and `AgentDefinition` above, the five `HookEventName`s and the handler fields (the manifest shape of
-`contributes.hooks` still comes from the shared schema). The
+`contributes.hooks` still comes from the shared schema). Plugin API 1.7.0 adds the type exports `WebSearchRequest` and
+`WebSearchParams`, the optional `ProviderDefinition.webSearch`, the `oauth` member of the http / sse `McpServerDecl`
+transport (from the shared `mcpServerDeclSchema`) and the `notification` type `'elicitation_dialog'`. The
 template mirror `apps/server/src/plugins/templates/sdk-types.ts` (the `harness-forge.d.ts` of the templates and
-examples) follows the SDK, including the `ToolMode` literal and the 1.4.0, 1.5.0 and 1.6.0 members. `ModelInfo` must be imported from these packages,
+examples) follows the SDK, including the `ToolMode` literal and the 1.4.0, 1.5.0, 1.6.0 and 1.7.0 members. `ModelInfo` must be imported from these packages,
 not from `ai` (which exports an unrelated type of the same name).
 
 ### `PluginContext`
@@ -1451,11 +1562,73 @@ All `register` calls are valid during and after `setup` until the plugin is disp
 | `createTranscriptionModel(modelId, rt)` | no (1.1.0) | returns a `TranscriptionModelV4` (or `V3`) instance for a model of kind `transcription` (dictation); no network I/O; guarded like `createImageModel`. Without it the provider's transcription models are left out of Settings → Media; a custom one answers `validation_error` (`modelRef: The provider "<name>" cannot transcribe speech, so the model "<ref>" cannot be used.`) |
 | `createSpeechModel(modelId, rt)` | no (1.1.0) | returns a `SpeechModelV4` (or `V3`) instance for a model of kind `speech` (read-aloud); no network I/O; guarded like `createImageModel`. Without it the provider's speech models are left out (a custom one answers `validation_error`, "cannot read text aloud") |
 | `transcriptionOptions(hints)` | no (1.1.0) | synchronous; turns `TranscriptionHints` `{ language? }` into provider options for `transcribe()`, e.g. `{ openai: { language } }`; `undefined` = send nothing. The host calls it only with an ISO 639 code (the setting "Detect automatically" never reaches it); a throw or a value that is not an object of objects sends no language |
+| `webSearch(model, request)` | no (1.7.0) | synchronous, no network I/O; the provider's own (native) web search for `model`: returns `WebSearchParams` `{ tools?, providerOptions?, exclusive? }` or `undefined` (the model cannot search). Called in try/catch like `reasoning` (a throw is logged and counts as `undefined`) for every chat turn whose web search mode resolves to native, and once per model with `{ functionTools: 0 }` when the catalog is built (the model DTO's `webSearch`: `'exclusive'` when the result sets `exclusive`, `'native'` for any other result with a tool or provider options, else null). Rules below |
 
 Registration (`ctx.providers.register`, and the definitions built from declarative providers) checks the data fields
-and the functions: `createLanguageModel` is required; `listModels`, `validate`, `reasoning`, `mapError` and the 1.1
+and the functions: `createLanguageModel` is required; `listModels`, `validate`, `reasoning`, `mapError`, the 1.1
 members `createImageModel`, `imageParams`, `createTranscriptionModel`, `createSpeechModel` and `transcriptionOptions`
-must be functions when present (`validation_error` `Provider "<id>": "<member>" must be a function.`).
+and the 1.7 member `webSearch` must be functions when present (`validation_error` `Provider "<id>": "<member>" must be a
+function.`).
+
+**`webSearch` rules** (plugin API 1.7.0, ADR-062): native search is a **provider-executed** tool: the provider's API
+runs the search and streams the call, its result and its citations back, so harness-forge never executes it.
+
+- `request.functionTools` is the number of function tools the turn sends besides search, `request.maxUses` the most
+  searches per turn (`WEB_SEARCH_MAX_USES`, 5); pass it to the tool's own limit when it has one.
+- The host keeps only tools whose value has `type === 'provider'` (a provider-defined tool from the provider package,
+  e.g. `anthropic.tools.webSearch_20250305(...)`) and whose key does not collide with a function tool of the turn; a
+  function tool in the result is dropped (and logged). The key is the ToolSet name the stream reports (`web_search`,
+  `google_search`, …); never use `search_web`, the builtin tool's name.
+- `providerOptions` are deep-merged into the call's options (under the `reasoning()` options), e.g. a search plugin
+  option of a gateway that has no tool form.
+- `exclusive: true` marks a model that silently drops function tools when the search tool is present (Gemini 2.x with
+  Google Search): the host then uses native search only on turns that send no function tool (`functionTools: 0`), and
+  otherwise the builtin `search_web` (or no search). Without `exclusive`, native search runs next to the turn's tools.
+- Native and builtin search are **never offered in one request**; which one a turn uses is decided by the shared
+  `resolveWebSearch` (the chat's mode, the tool mode, the model's `webSearch`, the setting `webSearchNative`, whether
+  `core-search` has a key). A provider-executed call is never sent to approval (it resolves `not-applicable` only when
+  the stream marks it `providerExecuted` and its name is one the hook returned; any other call of that name is denied),
+  no `PreToolUse` / `PostToolUse` / `PermissionRequest` hook and no `tool.approve` / `tool.before` / `tool.after` code
+  hook runs for it. Native search fees are billed by the provider and are not in harness-forge's cost estimate.
+- History: a later turn on **another provider** gets the earlier provider-executed parts removed; on the same provider
+  they are kept (some APIs need them to replay the conversation).
+- Declarative providers (section 4) have no `webSearch`; their chats use the builtin `search_web` of `core-search`.
+- The builtin providers' choices (tool versions, model deny-lists, `exclusive`) are listed in
+  [PROVIDERS.md 14](./PROVIDERS.md#14-web-search).
+
+Example: a code provider for an Anthropic-compatible gateway that also offers Anthropic's server-side web search
+(`"engines": { "harness": "^1.7.0" }`; the tool factory and its id come from `@ai-sdk/anthropic`, reached through
+`ctx.ai.createAnthropic`):
+
+```js
+// @ts-check
+/** @type {import('@harness-forge/plugin-sdk').PluginModule} */
+export default {
+  setup(ctx) {
+    // Only for the tool factories; never used for a request (it has no key).
+    const anthropicTools = ctx.ai.createAnthropic({ baseURL: 'https://claude-gateway.example.com/v1' }).tools
+    ctx.providers.register({
+      id: 'claude-gateway',
+      name: 'Claude gateway',
+      credentials: [{ key: 'apiKey', label: 'API key', type: 'secret', required: true }],
+      seedModels: [{ id: 'claude-sonnet-5', name: 'Claude Sonnet 5', capabilities: { tools: true, reasoning: true } }],
+      createLanguageModel(modelId, rt) {
+        return ctx.ai.createAnthropic({
+          baseURL: 'https://claude-gateway.example.com/v1',
+          apiKey: rt.credentials.apiKey,
+          fetch: rt.fetch,
+        })(modelId)
+      },
+      webSearch(model, request) {
+        if (!model.id.startsWith('claude-'))
+          return undefined // this gateway's other models cannot search
+        // ToolSet key `web_search` (Anthropic's wire name); a provider-executed tool of type 'provider'.
+        return { tools: { web_search: anthropicTools.webSearch_20250305({ maxUses: request.maxUses }) } }
+      },
+    })
+  },
+}
+```
 
 `ProviderRuntime`:
 
@@ -1666,7 +1839,7 @@ the folder path).
 | `run.stop` (1.5.0) | `chatId`, `modelRef`, `origin` (the run's `run.started.origin`), `hookActive` (true when this run is itself a hook continuation), `projectId` | `continue?` (a reason: the agent goes on with it) | when a model run is about to finish normally (not aborted, no error, no approval pending, no queued message); with the `Stop` command hooks. A `continue` starts a follow-up turn (`run.started.origin = 'hook'`) under the same cap as `Stop` hooks: at most 5 in a row | 3 s | ignored (the run finishes) |
 | `subagent.stop` (1.5.0) | `chatId`, `modelRef`, `type` (the agent type), `toolCallId`, `report`, `hookActive` | `continue?` | when a sub-agent (foreground or background) is about to complete; with the `SubagentStop` command hooks. A `continue` gives the child one more round with the reason, at most 2 | 3 s | ignored |
 | `compact.before` (1.5.0) | `chatId`, `modelRef`, `trigger` (`manual` for `/compact`, `auto`), `focus` | none (observe) | before every compaction; with the `PreCompact` command hooks | 3 s | logged only |
-| `notification` (1.5.0) | `chatId`, `modelRef`, `type` (`permission_prompt`), `message` | none (observe) | when a run ends waiting for an approval; with the `Notification` command hooks | 3 s | logged only |
+| `notification` (1.5.0) | `chatId`, `modelRef`, `type` (`permission_prompt`; 1.7.0: `elicitation_dialog`), `message` | none (observe) | when a run ends waiting for an approval (`permission_prompt`); 1.7.0: when an MCP server asks the user for input and the chat shows its form card while the run waits (`elicitation_dialog`, the message names the server; never the fields' values); with the `Notification` command hooks (`notification_type` with the same values) | 3 s | logged only |
 
 #### Command hooks (1.5.0)
 
@@ -1750,13 +1923,19 @@ order (first match wins; same table as [ARCHITECTURE.md 6.2](./ARCHITECTURE.md#6
 - MCP tool policy: `readOnlyHint: true` -> `safe`; else `destructiveHint: true` -> `always`; else the server's
   `policy` (default `ask`). Annotations come from the MCP server and are advisory: if you do not fully trust a
   server, set an override (`ask`) on its tools.
+- Phase 14 (ADR-062): before step 1, a **provider-executed** call (a provider's native web search, `ProviderDefinition.
+  webSearch`) whose name is one of the turn's native tools and that the stream marks `providerExecuted` resolves
+  `not-applicable` (the provider already ran it; no card, no hook, no record); a call of a native name without that
+  mark is `denied`, and unknown names stay denied. The builtin `search_web` of `core-search` is an ordinary tool
+  (policy `safe`, steps 1 – 9 apply). An approval still ends the run; an MCP **elicitation** (a server asking for input
+  while its tool runs, ADR-060) is the only case where a run waits for the user, and it is not an approval.
 
 ## 11. Lifecycle
 
 ### Load order
 
-1. Builtins (static imports, trusted): `core-providers`, `core-tools`, `core-commands`, `core-mcp`, `core-workspace`
-   (Phase 7), `core-agent` (Phase 9), then `mock` when `HF_MOCK_PROVIDER=1`.
+1. Builtins (static imports, trusted): `core-providers`, `core-tools`, `core-search` (Phase 14), `core-commands`,
+   `core-mcp`, `core-workspace` (Phase 7), `core-agent` (Phase 9), then `mock` when `HF_MOCK_PROVIDER=1`.
 2. Unless `HF_SAFE_MODE=1`: every directory in `data/plugins/*` (not starting with `.`) plus linked folders, sorted
    by id (ASCII), each loaded independently and guarded.
 
@@ -1911,7 +2090,8 @@ install), with `details.reason: 'exists'` and a message naming both; the inspect
 ### Uninstall and export
 
 - `DELETE /api/plugins/:id?keepData=<bool>`: dispose -> remove `data/plugins/<id>` (for `link`: only forget the
-  link) -> unless `keepData=true`, purge `plugin_settings`, `plugin_kv`, secrets of scope `plugin:<id>`,
+  link) -> unless `keepData=true`, purge `plugin_settings`, `plugin_kv`, secrets of scope `plugin:<id>` (Phase 14:
+  this includes the sign-in records `mcp-oauth.<serverId>` of the plugin's MCP servers),
   `data/plugins/.data/<id>/` and the credentials/configs of the plugin's providers. Tool preferences
   (`tool_prefs`) are user data and are kept.
 - `GET /api/plugins/:id/export` returns a zip of the plugin directory without `node_modules`, `.git` and build
@@ -2022,15 +2202,16 @@ trust:
 | Qualified name (1.6.0) | `<pluginId>:<segment>[:<segment>…]`, 1–3 segments of `^[a-z][a-z0-9-]{0,63}$` after the plugin id, ≤ 128 characters (`QUALIFIED_NAME_PATTERN`); the first segment must be the registering plugin's id | the commands, agents, skills and output styles of Claude Code plugins use them; harness plugin entries keep bare names and also answer as `<pluginId>:<name>`; a bare name reaches a qualified entry only when nothing has the exact bare name and exactly one distinct active name ends in `:<bare>` (slash names: across the commands and user-invocable skills), so the builtin `/review` always stays `/review` |
 | Provider id | builtins: models.dev keys; plugins: `<pluginId>` or `<pluginId>-<suffix>` with `<suffix>` matching `[a-z0-9-]+`, total <= 64 characters | first registration wins, later ones throw `conflict` |
 | Model ref | `providerId:modelId`, split on the **first** `:` (`ollama:llama3:8b`); never in URL paths | |
-| Tool name | `^[a-zA-Z0-9_-]{1,64}$`; the prefix `mcp__` is reserved for MCP tools; prefer a plugin-specific prefix (`dice_roll`); the builtins already hold `current_time`, `web_fetch`, `generate_image`, the seven workspace tools, (Phase 9) `todo_write`, `exit_plan_mode`, `task` and (Phase 10) `skill` | global; duplicates throw `conflict` |
+| Tool name | `^[a-zA-Z0-9_-]{1,64}$`; the prefix `mcp__` is reserved for MCP tools; prefer a plugin-specific prefix (`dice_roll`); the builtins already hold `current_time`, `web_fetch`, `generate_image`, the seven workspace tools, (Phase 9) `todo_write`, `exit_plan_mode`, `task`, (Phase 10) `skill` and (Phase 14) `search_web`; never name a tool `web_search` (the native search tools of Anthropic, OpenAI, xAI and OpenRouter use that name) | global; duplicates throw `conflict` |
 | MCP tool name | `mcp__<serverId>__<tool>`; characters of `<tool>` outside `[a-zA-Z0-9_-]` become `_`; longer than 64 characters -> the first 55 characters + `_` + 8 hex characters of the FNV-1a hash of the full name (`mcpToolName()` in `@harness-forge/shared`, synchronous and browser-safe) | global |
 | MCP server id | `^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$`; plugin servers: `<pluginId>` or `<pluginId>-<suffix>` (so plugins with ids longer than 32 characters cannot declare MCP servers) | across plugins and the MCP panel |
+| MCP prompt command (Phase 14) | `/mcp__<serverId>__<prompt>`, built like an MCP tool name (`mcpPromptCommandName`, ≤ 64 characters, `MCP_PROMPT_NAME_PATTERN` `^mcp__[\w-]{1,59}$`); a plugin command name cannot take this shape (no `_`) | per server; a project's server shadows a global server of the same id in that project's chats |
 | Command name | `^[a-z][a-z0-9-]{0,31}$`; reserved client-only: `new`, `model`, `effort`, `mode`, `help`, (Phase 10) `remember` and (Phase 11) `output-style`; reserved harness command (Phase 9): `compact` | first wins among plugins; Phase 10: a project or personal command of the same name wins over it; Phase 11: a command wins over a skill of the same name in the slash menu |
 | Agent name (1.4.0) | `^[a-z][a-z0-9-]{0,63}$`; reserved: `explore`, `general` (the built-ins) and the alias `general-purpose` | across plugins (`conflict`); a personal or project agent of the same name wins over it |
 | Skill name (1.4.0) | `^[a-z][a-z0-9-]{0,63}$`; since 1.5.0 also its slash name (`/name`, up to 64 characters: `slashNameSchema`) | across plugins (`conflict`); a personal or project skill of the same name wins over it |
 | Output style name (1.5.0) | `^[a-z][a-z0-9-]{0,63}$`; reserved: `default`, `explanatory`, `learning` (the built-ins); style files' names are slugified (lowercase, spaces → `-`) and keep the original as their label | across plugins (`conflict`); a personal or project style of the same name wins over it |
 | Credential key, setting key | `^[a-zA-Z][a-zA-Z0-9_]{0,63}$` | within the provider / schema |
-| Secret scopes | `provider:<id>`, `plugin:<id>`, `mcp:<id>`, `auth`; Phase 11: `project:<projectId>` (the `.mcp.json` variables of a project, names `mcp.var.<NAME>`; server-only, never reachable through `ctx.secrets`) | |
+| Secret scopes | `provider:<id>`, `plugin:<id>`, `mcp:<id>`, `auth`; Phase 11: `project:<projectId>` (the `.mcp.json` variables of a project, names `mcp.var.<NAME>`; server-only, never reachable through `ctx.secrets`); Phase 14 adds no scope, only the MCP sign-in names: `mcp:<id>` `oauth.record` and `oauth.clientSecret` (MCP panel servers), `plugin:<pluginId>` `mcp-oauth.<serverId>` (plugin and Claude Code plugin servers), `project:<projectId>` `mcp-oauth.<serverId>` (`.mcp.json` servers); none of them is reachable through `ctx.secrets` or in a backup | |
 
 ## 15. Authoring guide
 
@@ -2610,12 +2791,22 @@ linked folder (pinned to the path).
 an entry of a marketplace; it keeps Claude Code's layout and its names get the plugin's prefix (`/review-kit:review`).
 LSP servers, `bin/`, themes, monitors, workflows and `http` / `mcp_tool` / `agent` hooks are not supported (section 17).
 
-**My plugin is `incompatible`.** `engines.harness` does not include `PLUGIN_API_VERSION` (`1.6.0`). Use `"^1.0.0"`
+**My plugin is `incompatible`.** `engines.harness` does not include `PLUGIN_API_VERSION` (`1.7.0`). Use `"^1.0.0"`
 (or `"^1.1.0"` when the plugin uses a 1.1 member such as `createTranscriptionModel` or `ctx.images`, `"^1.2.0"` for a
 1.2 member such as `ToolDefinition.workspace`, `"^1.3.0"` for an async-generator `execute`, `"^1.4.0"` for
 `contributes.agents` / `contributes.skills` or `ctx.agents` / `ctx.skills`, `"^1.5.0"` for `contributes.hooks`,
 `contributes.outputStyles`, `ctx.outputStyles` or a 1.5 hook event such as `prompt.submit`, `"^1.6.0"` for a prompt
-hook, a 1.6 hook event or handler field, `syntax: 'markdown'`, a skill `baseDir` or the new agent fields).
+hook, a 1.6 hook event or handler field, `syntax: 'markdown'`, a skill `baseDir` or the new agent fields, `"^1.7.0"`
+for `ProviderDefinition.webSearch` or an MCP server's `oauth`).
+
+**Can my plugin's MCP server use the user's own account (OAuth)?** Yes, since plugin API 1.7.0: an http / sse server
+that answers 401 with OAuth metadata can sign in; declare `transport.oauth` only to pin a pre-registered `clientId`
+(templated from a setting) or the `scopes` ([section 5](#5-declarative-mcp-servers)). The user signs in from the MCP
+servers list; the tokens stay in the host (your code never sees them).
+
+**Can my provider use its API's own web search?** Yes, since plugin API 1.7.0: return its provider-defined search tool
+from `webSearch(model, request)` ([`ProviderDefinition`](#providerdefinition)). Without it, chats on your models use
+the builtin `search_web` when the user has a search key.
 
 **Can my tool show progress, like a sub-agent?** Yes, since plugin API 1.3.0: write `execute` as an `async function*`
 and `yield` snapshots; the last yielded value is the result ([Tools](#tools)). Only the final value reaches the model
@@ -2797,8 +2988,13 @@ stays as written) and `secret-in-body` (a body names a secret option; it stays e
   events harness-forge runs (ARCHITECTURE.md 6.28, 6.37); unknown events and `http` / `mcp_tool` / `agent` handlers are
   diagnostics (the plugin stays active; the handler types are listed under "Ignored"). A shell-form handler (no `args`)
   that uses `${user_config.*}` is refused (an `invalid-command` error: it never runs; use `args`).
-- **MCP servers**: stdio (run in the plugin folder, only for a trusted plugin), `http` and `sse`. `headersHelper` and
-  OAuth settings are dropped with an info (the server connects without them); `.mcpb` / `.dxt` bundles, `ws` servers,
+- **MCP servers**: stdio (run in the plugin folder, only for a trusted plugin), `http` and `sse`. `headersHelper` is
+  dropped with an info (the server connects without it). Since v1.9 (Phase 14, ADR-059) the `oauth` object of an http /
+  sse server is kept (`clientId`, `scopes`; `callbackPort` is ignored with an info: harness-forge signs in through its own
+  callback page, so a client registered for Claude Code's local port may need the redirect URI `<origin>/oauth/callback`
+  added at the authorization server); such a server, and any server that answers 401 with OAuth metadata, is
+  `needs-auth` until the user signs in from the MCP servers list (v1.8 dropped the object and the server failed to
+  connect); its tokens live under `plugin:<pluginId>` `mcp-oauth.<serverId>`; `.mcpb` / `.dxt` bundles, `ws` servers,
   servers that use `${CLAUDE_PROJECT_DIR}` (plugin servers are global) and servers whose `command` uses a variable are
   skipped with a diagnostic.
 

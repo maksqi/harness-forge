@@ -20,6 +20,7 @@ import type {
   Disposable,
   GeneratedImageFile,
   HarnessErrorInit,
+  HookChatContext,
   HookEventName,
   HookHandlerSpec,
   HookMap,
@@ -30,6 +31,8 @@ import type {
   ImageGenerateResult,
   ImageParamsRequest,
   ImageParamsResult,
+  McpServerDecl,
+  McpServerDeclOAuth,
   ModelInfo,
   ModelKind,
   OutputStyleDefinition,
@@ -51,6 +54,8 @@ import type {
   ToolWorkspace,
   ToolWorkspaceAccess,
   TranscriptionHints,
+  WebSearchParams,
+  WebSearchRequest,
 } from './index.ts'
 import { readFileSync } from 'node:fs'
 import * as shared from '@harness-forge/shared'
@@ -94,8 +99,8 @@ describe('exports', () => {
     expect(Object.keys(sdk).sort()).toEqual([...REEXPORTED_VALUES, 'PLUGIN_API_VERSION', 'definePlugin', 'settingsValuesSchema'].sort())
   })
 
-  it('has plugin API version 1.6.0 (Phase 12: Claude Code plugins, prompt hooks, five hook events)', () => {
-    expect(sdk.PLUGIN_API_VERSION).toBe('1.6.0')
+  it('has plugin API version 1.7.0 (Phase 14: provider-native web search, MCP OAuth, the elicitation notification)', () => {
+    expect(sdk.PLUGIN_API_VERSION).toBe('1.7.0')
   })
 
   it('definePlugin is the identity', () => {
@@ -222,7 +227,8 @@ describe('exports', () => {
     expectTypeOf<HookMap['run.stop'][1]>().toEqualTypeOf<{ continue?: string }>()
     expectTypeOf<HookMap['subagent.stop'][1]>().toEqualTypeOf<{ continue?: string }>()
     expectTypeOf<HookMap['compact.before'][0]['trigger']>().toEqualTypeOf<'manual' | 'auto'>()
-    expectTypeOf<HookMap['notification'][0]['type']>().toEqualTypeOf<'permission_prompt'>()
+    // Plugin API 1.7.0 adds `elicitation_dialog` (see below).
+    expectTypeOf<'permission_prompt'>().toExtend<HookMap['notification'][0]['type']>()
     expectTypeOf<HookMap['tool.after'][1]>().toEqualTypeOf<{ output: unknown, context?: string }>()
     const style: OutputStyleDefinition = { name: 'terse', description: 'Short answers.', content: 'Answer briefly.', keepCodingInstructions: true }
     expect(shared.declarativeOutputStyleSchema.parse(style)).toEqual(style)
@@ -290,6 +296,41 @@ describe('exports', () => {
     // Unknown events stay errors in a harness manifest; prompt handlers only on the prompt events.
     expect(shared.pluginManifestSchema.safeParse({ ...base, contributes: { hooks: { BeforeTool: [{ hooks: [{ type: 'command', command: 'x' }] }] } } }).success).toBe(false)
     expect(shared.pluginManifestSchema.safeParse({ ...base, contributes: { hooks: { SessionStart: [{ hooks: [{ type: 'prompt', prompt: 'x' }] }] } } }).success).toBe(false)
+  })
+
+  it('types the additions of plugin API 1.7.0 (ADR-059, ADR-060, ADR-062)', () => {
+    // Provider-native web search: a synchronous hook with the model and the request, like `reasoning`.
+    type WebSearchHook = NonNullable<ProviderDefinition['webSearch']>
+    expectTypeOf<Parameters<WebSearchHook>>().toEqualTypeOf<[model: ModelInfo, request: WebSearchRequest]>()
+    expectTypeOf<ReturnType<WebSearchHook>>().toEqualTypeOf<WebSearchParams | undefined>()
+    expectTypeOf<WebSearchRequest>().toEqualTypeOf<{ readonly functionTools: number, readonly maxUses: number }>()
+    expectTypeOf<keyof WebSearchParams>().toEqualTypeOf<'tools' | 'providerOptions' | 'exclusive'>()
+    expectTypeOf<WebSearchParams['tools']>().toEqualTypeOf<Record<string, Tool> | undefined>()
+    expectTypeOf<WebSearchParams['providerOptions']>().toEqualTypeOf<SharedV4ProviderOptions | undefined>()
+    // A provider-defined tool of an AI SDK provider package is a valid entry.
+    const providerTool = { type: 'provider', id: 'mock.web_search', args: {}, inputSchema: z.object({}), isProviderExecuted: true } as unknown as Tool
+    const provider: Pick<ProviderDefinition, 'webSearch'> = {
+      webSearch: (model, request) => (model.capabilities?.tools === false ? undefined : { tools: { web_search: providerTool }, exclusive: request.functionTools < 0 }),
+    }
+    expect(provider.webSearch?.({ id: 'm' }, { functionTools: 0, maxUses: 5 })?.tools).toHaveProperty('web_search')
+    // MCP OAuth settings of an http / sse declaration (a templated client id, never a secret).
+    expectTypeOf<McpServerDeclOAuth>().toEqualTypeOf<shared.McpServerDeclOAuth>()
+    expectTypeOf<Extract<McpServerDecl['transport'], { type: 'http' | 'sse' }>['oauth']>().toEqualTypeOf<McpServerDeclOAuth | undefined>()
+    expectTypeOf<keyof McpServerDeclOAuth>().toEqualTypeOf<'clientId' | 'scopes'>()
+    const decl: McpServerDecl = { id: 'acme', name: 'Acme', transport: { type: 'http', url: 'https://mcp.acme.dev/mcp', oauth: { clientId: '{{settings.clientId}}', scopes: 'read' } } }
+    expect(shared.mcpServerDeclSchema.parse(decl)).toEqual(decl)
+    // The notification hook also reports elicitation dialogs.
+    expectTypeOf<HookMap['notification'][0]>().toEqualTypeOf<HookChatContext & { type: 'permission_prompt' | 'elicitation_dialog', message: string }>()
+  })
+
+  it('keeps ^1.6.0 (and older) manifests loading under 1.7.0, the examples included', () => {
+    const base = { manifestVersion: 1, id: 'old-pack', name: 'Old pack', version: '1.0.0', engines: { harness: '^1.6.0' } } as const
+    const parsed = shared.pluginManifestSchema.parse({ ...base, contributes: { mcpServers: [{ id: 'old-pack', name: 'Old', transport: { type: 'http', url: 'https://mcp.example.com/mcp' } }] } })
+    expect(parsed.engines.harness).toBe('^1.6.0')
+    for (const example of ['agent-pack', 'dice-roller', 'echo-provider', 'hook-pack', 'lmstudio', 'mcp-everything', 'together-ai']) {
+      const manifest = JSON.parse(readFileSync(new URL(`../../../examples/plugins/${example}/plugin.json`, import.meta.url), 'utf8')) as unknown
+      expect(shared.pluginManifestSchema.safeParse(manifest).success, example).toBe(true)
+    }
   })
 
   it('derives the AI SDK types of PLUGINS.md section 9', () => {

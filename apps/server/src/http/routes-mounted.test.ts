@@ -393,6 +393,85 @@ describe('unknown routes and invalid input', () => {
     }
   })
 
+  const ELICITATION = 'eli_sample0000000001'
+  const STATE = 'state0000000000000000001'
+  it.each([
+    ['POST', '/api/mcp/My_Server/oauth', {}, ['id']],
+    ['POST', '/api/mcp/linear/oauth', { returnTo: '//evil.example' }, ['returnTo']],
+    ['POST', '/api/mcp/linear/oauth', { returnTo: 'https://evil.example/' }, ['returnTo']],
+    ['POST', '/api/mcp/linear/oauth', { returnTo: '/plugins', extra: true }, []],
+    ['DELETE', '/api/mcp/My_Server/oauth', undefined, ['id']],
+    ['POST', '/api/projects/prj_short/mcp/linear/oauth', {}, ['id']],
+    ['POST', `/api/projects/${PROJECT}/mcp/My_Server/oauth`, {}, ['serverId']],
+    ['POST', `/api/projects/${PROJECT}/mcp/linear/oauth`, { returnTo: '/a\\b' }, ['returnTo']],
+    ['DELETE', `/api/projects/${PROJECT}/mcp/My_Server/oauth`, undefined, ['serverId']],
+    ['POST', '/api/mcp/oauth/callback', { state: STATE }, ['code']],
+    ['POST', '/api/mcp/oauth/callback', { state: STATE, code: 'abc', error: 'access_denied' }, ['code']],
+    ['POST', '/api/mcp/oauth/callback', { state: 'short', code: 'abc' }, ['state']],
+    ['POST', '/api/mcp/oauth/callback', { state: STATE, code: 'abc', token: 'x' }, []],
+    ['POST', '/api/chat/not-a-uuid/elicitations/eli_sample0000000001', { action: 'decline' }, ['id']],
+    ['POST', `/api/chat/${CHAT}/elicitations/msg_sample0000000001`, { action: 'decline' }, ['elicitationId']],
+    ['POST', `/api/chat/${CHAT}/elicitations/${ELICITATION}`, { action: 'submit' }, ['action']],
+    ['POST', `/api/chat/${CHAT}/elicitations/${ELICITATION}`, { action: 'decline', content: { a: 'b' } }, ['content']],
+    ['POST', `/api/chat/${CHAT}/elicitations/${ELICITATION}`, { action: 'accept', content: { a: { nested: true } } }, ['content', 'a']],
+    ['GET', '/api/mcp/resources?limit=101', undefined, ['limit']],
+    ['GET', '/api/mcp/resources?projectId=prj_short', undefined, ['projectId']],
+    ['GET', `/api/mcp/resources?q=${'x'.repeat(257)}`, undefined, ['q']],
+    ['POST', '/api/mcp/resources/attach', { serverId: 'github', uri: 'no scheme' }, ['uri']],
+    ['POST', '/api/mcp/resources/attach', { serverId: 'GitHub', uri: 'repo://a/b' }, ['serverId']],
+    ['POST', '/api/mcp/resources/attach', { serverId: 'github', uri: 'repo://a/b', extra: 1 }, []],
+    ['POST', '/api/web-search/test', { backend: 'google' }, ['backend']],
+    ['POST', '/api/web-search/test', { query: 'x' }, []],
+  ] as const)('the Phase 14 routes validate their input first: %s %s -> 400', async (method, path, body, issuePath) => {
+    const init: RequestInit = { method }
+    if (body !== undefined) {
+      init.headers = { 'content-type': 'application/json' }
+      init.body = JSON.stringify(body)
+    }
+    const response = await t.request(path, init)
+    expect(response.status).toBe(400)
+    const envelope = harnessErrorEnvelopeSchema.parse(await response.json())
+    expect(envelope.error.code).toBe('validation_error')
+    expect(envelope.error.details).toMatchObject({ issues: [expect.objectContaining({ path: [...issuePath] })] })
+  })
+
+  it('the Phase 14 routes never shadow each other (MCP server ids `oauth` and `resources` stay valid)', async () => {
+    expect(API_ROUTE_KEYS).toHaveLength(141)
+    expect(API_MODULES).toHaveLength(40)
+    for (const [method, path, key] of [
+      ['POST', '/api/mcp/oauth/callback', 'mcpAuth.callback'],
+      ['POST', '/api/mcp/linear/oauth', 'mcpAuth.start'],
+      ['POST', '/api/mcp/oauth/oauth', 'mcpAuth.start'],
+      ['POST', '/api/mcp/resources/oauth', 'mcpAuth.start'],
+      ['DELETE', '/api/mcp/oauth/oauth', 'mcpAuth.signOut'],
+      ['POST', `/api/projects/${PROJECT}/mcp/linear/oauth`, 'mcpAuth.projectStart'],
+      ['DELETE', `/api/projects/${PROJECT}/mcp/linear/oauth`, 'mcpAuth.projectSignOut'],
+      ['POST', `/api/projects/${PROJECT}/mcp/linear/reconnect`, 'projectMcp.reconnect'],
+      ['POST', `/api/chat/${CHAT}/elicitations/${ELICITATION}`, 'chatElicitations.answer'],
+      ['GET', '/api/mcp/resources', 'mcpResources.list'],
+      ['POST', '/api/mcp/resources/attach', 'mcpResources.attach'],
+      ['POST', '/api/web-search/test', 'webSearch.test'],
+    ] as const) {
+      if (!stubRouteKeys().has(key))
+        continue
+      const init: RequestInit = { method }
+      if (method === 'POST' && key === 'mcpAuth.callback') {
+        init.headers = { 'content-type': 'application/json' }
+        init.body = JSON.stringify({ state: STATE, code: 'abc' })
+      }
+      else if (key === 'chatElicitations.answer') {
+        init.headers = { 'content-type': 'application/json' }
+        init.body = JSON.stringify({ action: 'decline' })
+      }
+      else if (key === 'mcpResources.attach') {
+        init.headers = { 'content-type': 'application/json' }
+        init.body = JSON.stringify({ serverId: 'github', uri: 'repo://owner/name/README.md' })
+      }
+      const envelope = harnessErrorEnvelopeSchema.parse(await (await t.request(path, init)).json())
+      expect(envelope.error.message, `${method} ${path}`).toContain(`(${key})`)
+    }
+  })
+
   it('/customizations/source is never taken for a customization id (static segment first)', async () => {
     const response = await t.request('/api/customizations/source?kind=skill&name=pdf&source=builtin')
     const envelope = harnessErrorEnvelopeSchema.parse(await response.json())

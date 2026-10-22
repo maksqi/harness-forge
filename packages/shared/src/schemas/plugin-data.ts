@@ -254,6 +254,20 @@ export type DeclarativeOutputStyle = z.infer<typeof declarativeOutputStyleSchema
 
 // ---------- MCP server declarations ----------
 
+/**
+ * `transport.oauth` of an http / sse MCP server declaration (plugin API 1.7.0, ADR-059): a pre-registered OAuth
+ * `clientId` (may contain `{{settings.<key>}}` placeholders, resolved when connecting; omitted = dynamic client
+ * registration) and the `scopes` to ask for (space-separated). Plugin servers never carry a client secret.
+ */
+export const mcpServerDeclOAuthSchema = z.strictObject({
+  clientId: settingsTemplatedSchema
+    .refine(value => value.trim().length > 0 && value.length <= 256, 'Client ids use 1-256 characters.')
+    .refine(value => /^[\x20-\x7E]+$/.test(value), 'Client ids use printable ASCII characters.')
+    .optional(),
+  scopes: z.string().max(1024).refine(value => !hasControlChars(value), 'Scopes cannot contain control characters.').optional(),
+})
+export type McpServerDeclOAuth = z.infer<typeof mcpServerDeclOAuthSchema>
+
 export const mcpServerDeclSchema = z.strictObject({
   /** `<pluginId>` or `<pluginId>-<suffix>` (checked by the manifest schema). */
   id: mcpServerIdSchema,
@@ -266,6 +280,8 @@ export const mcpServerDeclSchema = z.strictObject({
       type: z.enum(['http', 'sse']),
       url: settingsTemplatedUrlSchema,
       headers: z.record(httpHeaderNameSchema, settingsTemplatedHeaderValueSchema).optional(),
+      /** Plugin API 1.7.0 (ADR-059): OAuth settings for a server that asks for a sign-in. */
+      oauth: mcpServerDeclOAuthSchema.optional(),
     }),
     z.strictObject({
       type: z.literal('stdio'),
@@ -283,11 +299,14 @@ export const mcpServerDeclSchema = z.strictObject({
 })
 export type McpServerDecl = z.infer<typeof mcpServerDeclSchema>
 
-/** `{{settings.<key>}}` keys referenced by an MCP server declaration (url, header values, args, env values). */
+/**
+ * `{{settings.<key>}}` keys referenced by an MCP server declaration (url, header values, args, env values and, plugin
+ * API 1.7.0, the OAuth client id).
+ */
 export function mcpServerDeclSettingsKeys(server: McpServerDecl): string[] {
   const values = server.transport.type === 'stdio'
     ? [...(server.transport.args ?? []), ...Object.values(server.transport.env ?? {})]
-    : [server.transport.url, ...Object.values(server.transport.headers ?? {})]
+    : [server.transport.url, ...Object.values(server.transport.headers ?? {}), ...(server.transport.oauth?.clientId === undefined ? [] : [server.transport.oauth.clientId])]
   return [...new Set(values.flatMap(value => templateKeys(value, 'settings') ?? []))]
 }
 

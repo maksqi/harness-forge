@@ -44,6 +44,8 @@ export type {
   ToolWorkspace,
   ToolWorkspaceAccess,
   TranscriptionHints,
+  WebSearchParams,
+  WebSearchRequest,
 } from './types.ts'
 export { PLUGIN_API_VERSION } from './version.ts'
 export {
@@ -84,6 +86,7 @@ export type {
   HarnessErrorInit,
   ImageAspectRatio,
   McpServerDecl,
+  McpServerDeclOAuth,
   ModelInfo,
   ModelKind,
   PluginFormat,

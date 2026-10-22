@@ -38,6 +38,13 @@ const SECRETS = {
   mcpEnv: sentinel('mcpenv'),
   draftTestKey: sentinel('drafttest'),
   wrongPassword: sentinel('wrongpass'),
+  // Phase 14 (ADR-059): the OAuth record of an MCP server (access and refresh token), a confidential client's secret,
+  // and the authorization code and state posted to the sign-in callback.
+  mcpOAuthAccessToken: sentinel('oauthaccess'),
+  mcpOAuthRefreshToken: sentinel('oauthrefresh'),
+  mcpOAuthClientSecret: sentinel('oauthclient'),
+  mcpOAuthCode: sentinel('oauthcode'),
+  mcpOAuthState: sentinel('oauthstate'),
 } as const
 const CHAT_CONTENT = `chat message ${sentinel('chat')}`
 const PLUGIN_ID = 'leak-check'
@@ -189,6 +196,14 @@ beforeAll(async () => {
   expect((await write('mcp http', 'POST', '/api/mcp', { id: 'leak-web', name: 'Web', enabled: false, transport: { type: 'http', url: 'https://mcp.example.com/mcp', headers: { Authorization: `Bearer ${SECRETS.mcpHeader}` } } })).status).toBe(201)
   expect((await write('mcp stdio', 'POST', '/api/mcp', { id: 'leak-local', name: 'Local', enabled: false, transport: { type: 'stdio', command: 'node', args: ['server.mjs'], env: { API_TOKEN: SECRETS.mcpEnv } } })).status).toBe(201)
   expect((await write('mcp update', 'PATCH', '/api/mcp/leak-web', { transport: { type: 'http', url: 'https://mcp.example.com/v2', headers: { Authorization: `Bearer ${SECRETS.mcpHeader}` } } })).status).toBe(200)
+  // Phase 14 (ADR-059): stored OAuth tokens and a client secret of a personal server and of a project server (the
+  // secret names of the plan), and a sign-in callback carrying a code and a state: no answer may quote them.
+  const oauthRecord = JSON.stringify({ v: 1, resource: 'https://mcp.example.com/v2', clientId: 'leak-client', tokens: { access_token: SECRETS.mcpOAuthAccessToken, refresh_token: SECRETS.mcpOAuthRefreshToken, token_type: 'Bearer', obtainedAt: 1 } })
+  await t.deps.secrets.set('mcp:leak-web', 'oauth.record', oauthRecord)
+  await t.deps.secrets.set('mcp:leak-web', 'oauth.clientSecret', SECRETS.mcpOAuthClientSecret)
+  await t.deps.secrets.set('project:prj_ABCdef0123456789', 'mcp-oauth.memory', oauthRecord)
+  const callback = await write('mcp oauth callback', 'POST', '/api/mcp/oauth/callback', { state: SECRETS.mcpOAuthState, code: SECRETS.mcpOAuthCode, iss: 'https://auth.example.com' })
+  expect([409, 501], await callback.clone().text()).toContain(callback.status)
 
   // A chat (message contents are not secrets, but must stay out of info-level logs) and an uploaded file.
   chatId = createChatId()
@@ -255,6 +270,8 @@ function getInputs(): Partial<Record<ApiRouteKey, Array<{ params?: Record<string
     'marketplaces.get': [{ params: { id: 'mkt_ABCdef0123456789' } }],
     'claudeImport.home': [{}],
     'projectDefinitions.read': [{ params: { id: 'prj_ABCdef0123456789' }, query: { path: '.claude/settings.json' } }],
+    // Phase 14 (ADR-061): the MCP resources of the global servers and of an unknown project (never an OAuth token).
+    'mcpResources.list': [{}, { query: { projectId: 'prj_ABCdef0123456789', q: 'readme' } }],
   }
 }
 

@@ -36,6 +36,16 @@ import type {
   MarketplaceEntry,
   MarketplaceList,
   MarketplaceSummary,
+  McpAuthCallbackResult,
+  McpAuthInfo,
+  McpAuthStart,
+  McpElicitation,
+  McpElicitationForm,
+  McpElicitationRecord,
+  McpResourceEntry,
+  McpResourceList,
+  McpServer,
+  McpToolProgress,
   MessageBranch,
   PersonalHook,
   PluginDetail,
@@ -55,6 +65,8 @@ import type {
   RememberResult,
   RestoreResult,
   RewindPreview,
+  SearchWebOutput,
+  SearchWebResult,
   Settings,
   ShellOutput,
   ShellRule,
@@ -67,6 +79,7 @@ import type {
   TodoItem,
   ToolSummary,
   TrustItem,
+  WebSearchTestResult,
   WorkspaceChangedData,
 } from '@harness-forge/shared'
 import type { ChangesRow } from '~/components/workspace/changes/changes-rows'
@@ -930,6 +943,7 @@ export function projectMcpServer(overrides: Partial<ProjectMcpServer> = {}): Pro
     sha256: trustSha(3),
     tools: [],
     missingVariables: ['MCP_TOKEN'],
+    auth: null,
     ...overrides,
   }
 }
@@ -1194,4 +1208,154 @@ export function projectDefinitionWriteResult(overrides: Partial<ProjectDefinitio
     trust: { pending: 1 },
     ...overrides,
   }
+}
+
+// ---------- Phase 14: MCP 2.0 and web search (ADR-059 … ADR-063) ----------
+
+/** A personal http MCP server (`core-mcp`) without OAuth settings, connected with one tool. */
+export function mcpServer(overrides: Partial<McpServer> = {}): McpServer {
+  return {
+    id: 'github',
+    name: 'GitHub',
+    pluginId: 'core-mcp',
+    editable: true,
+    transport: { type: 'http', url: 'https://mcp.example.com/mcp', headers: {}, oauth: null },
+    policy: 'ask',
+    enabled: true,
+    status: 'connected',
+    error: null,
+    tools: ['mcp__github__search'],
+    connectedAt: 1_759_000_000_000,
+    auth: null,
+    ...overrides,
+  }
+}
+
+/** The sign-in state of a server signed in through dynamic client registration (`McpServer.auth`). */
+export function mcpAuthInfo(overrides: Partial<McpAuthInfo> = {}): McpAuthInfo {
+  return { signedIn: true, expiresAt: 1_759_003_600_000, scope: 'read', client: 'dynamic', issuer: 'https://auth.example.com', ...overrides }
+}
+
+/** A personal http server that asks for a sign-in (status `needs-auth`, nothing stored yet). */
+export function mcpServerNeedsAuth(overrides: Partial<McpServer> = {}): McpServer {
+  return mcpServer({
+    id: 'linear',
+    name: 'Linear',
+    transport: { type: 'http', url: 'https://mcp.linear.app/mcp', headers: {}, oauth: null },
+    status: 'needs-auth',
+    tools: [],
+    connectedAt: null,
+    auth: mcpAuthInfo({ signedIn: false, expiresAt: null, scope: null, client: null, issuer: null }),
+    ...overrides,
+  })
+}
+
+/** `POST /mcp/:id/oauth`: the authorization URL the browser opens in the same tab. */
+export function mcpAuthStart(overrides: Partial<McpAuthStart> = {}): McpAuthStart {
+  return {
+    authorizationUrl: 'https://auth.example.com/authorize?response_type=code&code_challenge_method=S256&state=sampleState0000000000001',
+    redirectUri: 'http://127.0.0.1:3000/oauth/callback',
+    expiresAt: 1_759_000_600_000,
+    ...overrides,
+  }
+}
+
+/** `POST /mcp/oauth/callback`: a global server signed in and connected, back to the MCP list. */
+export function mcpAuthCallbackResult(overrides: Partial<McpAuthCallbackResult> = {}): McpAuthCallbackResult {
+  return { target: { kind: 'global', serverId: 'linear' }, status: 'connected', returnTo: '/plugins?tab=mcp', ...overrides }
+}
+
+/** A fixed elicitation id: elicitationId(1) -> 'eli_0000000000000001'. */
+export function elicitationId(n: number): string {
+  return `eli_${String(n).padStart(16, '0')}`
+}
+
+/** A normalized elicitation form: a required email, an optional count, a boolean and a single-select. */
+export function mcpElicitationForm(overrides: Partial<McpElicitationForm> = {}): McpElicitationForm {
+  return {
+    fields: [
+      { name: 'email', type: 'string', title: 'Email', description: 'Where to send the report', required: true, format: 'email' },
+      { name: 'count', type: 'integer', title: 'Count', description: null, required: false, minimum: 1, maximum: 10, default: 3 },
+      { name: 'notify', type: 'boolean', title: 'Notify me', description: null, required: false, default: false },
+      { name: 'priority', type: 'enum', title: 'Priority', description: null, required: true, options: [{ value: 'low', label: 'Low' }, { value: 'high', label: 'High' }] },
+    ],
+    ...overrides,
+  }
+}
+
+/** A pending elicitation of the `fixture` server (the card under a running MCP tool row). */
+export function mcpElicitation(overrides: Partial<McpElicitation> = {}): McpElicitation {
+  return {
+    id: elicitationId(1),
+    serverId: 'fixture',
+    serverName: 'Fixture',
+    message: 'Where should the report go?',
+    form: mcpElicitationForm(),
+    expiresAt: 1_759_000_480_000,
+    ...overrides,
+  }
+}
+
+/** The preliminary output of an MCP tool call that waits for the user. */
+export function mcpToolProgress(elicitation: McpElicitation | null = mcpElicitation()): McpToolProgress {
+  return elicitation === null ? { status: 'running' } : { status: 'input-required', elicitation }
+}
+
+/** What the stored output of an MCP tool call keeps of an elicitation (never the values). */
+export function mcpElicitationRecord(overrides: Partial<McpElicitationRecord> = {}): McpElicitationRecord {
+  return { id: elicitationId(1), message: 'Where should the report go?', fields: ['email', 'count', 'notify', 'priority'], action: 'accept', reason: 'user', ...overrides }
+}
+
+/** An MCP prompt in `GET /commands` (`source: 'mcp'`). */
+export function mcpPromptCommand(overrides: Partial<CommandSummary> = {}): CommandSummary {
+  return {
+    name: 'mcp__fixture__greet',
+    description: 'Greets someone',
+    source: 'mcp',
+    argumentHint: '<name> [style]',
+    mcpServer: { id: 'fixture', name: 'Fixture' },
+    ...overrides,
+  }
+}
+
+/** One MCP resource of the `@` menu. */
+export function mcpResourceEntry(overrides: Partial<McpResourceEntry> = {}): McpResourceEntry {
+  const serverId = overrides.serverId ?? 'github'
+  const uri = overrides.uri ?? 'repo://owner/name/README.md'
+  return {
+    serverId,
+    serverName: 'GitHub',
+    scope: 'global',
+    uri,
+    name: 'README.md',
+    mimeType: 'text/markdown',
+    size: 1200,
+    mention: `@${serverId}:${uri}`,
+    ...overrides,
+  }
+}
+
+/** `GET /mcp/resources`: one resource, a server that asks for a sign-in. */
+export function mcpResourceList(overrides: Partial<McpResourceList> = {}): McpResourceList {
+  return { items: [mcpResourceEntry()], truncated: false, unavailable: [{ serverId: 'linear', status: 'needs-auth' }], ...overrides }
+}
+
+/** One normalized `search_web` result. */
+export function searchWebResult(overrides: Partial<SearchWebResult> = {}): SearchWebResult {
+  return { title: 'Harness Forge', url: 'https://example.com/harness-forge', snippet: 'A self-hosted chat and agent harness.', published: '2026-10-01', ...overrides }
+}
+
+/** The output of a `search_web` call on Brave with two results. */
+export function searchWebOutput(overrides: Partial<SearchWebOutput> = {}): SearchWebOutput {
+  return {
+    query: 'harness forge',
+    backend: 'brave',
+    results: [searchWebResult(), searchWebResult({ title: 'Docs', url: 'https://docs.example.org/start', snippet: 'Getting started.', published: null })],
+    ...overrides,
+  }
+}
+
+/** `POST /web-search/test`: Brave answered with 5 results. */
+export function webSearchTestResult(overrides: Partial<WebSearchTestResult> = {}): WebSearchTestResult {
+  return { ok: true, backend: 'brave', results: 5, ms: 312, ...overrides }
 }

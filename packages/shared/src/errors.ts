@@ -110,7 +110,11 @@ export type ValidationErrorDetails = z.infer<typeof validationErrorDetailsSchema
  * block` or `continue: false`; the message is the hook's reason) and nothing was stored; `untrusted` (Phase 11,
  * ADR-049 / ADR-052): a project command file with `` !`cmd` `` spans whose trust hash is not approved for the project;
  * `offline` (Phase 12, ADR-054): `HF_OFFLINE=1` refuses adding or refreshing a marketplace and installing from a
- * `github` or `marketplace` source (npm and URL installs are unchanged).
+ * `github` or `marketplace` source (npm and URL installs are unchanged); `needs-auth` (Phase 14, ADR-059 / ADR-061): the
+ * MCP server must be signed in first (status `needs-auth`), e.g. attaching one of its resources. Phase 14 also uses
+ * `stale` (an OAuth callback whose state is unknown, used or expired; an elicitation answer after it was answered,
+ * expired or its run ended), `disabled` (signing in to a disabled MCP server) and `untrusted` (signing in to a project
+ * MCP server that is not approved).
  */
 export const conflictReasonSchema = z.enum([
   'run-active',
@@ -128,6 +132,7 @@ export const conflictReasonSchema = z.enum([
   'hook-blocked',
   'untrusted',
   'offline',
+  'needs-auth',
 ])
 export type ConflictReason = z.infer<typeof conflictReasonSchema>
 
