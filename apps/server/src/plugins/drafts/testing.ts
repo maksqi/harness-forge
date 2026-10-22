@@ -10,6 +10,7 @@ import type { McpManager } from '../../mcp/types.ts'
 import { Buffer } from 'node:buffer'
 import { createServer } from 'node:http'
 import { HarnessError } from '@harness-forge/shared'
+import { inertMcpManagerMembers } from '../../testing/fake-mcp.ts'
 
 export interface FakeLlmRequest {
   method: string
@@ -153,5 +154,6 @@ export function createInertMcpManager(): McpManager {
     update: unavailable,
     remove: unavailable,
     reconnect: unavailable,
+    ...inertMcpManagerMembers(),
   }
 }

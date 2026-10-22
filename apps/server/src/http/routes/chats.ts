@@ -15,6 +15,12 @@
 // reads the chat row before the delete and, once the chat is deleted, hands it to `deps.hooks.sessionEnd(chat)`
 // (`SessionEnd`, `reason: 'other'`; detached: the answer never waits for it, a failure never fails the delete). Only a
 // single chat delete ends a session: delete-all, a project delete and shutdown never call it.
+// Phase 14 (C52, ADR-060, open point 2; COMPLETE and FROZEN after P14-0b): the answers of `GET /chats` (every item) and
+// `GET /chats/:id` carry `awaitingInput: deps.elicitations.pendingCount(id) > 0` (live: an MCP tool call of the chat's
+// run waits for the user's answer to an elicitation; `withAwaitingInput`). A broker that throws counts as nothing
+// pending. The other answers (create, update, branch, version delete) keep the v1.8 shape (absent = unchanged for the
+// web store); the broker reports changes through `chat.updated` (W14.3).
+import type { ChatSummary } from '@harness-forge/shared'
 import type { SessionEndChat } from '../../services/hooks/types.ts'
 import type { AppDeps } from '../../types.ts'
 import type { AppEnv } from '../types.ts'
@@ -48,11 +54,27 @@ export function endChatSession(deps: Pick<AppDeps, 'hooks' | 'logger'>, chat: Se
   }
 }
 
+/**
+ * `summary` with `awaitingInput` (Phase 14, see the module comment): true while an elicitation of the chat waits for the
+ * user (`ElicitationBroker.pendingCount`), else false; a failing broker counts as nothing pending.
+ */
+export function withAwaitingInput<T extends Pick<ChatSummary, 'id'>>(deps: Pick<AppDeps, 'elicitations' | 'logger'>, summary: T): T & { awaitingInput: boolean } {
+  let pending = 0
+  try {
+    pending = deps.elicitations.pendingCount(summary.id)
+  }
+  catch (error) {
+    deps.logger.warn('cannot read the pending elicitations of a chat', { chatId: summary.id, err: error })
+  }
+  return { ...summary, awaitingInput: Number.isFinite(pending) && pending > 0 }
+}
+
 export function createChatsRoutes(deps: AppDeps): Hono<AppEnv> {
   const app = new Hono<AppEnv>()
 
   app.get(apiRoutes['chats.list'].path, validate('query', chatsQuerySchema), async (c) => {
-    return c.json(await deps.chats.list(c.req.valid('query')))
+    const page = await deps.chats.list(c.req.valid('query'))
+    return c.json({ ...page, items: page.items.map(item => withAwaitingInput(deps, item)) })
   })
 
   app.post(apiRoutes['chats.create'].path, validate('json', chatCreateSchema), async (c) => {
@@ -60,7 +82,7 @@ export function createChatsRoutes(deps: AppDeps): Hono<AppEnv> {
   })
 
   app.get(apiRoutes['chats.get'].path, validate('param', chatParamsSchema), async (c) => {
-    return c.json(await deps.chats.get(c.req.valid('param').id))
+    return c.json(withAwaitingInput(deps, await deps.chats.get(c.req.valid('param').id)))
   })
 
   app.patch(apiRoutes['chats.update'].path, validate('param', chatParamsSchema), validate('json', chatUpdateSchema), async (c) => {

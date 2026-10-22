@@ -8,8 +8,24 @@
 // cannot run (the chat's model answers instead); a continuation whose reply already shows it does not add it again.
 // Phase 11: `output-style-unavailable` (ADR-051, `output-style.ts`), `hook-continuation-limit` (ADR-048, the `Stop` gate
 // of `hooks.ts`, at the end of the reply) and `project-mcp-unavailable` (ADR-050, `modelStream`).
-import type { NoticeData } from '@harness-forge/shared'
+// Phase 14 (C52, ADR-063): `web-search-unavailable` (`modelStream`): web search is on for the turn but
+// `resolveWebSearch` answered `unavailable`; once per chat, model and reason (`notice-memory.ts` and the history).
+import type { NoticeData, WebSearchUnavailableReason } from '@harness-forge/shared'
 import { LIMITS } from '@harness-forge/shared'
+
+/** Why a turn with web search on cannot search, as the notice says it (`model`: the model's display name). */
+function webSearchReasonText(reason: WebSearchUnavailableReason, model: string): string {
+  switch (reason) {
+    case 'tool-mode-off':
+      return 'tools are off in this chat.'
+    case 'tools-conflict':
+      return `${model} can't search while tools are on. Add a search key in Settings → Web search to search with tools.`
+    case 'tools-unsupported':
+      return `${model} can't use tools.`
+    default:
+      return `${model} has no web search of its own. Add a search key in Settings → Web search.`
+  }
+}
 
 export const NOTICES = {
   superseded: (count: number): NoticeData => ({
@@ -88,6 +104,15 @@ export const NOTICES = {
     message: names.length === 1
       ? `The project MCP server "${names[0]}" is not ready, so its tools were not sent.`
       : `${names.length} project MCP servers are not ready (${names.map(name => `"${name}"`).join(', ')}), so their tools were not sent.`,
+  }),
+  /**
+   * Phase 14 (ADR-063): web search is on for the turn, but the turn cannot search (`resolveWebSearch` answered
+   * `unavailable` with `reason`); `model` is the model's display name (`CatalogModel.name`). The turn runs without search.
+   */
+  webSearchUnavailable: (reason: WebSearchUnavailableReason, model: string): NoticeData => ({
+    level: 'info',
+    code: 'web-search-unavailable',
+    message: `Web search is off for this reply: ${webSearchReasonText(reason, model.trim() === '' ? 'This model' : model.trim())}`,
   }),
   /** Generated files that were not kept (not a raster image of `GENERATED_IMAGE_MIME_TYPES`, too large, unreadable). */
   generatedFileDropped: (count = 1): NoticeData => {

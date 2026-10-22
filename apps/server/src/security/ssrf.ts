@@ -18,6 +18,12 @@
 // must still be https without credentials, an IP literal or `localhost` host is classified as usual (so
 // `https://127.0.0.1/…` and `http://127.0.0.1:<port>/…` stay refused), redirects are re-checked and rerouted the same way,
 // and the result carries the original (logical) URL. No host name is ever resolved in that mode.
+//
+// Phase 14 (ADR-063, C50, complete and FROZEN after Gate P14-0b): `method: 'POST'` with a `body` (a string or bytes,
+// at most `SAFE_FETCH_MAX_BODY_BYTES`, sent with `content-length`) for the `core-search` backends and the OAuth token
+// revocation. A POST never follows a redirect: a 3xx answer is returned as the result (status, headers, capped body), so
+// a body is never re-sent to another host. The guard, the DNS pinning, `protocols`, the caps, the timeout and the test
+// remote reroute (which carries the method and the body) are unchanged.
 import type { LookupAddress } from 'node:dns'
 import type { ClientRequest, IncomingHttpHeaders, IncomingMessage } from 'node:http'
 import type { LookupFunction } from 'node:net'
@@ -249,6 +255,8 @@ export const SAFE_FETCH_MAX_REDIRECTS = 5
 export const SAFE_FETCH_PROTOCOLS: readonly ('http:' | 'https:')[] = ['http:', 'https:']
 /** Default User-Agent when neither the config nor the caller sets one. */
 export const SAFE_FETCH_USER_AGENT = 'harness-forge'
+/** Largest request body of a `POST` (Phase 14): 64 KiB. */
+export const SAFE_FETCH_MAX_BODY_BYTES = 65_536
 
 /** Longest URL accepted (first URL and redirect locations). */
 const MAX_URL_LENGTH = 8192
@@ -446,7 +454,7 @@ function withoutCredentials(headers: Record<string, string>): Record<string, str
   return Object.fromEntries(Object.entries(headers).filter(([name]) => !CREDENTIAL_HEADERS.has(name)))
 }
 
-function openRequest(url: URL, method: 'GET' | 'HEAD', headers: Record<string, string>, addresses: readonly LookupAddress[], signal: AbortSignal): Promise<IncomingMessage> {
+function openRequest(url: URL, method: SafeFetchMethod, headers: Record<string, string>, body: Buffer | null, addresses: readonly LookupAddress[], signal: AbortSignal): Promise<IncomingMessage> {
   const transport = url.protocol === 'https:' ? https : http
   return new Promise((resolve, reject) => {
     let request: ClientRequest
@@ -465,7 +473,10 @@ function openRequest(url: URL, method: 'GET' | 'HEAD', headers: Record<string, s
       return
     }
     request.once('error', reject)
-    request.end()
+    if (body === null)
+      request.end()
+    else
+      request.end(body)
   })
 }
 
@@ -569,15 +580,38 @@ function raceAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   })
 }
 
-function checkOptions(options: SafeFetchOptions): void {
+type SafeFetchMethod = NonNullable<SafeFetchOptions['method']>
+
+const METHODS: ReadonlySet<unknown> = new Set<SafeFetchMethod>(['GET', 'HEAD', 'POST'])
+
+/** Checks the options; answers the bytes of a POST body (an empty body for a POST without one), else null. */
+function checkOptions(options: SafeFetchOptions): Buffer | null {
   if (!Number.isSafeInteger(options.maxBytes) || options.maxBytes < 0)
     throw invalid('maxBytes must be a non-negative integer.')
   if (options.timeoutMs !== undefined && !(Number.isFinite(options.timeoutMs) && options.timeoutMs > 0))
     throw invalid('timeoutMs must be a positive number.')
   if (options.maxRedirects !== undefined && !(Number.isSafeInteger(options.maxRedirects) && options.maxRedirects >= 0))
     throw invalid('maxRedirects must be a non-negative integer.')
-  if (options.method !== undefined && options.method !== 'GET' && options.method !== 'HEAD')
-    throw invalid('Only GET and HEAD requests are supported.')
+  if (options.method !== undefined && !METHODS.has(options.method))
+    throw invalid('Only GET, HEAD and POST requests are supported.')
+  const { body } = options
+  if (options.method !== 'POST') {
+    if (body !== undefined)
+      throw invalid('Only a POST request can have a body.')
+    return null
+  }
+  if (body === undefined)
+    return Buffer.alloc(0)
+  let bytes: Buffer
+  if (typeof body === 'string')
+    bytes = Buffer.from(body, 'utf8')
+  else if (body instanceof Uint8Array)
+    bytes = Buffer.from(body.buffer, body.byteOffset, body.byteLength)
+  else
+    throw invalid('The request body must be a string or bytes.')
+  if (bytes.byteLength > SAFE_FETCH_MAX_BODY_BYTES)
+    throw invalid(`The request body is larger than the limit of ${SAFE_FETCH_MAX_BODY_BYTES} bytes.`)
+  return bytes
 }
 
 // ---------- factory ----------
@@ -598,7 +632,7 @@ function createGuardedFetch(config: SafeFetchConfig, route: HopRoute | null): Sa
   const userAgent = config.userAgent ?? SAFE_FETCH_USER_AGENT
 
   return async (input: string, options: SafeFetchOptions): Promise<SafeFetchResult> => {
-    checkOptions(options)
+    const body = checkOptions(options)
     const timeoutMs = options.timeoutMs ?? SAFE_FETCH_TIMEOUT_MS
     const maxRedirects = options.maxRedirects ?? SAFE_FETCH_MAX_REDIRECTS
     const protocols = options.protocols ?? SAFE_FETCH_PROTOCOLS
@@ -609,6 +643,9 @@ function createGuardedFetch(config: SafeFetchConfig, route: HopRoute | null): Sa
 
     let url = parseUrl(input, protocols)
     let headers = requestHeaders(options.headers, userAgent)
+    // Phase 14: a POST always declares its length (the caller cannot set `content-length`: a reserved header).
+    if (body !== null)
+      headers['content-length'] = String(body.byteLength)
     const controller = new AbortController()
     let timedOut = false
     const timer = setTimeout(() => {
@@ -622,10 +659,11 @@ function createGuardedFetch(config: SafeFetchConfig, route: HopRoute | null): Sa
       for (let redirects = 0; ; redirects++) {
         const target = route === null ? url : route(url)
         const addresses = await raceAbort(checkedAddresses(target, route === null ? policy : routedPolicy), controller.signal)
-        const response = await openRequest(target, method, headers, addresses, controller.signal)
+        const response = await openRequest(target, method, headers, body, addresses, controller.signal)
         const status = response.statusCode ?? 0
         const location = response.headers.location
-        if (REDIRECT_STATUSES.has(status) && typeof location === 'string' && location.trim() !== '') {
+        // Phase 14: a POST never follows a redirect (its 3xx is the result below), so its body never reaches another URL.
+        if (method !== 'POST' && REDIRECT_STATUSES.has(status) && typeof location === 'string' && location.trim() !== '') {
           response.destroy()
           if (redirects >= maxRedirects)
             throw new HarnessError({ code: 'provider_error', message: `Too many redirects: ${url.host} redirected more than ${maxRedirects} times.` })
@@ -635,15 +673,15 @@ function createGuardedFetch(config: SafeFetchConfig, route: HopRoute | null): Sa
           url = next
           continue
         }
-        let body: Uint8Array
+        let answer: Uint8Array
         if (method === 'HEAD') {
           response.destroy()
-          body = new Uint8Array(0)
+          answer = new Uint8Array(0)
         }
         else {
-          body = await readBody(response, options.maxBytes, controller.signal, url.host)
+          answer = await readBody(response, options.maxBytes, controller.signal, url.host)
         }
-        return { url: url.href, status, headers: responseHeaders(response.headers), body }
+        return { url: url.href, status, headers: responseHeaders(response.headers), body: answer }
       }
     }
     catch (error) {

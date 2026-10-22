@@ -6,8 +6,12 @@
 // project's chats." when it shadows a global server, Reconnect (`project-mcp-reconnect`, `reconnect`; connected, error
 // and idle servers) and Review… while pending (`project-mcp-review`, `review`). Store-free. Props, emits and the root
 // test id are frozen from Gate P11-0b (C39); W11.9.
+// Phase 14 (ADR-059; C54 declares, W14.7 implements; frozen from Gate P14-0b): + emits `signIn` / `signOut`: a
+// `needs-auth` remote server shows **Sign in** (`project-mcp-sign-in`, named "Sign in to {name}"), a signed-in one **Sign
+// out…** (`project-mcp-sign-out`, named "Sign out of {name}"); pending rows keep Review… and never show Sign in. W14.7 adds
+// the `.mcp.json` OAuth values (`data-slot="project-mcp-oauth"`).
 import type { ProjectMcpServer, TrustItem } from '@harness-forge/shared'
-import { ChevronRightIcon, RotateCwIcon, ServerCogIcon, ShieldQuestionMarkIcon } from '@lucide/vue'
+import { ChevronRightIcon, LogInIcon, LogOutIcon, RotateCwIcon, ServerCogIcon, ShieldQuestionMarkIcon } from '@lucide/vue'
 import { computed, useId } from 'vue'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
@@ -18,7 +22,7 @@ import { canReconnect, mcpServerCommand, mcpStatusDot, mcpStatusText } from '../
 
 const props = defineProps<{ server: ProjectMcpServer, trust: TrustItem | null, expanded: boolean, busy: boolean }>()
 
-const emit = defineEmits<{ toggle: [], reconnect: [], review: [] }>()
+const emit = defineEmits<{ toggle: [], reconnect: [], review: [], signIn: [], signOut: [] }>()
 
 const toolsId = useId()
 
@@ -26,6 +30,10 @@ const status = computed(() => mcpStatusText(props.server))
 const dot = computed(() => mcpStatusDot(props.server))
 const command = computed(() => mcpServerCommand(props.trust))
 const reconnectable = computed(() => canReconnect(props.server))
+/** + Phase 14: an approved remote server asks for a sign-in. */
+const canSignIn = computed(() => props.server.state === 'needs-auth' && props.server.transport !== 'stdio')
+/** + Phase 14: an approved server holds OAuth tokens. */
+const signedIn = computed(() => props.server.state !== 'pending' && props.server.auth?.signedIn === true)
 </script>
 
 <template>
@@ -74,14 +82,42 @@ const reconnectable = computed(() => canReconnect(props.server))
         Review…
       </Button>
       <Button
-        v-else-if="reconnectable"
+        v-if="canSignIn"
+        type="button"
+        variant="outline"
+        size="xs"
+        :disabled="busy"
+        :aria-label="`Sign in to ${server.name}`"
+        :data-testid="testIds.projectMcpSignIn"
+        class="ml-auto pointer-coarse:h-10 pointer-coarse:px-3"
+        @click="emit('signIn')"
+      >
+        <LogInIcon aria-hidden="true" data-icon="inline-start" />
+        Sign in
+      </Button>
+      <Button
+        v-if="signedIn"
+        type="button"
+        variant="ghost"
+        size="xs"
+        :disabled="busy"
+        :aria-label="`Sign out of ${server.name}`"
+        :data-testid="testIds.projectMcpSignOut"
+        :class="cn('pointer-coarse:h-10 pointer-coarse:px-3', !canSignIn && 'ml-auto')"
+        @click="emit('signOut')"
+      >
+        <LogOutIcon aria-hidden="true" data-icon="inline-start" />
+        Sign out…
+      </Button>
+      <Button
+        v-if="reconnectable"
         type="button"
         variant="outline"
         size="xs"
         :disabled="busy"
         :aria-label="`Reconnect ${server.name}`"
         :data-testid="testIds.projectMcpReconnect"
-        class="ml-auto pointer-coarse:h-10 pointer-coarse:px-3"
+        :class="cn('pointer-coarse:h-10 pointer-coarse:px-3', !signedIn && 'ml-auto')"
         @click="emit('reconnect')"
       >
         <RotateCwIcon aria-hidden="true" data-icon="inline-start" :class="cn(busy && 'animate-spin motion-reduce:animate-none')" />

@@ -6,8 +6,11 @@
 // when the dialog closes. Saving a stdio server is a fresh-auth action (docs/UI.md 8.4, ADR-017; useFreshAuth with
 // `required` for such a request): with a password set and a stale session the password is asked first, and a
 // `403 forbidden` + `action: 'login'` answer is followed by one prompt and one more run.
-import type { McpServer } from '@harness-forge/shared'
-import type { McpFormErrors, McpFormState, McpSaveRequest, McpTransportType } from './mcp-form'
+// Phase 14 (ADR-059; C54 mounts, W14.7 implements; frozen from Gate P14-0b): the HTTP and SSE tabs render McpOAuthFields
+// (client ID, write-only client secret, scopes, the redirect URI built in script) under the header rows; W14.7 sends the
+// draft with the save (`oauthInputOf` / `oauthUpdateOf`) and shows "Saving signs you out of {name}." (`signsOut`).
+import type { McpServer, SecretState } from '@harness-forge/shared'
+import type { McpFormErrors, McpFormState, McpOAuthDraft, McpSaveRequest, McpTransportType } from './mcp-form'
 import { TerminalIcon } from '@lucide/vue'
 import { computed, reactive, ref, useId, watch } from 'vue'
 import { toast } from 'vue-sonner'
@@ -36,8 +39,10 @@ import {
   emptyForm,
   formFromServer,
   newRow,
+  oauthDraftOf,
   POLICY_OPTIONS,
   policyLabel,
+  redirectUriFor,
   requiresFreshAuth,
   saveErrorFields,
   schemaErrors,
@@ -45,6 +50,7 @@ import {
   TRANSPORT_OPTIONS,
   validateForm,
 } from './mcp-form'
+import McpOAuthFields from './McpOAuthFields.vue'
 import McpSecretRows from './McpSecretRows.vue'
 
 // Attributes go to the dialog content, not to the renderless dialog root.
@@ -84,6 +90,10 @@ const ids = {
 }
 
 const form = reactive<McpFormState>(emptyForm())
+/** + Phase 14: the OAuth fields of the HTTP and SSE tabs (the client secret is write-only). */
+const oauthDraft = ref<McpOAuthDraft>(oauthDraftOf(null))
+/** + Phase 14: the redirect URI shown in the OAuth fields (built here: no `//` in a template prop value). */
+const redirectUri = typeof window === 'undefined' ? '' : redirectUriFor(window.location.origin)
 const phase = ref<Phase>('idle')
 /** Validation runs live once a save was attempted. */
 const attempted = ref(false)
@@ -105,6 +115,7 @@ const title = computed(() => (props.server ? `Edit ${props.server.name}` : 'Add 
 
 function resetForm(server: McpServer | null) {
   Object.assign(form, server ? formFromServer(server) : emptyForm())
+  oauthDraft.value = oauthDraftOf(server)
   attempted.value = false
   serverErrors.value = {}
   phase.value = 'idle'
@@ -223,6 +234,14 @@ async function onSave() {
 function secretListOf(type: McpTransportType): SecretList {
   return type === 'stdio' ? 'env' : 'headers'
 }
+
+/** + Phase 14: the stored client secret of the edited server (null for a new or a stdio server). */
+const oauthSecretState = computed<SecretState | null>(() => {
+  const transport = props.server?.transport
+  return transport && transport.type !== 'stdio' ? transport.oauth?.clientSecret ?? null : null
+})
+/** + Phase 14: an Authorization header row is set: the server does not sign in. */
+const hasAuthorizationHeader = computed(() => form.headers.some(row => row.name.trim().toLowerCase() === 'authorization'))
 </script>
 
 <template>
@@ -394,6 +413,15 @@ function secretListOf(type: McpTransportType): SecretList {
                 @add="addRow(secretListOf(option.value))"
                 @remove="uid => removeRow(secretListOf(option.value), uid)"
                 @update="(uid, field, value) => updateRow(secretListOf(option.value), uid, field, value)"
+              />
+
+              <McpOAuthFields
+                v-if="option.value !== 'stdio'"
+                v-model="oauthDraft"
+                :secret-state="oauthSecretState"
+                :redirect-uri="redirectUri"
+                :disabled="busy || hasAuthorizationHeader"
+                :signed-in="server?.auth?.signedIn === true"
               />
             </TabsContent>
           </Tabs>

@@ -65,7 +65,24 @@
 // (`compaction/guard.ts`) and `SubagentStart` in the children; the hook matchers see the Claude names of plugin MCP
 // servers too (`hookMcpServerNames`); the `hooks` activity carries the `statusMessage` label. The agent scope's
 // `loadSkill` passes its options (`{ file?, toolCallId? }`, `skills.ts`; W12.7). Nothing else changes here.
-import type { HarnessError, HarnessUIMessage, HarnessUIMessagePart, MessageMetadata, NoticeData, ReasoningEffort, RunOrigin, ToolMode } from '@harness-forge/shared'
+// Phase 14 (C52 seams, ADR-060 / ADR-062 / ADR-063; COMPLETE and FROZEN after P14-0b; the features land behind them in
+// P14-A):
+// - web search: after `assembleTools` the turn's web search is resolved once (`turnWebSearch`, `search/turn.ts`: the
+//   effective mode `PreparedRun.webSearch`, the tool mode, `CatalogModel.webSearch`, the setting `webSearchNative`,
+//   `core-search`'s `search_web` in the assembled tools, the model's tool support, the other function tools) and
+//   applied: the merged tools (native provider tools added, `search_web` kept only for `builtin`) go to `streamText`,
+//   `toUIMessageStream`, the kept user message and the steer step; `activeTools` gains the native names; the approval
+//   function gets `nativeTools` (`approval.ts`: provider-executed native calls are `not-applicable`); the native search's
+//   provider options are deep-merged over the run's (`mergeProviderOptions`, after `chat.params`). An `unavailable`
+//   resolution adds the notice `web-search-unavailable` once per chat, model and reason (`RunContext.noticeMemory`, the
+//   runner's in-memory set, and the history, `alreadyNoticed`);
+// - the history stage `stripForeignProviderParts` (`search/history.ts`) runs on the model history before
+//   `toolPartsAsText`; the sources transform (`search/sources.ts`, `createSourcesTransform`) is the last transform of
+//   the run's UI stream, after `generatedFiles`;
+// - the agent scope's `notify` (`agent-scope.ts`) runs the run's `Notification` hooks (`RunSession.notify`:
+//   fire-and-forget, tracked, aborted at shutdown), so an MCP elicitation of one of the run's calls notifies with
+//   `notification_type: 'elicitation_dialog'` (W14.3).
+import type { HarnessError, HarnessUIMessage, HarnessUIMessagePart, MessageMetadata, NoticeData, ReasoningEffort, RunOrigin, ToolMode, WebSearchResolution } from '@harness-forge/shared'
 import type { LanguageModelUsage, ModelMessage, TextStreamPart, Tool, ToolSet, UIMessageChunk, UIMessageStreamOnEndCallback, UIMessageStreamWriter } from 'ai'
 import type { Logger } from '../logger.ts'
 import type { PluginHost } from '../plugins/types.ts'
@@ -73,11 +90,12 @@ import type { ResolvedModel } from '../providers/types.ts'
 import type { RegisteredTool } from '../registry/types.ts'
 import type { ImageGenerationResult } from '../services/images/types.ts'
 import type { AppDeps } from '../types.ts'
-import type { AgentRunScope } from './agent-scope.ts'
+import type { AgentNotification, AgentRunScope } from './agent-scope.ts'
 import type { BackgroundTasks } from './background/types.ts'
 import type { HarnessUIMessageChunk } from './generated-files.ts'
 import type { RunEnding } from './history.ts'
 import type { RunHooks } from './hooks.ts'
+import type { NoticeMemory } from './notice-memory.ts'
 import type { PreparedRun } from './prepare.ts'
 import type { ChatQueue } from './queue.ts'
 import type { Run, RunRegistry } from './runs.ts'
@@ -111,10 +129,13 @@ import { createRunHooks, hookMcpServerNames, noHookSnapshot, PERMISSION_PROMPT, 
 import { imageStream } from './images.ts'
 import { buildModelHistory } from './model-history.ts'
 import { NOTICES } from './notices.ts'
-import { buildRunParams, offeredAgentTools, providerImageOptions, runMaxSteps } from './params.ts'
+import { buildRunParams, mergeProviderOptions, offeredAgentTools, providerImageOptions, runMaxSteps } from './params.ts'
 import { savePlan } from './plan-file.ts'
 import { SseReplayBuffer } from './runs.ts'
 import { createRunScope } from './scope.ts'
+import { stripForeignProviderParts } from './search/history.ts'
+import { createSourcesTransform } from './search/sources.ts'
+import { turnWebSearch } from './search/turn.ts'
 import { loadSkill, modelInvocableSkills } from './skills.ts'
 import { createSteerStep, stepInjector } from './steer.ts'
 import { createPrepareStep } from './steps.ts'
@@ -237,6 +258,11 @@ export interface RunContext {
    * launches there (the sub-agent runner), and the steer step takes the finished results from it (W10.4).
    */
   background: BackgroundTasks
+  /**
+   * The runner's once-per-chat notice memory (Phase 14, `notice-memory.ts`): `web-search-unavailable` is shown once per
+   * chat, model and reason. Absent (test doubles) = the history check alone (`alreadyNoticed`).
+   */
+  noticeMemory?: NoticeMemory
 }
 
 /**
@@ -748,6 +774,36 @@ export class RunSession {
       this.ctx.tasks.track(this.hooks.notification({ message: text, notificationType: PERMISSION_PROMPT }, this.ctx.lifecycle))
   }
 
+  /**
+   * Phase 14 (ADR-060; `AgentRunScope.notify`): the run's `Notification` hooks with `input` (`elicitation_dialog`: an MCP
+   * server asks the user for input during one of the run's calls), fire-and-forget through the task tracker (aborted at
+   * shutdown); nothing without such hooks. Never throws.
+   */
+  notify(input: AgentNotification): void {
+    try {
+      if (!this.hooks.has('Notification'))
+        return
+      this.ctx.tasks.track(this.hooks.notification({ message: input.message, notificationType: input.notificationType }, this.ctx.lifecycle))
+    }
+    catch (error) {
+      this.ctx.logger.warn('the Notification hooks could not start', { err: error })
+    }
+  }
+
+  /**
+   * Phase 14 (ADR-063): the notice of a turn whose web search is on but cannot search (`resolution` `unavailable`), once
+   * per chat, model and reason: not when the runner's notice memory or the history (`alreadyNoticed`) already has it.
+   */
+  noticeWebSearch(resolution: WebSearchResolution, model: Pick<ResolvedModel, 'modelRef' | 'entry'>): void {
+    if (resolution.kind !== 'unavailable')
+      return
+    const notice = NOTICES.webSearchUnavailable(resolution.reason, model.entry.name)
+    const fresh = this.ctx.noticeMemory?.remember(this.chatId, `${notice.code}\n${model.modelRef}\n${resolution.reason}`) ?? true
+    if (!fresh || alreadyNoticed(this.ctx.prepared.history, notice, model.modelRef))
+      return
+    this.notices.push(notice)
+  }
+
   /** The cost of this run (model or image turn, plus the extra costs), for `message.completed`. */
   #runCost(): number | undefined {
     const own = this.mode === 'model'
@@ -955,6 +1011,8 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
     todos: () => latestTodos(prepared.history),
     loadSkill: (name, signal, options) => loadSkill({ deps, catalog, workspace: prepared.workspace, logger }, name, signal, options),
     savePlan: (plan, c) => savePlan({ deps, settings: prepared.settings, logger, now: session.ctx.now }, plan, c),
+    // Phase 14 (ADR-060): an MCP elicitation of one of the run's calls notifies through the run's hooks.
+    notify: input => session.notify(input),
   }
   const skills = catalog.skills()
   const assembled = await assembleTools({
@@ -985,6 +1043,17 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
     if (!alreadyNoticed(prepared.history, notice, modelRef))
       session.notices.push(notice)
   }
+  // Phase 14 (ADR-062 / ADR-063): the turn's web search, resolved once and applied to the assembled tools; from here on
+  // the run uses `search` (the merged tools, `byName`, `activeTools`, `nativeTools`), never `assembled.tools`.
+  const search = turnWebSearch({
+    mode: prepared.webSearch ?? 'off',
+    toolMode: session.ctx.toolMode,
+    model: resolved,
+    preferNative: prepared.settings.webSearchNative !== false,
+    assembled,
+    logger,
+  })
+  session.noticeWebSearch(search.resolution, resolved)
 
   // A chat model with image output gets the provider options of `imageParams` (e.g. Gemini's response modalities).
   const imageProviderOptions = resolved.entry.capabilities.imageOutput
@@ -1000,9 +1069,9 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
     globalInstructions: prepared.settings.instructions,
     chatInstructions: prepared.chat.settings.instructions,
     workspace: prepared.workspace,
-    workspaceTools: [...assembled.byName.values()].filter(entry => toolWorkspaceAccess(entry.definition) !== null).map(entry => entry.definition.name),
+    workspaceTools: [...search.byName.values()].filter(entry => toolWorkspaceAccess(entry.definition) !== null).map(entry => entry.definition.name),
     // The offered `core-agent` tools (Phase 9): the plan block, the todo hint and the `task` hint of the instructions.
-    agentTools: offeredAgentTools(assembled),
+    agentTools: offeredAgentTools(search),
     // The catalog's agent types and skills (Phase 10): their blocks, when `task` / `skill` are offered.
     agentTypes: catalog.agents(),
     skills,
@@ -1022,11 +1091,13 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
   if (files.dropped > 0)
     session.notices.push(NOTICES.filesNotSent(files.dropped))
 
-  const tools = Object.keys(assembled.tools).length > 0 ? assembled.tools : undefined
+  const tools = Object.keys(search.tools).length > 0 ? search.tools : undefined
+  // Phase 14: another provider's provider-executed parts (native search) leave the model history first.
+  const ownParts = stripForeignProviderParts(files.messages, resolved.providerId)
   // Without tool definitions, earlier tool calls go to the model as text: providers reject tool content without tools.
-  const history = tools === undefined ? toolPartsAsText(files.messages) : files.messages
+  const history = tools === undefined ? toolPartsAsText(ownParts) : ownParts
   // Outputs of tools the mode does not offer keep their model text (`historyToolSet`).
-  const historyTools = tools === undefined ? assembled.tools : conversionTools(deps, assembled.tools, logger)
+  const historyTools = tools === undefined ? search.tools : conversionTools(deps, search.tools, logger)
   const converted = await convertToModelMessages<HarnessUIMessage>(history, { tools: historyTools, ignoreIncompleteToolCalls: true })
   const messagesDraft: { messages: ModelMessage[] } = { messages: converted }
   await deps.registry.hooks.run('chat.messages', { chatId, modelRef }, messagesDraft)
@@ -1038,9 +1109,9 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
   // model call (step 0 included). The guard compacts the context above 80 % of the window, or trims the oldest turns
   // before the first step when automatic compaction is off or failed (the v1.4 pre-stream trim moved there).
   const prepareStep = createPrepareStep({
-    contextGuard: createContextGuard({ session, model: resolved, keptUser: keptUserMessage(session, resolved, assembled.tools) }),
+    contextGuard: createContextGuard({ session, model: resolved, keptUser: keptUserMessage(session, resolved, search.tools) }),
     hooks: hooks.stepPiece(),
-    steer: createSteerStep({ session, model: resolved, tools: assembled.tools }),
+    steer: createSteerStep({ session, model: resolved, tools: search.tools }),
     logger,
   })
 
@@ -1049,13 +1120,13 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
     instructions: params.instructions,
     messages: hooked ?? converted,
     tools,
-    ...(assembled.activeTools === undefined ? {} : { activeTools: assembled.activeTools }),
+    ...(search.activeTools === undefined ? {} : { activeTools: search.activeTools }),
     prepareStep,
     toolApproval: createToolApproval({
       chatId,
       modelRef,
       toolMode: session.ctx.toolMode,
-      tools: assembled.byName,
+      tools: search.byName,
       prefs: assembled.prefs,
       registry: deps.registry,
       plugins: deps.plugins,
@@ -1064,13 +1135,16 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
       workspace: assembled.workspace,
       scope: assembled.scope,
       hooks,
+      // Phase 14: provider-executed calls of these names are `not-applicable` (no hooks, no records).
+      nativeTools: search.nativeTools,
     }),
     experimental_toolApprovalSecret: deps.keyring.subkey('approval'),
     // Phase 11: a `continue: false` hook stops the run after the current step.
     stopWhen: [isStepCount(params.maxSteps), hooks.stopCondition],
     abortSignal: run.signal,
     maxRetries: MODEL_MAX_RETRIES,
-    providerOptions: params.providerOptions,
+    // Phase 14: the native search's provider options over the run's (after `chat.params`).
+    providerOptions: search.providerOptions === undefined ? params.providerOptions : mergeProviderOptions(params.providerOptions, search.providerOptions),
     ...(Object.keys(params.headers).length > 0 ? { headers: params.headers } : {}),
     ...(params.reasoning === undefined ? {} : { reasoning: params.reasoning }),
     ...(params.temperature === undefined ? {} : { temperature: params.temperature }),
@@ -1103,6 +1177,9 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
     onToolCost: usd => session.addExtraCost(usd),
     finishMetadata: metadata => session.finishWithExtraCost(metadata),
   })
+  // Phase 14 (ADR-063): `source-url` chunks after each final `search_web` output (the owner from the assembled tools, so
+  // an approval continuation still recognizes it).
+  const sources = createSourcesTransform({ toolOwner: name => assembled.byName.get(name)?.pluginId, continued: prepared.continued, logger })
   return createUIMessageStream<HarnessUIMessage>({
     originalMessages: prepared.history,
     generateId: () => session.assistantId,
@@ -1120,7 +1197,7 @@ export async function modelStream(session: RunSession): Promise<ReadableStream<U
         },
         track: chunk => session.track(chunk),
       })
-      writer.merge(ui.pipeThrough(stepInjector(session)).pipeThrough(gate).pipeThrough(generatedFiles))
+      writer.merge(ui.pipeThrough(stepInjector(session)).pipeThrough(gate).pipeThrough(generatedFiles).pipeThrough(sources))
     },
     onError: error => session.errorText(error),
     onEnd: session.onEnd,

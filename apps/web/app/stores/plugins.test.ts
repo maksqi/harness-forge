@@ -2,7 +2,7 @@ import type { MockApi } from '~/utils/testing/mock-api'
 import { HarnessError } from '@harness-forge/shared'
 import { createPinia, disposePinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { claudePluginInfo, logEntry, pluginDetail, pluginOrigin, pluginSummary, toolSummary } from '~/utils/testing/fixtures'
+import { claudePluginInfo, logEntry, mcpAuthStart, mcpServer, mcpServerNeedsAuth, pluginDetail, pluginOrigin, pluginSummary, toolSummary } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { parsePluginFilter, PLUGIN_LOG_LIMIT, pluginMatchesFilter, usePluginsStore } from './plugins'
 
@@ -262,5 +262,29 @@ describe('plugins store: Claude Code plugins (Phase 12, W12.9)', () => {
     // The opened detail is fetched again (a changed file tree changes its executables and trust).
     await vi.advanceTimersByTimeAsync(500)
     expect(api.plugins.get).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('plugins store: MCP sign-in (Phase 14, C54)', () => {
+  it('signInMcp starts a sign-in with the return path; signOutMcp replaces the row', async () => {
+    api.mcp.list.mockResolvedValue({ items: [mcpServerNeedsAuth({ auth: { signedIn: true, expiresAt: null, scope: null, client: 'dynamic', issuer: null } })] })
+    const plugins = usePluginsStore()
+    await plugins.fetchMcp()
+    api.mcpAuth.start.mockResolvedValue(mcpAuthStart())
+    await expect(plugins.signInMcp('linear', '/plugins/core-mcp')).resolves.toEqual(mcpAuthStart())
+    expect(api.mcpAuth.start).toHaveBeenCalledWith({ params: { id: 'linear' }, body: { returnTo: '/plugins/core-mcp' } })
+    await plugins.signInMcp('linear')
+    expect(api.mcpAuth.start).toHaveBeenLastCalledWith({ params: { id: 'linear' }, body: {} })
+
+    const signedOut = mcpServerNeedsAuth()
+    api.mcpAuth.signOut.mockResolvedValue(signedOut)
+    await expect(plugins.signOutMcp('linear')).resolves.toEqual(signedOut)
+    expect(api.mcpAuth.signOut).toHaveBeenCalledWith({ params: { id: 'linear' } })
+    expect(plugins.mcp).toEqual([signedOut])
+  })
+
+  it('a refused sign-in throws the HarnessError', async () => {
+    api.mcpAuth.start.mockRejectedValue(new HarnessError({ code: 'conflict', message: 'Turn the server on first.', details: { reason: 'disabled' } }))
+    await expect(usePluginsStore().signInMcp(mcpServer().id)).rejects.toMatchObject({ code: 'conflict' })
   })
 })

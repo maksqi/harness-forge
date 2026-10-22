@@ -12,7 +12,12 @@
 // - `project-mcp.changed` replaces the servers of a loaded project; `project-trust.changed` (an approval changes the
 //   servers' states) refetches a loaded or loading project quietly;
 // - a 404 (a deleted project) drops the project; `project.changed` with `project: null` drops it too.
-import type { ProjectMcpList, ProjectMcpServer, ServerEvent } from '@harness-forge/shared'
+// Phase 14 (ADR-059; C54 declares the signatures, W14.7 owns the bodies; frozen from Gate P14-0b): `signIn(projectId,
+// serverId, returnTo?)` starts the OAuth sign-in of an approved http / sse server of the project (`POST
+// /projects/:id/mcp/:serverId/oauth`; 409 `untrusted` while it waits for approval, `disabled`) and `signOut(projectId,
+// serverId)` forgets its tokens (`DELETE …/oauth`; the answered server replaces its row). `useMcpSignIn` is their only
+// caller.
+import type { McpAuthStart, ProjectMcpList, ProjectMcpServer, ServerEvent } from '@harness-forge/shared'
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { useApi } from '~/composables/useApi'
@@ -152,6 +157,28 @@ export const useProjectMcpStore = defineStore('project-mcp', () => {
       byProject.value = { ...byProject.value, [projectId]: { ...list, items: list.items.map(item => (item.id === server.id ? server : item)) } }
   }
 
+  /** The answered server replaces its row (when the project is loaded). */
+  function replaceServer(projectId: string, server: ProjectMcpServer): void {
+    const list = byProject.value[projectId]
+    if (list)
+      byProject.value = { ...byProject.value, [projectId]: { ...list, items: list.items.map(item => (item.id === server.id ? server : item)) } }
+  }
+
+  /**
+   * + Phase 14 (ADR-059): `POST /projects/:id/mcp/:serverId/oauth { returnTo }`: starts a sign-in (`authorizationUrl`
+   * null = the stored tokens still work). Throws `HarnessError` (409 `untrusted` / `disabled`, 400 stdio).
+   */
+  async function signIn(projectId: string, serverId: string, returnTo?: string): Promise<McpAuthStart> {
+    return withHarnessErrors(api.mcpAuth.projectStart({ params: { id: projectId, serverId }, body: returnTo === undefined ? {} : { returnTo } }))
+  }
+
+  /** + Phase 14 (ADR-059): `DELETE /projects/:id/mcp/:serverId/oauth`: forgets the tokens; the server replaces its row. */
+  async function signOut(projectId: string, serverId: string): Promise<ProjectMcpServer> {
+    const server = await withHarnessErrors(api.mcpAuth.projectSignOut({ params: { id: projectId, serverId } }))
+    replaceServer(projectId, server)
+    return server
+  }
+
   /**
    * `project-mcp.changed`: replaces the servers of a loaded project (an older answer in flight is not cached);
    * `project-trust.changed`: refetches a loaded or loading project; `project.changed` with `project: null`: drops the
@@ -197,6 +224,8 @@ export const useProjectMcpStore = defineStore('project-mcp', () => {
     fetch,
     saveVariables,
     reconnect,
+    signIn,
+    signOut,
     applyEvent,
     refreshLoaded,
   }

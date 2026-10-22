@@ -128,6 +128,24 @@ describe('sourcesPart', () => {
   })
 })
 
+describe('sourcesPart: domain chips (Phase 14, C54 mounts)', () => {
+  it('shows up to three unique domains of http(s) sources and "+N"; the chips are hidden from screen readers', () => {
+    const urls = ['https://www.nuxt.com/docs', 'https://nuxt.com/blog', 'https://vercel.com/ai', 'https://github.com/x', 'https://example.org/y', 'javascript:alert(1)']
+    const wrapper = withShell(() => h(SourcesPart, { parts: urls.map((url, index) => ({ type: 'source-url' as const, sourceId: `s${index}`, url })) }))
+    const trigger = wrapper.get(`[data-testid="${testIds.sourcesRow}"]`)
+    const chips = trigger.findAll(`[data-testid="${testIds.sourcesChip}"]`)
+    expect(chips.map(chip => chip.attributes('data-domain'))).toEqual(['nuxt.com', 'vercel.com', 'github.com'])
+    expect(trigger.get('[data-slot="sources-chips"]').attributes('aria-hidden')).toBe('true')
+    expect(trigger.get('[data-slot="sources-chips"]').text()).toContain('+1')
+    expect(trigger.text()).toContain('6 sources')
+  })
+
+  it('shows no chips for document sources', () => {
+    const wrapper = withShell(() => h(SourcesPart, { parts: [{ type: 'source-document', sourceId: 's1', mediaType: 'application/pdf', title: 'Spec', filename: 'spec.pdf' }] }))
+    expect(wrapper.find('[data-slot="sources-chips"]').exists()).toBe(false)
+  })
+})
+
 describe('filePart', () => {
   it('renders images as thumbnails and other files as chips', () => {
     const image = withShell(() => h(FilePart, { part: { type: 'file', mediaType: 'image/png', filename: 'shot.png', url: '/api/files/file_a000000000000001' } }))

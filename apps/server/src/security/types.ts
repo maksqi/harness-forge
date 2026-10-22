@@ -95,7 +95,18 @@ export interface SafeFetchOptions {
   maxRedirects?: number
   /** Default `['http:', 'https:']` (URL installs pass `['https:']`). */
   protocols?: readonly ('http:' | 'https:')[]
-  method?: 'GET' | 'HEAD'
+  /**
+   * Default `GET`. Phase 14 (ADR-063, complete): `POST` sends `body` and **never follows a redirect** (a 3xx answer is
+   * the result, with its status, headers and capped body); every other rule (the SSRF guard, DNS pinning, `protocols`,
+   * the caps and the timeout) is unchanged.
+   */
+  method?: 'GET' | 'HEAD' | 'POST'
+  /**
+   * Phase 14: the request body of a `POST` (a body with `GET` / `HEAD` is a `validation_error`): a string (sent as
+   * UTF-8) or bytes, at most 64 KiB (`SAFE_FETCH_MAX_BODY_BYTES` of `security/ssrf.ts`; more is a `validation_error`),
+   * sent with `content-length` (a POST without a body sends `content-length: 0`). The caller sets `content-type`.
+   */
+  body?: string | Uint8Array
   headers?: Record<string, string>
   signal?: AbortSignal
 }
@@ -110,7 +121,8 @@ export interface SafeFetchResult {
 
 /**
  * Outbound HTTP with the SSRF guard (ARCHITECTURE.md 10.4), used by the `web_fetch` tool (W3.5) and URL installs
- * (W3.2); implemented in `security/ssrf.ts` as `safeFetch`. The host is DNS-resolved and loopback, private
+ * (W3.2); implemented in `security/ssrf.ts` as `safeFetch`. Phase 14: also `POST` (the `core-search` backends, the OAuth
+ * token revocation). The host is DNS-resolved and loopback, private
  * (RFC 1918), link-local (incl. `169.254.169.254`), CGNAT, multicast, unspecified, IPv6 ULA / link-local and
  * IPv4-mapped forms of these are refused (`validation_error`); the connection goes to the checked address (no
  * re-resolve). Network failures and timeouts are `provider_unreachable`. Provider base URLs are not guarded.

@@ -4,9 +4,13 @@
 // can only be restarted). Rows: status dot + name, transport badge, status line, enabled switch, Restart and a menu
 // with Edit / Delete. The list lives in the plugins store; it refetches on `plugin.changed`, so connection changes
 // show up without polling.
+// Phase 14 (ADR-059; C54 mounts, W14.7 implements; frozen from Gate P14-0b): a `needs-auth` row that can sign in
+// (`canSignIn`) shows **Sign in** (`mcp-sign-in`, `data-server-id`) between the status and the switch, and a signed-in
+// row's menu **Sign out…** (`mcp-sign-out`), both through `useMcpSignIn`. W14.7 adds the "Signing in…" state, the inline
+// error (`mcp-sign-in-error`), the sign-out confirmation and the plugin rows' menu.
 import type { McpServer } from '@harness-forge/shared'
 import type { HarnessErrorUiAction } from '~/components/common/harness-error'
-import { EllipsisIcon, PencilIcon, PlusIcon, RotateCwIcon, ServerIcon, Trash2Icon } from '@lucide/vue'
+import { EllipsisIcon, LogInIcon, LogOutIcon, PencilIcon, PlusIcon, RotateCwIcon, ServerIcon, Trash2Icon } from '@lucide/vue'
 import { computed, nextTick, onMounted, ref, useId } from 'vue'
 import { toast } from 'vue-sonner'
 import { Button } from '@/components/ui/button'
@@ -26,10 +30,11 @@ import ConfirmDialog from '~/components/common/ConfirmDialog.vue'
 import { errorActions, toHarnessErrorView } from '~/components/common/harness-error'
 import HarnessErrorAlert from '~/components/common/HarnessErrorAlert.vue'
 import StatusDot from '~/components/common/StatusDot.vue'
+import { useMcpSignIn } from '~/composables/useMcpSignIn'
 import { usePluginsStore } from '~/stores/plugins'
 import { toHarnessError } from '~/utils/errors'
 import { testIds } from '~/utils/testids'
-import { CORE_MCP_PLUGIN_ID, MCP_STATUS_DOTS, MCP_STATUS_LABELS, mcpStatusText } from './mcp-form'
+import { canSignIn, CORE_MCP_PLUGIN_ID, MCP_STATUS_DOTS, MCP_STATUS_LABELS, mcpStatusText } from './mcp-form'
 import McpServerDialog from './McpServerDialog.vue'
 import McpTransportBadge from './McpTransportBadge.vue'
 
@@ -38,6 +43,7 @@ const props = withDefaults(defineProps<{ pluginId?: string }>(), { pluginId: COR
 type RowAction = 'enabled' | 'restart'
 
 const plugins = usePluginsStore()
+const signIn = useMcpSignIn()
 const headingId = useId()
 
 const loading = ref(false)
@@ -141,9 +147,29 @@ async function restart(server: McpServer) {
   }
 }
 
+// ---------- sign-in (Phase 14, ADR-059; W14.7) ----------
+
+async function startSignIn(server: McpServer) {
+  try {
+    await signIn.start({ kind: 'global', serverId: server.id }, { name: server.name })
+  }
+  catch (error) {
+    toastError(error, `Could not sign in to ${server.name}`)
+  }
+}
+
+async function signOut(server: McpServer) {
+  try {
+    await signIn.signOut({ kind: 'global', serverId: server.id }, server.name)
+  }
+  catch (error) {
+    toastError(error, `Could not sign out of ${server.name}`)
+  }
+}
+
 // ---------- row menu ----------
 
-type MenuAction = 'edit' | 'delete'
+type MenuAction = 'edit' | 'delete' | 'sign-out'
 
 /** Edit and Delete run once the menu has closed and given focus back, so the dialog keeps the focus it takes. */
 let pendingMenuAction: { action: MenuAction, server: McpServer } | null = null
@@ -161,6 +187,8 @@ function onMenuCloseAutoFocus(event: Event) {
   void nextTick(() => {
     if (next.action === 'edit')
       openEdit(next.server)
+    else if (next.action === 'sign-out')
+      void signOut(next.server)
     else
       askDelete(next.server)
   })
@@ -308,6 +336,20 @@ function onDeleteOpenChange(value: boolean) {
           </p>
         </div>
         <div class="flex items-center gap-1">
+          <Button
+            v-if="canSignIn(server)"
+            type="button"
+            size="sm"
+            variant="outline"
+            :aria-label="`Sign in to ${server.name}`"
+            :data-testid="testIds.mcpSignIn"
+            :data-server-id="server.id"
+            class="mr-1"
+            @click="startSignIn(server)"
+          >
+            <LogInIcon aria-hidden="true" data-icon="inline-start" />
+            Sign in
+          </Button>
           <Switch
             v-if="server.editable"
             size="sm"
@@ -351,6 +393,15 @@ function onDeleteOpenChange(value: boolean) {
               <DropdownMenuItem :data-testid="testIds.mcpEdit" :data-server-id="server.id" @select="chooseMenu('edit', server)">
                 <PencilIcon aria-hidden="true" />
                 Edit
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                v-if="server.auth?.signedIn"
+                :data-testid="testIds.mcpSignOut"
+                :data-server-id="server.id"
+                @select="chooseMenu('sign-out', server)"
+              >
+                <LogOutIcon aria-hidden="true" />
+                Sign out…
               </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem

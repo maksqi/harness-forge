@@ -15,30 +15,55 @@
 // tree still hashes to its trust pin (`createClaudeTrustGuard`, `plugins/claude/trust.ts`; other formats pass); a
 // mismatch is a permanent `forbidden` error of the server (no retry) and the plugin is loaded again, which leaves it
 // `untrusted` and removes its servers.
+//
+// Phase 14 (ADR-059 … ADR-061, C51; the seams are COMPLETE and FROZEN after P14-0b, the modules behind them belong to
+// P14-A):
+// - OAuth (W14.1 behind `deps.mcpAuth`): an http / sse transport without an `Authorization` header (any case) gets the
+//   connect-mode `authProvider` (`deps.mcpAuth.provider({ kind: 'global', serverId }, 'connect')`); `redirect: 'error'`
+//   stays and no `fetch` is ever passed (the AI SDK guards the OAuth URLs only with its own fetch). An auth failure while
+//   connecting or calling a tool (`isAuthRequired`: `McpAuthRequired`, `UnauthorizedError`, an OAuth error, an HTTP
+//   401) is the permanent `auth_invalid { status: 401 }`: status `needs-auth`, no backoff retry, the tools unregistered
+//   (also for sub-agents and background tasks), one `info` line, nothing prompts. A server with an `Authorization`
+//   header that answers 401 is `needs-auth` too (it cannot sign in: "rejected its Authorization header"). The DTOs carry
+//   `transport.oauth` (the row's / declaration's settings, the client secret as a `SecretState`) and `auth`
+//   (`deps.mcpAuth.info`); `authTarget(id)` names where a server's OAuth secrets live.
+// - Elicitation (W14.3 behind `deps.elicitations`): every client declares `capabilities: { elicitation: {} }` and
+//   registers `onElicitationRequest(ElicitationRequestSchema, deps.elicitations.handler(runtimeKey))` (runtime key
+//   `mcp:<id>#<generation>`); a server that negotiates the protocol `2026-07-28` (which cannot elicit through the AI SDK)
+//   is reconnected once without the capability, remembered per server id until its declaration changes. The tools'
+//   bindings register every call with the broker (`mcp-tools.ts`).
+// - Prompts and resources (W14.2 behind `prompts.ts` / `resources.ts`): after the tool listing a server with the
+//   `prompts` / `resources` capability fills the caches (in the background); a stdio `notifications/prompts/
+//   list_changed` / `notifications/resources/list_changed` refreshes them; a closed client drops them; the manager
+//   members `prompts`, `getPrompt`, `resources`, `readResource` read through them (a prompt change emits
+//   `customization.changed { kind: 'command' }`).
 import type { MCPClient, MCPClientConfig } from '@ai-sdk/mcp'
 import type { Disposable, McpServerDecl, ToolCallContext, ToolDefinition } from '@harness-forge/plugin-sdk'
-import type { HarnessErrorInit, LogLevel, McpServer, McpStatus, ToolPolicy } from '@harness-forge/shared'
+import type { HarnessErrorInit, LogLevel, McpAuthInfo, McpAuthTarget, McpServer, McpStatus, ToolPolicy } from '@harness-forge/shared'
 import type { RegisteredMcpServer, RegistryChange } from '../registry/types.ts'
 import type { AppDeps } from '../types.ts'
 import type { McpManagerInternals, OfflineMcpTool } from './internal.ts'
 import type { McpListedTool } from './mcp-tools.ts'
+import type { McpCachedList, McpCacheServer } from './prompts.ts'
 import type { StdioExit } from './stdio-transport.ts'
 import type { ResolvedMcpTransport } from './templating.ts'
-import type { McpManager } from './types.ts'
+import type { McpListing, McpListingUnavailable, McpManager } from './types.ts'
 import type { UserServerRecord } from './user-servers.ts'
 import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
-import { createMCPClient } from '@ai-sdk/mcp'
-import { HarnessError } from '@harness-forge/shared'
+import { createMCPClient, ElicitationRequestSchema } from '@ai-sdk/mcp'
+import { HarnessError, isHarnessError } from '@harness-forge/shared'
 import { appVersion } from '../paths.ts'
 import { createClaudeTrustGuard } from '../plugins/claude/trust.ts'
-import { connectionErrorInit, errorMessage, isConnectionFailure, isPermanentMcpError, mcpConfigError } from './errors.ts'
+import { authRequiredInit, connectionErrorInit, errorMessage, isAuthRequired, isConnectionFailure, isPermanentMcpError, mcpConfigError } from './errors.ts'
 import { CORE_MCP_PLUGIN_ID } from './internal.ts'
 import { mcpToolDefinition, mcpToolTitle, offlineToolOf } from './mcp-tools.ts'
 import { DEFAULT_MCP_POLICY } from './policy.ts'
+import { createPromptCache } from './prompts.ts'
+import { createResourceCache } from './resources.ts'
 import { createStdioTransport } from './stdio-transport.ts'
 import { resolveDeclTransport } from './templating.ts'
-import { createUserServerStore, ENV_SECRET_PREFIX, HEADER_SECRET_PREFIX, secretStateOf, transportChanged } from './user-servers.ts'
+import { createUserServerStore, ENV_SECRET_PREFIX, HEADER_SECRET_PREFIX, mcpSecretScope, secretStateOf, transportChanged } from './user-servers.ts'
 
 export { CORE_MCP_PLUGIN_ID } from './internal.ts'
 
@@ -55,6 +80,39 @@ const MAX_TOOLS = 1000
 /** stderr lines forwarded per server and minute. */
 const STDERR_LINES_PER_MINUTE = 100
 
+/**
+ * The MCP protocol version whose servers cannot elicit through `@ai-sdk/mcp` (its multi-round-trip requests are not
+ * supported yet): such a server is reconnected once without the elicitation capability (ADR-060).
+ */
+export const MCP_NO_ELICITATION_PROTOCOL = '2026-07-28'
+/** The client capabilities of every MCP client (form-mode elicitation, ADR-060). */
+export const MCP_CLIENT_CAPABILITIES = { elicitation: {} } as const satisfies NonNullable<MCPClientConfig['capabilities']>
+
+/** Phase 14 (ADR-059): the secret names of a personal server's OAuth token record and client secret (scope `mcp:<id>`). */
+export const OAUTH_RECORD_SECRET_NAME = 'oauth.record'
+export const OAUTH_CLIENT_SECRET_NAME = 'oauth.clientSecret'
+/** Phase 14 (ADR-059): the secret name prefix of a plugin / project server's token record (`mcp-oauth.<serverId>`). */
+export const OAUTH_SERVER_SECRET_PREFIX = 'mcp-oauth.'
+
+/** True when the headers carry an `Authorization` header (any case): such a transport gets no auth provider. */
+export function hasAuthorizationHeader(headers: Readonly<Record<string, string>> | undefined): boolean {
+  return Object.keys(headers ?? {}).some(name => name.toLowerCase() === 'authorization')
+}
+
+/** True when the client negotiated the protocol that cannot elicit (`MCP_NO_ELICITATION_PROTOCOL`). */
+export function negotiatedWithoutElicitation(client: MCPClient): boolean {
+  return client.initializeResult.protocolVersion === MCP_NO_ELICITATION_PROTOCOL
+}
+
+/** The `conflict` (`needs-auth`) of a call that needs the server signed in first (API.md 2.3). */
+export function needsAuthConflict(name: string): HarnessError {
+  return new HarnessError({
+    code: 'conflict',
+    message: `Sign in to the MCP server "${name}" first.`,
+    details: { reason: 'needs-auth' },
+  })
+}
+
 export interface McpManagerOptions {
   /** Automatic reconnect delays (tests use short ones). */
   retryDelaysMs?: readonly number[]
@@ -67,9 +125,14 @@ export interface McpManagerOptions {
   killGraceMs?: number
   /** `createMCPClient` (tests may wrap it). */
   createClient?: (config: MCPClientConfig) => Promise<MCPClient>
+  /** Phase 14: the prompt cache factory (tests may wrap it; default `createPromptCache`). */
+  createPromptCache?: typeof createPromptCache
+  /** Phase 14: the resource cache factory (tests may wrap it; default `createResourceCache`). */
+  createResourceCache?: typeof createResourceCache
 }
 
-type RuntimeStatus = 'idle' | 'connecting' | 'connected' | 'error'
+/** Phase 14: `needs-auth` = the server answered 401 (permanent until a sign-in, a reconnect or a change). */
+type RuntimeStatus = 'idle' | 'connecting' | 'connected' | 'error' | 'needs-auth'
 
 /** Connection state of one declared server id. */
 interface ServerRuntime {
@@ -82,6 +145,10 @@ interface ServerRuntime {
   connectedAt: number | null
   client: MCPClient | null
   controller: AbortController | null
+  /** Phase 14: aborts the background cache refreshes of the current client (aborted by `detach`). */
+  listing: AbortController | null
+  /** Phase 14: the transport of the last attempt sends an `Authorization` header (a 401 cannot be fixed by a sign-in). */
+  authHeader: boolean
   /** Server policy used for the registered tools. */
   policy: ToolPolicy
   tools: Disposable[]
@@ -159,9 +226,16 @@ export function createMcpManagerCore(deps: AppDeps, options: McpManagerOptions =
   const userErrors = new Map<string, HarnessErrorInit>()
   const closing = new Set<Promise<void>>()
   const attempts = new Set<Promise<void>>()
+  /** Phase 14: background cache refreshes (`stop()` waits for them). */
+  const background = new Set<Promise<void>>()
   /** v1.8.1: the verify-before-spawn of Claude Code plugin stdio servers. */
   const trustGuard = createClaudeTrustGuard(deps.plugins, deps.logger.child({ component: 'mcp' }))
   const emitTimers = new Map<string, NodeJS.Timeout>()
+  /**
+   * Phase 14 (ADR-060): ids of servers that negotiated `MCP_NO_ELICITATION_PROTOCOL`: they connect without the
+   * elicitation capability until their declaration is removed (an edit, a settings change, a plugin reload).
+   */
+  const withoutElicitation = new Set<string>()
   let subscriptions: Disposable[] = []
   let userOps: Promise<unknown> = Promise.resolve()
   let started = false
@@ -169,6 +243,15 @@ export function createMcpManagerCore(deps: AppDeps, options: McpManagerOptions =
   /** `core-mcp` is active: the user servers are declared as its contributions. */
   let coreActive = false
   let clientVersion: string | undefined
+  /** Phase 14 (ADR-061): the prompt and resource caches, keyed by server id. */
+  const promptCache = (options.createPromptCache ?? createPromptCache)({
+    logger: deps.logger.child({ component: 'mcp' }),
+    onChange: () => {
+      if (!stopped)
+        deps.events.emit('customization.changed', { kind: 'command' })
+    },
+  })
+  const resourceCache = (options.createResourceCache ?? createResourceCache)({ logger: deps.logger.child({ component: 'mcp' }) })
 
   const redact = (text: string): string => deps.redactor.redactText(text)
 
@@ -260,6 +343,8 @@ export function createMcpManagerCore(deps: AppDeps, options: McpManagerOptions =
         connectedAt: null,
         client: null,
         controller: null,
+        listing: null,
+        authHeader: false,
         policy: DEFAULT_MCP_POLICY,
         tools: [],
         lastTools: [],
@@ -313,6 +398,8 @@ export function createMcpManagerCore(deps: AppDeps, options: McpManagerOptions =
     runtime.generation += 1
     runtime.controller?.abort()
     runtime.controller = null
+    runtime.listing?.abort()
+    runtime.listing = null
     if (runtime.retryTimer) {
       clearTimeout(runtime.retryTimer)
       runtime.retryTimer = null
@@ -321,8 +408,12 @@ export function createMcpManagerCore(deps: AppDeps, options: McpManagerOptions =
     const client = runtime.client
     runtime.client = null
     runtime.connectedAt = null
-    if (client)
+    if (client) {
       trackClose(client)
+      // Phase 14: the cached prompts and resources belong to the closed client.
+      promptCache.drop(runtime.id)
+      resourceCache.drop(runtime.id)
+    }
   }
 
   /** The server is declared, its owner is active and (user servers) it is enabled. */
@@ -422,11 +513,101 @@ export function createMcpManagerCore(deps: AppDeps, options: McpManagerOptions =
         onNotification: (method) => {
           if (method === 'notifications/tools/list_changed')
             void refreshTools(runtime, generation)
+          else if (method === 'notifications/prompts/list_changed')
+            refreshCaches(runtime, generation, { prompts: true, resources: false })
+          else if (method === 'notifications/resources/list_changed')
+            refreshCaches(runtime, generation, { prompts: false, resources: true })
         },
         onExit: exit => onDisconnected(runtime, generation, new Error(`The MCP server process exited (${describeExit(exit)}).`)),
       })
     }
-    return { type: transport.type, url: transport.url, headers: { ...transport.headers }, redirect: 'error' }
+    // Phase 14 (ADR-059): without an `Authorization` header the connect-mode OAuth provider (stored tokens only; never a
+    // registration or a redirect). Never a `fetch` option: the AI SDK guards the OAuth URLs only with its own fetch.
+    const headers = { ...transport.headers }
+    if (hasAuthorizationHeader(headers))
+      return { type: transport.type, url: transport.url, headers, redirect: 'error' }
+    const authTarget: McpAuthTarget = { kind: 'global', serverId: runtime.id }
+    return { type: transport.type, url: transport.url, headers, redirect: 'error', authProvider: deps.mcpAuth.provider(authTarget, 'connect') }
+  }
+
+  /** The cache entry descriptor of a server. */
+  function cacheServer(runtime: ServerRuntime): McpCacheServer {
+    return { key: runtime.id, serverId: runtime.id, serverName: serverName(runtime.id), projectId: null }
+  }
+
+  /** The display name of a declared server (its id when unknown). */
+  function serverName(id: string): string {
+    return deps.registry.mcpServers.get(id)?.decl.name ?? userRows.get(id)?.name ?? id
+  }
+
+  /** Runs `work` in the background; `stop()` waits for it. Never rejects. */
+  function inBackground(work: Promise<void>): void {
+    const tracked = work
+      .catch((error: unknown) => deps.logger.debug('MCP background work failed', { err: error }))
+      .finally(() => {
+        background.delete(tracked)
+      })
+    background.add(tracked)
+  }
+
+  /** Phase 14 (ADR-061): fills the prompt / resource caches of a connected client (the capabilities decide). */
+  function refreshCaches(runtime: ServerRuntime, generation: number, kinds: { prompts: boolean, resources: boolean }): void {
+    const client = runtime.client
+    if (stopped || client === null || generation !== runtime.generation)
+      return
+    const capabilities = client.initializeResult.capabilities
+    if (runtime.listing === null)
+      runtime.listing = new AbortController()
+    const signal = runtime.listing.signal
+    const server = cacheServer(runtime)
+    if (kinds.prompts && capabilities.prompts)
+      inBackground(promptCache.refresh(server, client, signal))
+    if (kinds.resources && capabilities.resources)
+      inBackground(resourceCache.refresh(server, client, signal))
+  }
+
+  /** Phase 14 (ADR-060): the key of a client in the elicitation broker. */
+  function runtimeKey(runtime: ServerRuntime, generation: number): string {
+    return `mcp:${runtime.id}#${generation}`
+  }
+
+  /**
+   * Opens a client; with the elicitation capability unless the server is known to negotiate
+   * `MCP_NO_ELICITATION_PROTOCOL` (then it is reconnected once without it and remembered).
+   */
+  async function openClient(target: ConnectTarget, runtime: ServerRuntime, generation: number, signal: AbortSignal, timeout: number): Promise<MCPClient> {
+    const open = (elicitation: boolean): Promise<MCPClient> => createClient({
+      transport: createTransport(target, runtime, generation),
+      clientName: 'harness-forge',
+      version: version(),
+      onUncaughtError: (error) => {
+        if (generation === runtime.generation)
+          log(runtime.pluginId, 'debug', `[${runtime.id}] ${redact(errorMessage(error))}`)
+      },
+      initializationOptions: { signal, timeout },
+      ...(elicitation ? { capabilities: MCP_CLIENT_CAPABILITIES } : {}),
+    })
+    if (withoutElicitation.has(runtime.id))
+      return open(false)
+    const client = await open(true)
+    if (!negotiatedWithoutElicitation(client))
+      return client
+    withoutElicitation.add(runtime.id)
+    deps.logger.debug('MCP server cannot elicit on its protocol: reconnecting without the capability', { serverId: runtime.id })
+    trackClose(client)
+    if (generation !== runtime.generation || stopped)
+      throw new Error('The MCP connection attempt was cancelled.')
+    return open(false)
+  }
+
+  /** Phase 14 (ADR-060): the client's elicitation requests go to the broker (never fails the connection). */
+  function registerElicitation(runtime: ServerRuntime, generation: number, client: MCPClient): void {
+    try {
+      client.onElicitationRequest(ElicitationRequestSchema, deps.elicitations.handler(runtimeKey(runtime, generation)))
+    }
+    catch (error) {
+      deps.logger.warn('MCP elicitation handler not registered', { serverId: runtime.id, err: error })
+    }
   }
 
   async function listAllTools(client: MCPClient, signal: AbortSignal | undefined): Promise<McpListedTool[]> {
@@ -447,15 +628,23 @@ export function createMcpManagerCore(deps: AppDeps, options: McpManagerOptions =
     return tools.slice(0, MAX_TOOLS)
   }
 
-  async function callTool(runtime: ServerRuntime, generation: number, name: string, input: Record<string, unknown>, c: ToolCallContext) {
+  /**
+   * One tool call on the server's current client. `signal` is the call's active-budget signal (it follows `c.signal`):
+   * an abort never counts as a connection failure. Phase 14: an auth failure moves the server to `needs-auth`.
+   */
+  async function callTool(runtime: ServerRuntime, generation: number, name: string, input: Record<string, unknown>, signal: AbortSignal) {
     const client = generation === runtime.generation ? runtime.client : null
     if (!client)
       throw new Error(`The MCP server "${runtime.id}" is not connected.`)
     try {
-      return await client.callTool({ name, arguments: input, options: { signal: c.signal } })
+      return await client.callTool({ name, arguments: input, options: { signal } })
     }
     catch (error) {
-      if (!c.signal.aborted && isConnectionFailure(error))
+      if (!signal.aborted && isAuthRequired(error)) {
+        const init = onNeedsAuth(runtime, generation, error)
+        throw new Error(`The MCP tool "${name}" failed: ${init.message}`)
+      }
+      if (!signal.aborted && isConnectionFailure(error))
         onDisconnected(runtime, generation, error)
       throw new Error(`The MCP tool "${name}" failed: ${redact(errorMessage(error))}`)
     }
@@ -466,7 +655,8 @@ export function createMcpManagerCore(deps: AppDeps, options: McpManagerOptions =
       serverId: runtime.id,
       pluginId: runtime.pluginId,
       serverPolicy: runtime.policy,
-      call: (name: string, input: Record<string, unknown>, c: ToolCallContext) => callTool(runtime, generation, name, input, c),
+      call: (name: string, input: Record<string, unknown>, _c: ToolCallContext, signal: AbortSignal) => callTool(runtime, generation, name, input, signal),
+      elicitation: { broker: deps.elicitations, runtimeKey: runtimeKey(runtime, generation), serverName: serverName(runtime.id) },
     }
     const seen = new Set<string>()
     const offline: OfflineMcpTool[] = []
@@ -531,11 +721,31 @@ export function createMcpManagerCore(deps: AppDeps, options: McpManagerOptions =
   function onDisconnected(runtime: ServerRuntime, generation: number, error: unknown): void {
     if (stopped || generation !== runtime.generation)
       return
+    if (isAuthRequired(error)) {
+      onNeedsAuth(runtime, generation, error)
+      return
+    }
     detach(runtime)
     const init = connectionErrorInit(error, redact)
     setStatus(runtime, 'error', init)
     log(runtime.pluginId, 'warn', `[${runtime.id}] Disconnected: ${init.message}`)
     void scheduleRetry(runtime)
+  }
+
+  /**
+   * Phase 14 (ADR-059): the server needs a sign-in (or rejected its `Authorization` header): close it, `needs-auth`
+   * with the permanent `auth_invalid { status: 401 }`, no retry (only a sign-in, a reconnect or a change connects
+   * again). Answers the error init.
+   */
+  function onNeedsAuth(runtime: ServerRuntime, generation: number, error: unknown): HarnessErrorInit {
+    const init = authRequiredInit(error, redact, { header: runtime.authHeader })
+    if (stopped || generation !== runtime.generation)
+      return init
+    detach(runtime)
+    runtime.attempt = 0
+    setStatus(runtime, 'needs-auth', init)
+    log(runtime.pluginId, 'info', `[${runtime.id}] ${runtime.authHeader ? 'The server rejected its Authorization header.' : 'Needs a sign-in.'}`)
+    return init
   }
 
   async function runConnect(runtime: ServerRuntime, generation: number, signal: AbortSignal): Promise<void> {
@@ -549,20 +759,13 @@ export function createMcpManagerCore(deps: AppDeps, options: McpManagerOptions =
       if (!current())
         return
       runtime.policy = target.policy
-      client = await createClient({
-        transport: createTransport(target, runtime, generation),
-        clientName: 'harness-forge',
-        version: version(),
-        onUncaughtError: (error) => {
-          if (generation === runtime.generation)
-            log(runtime.pluginId, 'debug', `[${runtime.id}] ${redact(errorMessage(error))}`)
-        },
-        initializationOptions: { signal, timeout: options.connectTimeoutMs ?? settings.connectTimeoutMs },
-      })
+      runtime.authHeader = target.transport.type !== 'stdio' && hasAuthorizationHeader(target.transport.headers)
+      client = await openClient(target, runtime, generation, signal, options.connectTimeoutMs ?? settings.connectTimeoutMs)
       if (!current()) {
         trackClose(client)
         return
       }
+      registerElicitation(runtime, generation, client)
       const listed = await listAllTools(client, signal)
       if (!current()) {
         trackClose(client)
@@ -576,6 +779,7 @@ export function createMcpManagerCore(deps: AppDeps, options: McpManagerOptions =
       setStatus(runtime, 'connected', null)
       const count = runtime.tools.length
       log(runtime.pluginId, 'info', `[${runtime.id}] Connected (${count} ${count === 1 ? 'tool' : 'tools'}).`)
+      refreshCaches(runtime, generation, { prompts: true, resources: true })
     }
     catch (error) {
       if (client !== null && runtime.client !== client)
@@ -583,6 +787,10 @@ export function createMcpManagerCore(deps: AppDeps, options: McpManagerOptions =
       if (!current())
         return
       runtime.controller = null
+      if (isAuthRequired(error)) {
+        onNeedsAuth(runtime, generation, error)
+        return
+      }
       const init = connectionErrorInit(error, redact)
       setStatus(runtime, 'error', init)
       log(runtime.pluginId, 'warn', `[${runtime.id}] Connection failed: ${init.message}`)
@@ -621,6 +829,8 @@ export function createMcpManagerCore(deps: AppDeps, options: McpManagerOptions =
     }
     if (change.pluginId === CORE_MCP_PLUGIN_ID)
       userDecls.delete(id)
+    // Phase 14: a changed declaration may speak another protocol: the elicitation capability is offered again.
+    withoutElicitation.delete(id)
     const runtime = servers.get(id)
     if (runtime && runtime.pluginId === change.pluginId) {
       const wasOpen = runtime.status === 'connected' || runtime.status === 'connecting'
@@ -741,7 +951,20 @@ export function createMcpManagerCore(deps: AppDeps, options: McpManagerOptions =
       return { status: 'connected', error: null }
     if (runtime?.status === 'error')
       return { status: 'error', error: runtime.error }
+    if (runtime?.status === 'needs-auth')
+      return { status: 'needs-auth', error: runtime.error }
     return { status: 'connecting', error: null }
+  }
+
+  /** Phase 14 (ADR-059): the sign-in state of a remote server for its DTO (`deps.mcpAuth.info`; never rejects). */
+  async function authInfo(id: string): Promise<McpAuthInfo | null> {
+    try {
+      return await deps.mcpAuth.info({ kind: 'global', serverId: id })
+    }
+    catch (error) {
+      deps.logger.debug('MCP sign-in state unavailable', { serverId: id, err: error })
+      return null
+    }
   }
 
   function userView(row: UserServerRecord): { status: McpStatus, error: HarnessErrorInit | null } {
@@ -770,8 +993,14 @@ export function createMcpManagerCore(deps: AppDeps, options: McpManagerOptions =
           type: row.transport.type,
           url: row.transport.url,
           headers: Object.fromEntries(row.transport.headerNames.map(name => [name, secretStateOf(entries.get(`${HEADER_SECRET_PREFIX}${name}`))])),
-          // Phase 14 (ADR-059): OAuth settings land with W14.1; until then none are configured.
-          oauth: null,
+          // Phase 14 (ADR-059): the configured client id and scopes of the row, the client secret as a `SecretState`.
+          oauth: row.transport.oauth
+            ? {
+                clientId: row.transport.oauth.clientId ?? null,
+                clientSecret: secretStateOf(entries.get(OAUTH_CLIENT_SECRET_NAME)),
+                scopes: row.transport.oauth.scopes ?? null,
+              }
+            : null,
         }
     const connected = view.status === 'connected'
     return {
@@ -786,12 +1015,11 @@ export function createMcpManagerCore(deps: AppDeps, options: McpManagerOptions =
       error: view.error,
       tools: connected ? registeredToolNames(row.id) : [],
       connectedAt: connected ? servers.get(row.id)?.connectedAt ?? null : null,
-      // Phase 14 (ADR-059): the sign-in state lands with W14.1.
-      auth: null,
+      auth: row.transport.type === 'stdio' ? null : await authInfo(row.id),
     }
   }
 
-  function pluginDto(registered: RegisteredMcpServer): McpServer {
+  async function pluginDto(registered: RegisteredMcpServer): Promise<McpServer> {
     const { decl, pluginId } = registered
     const state = (template: string) => (template === '' ? secretStateOf(undefined) : { set: true, hint: null, source: 'stored' as const })
     const transport: McpServer['transport'] = decl.transport.type === 'stdio'
@@ -805,8 +1033,15 @@ export function createMcpManagerCore(deps: AppDeps, options: McpManagerOptions =
           type: decl.transport.type,
           url: decl.transport.url,
           headers: Object.fromEntries(Object.entries(decl.transport.headers ?? {}).map(([name, value]) => [name, state(value)])),
-          // Phase 14 (ADR-059): OAuth settings land with W14.1; until then none are configured.
-          oauth: null,
+          // Phase 14 (ADR-059): the declaration's client id (as declared, `{{settings.x}}` unresolved) and scopes; plugin
+          // servers never have a client secret.
+          oauth: decl.transport.oauth
+            ? {
+                clientId: decl.transport.oauth.clientId ?? null,
+                clientSecret: secretStateOf(undefined),
+                scopes: decl.transport.oauth.scopes ?? null,
+              }
+            : null,
         }
     const view = runtimeView(servers.get(decl.id))
     const connected = view.status === 'connected'
@@ -822,8 +1057,7 @@ export function createMcpManagerCore(deps: AppDeps, options: McpManagerOptions =
       error: view.error,
       tools: connected ? registeredToolNames(decl.id) : [],
       connectedAt: connected ? servers.get(decl.id)?.connectedAt ?? null : null,
-      // Phase 14 (ADR-059): the sign-in state lands with W14.1.
-      auth: null,
+      auth: decl.transport.type === 'stdio' ? null : await authInfo(decl.id),
     }
   }
 
@@ -853,6 +1087,76 @@ export function createMcpManagerCore(deps: AppDeps, options: McpManagerOptions =
       timer = setTimeout(resolve, ms)
     })])
     clearTimeout(timer)
+  }
+
+  // ---------- prompts and resources (Phase 14, ADR-061) ----------
+
+  /**
+   * The cached entries of every declared, wanted server: connected servers with the capability list through `read`;
+   * the others are `unavailable` with their status (disabled servers are not named). Never rejects for a server.
+   */
+  async function listing<T>(capability: 'prompts' | 'resources', read: (server: McpCacheServer, client: MCPClient) => Promise<McpCachedList<T>>): Promise<McpListing<T>> {
+    const unavailable: McpListingUnavailable[] = []
+    const reads: Promise<McpCachedList<T>>[] = []
+    for (const { decl } of deps.registry.mcpServers.list()) {
+      if (!wanted(decl.id))
+        continue
+      const runtime = servers.get(decl.id)
+      const client = runtime?.status === 'connected' ? runtime.client : null
+      if (runtime === undefined || client === null) {
+        unavailable.push({ serverId: decl.id, status: runtimeView(runtime).status })
+        continue
+      }
+      if (!client.initializeResult.capabilities[capability])
+        continue
+      reads.push(read(cacheServer(runtime), client).catch((error: unknown) => {
+        deps.logger.debug(`MCP ${capability} listing failed`, { serverId: decl.id, err: error })
+        return { items: [], truncated: false }
+      }))
+    }
+    const lists = await Promise.all(reads)
+    return { items: lists.flatMap(list => list.items), truncated: lists.some(list => list.truncated), unavailable }
+  }
+
+  /** The connected client of a server for one prompt / resource request (`not_found`, `needs-auth`, `provider_unreachable`). */
+  async function requireClient(id: string, capability: 'prompts' | 'resources'): Promise<{ runtime: ServerRuntime, generation: number, client: MCPClient }> {
+    const registered = deps.registry.mcpServers.get(id)
+    if (registered === undefined && !userRows.has(id) && await store.get(id) === null)
+      throw notFound(id)
+    const runtime = servers.get(id)
+    if (registered === undefined || !wanted(id))
+      throw new HarnessError({ code: 'provider_unreachable', message: `The MCP server "${id}" is disabled.` })
+    if (runtime?.status === 'needs-auth')
+      throw needsAuthConflict(serverName(id))
+    const client = runtime?.status === 'connected' ? runtime.client : null
+    if (runtime === undefined || client === null)
+      throw new HarnessError({ code: 'provider_unreachable', message: `The MCP server "${id}" is not connected.`, action: 'retry' })
+    if (!client.initializeResult.capabilities[capability])
+      throw new HarnessError({ code: 'not_found', message: `The MCP server "${id}" has no ${capability}.` })
+    return { runtime, generation: runtime.generation, client }
+  }
+
+  /** Runs one request on a server's client; maps its failures (the server's state follows auth and network failures). */
+  async function onServer<T>(id: string, capability: 'prompts' | 'resources', signal: AbortSignal, request: (server: McpCacheServer, client: MCPClient) => Promise<T>): Promise<T> {
+    signal.throwIfAborted()
+    const { runtime, generation, client } = await requireClient(id, capability)
+    try {
+      return await request(cacheServer(runtime), client)
+    }
+    catch (error) {
+      signal.throwIfAborted()
+      if (isHarnessError(error))
+        throw error
+      if (isAuthRequired(error)) {
+        onNeedsAuth(runtime, generation, error)
+        throw needsAuthConflict(serverName(id))
+      }
+      if (isConnectionFailure(error)) {
+        onDisconnected(runtime, generation, error)
+        throw new HarnessError({ code: 'provider_unreachable', message: `The MCP server "${id}" is not reachable: ${redact(errorMessage(error))}`, action: 'retry' })
+      }
+      throw new HarnessError({ code: 'provider_error', message: `The MCP server "${id}" failed: ${redact(errorMessage(error))}` })
+    }
   }
 
   // ---------- the manager ----------
@@ -907,16 +1211,19 @@ export function createMcpManagerCore(deps: AppDeps, options: McpManagerOptions =
       coreActive = false
       disposeUserDecls()
       await Promise.allSettled(pending)
-      await Promise.allSettled([...closing, trustGuard.stop()])
+      await Promise.allSettled([...closing, ...background, trustGuard.stop()])
+      promptCache.clear()
+      resourceCache.clear()
+      withoutElicitation.clear()
     },
 
     list: async () => {
       const rows = await store.list()
       const userIds = new Set(rows.map(row => row.id))
       const users = await Promise.all(rows.map(row => userDto(row)))
-      const declared = deps.registry.mcpServers.list()
+      const declared = await Promise.all(deps.registry.mcpServers.list()
         .filter(server => server.pluginId !== CORE_MCP_PLUGIN_ID && !userIds.has(server.decl.id))
-        .map(pluginDto)
+        .map(pluginDto))
       return [...users, ...declared]
     },
 
@@ -1000,6 +1307,23 @@ export function createMcpManagerCore(deps: AppDeps, options: McpManagerOptions =
       if (!wanted(id))
         return 'disabled'
       return runtimeView(servers.get(id)).status
+    },
+
+    prompts: () => listing('prompts', (server, client) => promptCache.list(server, client)),
+
+    getPrompt: (serverId, name, args, signal) => onServer(serverId, 'prompts', signal, (server, client) => promptCache.get(server, client, name, args, signal)),
+
+    resources: () => listing('resources', (server, client) => resourceCache.list(server, client)),
+
+    readResource: (serverId, uri, signal) => onServer(serverId, 'resources', signal, (server, client) => resourceCache.read(server, client, uri, signal)),
+
+    authTarget: (id) => {
+      const registered = deps.registry.mcpServers.get(id)
+      if (userRows.has(id) || registered?.pluginId === CORE_MCP_PLUGIN_ID)
+        return { kind: 'user', scope: mcpSecretScope(id), name: OAUTH_RECORD_SECRET_NAME }
+      if (registered === undefined)
+        return null
+      return { kind: 'plugin', scope: `plugin:${registered.pluginId}`, name: `${OAUTH_SERVER_SECRET_PREFIX}${id}` }
     },
   }
 }

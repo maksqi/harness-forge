@@ -6,6 +6,8 @@
 // no local file): `POST /projects/:id/files/attach` snapshots it as an upload; the same path is attached once; a file
 // the server refuses (413 / 404 / 400) is dropped and reported through `onReject` with `source` and `path`.
 // `addRefs(refs)` adds chips of files that are already uploaded (queued messages put back into the composer).
+// Phase 14 (ADR-061; C54 declares it, W14.8 owns it): `addResource(fileRef)` adds the chip of an MCP resource the composer
+// attached through `useResourceMentions().attach` (an upload already; a file already shown is skipped).
 import type { FileRef, HarnessError } from '@harness-forge/shared'
 import type { ComputedRef, Ref } from 'vue'
 import type { AttachmentRejection } from '~/components/chat/composer/attachments'
@@ -82,6 +84,8 @@ export interface ComposerAttachments {
   addProject: (projectId: string, path: string) => ComposerAttachment
   /** + Phase 9: adds chips of already uploaded files (a file already shown is skipped); returns the added ones. */
   addRefs: (refs: readonly FileRef[]) => ComposerAttachment[]
+  /** + Phase 14: the chip of an attached MCP resource (`POST /mcp/resources/attach` answered its `FileRef`). */
+  addResource: (fileRef: FileRef) => void
   remove: (id: string) => void
   retry: (id: string) => void
   /** Removes everything (aborting uploads in flight). */
@@ -274,6 +278,10 @@ export function useComposerAttachments(options: ComposerAttachmentsOptions = {})
     return added
   }
 
+  function addResource(fileRef: FileRef): void {
+    addRefs([fileRef])
+  }
+
   function retry(id: string) {
     const attachment = items.value.find(item => item.id === id)
     if (attachment && attachment.state === 'error')
@@ -309,5 +317,5 @@ export function useComposerAttachments(options: ComposerAttachmentsOptions = {})
   if (getCurrentScope())
     onScopeDispose(clear)
 
-  return { items, add, addProject, addRefs, remove: drop, retry, clear, uploading, failed, fileRefs, settled }
+  return { items, add, addProject, addRefs, addResource, remove: drop, retry, clear, uploading, failed, fileRefs, settled }
 }

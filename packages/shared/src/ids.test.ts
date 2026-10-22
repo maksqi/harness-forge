@@ -172,7 +172,7 @@ describe('id schemas', () => {
 describe('builtin and reserved ids', () => {
   it('lists the builtin ids of DECISIONS.md', () => {
     expect(BUILTIN_PROVIDER_IDS).toEqual(['anthropic', 'openai', 'google', 'xai', 'deepseek', 'moonshotai', 'alibaba', 'zai', 'minimax', 'mistral', 'groq', 'openrouter', 'ollama'])
-    expect(BUILTIN_PLUGIN_IDS).toEqual(['core-providers', 'core-tools', 'core-commands', 'core-mcp', 'core-workspace', 'core-agent', 'mock'])
+    expect(BUILTIN_PLUGIN_IDS).toEqual(['core-providers', 'core-tools', 'core-search', 'core-commands', 'core-mcp', 'core-workspace', 'core-agent', 'mock'])
     // Phase 10 (ADR-047): `/remember` is a client command, so no plugin or command file can take the name; Phase 11
     // (ADR-051) adds `/output-style`.
     expect(CLIENT_COMMANDS).toEqual(['new', 'model', 'effort', 'mode', 'help', 'remember', 'output-style'])

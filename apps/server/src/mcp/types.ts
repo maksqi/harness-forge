@@ -4,9 +4,17 @@
 // of a project's `.mcp.json`, offered only in that project's chats). Implementation: `createProjectMcpManager(deps)` in
 // `mcp/project.ts` (C36 stub: no tools; W11.4 implements the runtimes). Test double: `createFakeProjectMcpManager`
 // (`testing/fake-project-mcp.ts`), installed with `createTestApp({ projectMcp: 'fake' })`.
+// Phase 14 (ADR-059 / ADR-061, P14-0b C50; API.md 4.36 / 4.38, ARCHITECTURE.md 6.39 / 6.41 / 6.42): both managers gain
+// the MCP prompts (`prompts`, `getPrompt`: slash commands `/mcp__<serverId>__<prompt>`), the MCP resources
+// (`resources`, `readResource`: the `@` menu and its attach) and `authTarget` (where a server's OAuth secrets are
+// stored, `McpAuthStorage`). The caches live in `mcp/{prompts,resources}.ts` (C51 stubs, W14.2); the content mapping in
+// `mcp/content.ts`. Prompt and resource contents are untrusted text: capped before use, never logged at `info`.
+import type { MCPClient } from '@ai-sdk/mcp'
 import type {
+  McpPromptArgument,
   McpServer,
   McpServerInput,
+  McpServerStateAny,
   McpServerUpdate,
   ProjectMcpList,
   ProjectMcpServer,
@@ -17,6 +25,81 @@ import type {
 } from '@harness-forge/shared'
 import type { RegisteredTool } from '../registry/types.ts'
 import type { SensitiveOperationOptions } from '../types.ts'
+import type { McpAuthStorage } from './oauth/types.ts'
+
+/** A prompt of a connected MCP server (Phase 14, ADR-061): offered as the slash command `/<commandName>`. */
+export interface McpPromptInfo {
+  readonly serverId: string
+  /** The server's display name (`CommandSummary.mcpServer.name`). */
+  readonly serverName: string
+  /** The prompt's name as the server lists it (what `getPrompt` sends). */
+  readonly name: string
+  /** `mcpPromptCommandName(serverId, name)`: `mcp__<serverId>__<prompt>`, sanitized, at most 64 characters. */
+  readonly commandName: string
+  /** Untrusted plain text (capped). */
+  readonly title: string | null
+  /** Untrusted plain text (capped). */
+  readonly description: string | null
+  /** The declared arguments in order (at most `LIMITS.mcpPromptArgumentsMax`), for the hint and the binding. */
+  readonly arguments: readonly McpPromptArgument[]
+}
+
+/** A resource of a connected MCP server (Phase 14, ADR-061; resource templates are not listed). Untrusted text. */
+export interface McpResourceInfo {
+  readonly serverId: string
+  readonly serverName: string
+  readonly uri: string
+  readonly name: string
+  readonly title: string | null
+  readonly description: string | null
+  readonly mimeType: string | null
+  /** Bytes, when the server says. */
+  readonly size: number | null
+}
+
+/** A server whose prompts or resources are missing from a listing, with its status (`McpStatus` / `ProjectMcpState`). */
+export interface McpListingUnavailable {
+  readonly serverId: string
+  readonly status: McpServerStateAny
+}
+
+/** The prompts or resources of the connected servers of one scope (Phase 14). */
+export interface McpListing<T> {
+  /** Every server's entries (cached; at most `LIMITS.mcpPromptsMax` / `LIMITS.mcpResourcesMax` per server), by server. */
+  readonly items: readonly T[]
+  /** A server listed more entries than its cap (the rest are left out). */
+  readonly truncated: boolean
+  /**
+   * Enabled servers of the scope that list nothing because they are not connected (connecting, `needs-auth`, error;
+   * project servers: also `needs-variables`), with their status. Disabled and pending servers are not named.
+   */
+  readonly unavailable: readonly McpListingUnavailable[]
+}
+
+/** A project's listing (Phase 14): the global ids its approved servers replace in the project's chats (as for tools). */
+export interface ProjectMcpListing<T> extends McpListing<T> {
+  readonly shadowed: ReadonlySet<string>
+}
+
+/** Options of the project manager's `prompts` / `resources` (Phase 14). */
+export interface ProjectMcpListingOptions {
+  /** An abort ends the wait (the servers keep connecting). */
+  readonly signal?: AbortSignal
+  /**
+   * How long to wait for approved servers that are not connected yet (they are started like `toolsFor` does); default
+   * 0 = answer what is ready (the others are `unavailable`).
+   */
+  readonly waitMs?: number
+}
+
+/**
+ * The result of `prompts/get` as `@ai-sdk/mcp` parses it (`messages` of user / assistant text, images, embedded
+ * resources and resource links): mapped to the frozen command expansion by `mcp/content.ts`. Untrusted.
+ */
+export type McpPromptResult = Awaited<ReturnType<MCPClient['experimental_getPrompt']>>
+
+/** The result of `resources/read` as `@ai-sdk/mcp` parses it (text and base64 `blob` contents). Untrusted. */
+export type McpResourceContents = Awaited<ReturnType<MCPClient['readResource']>>
 
 /**
  * One `@ai-sdk/mcp` client per enabled server declared in the registry (plugin declarations and `core-mcp` user
@@ -43,6 +126,35 @@ export interface McpManager {
   readonly remove: (id: string) => Promise<void>
   /** Close + reconnect, waiting up to 10 s. `not_found`, `conflict` (`disabled`). */
   readonly reconnect: (id: string) => Promise<McpServer>
+  /**
+   * Phase 14 (ADR-061): the prompts of the connected servers with the `prompts` capability (`GET /commands`, the slash
+   * menus). The cache is filled on connect, on a stdio `notifications/prompts/list_changed` and here when it is older
+   * than 60 s. Never rejects for a server problem (the server is `unavailable`).
+   */
+  readonly prompts: () => Promise<McpListing<McpPromptInfo>>
+  /**
+   * Phase 14 (ADR-061): `prompts/get` once (a command invocation; the result is frozen into the expansion). `args` are
+   * the bound argument values. Throws `not_found` (unknown server or prompt), `conflict` `needs-auth` (the server needs
+   * a sign-in), `provider_unreachable` (not connected) and `provider_error` (the server's error, redacted); an abort of
+   * `signal` rejects with its reason.
+   */
+  readonly getPrompt: (serverId: string, name: string, args: Readonly<Record<string, string>>, signal: AbortSignal) => Promise<McpPromptResult>
+  /**
+   * Phase 14 (ADR-061): the resources of the connected servers with the `resources` capability (`GET /mcp/resources`),
+   * cached under the prompt rules. Never rejects for a server problem.
+   */
+  readonly resources: () => Promise<McpListing<McpResourceInfo>>
+  /**
+   * Phase 14 (ADR-061): `resources/read` of one resource (`POST /mcp/resources/attach`; the caller caps the size). Throws
+   * like `getPrompt`.
+   */
+  readonly readResource: (serverId: string, uri: string, signal: AbortSignal) => Promise<McpResourceContents>
+  /**
+   * Phase 14 (ADR-059): where the OAuth secrets of a server of `list()` are stored: a personal server → `user`
+   * (`mcp:<id>`, `oauth.record`), a plugin or Claude Code plugin server → `plugin` (`plugin:<pluginId>`,
+   * `mcp-oauth.<id>`); null for an unknown id.
+   */
+  readonly authTarget: (id: string) => McpAuthStorage | null
 }
 
 /** A `tool_prefs` row; a tool without a row is `{ enabled: true, override: null }`. */
@@ -128,6 +240,23 @@ export interface ProjectMcpManager {
   readonly reconnect: (projectId: string, serverId: string) => Promise<ProjectMcpServer>
   /** Stops every runtime of the project (project deletion, revoke of every item). Never rejects. */
   readonly stopProject: (projectId: string) => Promise<void>
+  /**
+   * Phase 14 (ADR-061): the prompts of the project's connected, approved servers (`GET /commands?projectId=`; a project
+   * server shadows the global server of the same id, `shadowed`). Throws `not_found` for an unknown project; never
+   * rejects for a server problem; an abort of `options.signal` rejects with its reason.
+   */
+  readonly prompts: (projectId: string, options?: ProjectMcpListingOptions) => Promise<ProjectMcpListing<McpPromptInfo>>
+  /** Phase 14: `McpManager.getPrompt` for a project server; also `conflict` `untrusted` for a pending one. */
+  readonly getPrompt: (projectId: string, serverId: string, name: string, args: Readonly<Record<string, string>>, signal: AbortSignal) => Promise<McpPromptResult>
+  /** Phase 14 (ADR-061): the resources of the project's connected, approved servers (`GET /mcp/resources?projectId=`). */
+  readonly resources: (projectId: string, options?: ProjectMcpListingOptions) => Promise<ProjectMcpListing<McpResourceInfo>>
+  /** Phase 14: `McpManager.readResource` for a project server; also `conflict` `untrusted` for a pending one. */
+  readonly readResource: (projectId: string, serverId: string, uri: string, signal: AbortSignal) => Promise<McpResourceContents>
+  /**
+   * Phase 14 (ADR-059): where the OAuth secrets of a project server are stored: `project` (`project:<projectId>`,
+   * `mcp-oauth.<serverId>`). Pure (no existence check: the routes check the server first).
+   */
+  readonly authTarget: (projectId: string, serverId: string) => McpAuthStorage
   /**
    * Shutdown (`stopDeps`, right after the hooks): stops every runtime (stdio process groups killed), drops the
    * subscriptions and timers. Idempotent; never rejects.

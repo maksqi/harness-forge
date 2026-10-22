@@ -8,6 +8,11 @@
 // rows that stop matching the filter leave the list (a move, `chat.updated`), rows that start matching join it, and a
 // stored project id that is unknown once the projects loaded falls back to `all`. Summaries seen outside the list (an
 // open chat of another project, or one older than the loaded pages) are kept aside, so `byId` still answers for them.
+// Phase 14 (ADR-060; C54, complete from P14-0b): the run state `input` ("Needs your input": a running MCP tool call waits
+// for the user's answer to an elicitation) comes from `ChatSummary.awaitingInput` (the list, `GET /chats/:id` and
+// `chat.updated` / `chat.created`; an event without the key leaves the state unchanged, open point 2) or from a session
+// in run state `input` (`setRunState`); `run.finished` clears it. The dot's priority is input > approval > running >
+// unread; `input` is also a running state (`isRunningState`).
 import type {
   ChatCreate,
   ChatDetail,
@@ -39,10 +44,18 @@ import { useUiStore } from './ui'
  */
 export type ChatProjectFilter = 'all' | 'none' | (string & {})
 
-/** Live run state of a chat: streaming, or waiting for a tool approval. */
-export type ChatRunState = 'running' | 'approval'
-/** The sidebar dot of a chat (priority approval > running > unread). */
+/**
+ * Live run state of a chat: streaming, or waiting for a tool approval; + Phase 14 (ADR-060): `input`, a running MCP tool
+ * call waits for the user's answer to an elicitation (the run is still active).
+ */
+export type ChatRunState = 'running' | 'approval' | 'input'
+/** The sidebar dot of a chat (priority input > approval > running > unread). */
 export type ChatListStatus = ChatRunState | 'unread'
+
+/** + Phase 14: a run of the chat is active (`running`, or `input`: it waits for an answer while it runs). */
+export function isRunningState(state: ChatRunState | null | undefined): boolean {
+  return state === 'running' || state === 'input'
+}
 
 export type ChatRemoveOutcome
   = | { status: 'deleted' }
@@ -138,7 +151,16 @@ function compareChats(a: ChatSummary, b: ChatSummary): number {
   return b.updatedAt - a.updatedAt || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0)
 }
 
-function runStateOf(chat: ChatSummary): ChatRunState | null {
+/** What the run state of a chat is read from (a summary, a detail or `chat.updated` data). */
+type RunStateSource = Pick<ChatSummary, 'id' | 'running' | 'pendingApproval' | 'awaitingInput'>
+
+/**
+ * The run state a summary reports. + Phase 14: `awaitingInput: true` of a running chat is `input`; a summary without the
+ * key (an event that does not know it) keeps a current `input` while the chat still runs (open point 2).
+ */
+function runStateOf(chat: RunStateSource, current: ChatRunState | null = null): ChatRunState | null {
+  if (chat.running && (chat.awaitingInput === true || (chat.awaitingInput === undefined && current === 'input')))
+    return 'input'
   if (chat.pendingApproval)
     return 'approval'
   return chat.running ? 'running' : null
@@ -188,7 +210,7 @@ export const useChatsStore = defineStore('chats', () => {
   const groups = computed<Array<ChatDateGroup<ChatSummary>>>(() =>
     groupChatsByDate(items.value, Math.max(Date.now(), today.value)))
 
-  /** `statusOf(id)`: the dot of a chat row: `approval` > `running` > `unread`, else null. */
+  /** `statusOf(id)`: the dot of a chat row: `input` > `approval` > `running` > `unread`, else null. */
   const statusOf = computed(() => (id: string): ChatListStatus | null =>
     runState.value[id] ?? (unread.value[id] ? 'unread' : null))
 
@@ -203,11 +225,12 @@ export const useChatsStore = defineStore('chats', () => {
       pendingDeletes.delete(id)
   }
 
-  function seedRunState(chats: readonly ChatSummary[]) {
+  function seedRunState(chats: readonly RunStateSource[]) {
     let next: Record<string, ChatRunState> | null = null
     for (const chat of chats) {
-      const state = runStateOf(chat)
-      if ((runState.value[chat.id] ?? null) === state)
+      const current = runState.value[chat.id] ?? null
+      const state = runStateOf(chat, current)
+      if (current === state)
         continue
       next ??= { ...runState.value }
       if (state)
@@ -442,9 +465,9 @@ export const useChatsStore = defineStore('chats', () => {
    */
   async function get(id: string): Promise<ChatDetail> {
     const chat = await withHarnessErrors(api.chats.get({ params: { id } }))
-    const summary = summaryOf(chat)
-    seedRunState([summary])
-    upsertSummary(summary)
+    // + Phase 14: from the detail itself (the row's summary does not keep `awaitingInput`).
+    seedRunState([chat])
+    upsertSummary(summaryOf(chat))
     return chat
   }
 
@@ -549,7 +572,7 @@ export const useChatsStore = defineStore('chats', () => {
     await downloadResponse(response, `chat-${id}.${format}`)
   }
 
-  /** Run state pushed by the chat session (and by `run.*` events); null clears it. */
+  /** Run state pushed by the chat session (and by `run.*` events); null clears it. + Phase 14: also `input`. */
   function setRunState(id: string, state: ChatRunState | null): void {
     if ((runState.value[id] ?? null) === state)
       return
@@ -594,9 +617,10 @@ export const useChatsStore = defineStore('chats', () => {
 
   /**
    * `chat.created` / `chat.updated` refresh the row (and its run state; the `activeLeafId` of `chat.updated` is not
-   * kept), `chat.deleted` drops it, `run.started` sets `running`, `run.finished` clears it (or sets `approval` when
-   * `awaitingApproval`) and marks the chat unread unless it is the open one (`ui.activeChatId`). Phase 7:
-   * `project.changed` for a deleted project detaches its chats (`detachProject`).
+   * kept; + Phase 14: `awaitingInput: true` sets `input`, `false` ends it, an absent key keeps it), `chat.deleted` drops
+   * it, `run.started` sets `running`, `run.finished` clears it (or sets `approval` when `awaitingApproval`; it also ends
+   * `input`) and marks the chat unread unless it is the open one (`ui.activeChatId`). Phase 7: `project.changed` for a
+   * deleted project detaches its chats (`detachProject`).
    */
   function applyEvent(event: ServerEvent): void {
     switch (event.type) {
@@ -604,9 +628,9 @@ export const useChatsStore = defineStore('chats', () => {
       case 'chat.updated': {
         if (pendingDeletes.has(event.data.id))
           return
-        const summary = summaryOf(event.data)
-        seedRunState([summary])
-        upsertSummary(summary)
+        // + Phase 14: from the event itself (the row's summary does not keep `awaitingInput`).
+        seedRunState([event.data])
+        upsertSummary(summaryOf(event.data))
         return
       }
       case 'chat.deleted': {

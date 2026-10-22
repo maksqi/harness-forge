@@ -69,12 +69,12 @@ describe('mock plugin', () => {
 })
 
 describe('mock provider definition', () => {
-  it('has no credentials, no icon, echo as small model and the twenty-one models as listing and seeds', async () => {
+  it('has no credentials, no icon, echo as small model and the twenty-three models as listing and seeds', async () => {
     expect(mockProvider).toMatchObject({ id: 'mock', name: 'Mock (dev only)', credentials: [], smallModelId: 'echo' })
     expect(mockProvider.icon).toBeUndefined()
     const listed = await mockProvider.listModels?.({ credentials: {}, fetch: globalThis.fetch })
-    expect(listed?.map(model => model.id)).toEqual(['echo', 'reasoning', 'tool-approval', 'error', 'image', 'image-chat', 'image-tool', 'transcribe', 'speech', 'workspace', 'checkpoint', 'shell', 'compact', 'plan', 'todo', 'subagent', 'steer', 'agents', 'background', 'hooks', 'prompt-hook'])
-    expect(listed).toHaveLength(21)
+    expect(listed?.map(model => model.id)).toEqual(['echo', 'reasoning', 'tool-approval', 'error', 'image', 'image-chat', 'image-tool', 'transcribe', 'speech', 'workspace', 'checkpoint', 'shell', 'compact', 'plan', 'todo', 'subagent', 'steer', 'agents', 'background', 'hooks', 'prompt-hook', 'search', 'search-tool'])
+    expect(listed).toHaveLength(23)
     expect(mockProvider.seedModels).toEqual(listed)
     expect(modelInfoListSchema.parse(mockModels())).toEqual(mockModels())
     const byId = new Map(mockModels().map(model => [model.id, model]))
@@ -128,9 +128,9 @@ describe('mock provider definition', () => {
       })
       expect(mockProvider.createLanguageModel(id, { credentials: {}, fetch: globalThis.fetch })).toMatchObject({ provider: 'mock', modelId: id })
     }
-    // Visible chat models (the picker, the provider's `modelCount`): everything except the three media models (18 since
-    // Phase 12).
-    expect(mockModels().filter(model => model.kind === undefined || model.kind === 'chat')).toHaveLength(18)
+    // Visible chat models (the picker, the provider's `modelCount`): everything except the three media models (20 since
+    // Phase 14, 18 in Phase 12).
+    expect(mockModels().filter(model => model.kind === undefined || model.kind === 'chat')).toHaveLength(20)
   })
 
   it('lists the two customization mocks (Phase 10) as explicit chat models with tools only', () => {
@@ -149,11 +149,12 @@ describe('mock provider definition', () => {
       expect(mockProvider.createLanguageModel(id, { credentials: {}, fetch: globalThis.fetch })).toMatchObject({ provider: 'mock', modelId: id })
     }
     // The visible models (`GET /api/models`): the chat models plus the image model; transcribe and speech are hidden.
-    expect(mockModels().filter(model => model.kind !== 'transcription' && model.kind !== 'speech')).toHaveLength(19)
+    expect(mockModels().filter(model => model.kind !== 'transcription' && model.kind !== 'speech')).toHaveLength(21)
   })
 
   it('lists mock:hooks (Phase 11) as an explicit chat model with tools only, before mock:prompt-hook', () => {
-    const hooks = mockModels().at(-2)
+    const hooks = mockModels().find(model => model.id === 'hooks')
+    expect(mockModels().map(model => model.id).slice(-4)).toEqual(['hooks', 'prompt-hook', 'search', 'search-tool'])
     expect(modelInfoSchema.parse(hooks)).toEqual({
       id: 'hooks',
       name: 'Mock Hooks',
@@ -166,8 +167,8 @@ describe('mock provider definition', () => {
     expect(mockProvider.createLanguageModel('hooks', { credentials: {}, fetch: globalThis.fetch })).toMatchObject({ provider: 'mock', modelId: 'hooks' })
   })
 
-  it('lists mock:prompt-hook (Phase 12) as an explicit chat model without capabilities, the last one', () => {
-    const promptHook = mockModels().at(-1)
+  it('lists mock:prompt-hook (Phase 12) as an explicit chat model without capabilities, before the Phase 14 mocks', () => {
+    const promptHook = mockModels().find(model => model.id === 'prompt-hook')
     expect(modelInfoSchema.parse(promptHook)).toEqual({
       id: 'prompt-hook',
       name: 'Mock Prompt Hook',
@@ -180,8 +181,38 @@ describe('mock provider definition', () => {
     expect(mockProvider.createLanguageModel('prompt-hook', { credentials: {}, fetch: globalThis.fetch })).toMatchObject({ provider: 'mock', modelId: 'prompt-hook' })
     // The small model stays `echo` (titles): a prompt hook without a model runs on `mock:echo` (open point 13).
     expect(mockProvider.smallModelId).toBe('echo')
-    // Counts of Phase 12: listing 21, `GET /api/models` 19, `modelCount` 18.
-    expect(mockModels()).toHaveLength(21)
+    // Counts since Phase 14: listing 23, `GET /api/models` 21, `modelCount` 20 (Phase 12: 21, 19, 18).
+    expect(mockModels()).toHaveLength(23)
+  })
+
+  it('lists mock:search and mock:search-tool (Phase 14) as explicit chat models with tools only, the last two', () => {
+    for (const [id, name] of [['search', 'Mock Search'], ['search-tool', 'Mock Search Tool']] as const) {
+      expect(modelInfoSchema.parse(mockModels().find(model => model.id === id)), id).toEqual({
+        id,
+        name,
+        kind: 'chat',
+        contextWindow: 32_000,
+        maxOutputTokens: 4096,
+        capabilities: { tools: true, vision: false, pdf: false, reasoning: false, structuredOutput: false, imageOutput: false },
+        cost: { input: 1, output: 2 },
+      })
+      expect(mockProvider.createLanguageModel(id, { credentials: {}, fetch: globalThis.fetch })).toMatchObject({ provider: 'mock', modelId: id })
+    }
+    expect(mockModels().map(model => model.id).slice(-2)).toEqual(['search', 'search-tool'])
+  })
+
+  it('defines the plugin API 1.7.0 webSearch hook: the provider-executed web_search tool for mock:search only', () => {
+    const byId = new Map(mockModels().map(model => [model.id, model]))
+    const search = mockProvider.webSearch?.(byId.get('search')!, { functionTools: 0, maxUses: 5 })
+    expect(search).toEqual({ tools: { web_search: expect.objectContaining({ type: 'provider', id: 'mock.web_search', args: {}, isProviderExecuted: true }) } })
+    expect(Object.keys(search ?? {})).toEqual(['tools'])
+    // The same answer with function tools in the turn: never `exclusive`, never provider options.
+    expect(mockProvider.webSearch?.(byId.get('search')!, { functionTools: 3, maxUses: 5 })).toEqual(search)
+    // A fresh tool object per call (the host may merge it into a turn's tool set).
+    expect(mockProvider.webSearch?.(byId.get('search')!, { functionTools: 0, maxUses: 5 })?.tools?.web_search).not.toBe(search?.tools?.web_search)
+    for (const model of mockModels().filter(entry => entry.id !== 'search'))
+      expect(mockProvider.webSearch?.(model, { functionTools: 0, maxUses: 5 }), model.id).toBeUndefined()
+    expect(mockProvider.webSearch?.({ id: 'unknown' }, { functionTools: 0, maxUses: 5 })).toBeUndefined()
   })
 
   it('passes the registry validation of provider definitions', () => {

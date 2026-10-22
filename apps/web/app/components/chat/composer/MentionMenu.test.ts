@@ -3,7 +3,7 @@ import { mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { nextTick } from 'vue'
 import { testIds } from '~/utils/testids'
-import { projectFileEntry } from '~/utils/testing/fixtures'
+import { mcpResourceEntry, projectFileEntry } from '~/utils/testing/fixtures'
 import MentionMenu from './MentionMenu.vue'
 
 const items: ProjectFileEntry[] = [projectFileEntry('src/parser.ts'), projectFileEntry('src/parser.test.ts'), projectFileEntry('src/parsers', 'dir')]
@@ -188,5 +188,19 @@ describe('mentionMenu', () => {
     expect(wrapper.vm.handleKeydown(key({ key: 'Escape' }))).toBe(false)
     expect(wrapper.vm.activeId).toBeUndefined()
     expect(wrapper.vm.listId).toMatch(/^mention-menu-/)
+  })
+})
+
+describe('mentionMenu: MCP resources (Phase 14, C54 declares)', () => {
+  it('accepts the resources, their state and the select-resource emit; the files stay as they were', () => {
+    const wrapper = mount(MentionMenu, { props: { ...props, resources: [mcpResourceEntry()], resourcesState: 'ready' as const } })
+    expect(wrapper.props('resources')).toEqual([mcpResourceEntry()])
+    expect(wrapper.props('resourcesState')).toBe('ready')
+    expect(wrapper.findAll(item)).toHaveLength(3)
+    wrapper.vm.$emit('select-resource', mcpResourceEntry())
+    expect(wrapper.emitted('select-resource')).toEqual([[mcpResourceEntry()]])
+    const plain = mount(MentionMenu, { props })
+    expect(plain.props('resources')).toEqual([])
+    expect(plain.props('resourcesState')).toBe('idle')
   })
 })

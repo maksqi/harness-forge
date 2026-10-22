@@ -2,6 +2,7 @@ import type { HarnessUIMessage, ServerEvent } from '@harness-forge/shared'
 import type { ChatRunner } from '../../chat/types.ts'
 import type { ChatsService } from '../../services/chats/types.ts'
 import type { TestApp } from '../../testing/create-test-app.ts'
+import type { FakeElicitationBroker } from '../../testing/fake-elicitations.ts'
 import type { FakeHookService } from '../../testing/fake-hooks.ts'
 import {
   chatDetailSchema,
@@ -15,6 +16,7 @@ import { chatBody, nextEvent, testChatId } from '../../chat/testing.ts'
 import { projects } from '../../db/schema.ts'
 import { createChatsService } from '../../services/chats/index.ts'
 import { createTestApp } from '../../testing/create-test-app.ts'
+import { withAwaitingInput } from './chats.ts'
 
 const chatPageSchema = cursorPageSchema(chatSummarySchema)
 
@@ -216,7 +218,8 @@ describe('message tree routes (ADR-023)', () => {
     const detail = chatDetailSchema.parse(await response.json())
     expect(ids(detail.messages)).toEqual([mid(204), mid(205)])
     expect(detail.branches).toEqual({ [mid(204)]: { siblings: [mid(200), mid(204)], index: 1 } })
-    expect(chatDetailSchema.parse(await (await t.request(`/api/chats/${chatId(20)}`)).json())).toEqual(detail)
+    // Phase 14: the detail route adds the live `awaitingInput` (nothing waits here).
+    expect(chatDetailSchema.parse(await (await t.request(`/api/chats/${chatId(20)}`)).json())).toEqual({ ...detail, awaitingInput: false })
   })
 
   it('pOST /api/chats rejects an invalid tree with 400 and the field path', async () => {
@@ -319,7 +322,7 @@ describe('dELETE /api/chats/:id/messages/:messageId (ADR-030)', () => {
     expect(ids(detail.messages)).toEqual([mid(400), mid(401), mid(402), mid(403)])
     expect(detail.branches).toEqual({})
     expect(detail.updatedAt).toBe(before.updatedAt)
-    expect(chatDetailSchema.parse(await (await t.request(`/api/chats/${chatId(40)}`)).json())).toEqual(detail)
+    expect(chatDetailSchema.parse(await (await t.request(`/api/chats/${chatId(40)}`)).json())).toEqual({ ...detail, awaitingInput: false })
     expect(received.map(event => event.type)).toEqual(['chat.updated'])
     expect(received[0]).toMatchObject({ data: { id: chatId(40), activeLeafId: mid(403) } })
     // The deleted versions are gone from the JSON export too.
@@ -660,5 +663,77 @@ describe('dELETE /api/chats/:id: SessionEnd (Phase 12, C44 call site)', () => {
     finally {
       Object.assign(hooks, { sessionEnd: original })
     }
+  })
+})
+
+describe('awaitingInput (Phase 14, C52-T6, open point 2)', () => {
+  let app: TestApp
+  let broker: FakeElicitationBroker
+
+  beforeAll(async () => {
+    app = await createTestApp({ start: false, elicitations: 'fake' })
+    broker = app.deps.elicitations as FakeElicitationBroker
+  })
+
+  afterAll(async () => {
+    await app.close()
+  })
+
+  function begin(id: string, toolCallId: string): AbortController {
+    const controller = new AbortController()
+    broker.begin({ runtimeKey: 'fake', chatId: id, toolCallId, serverId: 'fake', serverName: 'Fake', interactive: true, signal: controller.signal })
+    return controller
+  }
+
+  it('the list and the detail carry awaitingInput from the broker: true while a request waits, false otherwise', async () => {
+    const waiting = chatId(950)
+    const idle = chatId(951)
+    for (const id of [waiting, idle])
+      expect((await app.request('/api/chats', json('POST', { id }))).status).toBe(201)
+    const listed = async (): Promise<Record<string, boolean | undefined>> => Object.fromEntries(chatPageSchema.parse(await (await app.request('/api/chats')).json()).items.map(chat => [chat.id, chat.awaitingInput]))
+    const detailOf = async (id: string) => chatDetailSchema.parse(await (await app.request(`/api/chats/${id}`)).json())
+
+    expect(await listed()).toEqual({ [waiting]: false, [idle]: false })
+    expect((await detailOf(waiting)).awaitingInput).toBe(false)
+
+    begin(waiting, 'call_1')
+    const form = { fields: [{ name: 'name', type: 'string' as const, title: null, description: null, required: true }] }
+    const reply = broker.request({ chatId: waiting, toolCallId: 'call_1' }, { message: 'Your name?', form })
+    expect(await listed()).toEqual({ [waiting]: true, [idle]: false })
+    expect((await detailOf(waiting)).awaitingInput).toBe(true)
+    expect((await detailOf(idle)).awaitingInput).toBe(false)
+
+    // Answered (through the broker: the answer route is W14.3's): nothing waits any more.
+    await broker.answer(waiting, reply.elicitation.id, { action: 'decline' })
+    expect(await reply.result).toMatchObject({ action: 'decline' })
+    expect(await listed()).toEqual({ [waiting]: false, [idle]: false })
+    expect((await detailOf(waiting)).awaitingInput).toBe(false)
+  })
+
+  it('a failing broker counts as nothing pending (the routes still answer)', async () => {
+    const id = chatId(952)
+    expect((await app.request('/api/chats', json('POST', { id }))).status).toBe(201)
+    const original = broker.pendingCount
+    Object.assign(broker, { pendingCount: () => {
+      throw new Error('broken')
+    } })
+    try {
+      const detail = await app.request(`/api/chats/${id}`)
+      expect(detail.status).toBe(200)
+      expect(chatDetailSchema.parse(await detail.json()).awaitingInput).toBe(false)
+      const list = await app.request('/api/chats')
+      expect(list.status).toBe(200)
+      expect(chatPageSchema.parse(await list.json()).items.every(chat => chat.awaitingInput === false)).toBe(true)
+    }
+    finally {
+      Object.assign(broker, { pendingCount: original })
+    }
+  })
+
+  it('withAwaitingInput decorates any summary; a non-finite count is false', () => {
+    const logger = app.deps.logger
+    expect(withAwaitingInput({ logger, elicitations: { ...broker, pendingCount: () => 2 } }, { id: 'x' })).toEqual({ id: 'x', awaitingInput: true })
+    expect(withAwaitingInput({ logger, elicitations: { ...broker, pendingCount: () => 0 } }, { id: 'x' })).toEqual({ id: 'x', awaitingInput: false })
+    expect(withAwaitingInput({ logger, elicitations: { ...broker, pendingCount: () => Number.NaN } }, { id: 'x' })).toEqual({ id: 'x', awaitingInput: false })
   })
 })

@@ -3,7 +3,8 @@
 // Phase 0 (bind safety with a stored password is enforced in `main.ts`); `HF_TRUST_PROXY` by W5.7 (ADR-026);
 // `HF_WORKSPACE_ROOTS` / `HF_WORKSPACE_SHELL` by C14 (Phase 7, ADR-031 / ADR-033); `DataPaths.checkpoints` and the
 // test-only `HF_TEST_FILE_SWEEP_DELAY_MS` by C19 (Phase 8, ADR-036 / ADR-039); `HF_CLAUDE_HOME`, the test-only
-// `HF_TEST_REMOTE_URL` and `DataPaths.transcripts` by C43 (Phase 12, ADR-054 / ADR-055 / ADR-057).
+// `HF_TEST_REMOTE_URL` and `DataPaths.transcripts` by C43 (Phase 12, ADR-054 / ADR-055 / ADR-057); the test-only
+// `HF_TEST_ELICITATION_WAIT_MS` by C50 (Phase 14, ADR-060; open point 3 of the phase doc, accepted at Gate P14-0a).
 import type { LogLevel } from './logger.ts'
 import { Buffer } from 'node:buffer'
 import { existsSync, mkdirSync } from 'node:fs'
@@ -122,6 +123,14 @@ export interface Env {
    * other value than a loopback base fails the boot. Null when unset. Normalized without a trailing `/`.
    */
   readonly testRemoteUrl: string | null
+  /**
+   * Test-only `HF_TEST_ELICITATION_WAIT_MS` (Phase 14, ADR-060): replaces the 480 s wait of an MCP elicitation for the
+   * user (`LIMITS.mcpElicitationWaitMs`), in ms (1000 - 480,000; another value fails the boot like any invalid variable),
+   * so probes and e2e specs can see a real timeout; `deps.ts` passes it to the broker as `waitMs`. Honored only with
+   * `HF_MOCK_PROVIDER=1`; otherwise null, and `envBootWarnings` reports the ignored value (logged by `startDeps`). Null
+   * when unset.
+   */
+  readonly testElicitationWaitMs: number | null
   /** `HF_API_TARGET`: proxy target of `nuxt dev` (unused by the server, kept for completeness). */
   readonly apiTarget: string
   /**
@@ -239,6 +248,18 @@ const testFileSweepDelaySchema = z
     .max(TEST_FILE_SWEEP_DELAY_RANGE.max, `Expected ${TEST_FILE_SWEEP_DELAY_RANGE.min} - ${TEST_FILE_SWEEP_DELAY_RANGE.max} ms.`))
   .optional()
 
+/** Bounds of `HF_TEST_ELICITATION_WAIT_MS` (ms; at most the production wait `LIMITS.mcpElicitationWaitMs`). */
+export const TEST_ELICITATION_WAIT_RANGE = { min: 1000, max: 480_000 } as const
+
+const testElicitationWaitSchema = z
+  .string()
+  .regex(/^\s*\d{1,6}\s*$/, 'Expected a number of milliseconds.')
+  .transform(Number)
+  .pipe(z.int()
+    .min(TEST_ELICITATION_WAIT_RANGE.min, `Expected ${TEST_ELICITATION_WAIT_RANGE.min} - ${TEST_ELICITATION_WAIT_RANGE.max} ms.`)
+    .max(TEST_ELICITATION_WAIT_RANGE.max, `Expected ${TEST_ELICITATION_WAIT_RANGE.min} - ${TEST_ELICITATION_WAIT_RANGE.max} ms.`))
+  .optional()
+
 /** `HF_CLAUDE_HOME=0` turns the import scan off. */
 const CLAUDE_HOME_OFF = '0'
 
@@ -307,6 +328,7 @@ const envSchema = z.object({
   HF_TEST_FILE_SWEEP_DELAY_MS: testFileSweepDelaySchema,
   HF_CLAUDE_HOME: claudeHomeSchema,
   HF_TEST_REMOTE_URL: testRemoteUrlSchema,
+  HF_TEST_ELICITATION_WAIT_MS: testElicitationWaitSchema,
   NODE_ENV: z.string().optional(),
 })
 
@@ -389,6 +411,7 @@ export function loadEnv(source: Record<string, string | undefined> = process.env
     testFileSweepDelayMs: values.HF_MOCK_PROVIDER ? values.HF_TEST_FILE_SWEEP_DELAY_MS ?? null : null,
     claudeHome: values.HF_CLAUDE_HOME === undefined ? join(options.homedir ?? homedir(), '.claude') : values.HF_CLAUDE_HOME,
     testRemoteUrl: values.HF_MOCK_PROVIDER ? values.HF_TEST_REMOTE_URL ?? null : null,
+    testElicitationWaitMs: values.HF_MOCK_PROVIDER ? values.HF_TEST_ELICITATION_WAIT_MS ?? null : null,
     apiTarget: values.HF_API_TARGET,
     webDir: values.HF_WEB_DIR === undefined ? null : resolveDataDir(values.HF_WEB_DIR, cwd),
     dev,
@@ -400,9 +423,13 @@ export function loadEnv(source: Record<string, string | undefined> = process.env
 /** The boot warning of a valid `HF_TEST_REMOTE_URL` without `HF_MOCK_PROVIDER=1` (Phase 12). */
 export const TEST_REMOTE_URL_IGNORED_WARNING = 'the test-only remote URL is ignored: it is honored only with HF_MOCK_PROVIDER=1'
 
+/** The boot warning of a valid `HF_TEST_ELICITATION_WAIT_MS` without `HF_MOCK_PROVIDER=1` (Phase 14). */
+export const TEST_ELICITATION_WAIT_IGNORED_WARNING = 'the test-only elicitation wait is ignored: it is honored only with HF_MOCK_PROVIDER=1'
+
 /**
  * Warnings about the environment that do not stop the boot, logged once by `startDeps` (Phase 8): a valid
- * `HF_TEST_FILE_SWEEP_DELAY_MS` without `HF_MOCK_PROVIDER=1` is ignored; Phase 12: so is a valid `HF_TEST_REMOTE_URL`.
+ * `HF_TEST_FILE_SWEEP_DELAY_MS` without `HF_MOCK_PROVIDER=1` is ignored; Phase 12: so is a valid `HF_TEST_REMOTE_URL`;
+ * Phase 14: and a valid `HF_TEST_ELICITATION_WAIT_MS`.
  */
 export function envBootWarnings(env: Pick<Env, 'mockProvider' | 'vars'>): string[] {
   const warnings: string[] = []
@@ -413,6 +440,8 @@ export function envBootWarnings(env: Pick<Env, 'mockProvider' | 'vars'>): string
     warnings.push('the test-only automatic file sweep delay is ignored: it is honored only with HF_MOCK_PROVIDER=1')
   if (!env.mockProvider && set(env.vars.HF_TEST_REMOTE_URL))
     warnings.push(TEST_REMOTE_URL_IGNORED_WARNING)
+  if (!env.mockProvider && set(env.vars.HF_TEST_ELICITATION_WAIT_MS))
+    warnings.push(TEST_ELICITATION_WAIT_IGNORED_WARNING)
   return warnings
 }
 

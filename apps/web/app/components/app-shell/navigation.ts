@@ -1,7 +1,7 @@
 // Sidebar modes and the last route per mode (docs/UI.md 5.2).
 import type { RemovableRef } from '@vueuse/core'
 import type { Component } from 'vue'
-import { BoxesIcon, DatabaseIcon, FoldersIcon, ImagePlayIcon, InfoIcon, KeyRoundIcon, PaletteIcon, SlidersHorizontalIcon, WandSparklesIcon } from '@lucide/vue'
+import { BoxesIcon, DatabaseIcon, FoldersIcon, GlobeIcon, ImagePlayIcon, InfoIcon, KeyRoundIcon, PaletteIcon, SlidersHorizontalIcon, WandSparklesIcon } from '@lucide/vue'
 import { useSessionStorage } from '@vueuse/core'
 import { effectScope } from 'vue'
 import { testIds } from '~/utils/testids'
@@ -69,18 +69,22 @@ export function useLastRoutes(): RemovableRef<LastRoutes> {
 }
 
 export interface SettingsLink {
-  key: 'providers' | 'models' | 'media' | 'projects' | 'customize' | 'general' | 'appearance' | 'data' | 'about'
+  key: 'providers' | 'models' | 'media' | 'search' | 'projects' | 'customize' | 'general' | 'appearance' | 'data' | 'about'
   label: string
   to: string
   icon: Component
   testId: string
 }
 
-/** The settings pages in sidebar order (docs/UI.md 5.5); the command palette lists them too. */
+/**
+ * The settings pages in sidebar order (docs/UI.md 5.5); the command palette lists them too. + Phase 14 (C54): Web search
+ * right after Media.
+ */
 export const SETTINGS_LINKS: readonly SettingsLink[] = [
   { key: 'providers', label: 'Providers', to: '/settings/providers', icon: KeyRoundIcon, testId: testIds.settingsNavProviders },
   { key: 'models', label: 'Models', to: '/settings/models', icon: BoxesIcon, testId: testIds.settingsNavModels },
   { key: 'media', label: 'Media', to: '/settings/media', icon: ImagePlayIcon, testId: testIds.settingsNavMedia },
+  { key: 'search', label: 'Web search', to: '/settings/search', icon: GlobeIcon, testId: testIds.settingsNavSearch },
   { key: 'projects', label: 'Projects', to: '/settings/projects', icon: FoldersIcon, testId: testIds.settingsNavProjects },
   { key: 'customize', label: 'Customize', to: '/settings/customize', icon: WandSparklesIcon, testId: testIds.settingsNavCustomize },
   { key: 'general', label: 'General', to: '/settings/general', icon: SlidersHorizontalIcon, testId: testIds.settingsNavGeneral },

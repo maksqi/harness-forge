@@ -20,7 +20,9 @@ import { NOTICES } from './notices.ts'
 import {
   checkImageOptions,
   commitHistory,
+  effectiveWebSearchMode,
   ensureChat,
+  ensureRunChat,
   generatedImageIds,
   imagePrompt,
   imageTurnInputs,
@@ -236,6 +238,42 @@ describe('ensureChat (the project of a new chat)', () => {
     } } } as unknown as Pick<AppDeps, 'chats'>
     const error = await ensureChat(deps, body({ projectId: PROJECT_ID })).catch((caught: unknown) => caught)
     expect((error as HarnessError).toJSON().error.code).toBe('not_found')
+  })
+})
+
+describe('the web search mode of a turn (Phase 14, C52-T3)', () => {
+  it('effectiveWebSearchMode: the body, else the chat\'s setting, else the global default, else off', () => {
+    const chat = (webSearch?: 'off' | 'auto') => ({ settings: webSearch === undefined ? {} : { webSearch } })
+    expect(effectiveWebSearchMode({ webSearch: 'auto' }, chat('off'), { webSearchDefault: 'off' })).toBe('auto')
+    expect(effectiveWebSearchMode({ webSearch: 'off' }, chat('auto'), { webSearchDefault: 'auto' })).toBe('off')
+    expect(effectiveWebSearchMode({}, chat('auto'), { webSearchDefault: 'off' })).toBe('auto')
+    expect(effectiveWebSearchMode({}, chat(), { webSearchDefault: 'auto' })).toBe('auto')
+    expect(effectiveWebSearchMode({}, chat(), {})).toBe('off')
+    // A value other than off / auto counts as absent (a v1.8.1 chat, a broken row).
+    expect(effectiveWebSearchMode({ webSearch: 'on' as never }, { settings: { webSearch: 'x' as never } }, { webSearchDefault: 'auto' })).toBe('auto')
+  })
+
+  it('a new chat keeps the body\'s webSearch (one touch with the output style); an existing chat keeps its own', async () => {
+    const touches: unknown[] = []
+    let created = true
+    const deps = {
+      chats: {
+        ensure: async () => ({ chat: record({ settings: { toolMode: 'edits', reasoningEffort: 'auto' } }), created }),
+        touch: async (_id: string, input: unknown) => {
+          touches.push(input)
+        },
+      },
+    } as unknown as Pick<AppDeps, 'chats'>
+    const both = await ensureRunChat(deps, body({ webSearch: 'auto', outputStyle: 'learning' }))
+    expect(both.chat.settings).toMatchObject({ webSearch: 'auto', outputStyle: 'learning' })
+    expect(touches).toEqual([{ settings: { outputStyle: 'learning', webSearch: 'auto' } }])
+    expect((await ensureRunChat(deps, body({ webSearch: 'off' }))).chat.settings.webSearch).toBe('off')
+    expect(touches.at(-1)).toEqual({ settings: { webSearch: 'off' } })
+    touches.length = 0
+    expect((await ensureRunChat(deps, body())).chat.settings.webSearch).toBeUndefined()
+    created = false
+    expect((await ensureRunChat(deps, body({ webSearch: 'auto' }))).chat.settings.webSearch).toBeUndefined()
+    expect(touches).toEqual([])
   })
 })
 

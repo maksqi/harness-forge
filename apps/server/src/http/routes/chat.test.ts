@@ -30,6 +30,7 @@ import {
 } from '../../chat/testing.ts'
 import { PNG } from '../../services/files/fixtures.test-util.ts'
 import { createTestApp } from '../../testing/create-test-app.ts'
+import { inertMcpManagerMembers } from '../../testing/fake-mcp.ts'
 import { createFakeProjectService } from '../../testing/fake-projects.ts'
 
 let t: TestApp
@@ -1000,6 +1001,7 @@ describe('with fake tool services (preferences, MCP servers)', () => {
       update: unused,
       remove: unused,
       reconnect: unused,
+      ...inertMcpManagerMembers(),
     }
     app = await createTestApp({ env: { HF_MOCK_PROVIDER: '1' }, overrides: { tools, mcp } })
     testkit = registerTestkit(app)

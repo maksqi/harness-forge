@@ -3,8 +3,23 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } f
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import process from 'node:process'
+import { LIMITS } from '@harness-forge/shared'
 import { afterEach, describe, expect, it } from 'vitest'
-import { bindSafetyError, defaultEnvFile, ensureDataDir, envBootWarnings, EnvError, isLoopbackHost, loadDotEnvFile, loadEnv, parseWorkspaceRoots, TEST_FILE_SWEEP_DELAY_RANGE, TEST_REMOTE_URL_IGNORED_WARNING } from './env.ts'
+import {
+  bindSafetyError,
+  defaultEnvFile,
+  ensureDataDir,
+  envBootWarnings,
+  EnvError,
+  isLoopbackHost,
+  loadDotEnvFile,
+  loadEnv,
+  parseWorkspaceRoots,
+  TEST_ELICITATION_WAIT_IGNORED_WARNING,
+  TEST_ELICITATION_WAIT_RANGE,
+  TEST_FILE_SWEEP_DELAY_RANGE,
+  TEST_REMOTE_URL_IGNORED_WARNING,
+} from './env.ts'
 import { findWorkspaceRoot, serverPackageRoot } from './paths.ts'
 
 const tempDirs: string[] = []
@@ -391,6 +406,51 @@ describe('phase 12: HF_CLAUDE_HOME, HF_TEST_REMOTE_URL and the transcripts folde
     const cwd = tempDir()
     expect(() => loadEnv({ HF_MOCK_PROVIDER: '1', HF_TEST_REMOTE_URL: value }, { cwd })).toThrow(EnvError)
     expect(() => loadEnv({ HF_TEST_REMOTE_URL: value }, { cwd })).toThrow(/HF_TEST_REMOTE_URL/)
+  })
+})
+
+describe('phase 14: HF_TEST_ELICITATION_WAIT_MS (ADR-060, open point 3)', () => {
+  it('unset (or empty): null and no warning, with or without the mock provider', () => {
+    const cwd = tempDir()
+    for (const mock of [undefined, '1']) {
+      for (const value of [undefined, '', '  ']) {
+        const env = loadEnv({ HF_MOCK_PROVIDER: mock, HF_TEST_ELICITATION_WAIT_MS: value }, { cwd })
+        expect(env.testElicitationWaitMs).toBeNull()
+        expect(envBootWarnings(env)).toEqual([])
+      }
+    }
+  })
+
+  it.each([
+    ['1000', 1000],
+    [' 2500 ', 2500],
+    ['60000', 60_000],
+    ['480000', 480_000],
+  ] as const)('%j is honored with HF_MOCK_PROVIDER=1 as %j ms (1000 - 480,000, both bounds included)', (value, expected) => {
+    expect(TEST_ELICITATION_WAIT_RANGE).toEqual({ min: 1000, max: LIMITS.mcpElicitationWaitMs })
+    const env = loadEnv({ HF_MOCK_PROVIDER: '1', HF_TEST_ELICITATION_WAIT_MS: value }, { cwd: tempDir() })
+    expect(env.testElicitationWaitMs).toBe(expected)
+    expect(envBootWarnings(env)).toEqual([])
+  })
+
+  it('ignored without HF_MOCK_PROVIDER=1: null and a boot warning that names it in words', () => {
+    const cwd = tempDir()
+    for (const mock of [undefined, '0']) {
+      const env = loadEnv({ HF_MOCK_PROVIDER: mock, HF_TEST_ELICITATION_WAIT_MS: '2000' }, { cwd })
+      expect(env.testElicitationWaitMs).toBeNull()
+      expect(envBootWarnings(env)).toEqual([TEST_ELICITATION_WAIT_IGNORED_WARNING])
+    }
+    expect(TEST_ELICITATION_WAIT_IGNORED_WARNING).toBe('the test-only elicitation wait is ignored: it is honored only with HF_MOCK_PROVIDER=1')
+    // The log redactor masks "HF_" + 16 or more word characters: the warning names the variable in words.
+    expect(TEST_ELICITATION_WAIT_IGNORED_WARNING).not.toMatch(/HF_\w{16,}/)
+    const all = loadEnv({ HF_TEST_FILE_SWEEP_DELAY_MS: '2000', HF_TEST_REMOTE_URL: 'http://127.0.0.1:8899', HF_TEST_ELICITATION_WAIT_MS: '2000' }, { cwd })
+    expect(envBootWarnings(all)).toHaveLength(3)
+  })
+
+  it.each(['999', '0', '480001', '1000000', '-5', '1.5', 'soon', '1e4'])('refuses %j (out of range or not a whole number of ms), with or without the mock provider', (value) => {
+    const cwd = tempDir()
+    expect(() => loadEnv({ HF_MOCK_PROVIDER: '1', HF_TEST_ELICITATION_WAIT_MS: value }, { cwd })).toThrow(EnvError)
+    expect(() => loadEnv({ HF_TEST_ELICITATION_WAIT_MS: value }, { cwd })).toThrow(/HF_TEST_ELICITATION_WAIT_MS/)
   })
 })
 

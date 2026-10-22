@@ -2,6 +2,8 @@ import process from 'node:process'
 import { defineConfig, devices } from '@playwright/test'
 
 const baseURL = process.env.E2E_BASE_URL ?? 'http://localhost:8899'
+// The fake Brave / Tavily / Exa remote behind `HF_TEST_REMOTE_URL` (Phase 14; `pnpm start:e2e` uses the same port).
+const fakeRemotePort = process.env.E2E_FAKE_REMOTE_PORT ?? '8889'
 
 export default defineConfig({
   testDir: 'e2e',
@@ -42,13 +44,22 @@ export default defineConfig({
       testMatch: /specs\/tablet\/.*\.spec\.ts$/,
     },
   ],
-  // Started only when no server answers on the health URL (a coordinator build or E2E_BASE_URL).
+  // Started only when nothing answers on their URLs (a coordinator build or E2E_BASE_URL): first the fake search remote
+  // (Phase 14), then the app, whose `start:e2e` points `HF_TEST_REMOTE_URL` at it.
   webServer: process.env.E2E_BASE_URL
     ? undefined
-    : {
-        command: 'pnpm start:e2e',
-        url: 'http://localhost:8899/api/health',
-        reuseExistingServer: true,
-        timeout: 120_000,
-      },
+    : [
+        {
+          command: `node e2e/fixtures/fake-remote.mjs --port ${fakeRemotePort}`,
+          url: `http://127.0.0.1:${fakeRemotePort}/`,
+          reuseExistingServer: true,
+          timeout: 30_000,
+        },
+        {
+          command: 'pnpm start:e2e',
+          url: 'http://localhost:8899/api/health',
+          reuseExistingServer: true,
+          timeout: 120_000,
+        },
+      ],
 })

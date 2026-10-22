@@ -32,7 +32,16 @@
 // (`ChildToolsInput.projectTools`, the `RunProjectTools` of `pipeline.ts`, foreground and background alike): the global
 // servers a project server shadows are not offered, and the project server tools join the candidates under the same
 // ceiling (only those that run without approval in the effective mode).
-import type { TaskType, ToolMode } from '@harness-forge/shared'
+// Phase 14 (C52, ADR-063; COMPLETE and FROZEN after P14-0b): a child resolves its parent turn's web search mode
+// (`ChildToolsInput.webSearch`, `childWebSearchMode` of `host.ts`) again for its own model, with the same resolver and
+// apply as a chat run (`turnWebSearch`, `search/turn.ts`) over its tools after the ceiling, the disallowed tools and the
+// allowlist (an agent whose `tools` leave out `search_web` has no builtin search): native provider tools join its tool
+// set (their provider-executed calls are `not-applicable` in its approval function, `nativeTools`; its provider options
+// come back in `ChildTools.providerOptions`), `core-search`'s `search_web` stays only when the builtin wins, and native
+// and builtin search are never offered together. A child writes no notice. Its MCP calls never elicit (no agent scope:
+// declined `not-interactive`, W14.3).
+import type { ProviderOptions } from '@harness-forge/plugin-sdk'
+import type { TaskType, ToolMode, WebSearchMode, WebSearchResolution } from '@harness-forge/shared'
 import type { ToolApprovalStatus, ToolSet } from 'ai'
 import type { ResolvedModel } from '../../providers/types.ts'
 import type { RegisteredTool } from '../../registry/types.ts'
@@ -44,6 +53,7 @@ import type { ChildSession } from './host.ts'
 import { GENERATE_IMAGE_TOOL_NAME, matchToolAllowlist } from '@harness-forge/shared'
 import { CORE_AGENT_PLUGIN_ID } from '../../builtin-plugins/core-agent/index.ts'
 import { createToolApproval, staticApprovalOutcome, toolWorkspaceAccess } from '../approval.ts'
+import { turnWebSearch } from '../search/turn.ts'
 import { assembleTools } from '../tools.ts'
 
 /** The reason a sub-agent's call that would need an approval is denied with. */
@@ -102,15 +112,26 @@ export interface ChildToolsInput {
   readonly hooks?: ToolHooks | null
   /** Phase 11 (ADR-050, W11.17): the parent run's project MCP tools; null or absent = none (no project server). */
   readonly projectTools?: ChildProjectTools | null
+  /**
+   * Phase 14 (ADR-063): the web search mode the child inherits (`childWebSearchMode` of its host); absent = `off` (no
+   * search: `core-search`'s `search_web` is not offered).
+   */
+  readonly webSearch?: WebSearchMode
 }
 
 export interface ChildTools {
-  /** The AI SDK tools of the child (empty when none). */
+  /** The AI SDK tools of the child (empty when none); Phase 14: native search tools included. */
   readonly tools: ToolSet
-  /** The child's tools by name (what its approval function sees). */
+  /** The child's function tools by name (what its approval function sees; never a native search tool). */
   readonly byName: ReadonlyMap<string, ApprovalTool>
   /** The child's approval function: never `user-approval`. */
   readonly toolApproval: ChildToolApproval
+  /** Phase 14: the child's web search resolution (absent in v1.8 test doubles: none). */
+  readonly webSearch?: WebSearchResolution
+  /** Phase 14: the names of the child's provider-executed native search tools (absent = none). */
+  readonly nativeTools?: ReadonlySet<string>
+  /** Phase 14: the native search's provider options, deep-merged over the child's run params (absent = none). */
+  readonly providerOptions?: ProviderOptions
 }
 
 /** The mode a child's tools and approvals follow: `ask` for `explore` and for a parent in `plan`, else the parent's. */
@@ -201,11 +222,21 @@ export async function childTools(input: ChildToolsInput): Promise<ChildTools> {
     byName.set(name, entry)
   }
 
+  // Phase 14 (ADR-063): the inherited web search mode, resolved for the child's model over its own tools.
+  const search = turnWebSearch({
+    mode: input.webSearch ?? 'off',
+    toolMode: mode,
+    model,
+    // (Test doubles of a v1.8 host may carry no settings: the default, true.)
+    preferNative: session.ctx.prepared?.settings?.webSearchNative !== false,
+    assembled: { tools, byName },
+    logger,
+  })
   const approval = createToolApproval({
     chatId: session.chatId,
     modelRef: model.modelRef,
     toolMode: mode,
-    tools: byName,
+    tools: search.byName,
     prefs: assembled.prefs,
     registry: deps.registry,
     plugins: deps.plugins,
@@ -214,10 +245,18 @@ export async function childTools(input: ChildToolsInput): Promise<ChildTools> {
     workspace: assembled.workspace,
     scope: assembled.scope,
     hooks: input.hooks ?? null,
+    nativeTools: search.nativeTools,
   })
   const toolApproval: ChildToolApproval = async options => denyUserApproval(await approval({
     ...options,
     toolCall: { ...options.toolCall, toolCallId: `${callIdPrefix}${options.toolCall.toolCallId}` },
   }))
-  return { tools, byName, toolApproval }
+  return {
+    tools: search.tools,
+    byName: search.byName,
+    toolApproval,
+    webSearch: search.resolution,
+    nativeTools: search.nativeTools,
+    ...(search.providerOptions === undefined ? {} : { providerOptions: search.providerOptions }),
+  }
 }

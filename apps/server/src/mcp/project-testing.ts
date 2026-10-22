@@ -5,7 +5,7 @@
 import type { McpJsonRemoteServer, ProjectSummary } from '@harness-forge/shared'
 import type { BuiltinPlugin } from '../plugins/types.ts'
 import type { ProjectMcpServerItem } from '../services/project-config/types.ts'
-import type { TestApp } from '../testing/create-test-app.ts'
+import type { TestApp, TestAppOptions } from '../testing/create-test-app.ts'
 import type { FakeProjectConfigService } from '../testing/fake-project-config.ts'
 import type { FakeProjectTrustService } from '../testing/fake-project-trust.ts'
 import type { RecordingEventBus } from '../testing/fakes.ts'
@@ -47,6 +47,8 @@ export interface ProjectMcpTestAppOptions {
   builtins?: readonly BuiltinPlugin[]
   /** Use the real hook service etc.: only the project MCP pieces are replaced (default true: `hooks: 'fake'`). */
   fakeHooks?: boolean
+  /** Phase 14: services to replace (e.g. `{ mcpAuth, elicitations }` fakes); the recording event bus is always set. */
+  overrides?: Omit<NonNullable<TestAppOptions['overrides']>, 'events'>
 }
 
 export async function createProjectMcpTestApp(options: ProjectMcpTestAppOptions = {}): Promise<ProjectMcpTestApp> {
@@ -63,7 +65,7 @@ export async function createProjectMcpTestApp(options: ProjectMcpTestAppOptions 
       projectConfig: config,
       projectTrust: 'fake',
       ...(options.fakeHooks === false ? {} : { hooks: 'fake' as const }),
-      overrides: { events },
+      overrides: { ...options.overrides, events },
       factories: {
         projectMcp: deps => createProjectMcpManagerCore(deps, { eventDelayMs: 5, reconcileDelayMs: 10, killGraceMs: 500, connectTimeoutMs: 15_000, ...options.manager }),
       },

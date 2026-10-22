@@ -1,5 +1,6 @@
 import type { PluginTestApp } from '../../plugins/__fixtures__/harness.ts'
 import {
+  BUILTIN_PLUGIN_IDS,
   harnessErrorEnvelopeSchema,
   listResponseSchema,
   pluginDetailSchema,
@@ -55,7 +56,13 @@ describe('list and detail', () => {
     const { status, body } = await json('/api/plugins')
     expect(status).toBe(200)
     const list = listResponseSchema(pluginSummarySchema).parse(body)
-    expect(list.items.map(plugin => plugin.id)).toEqual(['core-providers', 'core-tools', 'core-commands', 'core-mcp', 'core-workspace', 'core-agent', 'acme-docs', 'dice-roller', 'lobe-icon'])
+    // Phase 14 (C50): `core-search` loads right after `core-tools`; the registry ranks it with the builtins once
+    // `BUILTIN_PLUGIN_IDS` lists it (CCR C50-1), before that among the user plugins by id.
+    const builtinIds = ['core-providers', 'core-tools', 'core-search', 'core-commands', 'core-mcp', 'core-workspace', 'core-agent']
+    const ranked = (BUILTIN_PLUGIN_IDS as readonly string[]).includes('core-search')
+    expect(list.items.map(plugin => plugin.id)).toEqual(ranked
+      ? [...builtinIds, 'acme-docs', 'dice-roller', 'lobe-icon']
+      : [...builtinIds.filter(id => id !== 'core-search'), 'acme-docs', 'core-search', 'dice-roller', 'lobe-icon'])
   })
 
   it('returns the detail DTO, 404 for unknown ids and 400 for invalid ids', async () => {

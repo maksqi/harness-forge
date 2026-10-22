@@ -2,8 +2,13 @@
 // settings and logs, tools and their preferences, MCP servers and server commands. One-shot calls (inspect /
 // install, drafts, scaffold, files, build, export) stay in components through useApi(). Signatures are frozen
 // after Phase 0.
+// Phase 14 (ADR-059; C54 declares the signatures, W14.7 owns the bodies; frozen from Gate P14-0b): `signInMcp(id,
+// returnTo?)` starts the OAuth sign-in of a personal or plugin http / sse server (`POST /mcp/:id/oauth`, the answer's
+// `authorizationUrl` is opened by `useMcpSignIn` in the same tab) and `signOutMcp(id)` forgets its tokens (`DELETE
+// /mcp/:id/oauth`; the answered server replaces its row). `useMcpSignIn` is their only caller.
 import type {
   CommandSummary,
+  McpAuthStart,
   McpServer,
   McpServerInput,
   McpServerUpdate,
@@ -401,6 +406,21 @@ export const usePluginsStore = defineStore('plugins', () => {
     return server
   }
 
+  /**
+   * + Phase 14 (ADR-059): `POST /mcp/:id/oauth { returnTo }`: starts a sign-in; `authorizationUrl` null = the stored
+   * tokens still work (the server reconnected). Throws `HarnessError` (400 stdio / Authorization header, 409 disabled).
+   */
+  async function signInMcp(id: string, returnTo?: string): Promise<McpAuthStart> {
+    return withHarnessErrors(api.mcpAuth.start({ params: { id }, body: returnTo === undefined ? {} : { returnTo } }))
+  }
+
+  /** + Phase 14 (ADR-059): `DELETE /mcp/:id/oauth`: forgets the server's tokens; the answered server replaces its row. */
+  async function signOutMcp(id: string): Promise<McpServer> {
+    const server = await withHarnessErrors(api.mcpAuth.signOut({ params: { id } }))
+    replaceMcp(server)
+    return server
+  }
+
   /** `GET /commands` (server-side slash commands for the slash menu). */
   function fetchCommands(): Promise<CommandSummary[]> {
     pendingCommands ??= withHarnessErrors(api.commands.list())
@@ -499,6 +519,8 @@ export const usePluginsStore = defineStore('plugins', () => {
     saveMcp,
     removeMcp,
     reconnectMcp,
+    signInMcp,
+    signOutMcp,
     fetchCommands,
     applyEvent,
     refreshLoaded,

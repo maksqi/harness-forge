@@ -65,6 +65,15 @@
 //   remove tools from the turn; `allowed-tools` narrow it; `exit_plan_mode` stays in plan mode (`restrictTools`);
 // - fork definitions (`context: fork`): a user `/name` expands with a delegation directive (`forkDirective`) that asks
 //   the main agent to call `task` with the definition's `agent` type (default `general`); `task` is kept in the turn.
+// Phase 14 (C52 seams, ADR-061; the signatures are FROZEN after P14-0b, W14.2 implements behind them): MCP prompts are
+// slash commands `/mcp__<serverId>__<prompt>` (`MCP_PROMPT_NAME_PATTERN`; `parseSlashCommand` accepts the shape next to
+// catalog names). `resolveCommand` tries an MCP-shaped name with `mcpPromptResolution` first (the servers through the
+// optional `CommandServices.mcp` / `projectMcp`, the chat's project through `CommandContext.projectId`): a prompt of a
+// connected server resolves to a prompt invocation with source `mcp` (the expansion frozen, `prompts/get` once) or a
+// `failed` reply; null = not an MCP prompt, and the name falls through (it matches nothing else). `isServerCommandFor`
+// asks `isMcpPromptCommandFor` for such names, and `listServerCommands` takes the MCP prompt listings
+// (`McpPromptListings`) as its third parameter. P14-0b stubs: no MCP prompt resolves, none is a server command, none is
+// listed.
 import type { CommandDefinition, CommandRunResult } from '@harness-forge/plugin-sdk'
 import type {
   CommandInvocation,
@@ -78,6 +87,7 @@ import type {
 } from '@harness-forge/shared'
 import type { DataPaths } from '../env.ts'
 import type { Logger } from '../logger.ts'
+import type { McpListing, McpManager, McpPromptInfo, ProjectMcpListing, ProjectMcpManager } from '../mcp/types.ts'
 import type { PluginSpanTrust } from '../plugins/claude/trust.ts'
 import type { PluginHost } from '../plugins/types.ts'
 import type { ProviderService } from '../providers/types.ts'
@@ -99,8 +109,10 @@ import {
   isClientCommand,
   isHarnessCommand,
   isHarnessError,
+  isMcpPromptCommandName,
   LIMITS,
   matchToolAllowlist,
+  MCP_PROMPT_NAME_PATTERN,
   MCP_TOOL_PREFIX,
   modelRefSchema,
   planCommandExpansion,
@@ -125,9 +137,16 @@ export interface ParsedCommand {
  */
 const COMMAND_PREFIX = /^\/([\da-z][\d:a-z-]{0,127})(?=\s|$)/
 
-/** `/name input` at the start of `text` (leading whitespace ignored), else null. */
+/** Phase 14 (ADR-061): `/mcp__<serverId>__<prompt>` (`MCP_PROMPT_NAME_PATTERN`), followed by whitespace or the end. */
+const MCP_PROMPT_PREFIX = /^\/(mcp__[\w-]{1,59})(?=\s|$)/
+
+/** `/name input` at the start of `text` (leading whitespace ignored), else null. Phase 14: also an MCP prompt name. */
 export function parseSlashCommand(text: string): ParsedCommand | null {
   const trimmed = text.trimStart()
+  const mcp = trimmed.match(MCP_PROMPT_PREFIX)
+  const mcpName = mcp?.[1]
+  if (mcp !== null && mcpName !== undefined && MCP_PROMPT_NAME_PATTERN.test(mcpName))
+    return { name: mcpName, input: trimmed.slice(mcp[0].length).trim() }
   const match = trimmed.match(COMMAND_PREFIX)
   const name = match?.[1]
   if (match === null || name === undefined || !CATALOG_NAME_PATTERN.test(name))
@@ -186,6 +205,25 @@ export interface CommandServices {
   env?: { readonly paths: Pick<DataPaths, 'pluginData'> }
   /** Phase 12 (optional): resolves a full Claude model id (`resolveClaudeModel`); absent = Claude names never resolve. */
   providers?: Pick<ProviderService, 'resolveModel'>
+  /**
+   * Phase 14 (optional, ADR-061): the global MCP servers' prompts (`/mcp__<serverId>__<prompt>`, `prompts/get` once);
+   * absent = no global MCP prompt resolves.
+   */
+  mcp?: Pick<McpManager, 'prompts' | 'getPrompt'>
+  /**
+   * Phase 14 (optional, ADR-061): the project MCP servers' prompts (with `CommandContext.projectId`; a project server
+   * shadows a global server of the same id); absent = no project MCP prompt resolves.
+   */
+  projectMcp?: Pick<ProjectMcpManager, 'prompts' | 'getPrompt'>
+}
+
+/**
+ * The MCP prompts `listServerCommands` adds (Phase 14, ADR-061; `GET /commands`, W14.2): the global servers' listing
+ * and, in a project scope, the project's (its `shadowed` servers replace the global servers of the same id). Null = none.
+ */
+export interface McpPromptListings {
+  readonly global: McpListing<McpPromptInfo> | null
+  readonly project: ProjectMcpListing<McpPromptInfo> | null
 }
 
 /**
@@ -233,6 +271,11 @@ export interface CommandContext {
   argumentVars?: Readonly<Record<string, string>>
   /** Phase 12 (ADR-058): the setting `modelAliases` (Claude model names of definitions); absent = none configured. */
   modelAliases?: Readonly<ModelAliases> | null
+  /**
+   * Phase 14 (ADR-061): the chat's project (`prepare.ts`): an MCP prompt command may name a server of that project's
+   * `.mcp.json` (`CommandServices.projectMcp`). Null or absent = no project (the global servers only).
+   */
+  projectId?: string | null
 }
 
 /** What the `expandArguments` options of one definition body are built from (Phase 12, ADR-058). */
@@ -820,6 +863,12 @@ export async function resolveCommand(
     return null
   if (isHarnessCommand(typed.name))
     return compactResolution(typed.input)
+  // Phase 14 (ADR-061): an MCP prompt first; null = not one (the name falls through and matches nothing else).
+  if (isMcpPromptCommandName(typed.name)) {
+    const prompt = await mcpPromptResolution(services, typed, context)
+    if (prompt !== null)
+      return prompt
+  }
   const target = slashTarget(services.registry, context.catalog, typed.name)
   const parsed: ParsedCommand = { name: target.invocationName, input: typed.input }
   if (target.pluginId !== null)
@@ -834,6 +883,28 @@ export async function resolveCommand(
     return skill === null ? null : skillResolution(services, skill, parsed, context)
   }
   return registeredResolution(services, registered, parsed, context)
+}
+
+// ---------- Phase 14: MCP prompts (C52 stubs, W14.2) ----------
+
+/**
+ * The MCP prompt a typed `/mcp__<serverId>__<prompt> input` names (Phase 14, ADR-061): a prompt of a connected server of
+ * the chat's scope (`context.projectId`: a project server shadows a global one) → `prompts/get` once with the bound
+ * arguments (`bindMcpPromptArguments`) and a prompt invocation with source `mcp` whose expansion is frozen (≤ 64 KB,
+ * `mcp/content.ts`); a missing required argument or a server that is not connected → a `failed` reply. Null = not an MCP
+ * prompt of the scope (no such server or prompt, no MCP services). Throws only the abort of `context.signal`.
+ * P14-0b stub: null (no MCP prompt resolves).
+ */
+export async function mcpPromptResolution(_services: CommandServices, _parsed: ParsedCommand, _context: CommandContext): Promise<CommandResolution | null> {
+  return null
+}
+
+/**
+ * True when the MCP-shaped name `name` is a prompt command of a connected server in a chat of `projectId` (Phase 14,
+ * `isServerCommandFor`: the queue keeps such an item `turnOnly`). Never rejects. P14-0b stub: false.
+ */
+export async function isMcpPromptCommandFor(_deps: Partial<Pick<AppDeps, 'mcp' | 'projectMcp'>>, _projectId: string | null, _name: string): Promise<boolean> {
+  return false
 }
 
 /** A command of the plugin registry: a template, a markdown body (Phase 12) or a guarded `run`. */
@@ -899,8 +970,11 @@ function pluginCommandEntry(catalog: CustomizationCatalog | null, name: string, 
  * their `argumentHint` (and `pluginId` for a plugin skill) unless a command has the name. Phase 12: qualified names are
  * listed as they are (a bare alias is not an item of its own); plugin commands carry their `argumentHint` and model ref;
  * a definition's `when_to_use` is appended to its description.
+ * Phase 14 (ADR-061, W14.2): `mcp` adds the prompts of the connected MCP servers as `kind: 'command'`, `source: 'mcp'`
+ * with `mcpServer` and their argument hint (project servers shadow global servers of the same id). P14-0b stub: `mcp`
+ * adds nothing.
  */
-export function listServerCommands(registry: Pick<Registry, 'commands'>, catalog: CustomizationCatalog | null): CommandSummary[] {
+export function listServerCommands(registry: Pick<Registry, 'commands'>, catalog: CustomizationCatalog | null, _mcp: McpPromptListings | null = null): CommandSummary[] {
   const byName = new Map<string, CommandSummary>()
   for (const entry of registry.commands.list()) {
     const name = entry.definition.name
@@ -963,11 +1037,15 @@ export function listServerCommands(registry: Pick<Registry, 'commands'>, catalog
  * (never steered).
  * Client commands (`/model`, `/remember`) and plain text are never server commands. A catalog that cannot be read
  * (it never rejects by contract) adds nothing: the v1.5 answer (harness and plugin commands only).
+ * Phase 14 (ADR-061): an MCP-shaped name (`/mcp__<serverId>__<prompt>`) is a server command when
+ * `isMcpPromptCommandFor` says so (the MCP managers of `deps`, optional).
  */
-export async function isServerCommandFor(deps: Pick<AppDeps, 'registry' | 'customizations'>, projectId: string | null, text: string): Promise<boolean> {
+export async function isServerCommandFor(deps: Pick<AppDeps, 'registry' | 'customizations'> & Partial<Pick<AppDeps, 'mcp' | 'projectMcp'>>, projectId: string | null, text: string): Promise<boolean> {
   const parsed = parseSlashCommand(text)
   if (parsed === null || isClientCommand(parsed.name))
     return false
+  if (isMcpPromptCommandName(parsed.name))
+    return isMcpPromptCommandFor(deps, projectId, parsed.name)
   if (isHarnessCommand(parsed.name) || deps.registry.commands.get(parsed.name) !== undefined)
     return true
   let catalog: CustomizationCatalog | null = null

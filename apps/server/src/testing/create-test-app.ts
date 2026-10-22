@@ -38,6 +38,11 @@
 // ./fake-project-definitions.ts: files in memory), or ready services; `overrides` and `factories` of the same name win.
 // `HF_CLAUDE_HOME` defaults to `<dataDir>/claude-home` (not created: the home route answers `missing`), so no test ever
 // reads the real `~/.claude`; `env.HF_CLAUDE_HOME` wins (`'0'` = the scan is off).
+// Phase 14 (C50-T6): `mcpAuth` installs the MCP OAuth service (`'fake'`: `createFakeMcpAuthService()` of
+// ./fake-mcp-auth.ts: scripted sign-in states and tokens, recorded starts / completes / sign-outs) and `elicitations` the
+// elicitation broker (`'fake'`: `createFakeElicitationBroker()` of ./fake-elicitations.ts: scripted requests, recorded
+// answers, `pendingCount`), or ready services; `overrides` and `factories` of the same name win. Hand-written `McpManager`
+// doubles spread `inertMcpManagerMembers()` (./fake-mcp.ts); the fake project MCP manager has the Phase 14 members.
 import type { ApiClient } from '@harness-forge/shared'
 import type { Hono } from 'hono'
 import type { BackgroundTasks } from '../chat/background/types.ts'
@@ -46,6 +51,8 @@ import type { ServiceFactories } from '../deps.ts'
 import type { Env } from '../env.ts'
 import type { AppEnv } from '../http/types.ts'
 import type { MemoryLogger } from '../logger.ts'
+import type { ElicitationBroker } from '../mcp/elicitation/types.ts'
+import type { McpAuthService } from '../mcp/oauth/types.ts'
 import type { ProjectMcpManager } from '../mcp/types.ts'
 import type { MarketplaceService } from '../plugins/marketplaces/types.ts'
 import type { BuiltinPlugin } from '../plugins/types.ts'
@@ -68,7 +75,7 @@ import { getBuiltinPlugins } from '../builtin-plugins/index.ts'
 import { createChatRunnerWith } from '../chat/index.ts'
 import { openDatabase } from '../db/client.ts'
 import { migrateDatabase } from '../db/migrate.ts'
-import { createDeps, startDeps, stopDeps } from '../deps.ts'
+import { createDeps, elicitationBrokerOptions, startDeps, stopDeps } from '../deps.ts'
 import { ensureDataDir, loadEnv } from '../env.ts'
 import { createMemoryLogger } from '../logger.ts'
 import { createRedactor } from '../security/redact.ts'
@@ -76,8 +83,10 @@ import { createFakeBackgroundTasks } from './fake-background-tasks.ts'
 import { createFakeCheckpointService } from './fake-checkpoints.ts'
 import { createFakeClaudeImportService } from './fake-claude-import.ts'
 import { createFakeCustomizationService } from './fake-customizations.ts'
+import { createFakeElicitationBroker } from './fake-elicitations.ts'
 import { createFakeHookService } from './fake-hooks.ts'
 import { createFakeMarketplaceService } from './fake-marketplaces.ts'
+import { createFakeMcpAuthService } from './fake-mcp-auth.ts'
 import { createFakeProjectConfigService } from './fake-project-config.ts'
 import { createFakeProjectDefinitionsService } from './fake-project-definitions.ts'
 import { createFakeProjectFileService } from './fake-project-files.ts'
@@ -186,6 +195,18 @@ export interface TestAppOptions {
    * (files in memory), or a ready service; default: the real one. `overrides` / `factories` win.
    */
   projectDefinitions?: 'fake' | ProjectDefinitionsService
+  /**
+   * Phase 14: MCP OAuth: `'fake'` = `createFakeMcpAuthService()` (scripted `info` and tokens, in-memory flows, recorded
+   * starts / completes / sign-outs / providers), or a ready service; default: the real one. `overrides.mcpAuth` /
+   * `factories.mcpAuth` win.
+   */
+  mcpAuth?: 'fake' | McpAuthService
+  /**
+   * Phase 14: the elicitation broker: `'fake'` = `createFakeElicitationBroker()` (scripted requests for the calls in
+   * flight, recorded answers, `pendingCount`), or a ready broker; default: the real one (with `HF_TEST_ELICITATION_WAIT_MS`
+   * when honored). `overrides.elicitations` / `factories.elicitations` win.
+   */
+  elicitations?: 'fake' | ElicitationBroker
 }
 
 /** The folder name of the default `HF_CLAUDE_HOME` of a test app, inside its data directory (never created). */
@@ -248,14 +269,26 @@ function phase12OptionFactories(options: TestAppOptions): Partial<ServiceFactori
   }
 }
 
+/** The Phase 14 service options as factories (`overrides` and `factories` of the same name win). */
+function phase14OptionFactories(options: TestAppOptions): Partial<ServiceFactories> {
+  const { mcpAuth, elicitations } = options
+  return {
+    ...(mcpAuth === undefined ? {} : { mcpAuth: () => (mcpAuth === 'fake' ? createFakeMcpAuthService() : mcpAuth) }),
+    ...(elicitations === undefined
+      ? {}
+      : { elicitations: (deps: AppDeps) => (elicitations === 'fake' ? createFakeElicitationBroker(elicitationBrokerOptions(deps.env)) : elicitations) }),
+  }
+}
+
 /**
- * The Phase 8 - 12 service options as factories (`overrides` and `factories` of the same name win). `background` receives
+ * The Phase 8 - 14 service options as factories (`overrides` and `factories` of the same name win). `background` receives
  * the manager that `backgroundTasks` installs once the runner is built.
  */
 function serviceOptionFactories(options: TestAppOptions, background: { manager: BackgroundTasks | null }): Partial<ServiceFactories> {
   const { checkpoints, shellRules, projectFiles, customizations, backgroundTasks, hooks, projectConfig, projectTrust, projectMcp } = options
   return {
     ...phase12OptionFactories(options),
+    ...phase14OptionFactories(options),
     ...(hooks === undefined ? {} : { hooks: (deps: AppDeps) => (hooks === 'fake' ? createFakeHookService({ events: deps.events }) : hooks) }),
     ...(projectConfig === undefined ? {} : { projectConfig: () => (projectConfig === 'fake' ? createFakeProjectConfigService() : projectConfig) }),
     ...(projectTrust === undefined

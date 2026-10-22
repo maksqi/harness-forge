@@ -17,6 +17,12 @@
 // Phase 12 (C44, open point 10; COMPLETE and FROZEN after P12-0b): `loadSkill(name, signal, options?)` takes the
 // `skill` call's options (`LoadSkillOptions`: a supporting `file` of a plugin skill, the call's `toolCallId` for a fork
 // skill's child); `chat/skills.ts` ignores them until W12.7.
+// Phase 14 (C52, ADR-060; COMPLETE and FROZEN after P14-0b): `notify?(input)` runs the run's `Notification` hooks
+// (`RunHooks.notification` of `hooks.ts`, bound in `pipeline.ts`) with `notification_type: 'elicitation_dialog'` when an
+// MCP server asks the user for input during one of the run's calls (W14.3, `agentScopeOf(c)?.notify?.(…)` once per
+// request). Fire-and-forget: it never throws, never waits for the hooks (tracked by the run's task tracker, aborted at
+// shutdown) and does nothing without such hooks. A sub-agent's call has no scope, so a child never notifies (its MCP
+// calls never elicit: they are declined `not-interactive`).
 import type { ToolCallContext } from '@harness-forge/plugin-sdk'
 import type { ExitPlanModeOutput, SkillOutput, TaskInput, TaskOutput, TodoState, ToolMode } from '@harness-forge/shared'
 
@@ -47,6 +53,16 @@ export interface LoadSkillOptions {
  * plan file was written, `planError` when writing it failed; `{}` when no file is due (`planFiles` off, no project).
  */
 export type SavedPlan = Pick<ExitPlanModeOutput, 'planPath' | 'planError'>
+
+/** The `notification_type` values `AgentRunScope.notify` sends (Phase 14: an MCP elicitation, ADR-060). */
+export type AgentNotificationType = 'elicitation_dialog'
+
+/** What `AgentRunScope.notify` hands to the `Notification` hooks (Phase 14, ADR-060). */
+export interface AgentNotification {
+  /** The hook payload's `message` (the MCP server's request message, capped by the caller; never a value the user typed). */
+  readonly message: string
+  readonly notificationType: AgentNotificationType
+}
 
 /** What a `core-agent` tool of one call can reach through `agentScopeOf(c)`. */
 export interface AgentRunScope {
@@ -79,6 +95,11 @@ export interface AgentRunScope {
    * `{ planError }` and never fails the approval.
    */
   savePlan: (plan: string, c: ToolCallContext) => Promise<SavedPlan>
+  /**
+   * Phase 14 (ADR-060; see the module comment): runs the run's `Notification` hooks with `input` (fire-and-forget, never
+   * throws). Absent in test doubles and v1.8 scopes: nothing to notify.
+   */
+  notify?: (input: AgentNotification) => void
 }
 
 const scopes = new WeakMap<object, AgentRunScope>()

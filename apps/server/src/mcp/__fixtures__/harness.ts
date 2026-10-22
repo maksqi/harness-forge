@@ -2,23 +2,33 @@
 // with short retry delays, a recording event bus, the echo MCP server fixture over stdio or an in-process Streamable
 // HTTP endpoint on 127.0.0.1 (no other network access), and polling helpers. Phase 11 (C38-T3): the dependency-free
 // stdio fixture `mcp-min.mjs` (and its grandchild `grandchild.mjs`) for the process-group checks and `.mcp.json` tests.
+// Phase 14 (C51-T7; FROZEN after P14-0b): MCP tools are async generators (`mcp-tools.ts`), so `callTool` drains the
+// iteration and answers the final output; `callToolRun` / `runToolExecute` also answer the preliminary outputs (the
+// elicitation card's `McpToolProgress`); `createMcpTestApp({ overrides })` installs fakes (`mcpAuth`, `elicitations`).
 import type { ToolCallContext } from '@harness-forge/plugin-sdk'
 import type { BuiltinPluginId } from '@harness-forge/shared'
 import type { IncomingHttpHeaders, Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import type { TestApp } from '../../testing/create-test-app.ts'
+import type { TestApp, TestAppOptions } from '../../testing/create-test-app.ts'
 import type { RecordingEventBus } from '../../testing/fakes.ts'
 import type { McpManagerOptions } from '../index.ts'
+import type { McpPromptCache } from '../prompts.ts'
+import type { McpResourceCache } from '../resources.ts'
+import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
+import { Server as McpSdkServer } from '@modelcontextprotocol/sdk/server/index.js'
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
+import { CallToolRequestSchema, ListPromptsRequestSchema, ListResourcesRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { BUILTIN_PLUGINS } from '../../builtin-plugins/index.ts'
 import { createTestApp } from '../../testing/create-test-app.ts'
 import { createRecordingEventBus } from '../../testing/fakes.ts'
 import { createMcpManagerCore } from '../index.ts'
+import { createPromptCache } from '../prompts.ts'
+import { createResourceCache } from '../resources.ts'
 import { createEchoServer } from './echo-server.mjs'
 
 export { LONG_TOOL_NAME } from './echo-server.mjs'
@@ -68,6 +78,8 @@ export interface McpTestAppOptions {
   beforeStart?: (t: TestApp) => Promise<void>
   /** Start the MCP manager (default true). */
   startMcp?: boolean
+  /** Phase 14: services to replace (e.g. `{ mcpAuth, elicitations }` fakes); the recording event bus is always set. */
+  overrides?: Omit<NonNullable<TestAppOptions['overrides']>, 'events'>
 }
 
 export async function createMcpTestApp(options: McpTestAppOptions = {}): Promise<McpTestApp> {
@@ -77,7 +89,7 @@ export async function createMcpTestApp(options: McpTestAppOptions = {}): Promise
     env: options.env,
     start: false,
     builtins: BUILTIN_PLUGINS.filter(plugin => wanted.has(plugin.id)),
-    overrides: { events },
+    overrides: { ...options.overrides, events },
     factories: {
       mcp: deps => createMcpManagerCore(deps, { retryDelaysMs: [50, 100, 200], eventDelayMs: 5, killGraceMs: 1000, ...options.manager }),
     },
@@ -99,12 +111,41 @@ export function toolContext(signal: AbortSignal = new AbortController().signal):
   return { chatId: '0199a8f0-0000-7000-8000-000000000001', modelRef: 'mock:echo', toolCallId: 'call_1', messages: [], signal }
 }
 
-/** Executes a registered tool like the chat pipeline would (without guard and hooks). */
-export async function callTool(t: TestApp, name: string, input: Record<string, unknown> = {}): Promise<unknown> {
+/** What one tool call produced: the preliminary outputs (in order) and the final output (the last value). */
+export interface ToolRun {
+  preliminary: unknown[]
+  output: unknown
+}
+
+function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
+  return typeof value === 'object' && value !== null && Symbol.asyncIterator in value
+}
+
+/**
+ * Runs the result of a tool's `execute` to its end: an async iterable (an async generator `execute`, plugin API 1.3.0)
+ * is drained (every value but the last is a preliminary output, the last one the final output); anything else is
+ * awaited (no preliminary output). A throw of the iteration rejects.
+ */
+export async function runToolExecute(result: unknown): Promise<ToolRun> {
+  if (!isAsyncIterable(result))
+    return { preliminary: [], output: await result }
+  const values: unknown[] = []
+  for await (const value of result)
+    values.push(value)
+  return { preliminary: values.slice(0, -1), output: values.at(-1) }
+}
+
+/** Executes a registered tool like the chat pipeline would (without guard and hooks) and answers its final output. */
+export async function callTool(t: TestApp, name: string, input: Record<string, unknown> = {}, c: ToolCallContext = toolContext()): Promise<unknown> {
+  return (await callToolRun(t, name, input, c)).output
+}
+
+/** `callTool` with the preliminary outputs. */
+export async function callToolRun(t: TestApp, name: string, input: Record<string, unknown> = {}, c: ToolCallContext = toolContext()): Promise<ToolRun> {
   const tool = t.deps.registry.tools.get(name)
   if (!tool)
     throw new Error(`The tool "${name}" is not registered.`)
-  return tool.definition.execute(input, toolContext())
+  return runToolExecute(tool.definition.execute(input, c))
 }
 
 /** The text of the first content part of an MCP tool output. */
@@ -229,4 +270,121 @@ export async function startSseEchoServer(): Promise<HttpEchoServer> {
       server.close(() => resolve())
     }),
   }
+}
+
+export interface StatusServer {
+  url: string
+  /** JSON-RPC methods of the POSTs received (`server/discover`, `initialize`, ...). */
+  methods: string[]
+  /** Every request path (OAuth discovery included). */
+  paths: string[]
+  close: () => Promise<void>
+}
+
+/** Phase 14: a loopback endpoint that answers every request with `status` (401: no OAuth metadata at all). */
+export async function startStatusServer(status: number): Promise<StatusServer> {
+  const methods: string[] = []
+  const paths: string[] = []
+  const server = createServer((req, res) => {
+    paths.push(req.url ?? '')
+    let body = ''
+    req.setEncoding('utf8')
+    req.on('data', (chunk: string) => {
+      body += chunk
+    })
+    req.on('end', () => {
+      if (req.method === 'POST') {
+        try {
+          methods.push(String((JSON.parse(body) as { method?: unknown }).method))
+        }
+        catch {}
+      }
+      res.writeHead(status, { 'content-type': 'text/plain' }).end(status === 401 ? 'unauthorized secret-body-text' : 'failure')
+    })
+  })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  const { port } = server.address() as { port: number }
+  return {
+    url: `http://127.0.0.1:${port}/mcp`,
+    methods,
+    paths,
+    close: () => new Promise<void>((resolve) => {
+      server.closeAllConnections()
+      server.close(() => resolve())
+    }),
+  }
+}
+
+/**
+ * Phase 14: a stateful Streamable HTTP MCP server (SSE answers, `@modelcontextprotocol/sdk`) whose tool `ask` elicits a
+ * name and answers the `ElicitResult` as JSON text; it advertises prompts and resources (both lists empty).
+ */
+export async function startElicitServer(): Promise<{ url: string, close: () => Promise<void> }> {
+  const transports = new Map<string, StreamableHTTPServerTransport>()
+  const servers: McpSdkServer[] = []
+  const http = createServer((req, res) => {
+    const id = req.headers['mcp-session-id']
+    let transport = typeof id === 'string' ? transports.get(id) : undefined
+    const run = async (): Promise<void> => {
+      if (transport === undefined) {
+        const created = new StreamableHTTPServerTransport({
+          sessionIdGenerator: () => randomUUID(),
+          onsessioninitialized: (sessionId) => {
+            transports.set(sessionId, created)
+          },
+        })
+        const mcp = new McpSdkServer({ name: 'elicit', version: '1.0.0' }, { capabilities: { tools: {}, prompts: {}, resources: {} } })
+        mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: 'ask', description: 'Asks for a name.', inputSchema: { type: 'object', properties: {} } }] }))
+        mcp.setRequestHandler(ListPromptsRequestSchema, async () => ({ prompts: [] }))
+        mcp.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: [] }))
+        mcp.setRequestHandler(CallToolRequestSchema, async (_request, extra) => {
+          const answer = await mcp.elicitInput(
+            { message: 'Your name?', requestedSchema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] } },
+            { relatedRequestId: extra.requestId },
+          )
+          return { content: [{ type: 'text', text: JSON.stringify(answer) }] }
+        })
+        servers.push(mcp)
+        await mcp.connect(created)
+        transport = created
+      }
+      await transport.handleRequest(req, res)
+    }
+    run().catch(() => {
+      if (!res.headersSent)
+        res.writeHead(500).end()
+    })
+  })
+  await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve))
+  const { port } = http.address() as { port: number }
+  return {
+    url: `http://127.0.0.1:${port}/mcp`,
+    close: async () => {
+      await Promise.allSettled(servers.map(server => server.close()))
+      await new Promise<void>((resolve) => {
+        http.closeAllConnections()
+        http.close(() => resolve())
+      })
+    },
+  }
+}
+
+/** Phase 14: cache factories (manager options) whose `refresh` calls are recorded (the C51 stubs underneath). */
+export function spyMcpCaches() {
+  const refreshed: Array<{ kind: 'prompts' | 'resources', key: string, serverName: string, projectId: string | null }> = []
+  const prompts = (options: Parameters<typeof createPromptCache>[0]): McpPromptCache => {
+    const cache = createPromptCache(options)
+    return { ...cache, refresh: async (server, client, signal) => {
+      refreshed.push({ kind: 'prompts', key: server.key, serverName: server.serverName, projectId: server.projectId })
+      return cache.refresh(server, client, signal)
+    } }
+  }
+  const resources = (options: Parameters<typeof createResourceCache>[0]): McpResourceCache => {
+    const cache = createResourceCache(options)
+    return { ...cache, refresh: async (server, client, signal) => {
+      refreshed.push({ kind: 'resources', key: server.key, serverName: server.serverName, projectId: server.projectId })
+      return cache.refresh(server, client, signal)
+    } }
+  }
+  return { refreshed, prompts, resources }
 }

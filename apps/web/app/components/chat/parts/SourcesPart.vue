@@ -1,6 +1,9 @@
 <script setup lang="ts">
 // Sources row (docs/UI.md 7.1): consecutive `source-url` / `source-document` parts as one collapsed row "3 sources";
 // expanded, each source shows its title and host. Only http(s) URLs become links (new tab, no opener, no referrer).
+// Phase 14 (ADR-062; C54 mounts the chips, W14.9 owns the row in P14-A; frozen from Gate P14-0b): the trigger holds up to
+// three domain chips and "+{m}" (`sourceChips`, `sources-chip`, `data-domain`; `aria-hidden`). W14.9 adds the letter
+// avatars, `source-item` and the trigger's accessible name ("{n} sources: {a}, {b} and {m} more").
 import type { SourcePart } from '../chat-format'
 import { ChevronRightIcon, FileTextIcon, Link2Icon } from '@lucide/vue'
 import { computed, inject, ref, watch } from 'vue'
@@ -13,6 +16,7 @@ import {
 import { testIds } from '~/utils/testids'
 import { TRANSCRIPT_SCROLL } from '../chat-context'
 import { hostnameOf, safeExternalUrl } from '../chat-format'
+import { sourceChips } from './web-search'
 
 const props = defineProps<{ parts: SourcePart[] }>()
 
@@ -38,6 +42,8 @@ const items = computed<SourceItem[]>(() => props.parts.map((part, index) => {
   return { key: `${part.sourceId}-${index}`, title: part.title, href: null, detail: part.filename ?? part.mediaType }
 }))
 const label = computed(() => (items.value.length === 1 ? '1 source' : `${items.value.length} sources`))
+/** + Phase 14: the domain chips of the trigger (http(s) URLs only, unique, in order). */
+const chips = computed(() => sourceChips(props.parts.flatMap(part => (part.type === 'source-url' ? [part.url] : []))))
 </script>
 
 <template>
@@ -53,6 +59,16 @@ const label = computed(() => (items.value.length === 1 ? '1 source' : `${items.v
       />
       <Link2Icon aria-hidden="true" class="size-3.5" />
       <span>{{ label }}</span>
+      <span v-if="chips.domains.length > 0" aria-hidden="true" data-slot="sources-chips" class="flex min-w-0 items-center gap-1 overflow-hidden">
+        <span
+          v-for="domain in chips.domains"
+          :key="domain"
+          :data-testid="testIds.sourcesChip"
+          :data-domain="domain"
+          class="max-w-[16ch] truncate rounded-full bg-muted px-1.5 text-xs"
+        >{{ domain }}</span>
+        <span v-if="chips.more > 0" class="text-xs">+{{ chips.more }}</span>
+      </span>
     </AiSourcesTrigger>
     <AiSourcesContent class="mt-1 mb-1 w-full gap-1 pl-5">
       <template v-for="item in items" :key="item.key">

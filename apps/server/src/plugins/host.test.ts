@@ -10,7 +10,7 @@ import { EventEmitter } from 'node:events'
 import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import process from 'node:process'
-import { pluginDetailSchema, pluginSummarySchema } from '@harness-forge/shared'
+import { BUILTIN_PLUGIN_IDS, pluginDetailSchema, pluginSummarySchema } from '@harness-forge/shared'
 import { eq } from 'drizzle-orm'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { getBuiltinPlugins } from '../builtin-plugins/index.ts'
@@ -219,9 +219,13 @@ describe('loading and states', () => {
       plugins: [{ fixture: 'acme-docs' }],
     })
     const list = await h.t.deps.plugins.list()
-    expect(list.map(plugin => plugin.id)).toEqual(['core-providers', 'core-tools', 'core-commands', 'core-mcp', 'core-workspace', 'core-agent', 'acme-docs'])
-    expect(list.slice(0, 6).every(plugin => plugin.state === 'active' && plugin.builtin && !plugin.removable && plugin.source === 'builtin')).toBe(true)
-    expect(list[6]).toMatchObject({ id: 'acme-docs', state: 'disabled', enabled: true })
+    // Phase 14 (C50): `core-search` loads right after `core-tools`; the registry ranks it with the builtins once
+    // `BUILTIN_PLUGIN_IDS` lists it (CCR C50-1), before that among the user plugins by id.
+    const builtinIds = ['core-providers', 'core-tools', 'core-search', 'core-commands', 'core-mcp', 'core-workspace', 'core-agent']
+    const ranked = (BUILTIN_PLUGIN_IDS as readonly string[]).includes('core-search')
+    expect(list.map(plugin => plugin.id)).toEqual(ranked ? [...builtinIds, 'acme-docs'] : [...builtinIds.filter(id => id !== 'core-search'), 'acme-docs', 'core-search'])
+    expect(list.filter(plugin => plugin.id !== 'acme-docs').every(plugin => plugin.state === 'active' && plugin.builtin && !plugin.removable && plugin.source === 'builtin')).toBe(true)
+    expect(list.find(plugin => plugin.id === 'acme-docs')).toMatchObject({ id: 'acme-docs', state: 'disabled', enabled: true })
     expect(h.t.deps.registry.providers.list().map(provider => provider.definition.id)).toHaveLength(13)
     expect(h.t.deps.registry.providers.get('acme-docs')).toBeUndefined()
     const core = await detail(h, 'core-providers')

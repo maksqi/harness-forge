@@ -55,3 +55,30 @@ describe('projectMcpServerRow', () => {
     expect(tools.text()).toContain('mcp__memory__get')
   })
 })
+
+describe('projectMcpServerRow: sign-in (Phase 14, C54 declares)', () => {
+  const signedIn = { signedIn: true, expiresAt: null, scope: null, client: 'dynamic' as const, issuer: null }
+
+  it('a needs-auth remote server offers Sign in; a signed-in one Sign out…; pending rows neither', async () => {
+    const waiting = mount(ProjectMcpServerRow, { props: { server: projectMcpServer({ id: 'docs', name: 'docs', transport: 'http', state: 'needs-auth', missingVariables: [] }), trust: null, expanded: false, busy: false } })
+    expect(waiting.attributes('data-state')).toBe('needs-auth')
+    const signIn = waiting.get(`[data-testid="${testIds.projectMcpSignIn}"]`)
+    expect(signIn.attributes('aria-label')).toBe('Sign in to docs')
+    await signIn.trigger('click')
+    expect(waiting.emitted('signIn')).toEqual([[]])
+    expect(waiting.find(`[data-testid="${testIds.projectMcpSignOut}"]`).exists()).toBe(false)
+
+    const connected = mount(ProjectMcpServerRow, { props: { server: projectMcpServer({ id: 'wiki', name: 'wiki', transport: 'http', state: 'connected', missingVariables: [], auth: signedIn }), trust: null, expanded: false, busy: false } })
+    const signOut = connected.get(`[data-testid="${testIds.projectMcpSignOut}"]`)
+    expect(signOut.attributes('aria-label')).toBe('Sign out of wiki')
+    await signOut.trigger('click')
+    expect(connected.emitted('signOut')).toEqual([[]])
+    expect(connected.find(`[data-testid="${testIds.projectMcpReconnect}"]`).exists()).toBe(true)
+    expect(connected.find(`[data-testid="${testIds.projectMcpSignIn}"]`).exists()).toBe(false)
+
+    const pending = mount(ProjectMcpServerRow, { props: { server: projectMcpServer({ id: 'jira', name: 'jira', transport: 'http', state: 'pending', missingVariables: [], auth: signedIn }), trust: null, expanded: false, busy: false } })
+    expect(pending.find(`[data-testid="${testIds.projectMcpReview}"]`).exists()).toBe(true)
+    expect(pending.find(`[data-testid="${testIds.projectMcpSignIn}"]`).exists()).toBe(false)
+    expect(pending.find(`[data-testid="${testIds.projectMcpSignOut}"]`).exists()).toBe(false)
+  })
+})

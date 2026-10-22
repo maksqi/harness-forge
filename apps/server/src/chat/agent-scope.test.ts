@@ -125,3 +125,19 @@ describe('the Phase 10 members (C31-T4)', () => {
     expect(await savePlan({ deps, settings: { ...DEFAULT_SETTINGS, planFiles: true }, logger: createSilentLogger(), now: () => 0 }, '# Plan', c)).toEqual({})
   })
 })
+
+describe('agent scope: notify (Phase 14, C52-T5)', () => {
+  it('travels with the bound scope (the frozen copy keeps the run\'s function); absent in a v1.8 scope', () => {
+    const received: unknown[] = []
+    const c = {}
+    bindAgentScope(c, scope({ notify: input => received.push(input) }))
+    agentScopeOf(c)?.notify?.({ message: 'Your name?', notificationType: 'elicitation_dialog' })
+    expect(received).toEqual([{ message: 'Your name?', notificationType: 'elicitation_dialog' }])
+    expect(Object.isFrozen(agentScopeOf(c))).toBe(true)
+    const plain = {}
+    bindAgentScope(plain, scope())
+    expect(agentScopeOf(plain)?.notify).toBeUndefined()
+    // A sub-agent's call has no scope: nothing to notify.
+    expect(agentScopeOf({})?.notify).toBeUndefined()
+  })
+})

@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { chatDetail, chatId, chatSummary, projectId, projectSummary } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { stubLocalStorage } from '~/utils/testing/storage'
-import { PROJECT_DELETED_MESSAGE, PROJECT_FILTER_KEY, UNREAD_CHATS_KEY, useChatsStore } from './chats'
+import { isRunningState, PROJECT_DELETED_MESSAGE, PROJECT_FILTER_KEY, UNREAD_CHATS_KEY, useChatsStore } from './chats'
 import { useProjectsStore } from './projects'
 import { useUiStore } from './ui'
 
@@ -518,5 +518,56 @@ describe('chats store: project filter (Phase 7)', () => {
     const results = await chats.search('plans')
     expect(api.chats.list).toHaveBeenCalledWith({ query: { q: 'plans', limit: 20 }, signal: undefined })
     expect(results).toEqual([inOther, plain])
+  })
+})
+
+describe('chats store: waiting for input (Phase 14, C54)', () => {
+  const FINISHED = { messageId: 'msg_aaaaaaaaaaaaaaaa', outcome: 'completed' as const, awaitingApproval: false }
+
+  it('seeds `input` from awaitingInput of the list and of a detail: input > approval > running > unread', async () => {
+    api.chats.list.mockResolvedValue({
+      items: [
+        chatSummary({ id: chatId(1), updatedAt: NOW - 1, running: true, awaitingInput: true }),
+        chatSummary({ id: chatId(2), updatedAt: NOW - 2, running: true, awaitingInput: false }),
+        // A stopped run never waits.
+        chatSummary({ id: chatId(3), updatedAt: NOW - 3, running: false, awaitingInput: true }),
+      ],
+      nextCursor: null,
+    })
+    const chats = useChatsStore()
+    await chats.fetchPage()
+    expect(chats.statusOf(chatId(1))).toBe('input')
+    expect(chats.statusOf(chatId(2))).toBe('running')
+    expect(chats.statusOf(chatId(3))).toBeNull()
+
+    api.chats.get.mockResolvedValueOnce(chatDetail({ id: chatId(2), running: true, awaitingInput: true }))
+    await chats.get(chatId(2))
+    expect(chats.statusOf(chatId(2))).toBe('input')
+  })
+
+  it('chat.updated sets and ends `input`; an event without the key leaves it; run.finished ends it', () => {
+    const chats = useChatsStore()
+    const row = chatSummary({ id: chatId(4), running: true })
+    chats.applyEvent(createServerEvent('chat.updated', { ...row, awaitingInput: true, activeLeafId: null }))
+    expect(chats.statusOf(chatId(4))).toBe('input')
+    // A rename while it waits: unchanged.
+    chats.applyEvent(createServerEvent('chat.updated', { ...row, title: 'Renamed', activeLeafId: null }))
+    expect(chats.statusOf(chatId(4))).toBe('input')
+    chats.applyEvent(createServerEvent('chat.updated', { ...row, awaitingInput: false, activeLeafId: null }))
+    expect(chats.statusOf(chatId(4))).toBe('running')
+    chats.applyEvent(createServerEvent('chat.updated', { ...row, awaitingInput: true, activeLeafId: null }))
+    useUiStore().setActiveChat(chatId(4))
+    chats.applyEvent(createServerEvent('run.finished', { chatId: chatId(4), ...FINISHED }))
+    expect(chats.statusOf(chatId(4))).toBeNull()
+  })
+
+  it('takes `input` pushed by the chat session; `input` is a running state', () => {
+    const chats = useChatsStore()
+    chats.setRunState(chatId(5), 'input')
+    expect(chats.statusOf(chatId(5))).toBe('input')
+    expect(isRunningState(chats.runState[chatId(5)])).toBe(true)
+    expect(isRunningState('running')).toBe(true)
+    expect(isRunningState('approval')).toBe(false)
+    expect(isRunningState(undefined)).toBe(false)
   })
 })

@@ -2,8 +2,14 @@
 // text and dots, the form state of McpServerDialog, validation, request bodies and the mapping of server errors to
 // fields. Header and environment VALUES are write-only secrets: the form never holds a stored value, an existing row
 // with an empty input keeps its stored secret (`null` in `McpServerUpdate`), and a removed row is deleted.
+// Phase 14 (ADR-059; C54 declares the signatures, W14.7 owns the module in P14-A; signatures frozen from Gate P14-0b): the
+// OAuth settings of an http / sse server (`McpOAuthDraft`: client id, scopes, a write-only client secret), the redirect
+// URI shown with Copy (`redirectUriFor`: built in script, never a `//` in a template prop value, vue-tsc #6240), when a
+// row offers Sign in (`canSignIn`), when saving drops the tokens (`signsOut`), and " · Signed in" in the status line.
 import type {
   HarnessError,
+  McpOAuthInput,
+  McpOAuthUpdate,
   McpServer,
   McpServerInput,
   McpServerUpdate,
@@ -87,11 +93,14 @@ export function toolCountLabel(count: number): string {
   return `${count} ${count === 1 ? 'tool' : 'tools'}`
 }
 
-/** Status line of a server row: "Connected · 12 tools", "Connecting…", "Error: {message}", "Disabled". */
-export function mcpStatusText(server: Pick<McpServer, 'status' | 'tools' | 'error'>): string {
+/**
+ * Status line of a server row: "Connected · 12 tools", "Connecting…", "Error: {message}", "Disabled"; + Phase 14: "Sign
+ * in required", and " · Signed in" after a connected server's tools when it holds OAuth tokens.
+ */
+export function mcpStatusText(server: Pick<McpServer, 'status' | 'tools' | 'error'> & { auth?: McpServer['auth'] }): string {
   switch (server.status) {
     case 'connected':
-      return `Connected · ${toolCountLabel(server.tools.length)}`
+      return `Connected · ${toolCountLabel(server.tools.length)}${server.auth?.signedIn ? ' · Signed in' : ''}`
     case 'connecting':
       return 'Connecting…'
     case 'error':
@@ -101,6 +110,80 @@ export function mcpStatusText(server: Pick<McpServer, 'status' | 'tools' | 'erro
     default:
       return 'Disabled'
   }
+}
+
+// ---------- OAuth sign-in (Phase 14, ADR-059) ----------
+
+/** The path of the sign-in callback page (the redirect URI of every MCP sign-in is `<origin>/oauth/callback`). */
+export const OAUTH_CALLBACK_PATH = '/oauth/callback'
+
+/** The redirect URI the authorization server sends the browser back to (shown read-only with Copy). */
+export function redirectUriFor(origin: string): string {
+  return `${origin.replace(/\/+$/, '')}${OAUTH_CALLBACK_PATH}`
+}
+
+/** The OAuth fields of the dialog (`McpOAuthFields`): the client secret is write-only (never a stored value). */
+export interface McpOAuthDraft {
+  clientId: string
+  scopes: string
+  /** What the user typed; '' keeps a stored secret on an update. */
+  clientSecret: string
+  /** Remove the stored client secret (its Remove toggle). */
+  removeSecret: boolean
+}
+
+/** The draft of a server's OAuth settings (empty for a new server, a stdio server or one without OAuth settings). */
+export function oauthDraftOf(server: McpServer | null): McpOAuthDraft {
+  const oauth = server && server.transport.type !== 'stdio' ? server.transport.oauth : null
+  return { clientId: oauth?.clientId ?? '', scopes: oauth?.scopes ?? '', clientSecret: '', removeSecret: false }
+}
+
+/** `transport.oauth` of `POST /mcp`; undefined when every field is empty. */
+export function oauthInputOf(draft: McpOAuthDraft): Extract<McpServerInput['transport'], { type: 'http' | 'sse' }>['oauth'] | undefined {
+  const clientId = draft.clientId.trim()
+  const scopes = draft.scopes.trim()
+  const clientSecret = draft.clientSecret.trim()
+  if (clientId === '' && scopes === '')
+    return undefined
+  const oauth: McpOAuthInput = {}
+  if (clientId !== '')
+    oauth.clientId = clientId
+  if (scopes !== '')
+    oauth.scopes = scopes
+  if (clientId !== '' && clientSecret !== '')
+    oauth.clientSecret = clientSecret
+  return oauth
+}
+
+/**
+ * `transport.oauth` of `PATCH /mcp/:id` (the transport is replaced, so the OAuth settings are always sent; undefined
+ * removes them): a stored secret that was neither replaced nor removed is kept (`clientSecret: null`).
+ */
+export function oauthUpdateOf(server: McpServer, draft: McpOAuthDraft): McpOAuthUpdate | undefined {
+  const input = oauthInputOf(draft)
+  if (!input)
+    return undefined
+  const stored = server.transport.type !== 'stdio' && server.transport.oauth?.clientSecret.set === true
+  const update: McpOAuthUpdate = { ...input }
+  if (update.clientSecret === undefined && stored && !draft.removeSecret && update.clientId !== undefined)
+    update.clientSecret = null
+  return update
+}
+
+/** Saving these values drops the server's tokens: it is signed in and its URL, transport type or client id change. */
+export function signsOut(server: McpServer, next: { url: string, type: string, clientId: string }): boolean {
+  if (!server.auth?.signedIn || server.transport.type === 'stdio')
+    return false
+  return next.url.trim() !== server.transport.url
+    || next.type !== server.transport.type
+    || next.clientId.trim() !== (server.transport.oauth?.clientId ?? '')
+}
+
+/** A row offers Sign in: the server asks for one, is on, remote and has no `Authorization` header. */
+export function canSignIn(server: Pick<McpServer, 'status' | 'enabled' | 'transport'>): boolean {
+  if (server.status !== 'needs-auth' || !server.enabled || server.transport.type === 'stdio')
+    return false
+  return !Object.keys(server.transport.headers).some(name => name.toLowerCase() === 'authorization')
 }
 
 /** Only user-configured (`core-mcp`) servers can be edited, switched and deleted; plugin servers only restarted. */

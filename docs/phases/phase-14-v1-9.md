@@ -474,6 +474,25 @@ reconciled docs (W14.12) follow these, not the task text further down.
     chat delete / key rotation / shutdown → `cancel` + reason `stopped`; the 480 s timeout → reason `timeout`.
   - Seeds and probes that save provider credentials must point the provider at a loopback base URL (saving a key runs
     the provider test even with `HF_OFFLINE=1`).
+- **Gate P14-0b** (coordinator):
+  - CCR C50-1 applied: `BUILTIN_PLUGIN_IDS` lists `core-search` after `core-tools` (`SH/ids.ts` + its pin); the
+    `plugins` table of an upgraded data dir gains exactly that builtin row.
+  - CCR C52: `S/services/hooks/code-hooks.ts` forwards only `permission_prompt` to plugin `notification` code hooks →
+    the file joins **W14.3**'s glob in P14-A (forward `elicitation_dialog`).
+  - K4: the e2e fake remote listens on `E2E_FAKE_REMOTE_PORT` (default **8889**); Playwright's `webServer` starts it
+    before the app and `start:e2e` sets `HF_TEST_REMOTE_URL=http://127.0.0.1:${E2E_FAKE_REMOTE_PORT:-8889}`.
+  - C53: the fixture's `--preRegistered` only turns dynamic registration off; the public clients `fixture-client`,
+    `seed-client` and `seed-plugin-client` always exist (`fixture-client` may also send `fixture-secret`);
+    `mock:search-tool` reads the result titles from the JSON tool output, so `search_web` sends its JSON output to the
+    model; the `mock` plugin keeps `engines.harness` `^1.1.0`.
+  - C54: the composer shows `WebSearchToggle` only while search is available or the mode is `auto` (the 390 px model
+    picker keeps its 40 px target); W14.8 makes the unavailable state fit at 390 px. UI.md 10.10 / 11.10 won over this
+    file where they differed (`webSearch` is a `WebSearchMode`; the `web-search` store has `save` / `setKey`; three
+    extra test ids `web-search-tool`, `web-search-settings`, `settings-search-key-input`; `ChatView` provides
+    `TOOL_ELICITATIONS`).
+  - G14B "spec differs" accepted: a v1.8.1 cached mock listing hides the two new mocks until `POST
+    /providers/mock/models/refresh` (the upgrade probe refreshes); an out-of-range `HF_TEST_ELICITATION_WAIT_MS` fails
+    the boot (like an invalid `HF_TEST_REMOTE_URL`); without `HF_MOCK_PROVIDER=1` it is ignored with a warning.
 
 ## Rules for every Phase 14 agent
 

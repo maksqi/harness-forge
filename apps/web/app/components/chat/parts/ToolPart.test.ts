@@ -9,12 +9,14 @@ import { useCustomizationsStore } from '~/stores/customizations'
 import { usePluginsStore } from '~/stores/plugins'
 import { useProjectMcpStore } from '~/stores/project-mcp'
 import { testIds } from '~/utils/testids'
-import { customizationEntry, customizationList, hookData, hookRecordId, planApprovalPart, pluginSummary, projectMcpList, projectMcpServer, shellOutput, skillOutput, skillPart, taskPart, todoItem, todoWritePart, toolSummary } from '~/utils/testing/fixtures'
+import { customizationEntry, customizationList, hookData, hookRecordId, mcpElicitation, mcpToolProgress, planApprovalPart, pluginSummary, projectMcpList, projectMcpServer, searchWebOutput, shellOutput, skillOutput, skillPart, taskPart, todoItem, todoWritePart, toolSummary } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import PlanApprovalCard from '../agent/PlanApprovalCard.vue'
 import { HOOK_ACTIVITY } from '../chat-context'
 import { TOOL_BODY_PREVIEW_CHARS } from '../chat-format'
+import ElicitationCard from './ElicitationCard.vue'
 import { TOOL_APPROVAL_CONTEXT } from './tool-approval-context'
+import { TOOL_ELICITATIONS } from './tool-elicitation-context'
 import ToolApprovalCard from './ToolApprovalCard.vue'
 import ToolPart from './ToolPart.vue'
 
@@ -1108,5 +1110,57 @@ describe('toolPart: PermissionRequest answers on the approval card (v1.8.1)', ()
   it('shows no answer on a card outside a tool row (no records provided: TaskBlock\'s card)', () => {
     const wrapper = mount(ToolApprovalCard, { props: { part: request(), toolName: 'web_fetch' }, attachTo: document.body })
     expect(wrapper.find('[data-slot="tool-approval-permission-answer"]').exists()).toBe(false)
+  })
+})
+
+describe('toolPart: MCP questions and web search rows (Phase 14, C54 mounts)', () => {
+  const request = mcpElicitation()
+  const waiting = { type: 'tool-mcp__fixture__ask', toolCallId: 'call_mcp', state: 'output-available', input: {}, output: mcpToolProgress(request), preliminary: true } as ToolPartLike
+
+  function mountWithElicitations(toolPart: ToolPartLike, respond = vi.fn(async () => 'answered' as const)) {
+    const context = {
+      forCall: vi.fn((toolCallId: string) => (toolCallId === 'call_mcp' ? request : null)),
+      busy: vi.fn(() => false),
+      issues: vi.fn(() => []),
+      gone: vi.fn(() => false),
+      respond,
+    }
+    const wrapper = mount({
+      render: () => h(TooltipProvider, null, { default: () => h(ToolPart, { part: toolPart, streaming: true }) }),
+    }, { attachTo: document.body, global: { provide: { [TOOL_ELICITATIONS as symbol]: context } } })
+    return { wrapper, context }
+  }
+
+  it('renders ElicitationCard under a running call that waits on a request, and answers through TOOL_ELICITATIONS', async () => {
+    const { wrapper, context } = mountWithElicitations(waiting)
+    expect(context.forCall).toHaveBeenCalledWith('call_mcp')
+    const card = wrapper.getComponent(ElicitationCard)
+    expect(card.props()).toMatchObject({ request, busy: false, issues: [], gone: false })
+    card.vm.$emit('respond', { action: 'decline' })
+    await flushPromises()
+    expect(context.respond).toHaveBeenCalledWith(request.id, { action: 'decline' })
+  })
+
+  it('renders no card for another call, nor without the injection (share pages)', () => {
+    const other = { ...waiting, toolCallId: 'call_other' } as ToolPartLike
+    expect(mountWithElicitations(other).wrapper.findComponent(ElicitationCard).exists()).toBe(false)
+    expect(mountPart(waiting).findComponent(ElicitationCard).exists()).toBe(false)
+  })
+
+  it('a search_web row and a provider-executed search row get WebSearchToolBody', async () => {
+    async function opened(toolPart: Partial<ToolPartLike> & Pick<ToolPartLike, 'state'>) {
+      const wrapper = mountPart(part(toolPart))
+      await row(wrapper).get('button').trigger('click')
+      await flushPromises()
+      return wrapper
+    }
+    const builtin = await opened({ type: 'tool-search_web', state: 'output-available', input: { query: 'harness forge' }, output: searchWebOutput() } as Partial<ToolPartLike> & Pick<ToolPartLike, 'state'>)
+    expect(builtin.get(`[data-testid="${testIds.webSearchTool}"]`).attributes('data-mode')).toBe('builtin')
+    const native = await opened({ type: 'tool-web_search', state: 'output-available', input: { query: 'weather in Lisbon' }, output: [], providerExecuted: true } as Partial<ToolPartLike> & Pick<ToolPartLike, 'state'>)
+    expect(native.get(`[data-testid="${testIds.webSearchTool}"]`).attributes('data-mode')).toBe('native')
+    // A function tool that happens to be named web_search is not a search row.
+    const plain = await opened({ type: 'tool-web_search', state: 'output-available', input: {}, output: {} } as Partial<ToolPartLike> & Pick<ToolPartLike, 'state'>)
+    expect(plain.find(`[data-testid="${testIds.toolRowOutput}"]`).exists()).toBe(true)
+    expect(plain.find(`[data-testid="${testIds.webSearchTool}"]`).exists()).toBe(false)
   })
 })

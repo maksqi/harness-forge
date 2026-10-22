@@ -8,7 +8,7 @@ import { brotliCompressSync, deflateSync, gzipSync } from 'node:zlib'
 import { HarnessError, LIMITS } from '@harness-forge/shared'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { startFakeRemote } from '../testing/fake-remote.ts'
-import { classifyAddress, createPluginSourceFetch, createSafeFetch, isBlockedAddress, parseTestRemoteUrl, PLUGIN_SOURCE_PROTOCOLS, safeFetch, testRemoteUrlFor } from './ssrf.ts'
+import { classifyAddress, createPluginSourceFetch, createSafeFetch, isBlockedAddress, parseTestRemoteUrl, PLUGIN_SOURCE_PROTOCOLS, SAFE_FETCH_MAX_BODY_BYTES, safeFetch, testRemoteUrlFor } from './ssrf.ts'
 
 interface SeenRequest {
   method: string
@@ -300,7 +300,7 @@ describe('sSRF table (refused before any connection)', () => {
 
   it('rejects invalid options', async () => {
     expect((await failure(guarded('http://loop.test/', { maxBytes: -1 }))).code).toBe('validation_error')
-    expect((await failure(guarded('http://loop.test/', { maxBytes: 10, method: 'POST' as 'GET' }))).code).toBe('validation_error')
+    expect((await failure(guarded('http://loop.test/', { maxBytes: 10, method: 'PUT' as 'GET' }))).code).toBe('validation_error')
     expect((await failure(guarded('http://loop.test/', { maxBytes: 10, headers: { 'x-evil': 'a\r\nb: c' } }))).code).toBe('validation_error')
   })
 })
@@ -589,5 +589,149 @@ describe('createPluginSourceFetch', () => {
     const huge = remote.routes.resolve('acme/huge', 'main')
     const error = await failure(fetchSource(`https://codeload.github.com/acme/huge/zip/${huge}`, { maxBytes: LIMITS.repoArchiveBytes, maxRedirects: 0 }))
     expect(error).toMatchObject({ code: 'payload_too_large', details: { limitBytes: LIMITS.repoArchiveBytes } })
+  })
+})
+
+describe('pOST (Phase 14)', () => {
+  /** What the echo route saw: the method, the declared length, the content type and the body as text. */
+  interface Echo {
+    method: string
+    length: string | null
+    type: string | null
+    body: string
+  }
+
+  beforeAll(() => {
+    routes.set('/echo-body', (request, response) => {
+      const chunks: Buffer[] = []
+      request.on('data', (chunk: Buffer) => chunks.push(chunk))
+      request.on('end', () => {
+        const echo: Echo = {
+          method: request.method ?? '',
+          length: request.headers['content-length'] ?? null,
+          type: request.headers['content-type'] ?? null,
+          body: Buffer.concat(chunks).toString('utf8'),
+        }
+        response.writeHead(201, { 'content-type': 'application/json' })
+        response.end(JSON.stringify(echo))
+      })
+    })
+    routes.set('/post-redirect', (request, response) => {
+      request.resume()
+      request.on('end', () => {
+        response.writeHead(302, { 'location': '/ok', 'content-type': 'text/plain' })
+        response.end('moved')
+      })
+    })
+  })
+
+  function echoOf(body: Uint8Array): Echo {
+    return JSON.parse(decode(body)) as Echo
+  }
+
+  it('refuses a POST to a private, loopback or metadata address before any connection (the guard is unchanged)', async () => {
+    const noDns = createSafeFetch({ lookup: forbiddenLookup })
+    for (const url of [`${origin()}/echo-body`, 'http://10.0.0.1/', 'http://169.254.169.254/latest/meta-data', 'http://[fd00::1]/']) {
+      const error = await failure(noDns(url, { maxBytes: 1024, method: 'POST', body: '{"q":"x"}' }))
+      expect(error.code, url).toBe('validation_error')
+      expect(error.message, url).toMatch(/only public internet addresses/)
+    }
+    expect((await failure(guarded('http://rebind.test/', { maxBytes: 1024, method: 'POST', body: 'x' }))).message).toContain('10.0.0.5')
+    expect(seen).toEqual([])
+  })
+
+  it('sends a string or byte body with content-length; the caller sets content-type but never content-length', async () => {
+    const text = await loopback(`${origin()}/echo-body`, {
+      maxBytes: 4096,
+      method: 'POST',
+      body: '{"query":"caf\u00E9"}',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': '1' },
+    })
+    expect(text.status).toBe(201)
+    expect(echoOf(text.body)).toEqual({ method: 'POST', length: String(Buffer.byteLength('{"query":"caf\u00E9"}')), type: 'application/json', body: '{"query":"caf\u00E9"}' })
+    const bytes = await loopback(`${origin()}/echo-body`, { maxBytes: 4096, method: 'POST', body: new Uint8Array([0x61, 0x62, 0x63]).subarray(1) })
+    expect(echoOf(bytes.body)).toMatchObject({ method: 'POST', length: '2', body: 'bc' })
+    const empty = await loopback(`${origin()}/echo-body`, { maxBytes: 4096, method: 'POST' })
+    expect(echoOf(empty.body)).toMatchObject({ method: 'POST', length: '0', body: '' })
+  })
+
+  it('never follows a redirect of a POST: the 3xx is the result (status, headers, body), one request only', async () => {
+    const result = await loopback(`${origin()}/post-redirect`, { maxBytes: 1024, method: 'POST', body: 'token=secret-value' })
+    expect([result.status, result.url, result.headers.get('location'), decode(result.body)]).toEqual([302, `${origin()}/post-redirect`, '/ok', 'moved'])
+    expect(seen.map(request => [request.method, request.path])).toEqual([['POST', '/post-redirect']])
+    // A GET of the same route still follows it.
+    seen = []
+    const followed = await loopback(`${origin()}/post-redirect`, { maxBytes: 1024 })
+    expect([followed.status, followed.url]).toEqual([200, `${origin()}/ok`])
+    expect(seen.map(request => [request.method, request.path])).toEqual([['GET', '/post-redirect'], ['GET', '/ok']])
+  })
+
+  it('caps the body at 64 KiB (counted in bytes) before any connection', async () => {
+    expect(SAFE_FETCH_MAX_BODY_BYTES).toBe(65_536)
+    const fits = await loopback(`${origin()}/echo-body`, { maxBytes: 200_000, method: 'POST', body: 'a'.repeat(SAFE_FETCH_MAX_BODY_BYTES) })
+    expect(echoOf(fits.body).length).toBe(String(SAFE_FETCH_MAX_BODY_BYTES))
+    seen = []
+    for (const body of ['a'.repeat(SAFE_FETCH_MAX_BODY_BYTES + 1), '\u00E9'.repeat(SAFE_FETCH_MAX_BODY_BYTES / 2 + 1), new Uint8Array(SAFE_FETCH_MAX_BODY_BYTES + 1)]) {
+      const error = await failure(loopback(`${origin()}/echo-body`, { maxBytes: 1024, method: 'POST', body }))
+      expect(error.code).toBe('validation_error')
+      expect(error.message).toContain(String(SAFE_FETCH_MAX_BODY_BYTES))
+    }
+    expect(seen).toEqual([])
+  })
+
+  it('refuses a body with GET or HEAD and an unknown method; GET and HEAD send no content-length', async () => {
+    for (const method of ['GET', 'HEAD'] as const)
+      expect((await failure(loopback(`${origin()}/echo-body`, { maxBytes: 1024, method, body: 'x' }))).message).toBe('Only a POST request can have a body.')
+    expect((await failure(loopback(`${origin()}/echo-body`, { maxBytes: 1024, method: 'DELETE' as 'POST' }))).message).toBe('Only GET, HEAD and POST requests are supported.')
+    expect((await failure(loopback(`${origin()}/echo-body`, { maxBytes: 1024, method: 'POST', body: 42 as unknown as string }))).message).toBe('The request body must be a string or bytes.')
+    expect(seen).toEqual([])
+    const get = await loopback(`${origin()}/echo-body`, { maxBytes: 1024 })
+    expect(echoOf(get.body)).toMatchObject({ method: 'GET', length: null, body: '' })
+  })
+
+  it('the size cap and the timeout still apply to a POST', async () => {
+    expect((await failure(loopback(`${origin()}/echo-body`, { maxBytes: 10, method: 'POST', body: 'x'.repeat(100) }))).code).toBe('payload_too_large')
+    expect((await failure(loopback(`${origin()}/hang`, { maxBytes: 1024, method: 'POST', body: 'x', timeoutMs: 50 }))).code).toBe('provider_unreachable')
+  })
+
+  describe('through the plugin-source fetch and the test remote', () => {
+    let remote: FakeRemote
+
+    beforeAll(async () => {
+      remote = await startFakeRemote()
+      remote.routes.serve('https://api.search.example/search', { status: 200, headers: { 'content-type': 'application/json' }, body: '{"results":[]}' })
+      remote.routes.serve('https://api.search.example/moved', { status: 307, headers: { location: 'https://cdn.example.com/elsewhere' } })
+    })
+
+    beforeEach(() => {
+      remote.routes.requests.length = 0
+    })
+
+    afterAll(async () => {
+      await remote.close()
+    })
+
+    it('carries the method and the body to the served route; other paths answer 405; a redirect is returned', async () => {
+      const fetchSource = createPluginSourceFetch({ testRemoteUrl: remote.url, lookup: forbiddenLookup })
+      const body = JSON.stringify({ query: 'harness forge', max_results: 5 })
+      const result = await fetchSource('https://api.search.example/search', { maxBytes: 1024, method: 'POST', body, headers: { 'content-type': 'application/json' } })
+      expect([result.status, result.url, decode(result.body)]).toEqual([200, 'https://api.search.example/search', '{"results":[]}'])
+      const other = await fetchSource('https://api.search.example/other', { maxBytes: 1024, method: 'POST', body: 'x' })
+      expect(other.status).toBe(405)
+      const moved = await fetchSource('https://api.search.example/moved', { maxBytes: 1024, method: 'POST', body: 'x' })
+      expect([moved.status, moved.headers.get('location')]).toEqual([307, 'https://cdn.example.com/elsewhere'])
+      expect(remote.requests).toEqual([
+        { method: 'POST', host: 'api.search.example', path: '/search', status: 200, body },
+        { method: 'POST', host: 'api.search.example', path: '/other', status: 405, body: 'x' },
+        { method: 'POST', host: 'api.search.example', path: '/moved', status: 307, body: 'x' },
+      ])
+    })
+
+    it('a POST is still https only and still refused for private hosts', async () => {
+      const fetchSource = createPluginSourceFetch({ testRemoteUrl: remote.url, lookup: forbiddenLookup })
+      for (const url of ['http://api.search.example/search', 'https://10.0.0.1/search', 'https://localhost/search'])
+        expect((await failure(fetchSource(url, { maxBytes: 1024, method: 'POST', body: 'x', protocols: ['http:', 'https:'] }))).code, url).toBe('validation_error')
+      expect(remote.requests).toEqual([])
+    })
   })
 })

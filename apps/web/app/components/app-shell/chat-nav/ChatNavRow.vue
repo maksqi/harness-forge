@@ -7,6 +7,8 @@
 // the menu has closed and its trigger has focus again, so the dialog returns focus there when it closes. Phase 7: "Move to
 // project ▸" (chat-row-move, right after Rename; only with `canMove`) lists ProjectMenuItems with the chat's project
 // checked; the move runs once the menu has closed and returned focus to its trigger.
+// Phase 14 (ADR-060; C54, complete from P14-0b): the status `input` (a running MCP tool call waits for the user's answer)
+// shows the `approval` dot labelled "Needs your input" (`chat-status-dot[data-status=input]`, docs/UI.md 5.10).
 import type { ChatExportFormat, ChatSummary } from '@harness-forge/shared'
 import type { ChatListStatus } from '~/stores/chats'
 import {
@@ -67,6 +69,11 @@ let pending: 'rename' | 'share' | 'delete' | null = null
 let pendingMove: { projectId: string | null } | null = null
 
 const title = computed(() => props.chat.title?.trim() ?? '')
+
+/** + Phase 14: `input` looks like `approval` (a warning dot) with its own label; the test hook keeps `input`. */
+const dot = computed(() => (props.status === 'input'
+  ? { status: 'approval' as const, label: 'Needs your input' }
+  : props.status ? { status: props.status, label: undefined } : null))
 
 // Fine pointers: the dot and the actions button share one 20px slot, and hover, keyboard focus or an open menu
 // shows the button over the dot. The button is hidden with opacity, never display, so it stays focusable: closing
@@ -174,8 +181,10 @@ defineExpose({ focus })
       <div class="pointer-events-none absolute inset-y-0 right-1 flex items-center">
         <span class="relative flex items-center gap-0.5 pointer-fine:size-5 pointer-fine:justify-center">
           <StatusDot
-            v-if="status"
-            :status="status"
+            v-if="dot"
+            :status="dot.status"
+            :label="dot.label"
+            :data-status="status"
             :data-testid="testIds.chatStatusDot"
             :class="dotClass"
           />

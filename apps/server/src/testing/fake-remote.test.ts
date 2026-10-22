@@ -1,5 +1,6 @@
 // Smoke tests of the fake remote (C45-T2): every route and archive variant through both front ends (the loopback HTTP
-// server and `createFakeSafeFetch`), the request log, `githubZipOf` read back by the installer's zip reader.
+// server and `createFakeSafeFetch`), the request log, `githubZipOf` read back by the installer's zip reader. Phase 14
+// (C50-T6): POST on `serve()` routes, the recorded bodies, 405 elsewhere, no redirect for a POST.
 import type { FakeRemote } from './fake-remote.ts'
 import { createHash } from 'node:crypto'
 import { gunzipSync } from 'node:zlib'
@@ -9,10 +10,13 @@ import { EntryCollector } from '../plugins/install/archive.ts'
 import { INSTALL_LIMITS } from '../plugins/install/errors.ts'
 import { githubZipOf as reexportedGithubZipOf } from '../plugins/install/testing.ts'
 import { readZip } from '../plugins/install/zip.ts'
+import { SAFE_FETCH_MAX_BODY_BYTES } from '../security/ssrf.ts'
 import {
   createFakeRemoteRoutes,
   createFakeSafeFetch,
   FAKE_ARCHIVE_VARIANTS,
+  FAKE_REMOTE_MAX_BODY_BYTES,
+  FAKE_SAFE_FETCH_MAX_BODY_BYTES,
   fakeTgzOf,
   githubZipOf,
   startFakeRemote,
@@ -279,5 +283,59 @@ describe('createFakeSafeFetch', () => {
     const controller = new AbortController()
     controller.abort()
     await expect(safeFetch('https://cdn.example.com/a.zip', { maxBytes: 10, signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' })
+  })
+})
+
+describe('pOST (Phase 14)', () => {
+  it('the HTTP front end answers POST on serve() routes, records the bodies and keeps 405 elsewhere', async () => {
+    const remote = await started()
+    remote.routes.serve('https://api.search.example/search', { status: 200, headers: { 'Content-Type': 'application/json' }, body: '{"results":[]}' })
+    remote.routes.serve('https://auth.example.com/revoke', '')
+    const body = JSON.stringify({ query: 'harness', max_results: 3 })
+    const search = await fetch(`${remote.url}/api.search.example/search`, { method: 'POST', body, headers: { 'content-type': 'application/json' } })
+    expect([search.status, search.headers.get('content-type'), await search.text()]).toEqual([200, 'application/json', '{"results":[]}'])
+    expect((await fetch(`${remote.url}/auth.example.com/revoke`, { method: 'POST', body: 'token=x&token_type_hint=refresh_token' })).status).toBe(200)
+    expect((await fetch(`${remote.url}/api.search.example/other`, { method: 'POST', body: 'x' })).status).toBe(405)
+    expect((await fetch(`${remote.url}/api.search.example/search`, { method: 'PUT', body: 'x' })).status).toBe(405)
+    expect((await fetch(`${remote.url}/api.search.example/search`)).status).toBe(200)
+    expect(remote.requests).toEqual([
+      { method: 'POST', host: 'api.search.example', path: '/search', status: 200, body },
+      { method: 'POST', host: 'auth.example.com', path: '/revoke', status: 200, body: 'token=x&token_type_hint=refresh_token' },
+      { method: 'POST', host: 'api.search.example', path: '/other', status: 405, body: 'x' },
+      { method: 'PUT', host: 'api.search.example', path: '/search', status: 405, body: 'x' },
+      { method: 'GET', host: 'api.search.example', path: '/search', status: 200 },
+    ])
+  })
+
+  it('the HTTP front end refuses a request body over FAKE_REMOTE_MAX_BODY_BYTES with 413 (nothing logged)', async () => {
+    const remote = await started()
+    remote.routes.serve('https://api.search.example/search', 'ok')
+    const response = await fetch(`${remote.url}/api.search.example/search`, { method: 'POST', body: new Uint8Array(FAKE_REMOTE_MAX_BODY_BYTES + 1) })
+    expect(response.status).toBe(413)
+    expect(remote.requests).toEqual([])
+  })
+
+  it('createFakeSafeFetch passes the body, never follows a redirect of a POST and checks the body like safeFetch', async () => {
+    expect(FAKE_SAFE_FETCH_MAX_BODY_BYTES).toBe(SAFE_FETCH_MAX_BODY_BYTES)
+    const routes = createFakeRemoteRoutes()
+    routes.serve('https://api.search.example/search', { status: 200, body: '{"results":[]}' })
+    routes.serve('https://api.search.example/moved', { status: 302, headers: { location: 'https://api.search.example/search' } })
+    const { safeFetch, calls } = createFakeSafeFetch(routes)
+    const found = await safeFetch('https://api.search.example/search', { maxBytes: 1024, method: 'POST', body: '{"q":"a"}' })
+    expect([found.status, decoder.decode(found.body)]).toEqual([200, '{"results":[]}'])
+    const bytes = await safeFetch('https://api.search.example/search', { maxBytes: 1024, method: 'POST', body: new Uint8Array([0x7B, 0x7D]) })
+    expect(bytes.status).toBe(200)
+    const moved = await safeFetch('https://api.search.example/moved', { maxBytes: 1024, method: 'POST', body: 'x' })
+    expect([moved.status, moved.url, moved.headers.get('location')]).toEqual([302, 'https://api.search.example/moved', 'https://api.search.example/search'])
+    expect((await safeFetch('https://api.search.example/elsewhere', { maxBytes: 1024, method: 'POST' })).status).toBe(405)
+    await expect(safeFetch('https://api.search.example/search', { maxBytes: 1024, body: 'x' })).rejects.toMatchObject({ code: 'validation_error' })
+    await expect(safeFetch('https://api.search.example/search', { maxBytes: 1024, method: 'POST', body: 'a'.repeat(FAKE_SAFE_FETCH_MAX_BODY_BYTES + 1) })).rejects.toMatchObject({ code: 'validation_error' })
+    expect(routes.requests).toEqual([
+      { method: 'POST', host: 'api.search.example', path: '/search', status: 200, body: '{"q":"a"}' },
+      { method: 'POST', host: 'api.search.example', path: '/search', status: 200, body: '{}' },
+      { method: 'POST', host: 'api.search.example', path: '/moved', status: 302, body: 'x' },
+      { method: 'POST', host: 'api.search.example', path: '/elsewhere', status: 405, body: '' },
+    ])
+    expect(calls.map(call => [call.options.method, call.status])).toEqual([['POST', 200], ['POST', 200], ['POST', 302], ['POST', 405], [undefined, null], ['POST', null]])
   })
 })

@@ -13,6 +13,7 @@ import { join } from 'node:path'
 import { HarnessError, isClaudeHomeImportPath } from '@harness-forge/shared'
 import { zipOf } from '../../plugins/install/testing.ts'
 import { CLAUDE_HOME_CANARY_PREFIX, fakeClaudeHomeFiles, writeFileTree } from '../../testing/claude-fixtures.ts'
+import { inertMcpManagerMembers } from '../../testing/fake-mcp.ts'
 
 const cleanups: Array<() => Promise<void>> = []
 
@@ -171,6 +172,7 @@ export function createRecordingMcpManager(pluginServers: readonly McpServerInput
       servers.delete(id)
     },
     reconnect: async id => manager.get(id),
+    ...inertMcpManagerMembers(),
   }
   return manager
 }

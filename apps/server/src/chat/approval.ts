@@ -42,6 +42,14 @@
 // happened (the catch path included), `ToolHooks.settle(callId, { harnessAsked, asked })` stores the call's pending
 // hook records: `harnessAsked` = a `PreToolUse` `allow` whose call still asks the user; v1.8.1: `asked` = the call still
 // asks the user, whoever decided (an `allowed` `PermissionRequest` record the harness did not follow is flagged too).
+// Phase 14 (C52, ADR-062; COMPLETE and FROZEN after P14-0b): the AI SDK runs this function for every call whose name is
+// a key of the tool set, provider-executed calls included (`ai/dist/index.js` `executeToolsFromStream`): `not-applicable`
+// never re-executes a provider-executed call, `denied` would emit `tool-output-denied` for a search the provider already
+// ran. So the very first rule, before the unknown-tool rule, the plan card, the hooks and `settle`: a call whose name is
+// in `ToolApprovalContext.nativeTools` (the turn's provider-executed native search tools, `search/turn.ts`) and whose
+// `toolCall.providerExecuted` is `true` → `not-applicable` (no `PreToolUse`, `tool.approve`, `PermissionRequest`, no hook
+// record: it cannot be blocked after the fact, so it is not observed either); a native name without the flag (a model
+// calling it as a function) → denied (`DENIED_NOT_PROVIDER_EXECUTED`). Unknown names stay denied.
 import type { ToolCallContext, ToolDefinition, ToolWorkspace, ToolWorkspaceAccess } from '@harness-forge/plugin-sdk'
 import type { ToolMode, ToolOverride, ToolPolicy } from '@harness-forge/shared'
 import type { ModelMessage, ToolApprovalStatus, ToolSet } from 'ai'
@@ -82,6 +90,8 @@ export const DENIED_TOOLS_OFF = 'Tools are turned off for this chat.'
 export const DENIED_UNAVAILABLE = 'The tool is not available in this chat.'
 /** Phase 11: the reason of a call a `PreToolUse` hook denied without a reason. */
 export const BLOCKED_BY_HOOK = 'Blocked by hook.'
+/** Phase 14: the reason of a call of a native search tool that the provider did not execute itself. */
+export const DENIED_NOT_PROVIDER_EXECUTED = 'This search tool runs only at the model\'s provider and cannot be called as a function.'
 
 /** The denial reason of a `PreToolUse` hook: "Blocked by hook: <reason>" (`BLOCKED_BY_HOOK` without a reason). */
 export function blockedByHookReason(reason: string | null | undefined): string {
@@ -183,6 +193,12 @@ export interface ToolApprovalContext {
    * `PermissionRequest` and `settle` (see the module comment). Null or absent = no hooks.
    */
   hooks?: Pick<ToolHooks, 'preToolUse' | 'permissionRequest' | 'settle'> | null
+  /**
+   * Phase 14 (ADR-062): the names of the turn's provider-executed native search tools (`AppliedWebSearch.nativeTools`):
+   * a provider-executed call of one of them is `not-applicable`, any other call of one of them is denied (the module
+   * comment's first rule). Absent = empty (no native search).
+   */
+  nativeTools?: ReadonlySet<string>
 }
 
 /**
@@ -324,6 +340,25 @@ interface ApprovalCall {
   readonly input: unknown
 }
 
+/** The tool call of the approval function's options (the AI SDK's `TypedToolCall`, read structurally). */
+export interface ApprovalToolCall {
+  toolName: string
+  toolCallId: string
+  input: unknown
+  /** Phase 14 (ADR-062): `true` for a call the provider executed (a native search). */
+  providerExecuted?: boolean
+}
+
+/**
+ * The status of a call of a native search tool (Phase 14, the first rule of the module comment): `not-applicable` for a
+ * provider-executed call, denied otherwise; null when `toolCall` is no native search tool of the turn.
+ */
+export function nativeToolApproval(nativeTools: ReadonlySet<string> | undefined, toolCall: Pick<ApprovalToolCall, 'toolName' | 'providerExecuted'>): ToolApprovalStatus | null {
+  if (nativeTools === undefined || !nativeTools.has(toolCall.toolName))
+    return null
+  return toolCall.providerExecuted === true ? 'not-applicable' : { type: 'denied', reason: DENIED_NOT_PROVIDER_EXECUTED }
+}
+
 /** The tool's policy for one call (`evaluatePolicy` with the run's call context and scope). */
 function callPolicy(context: ToolApprovalContext, tool: ApprovalTool, toolCall: ApprovalCall, messages: ModelMessage[]): Promise<EffectivePolicy> {
   return evaluatePolicy(
@@ -370,8 +405,12 @@ async function harnessApproval(
 
 /** The approval function passed as `streamText({ toolApproval })` (and re-run by the SDK on approved continuations). */
 export function createToolApproval(context: ToolApprovalContext) {
-  return async (options: { toolCall: { toolName: string, toolCallId: string, input: unknown }, messages: ModelMessage[], tools?: ToolSet }): Promise<ToolApprovalStatus> => {
+  return async (options: { toolCall: ApprovalToolCall, messages: ModelMessage[], tools?: ToolSet }): Promise<ToolApprovalStatus> => {
     const { toolCall } = options
+    // Phase 14: a native search call first (no hooks, no `settle`, no records; see the module comment).
+    const native = nativeToolApproval(context.nativeTools, toolCall)
+    if (native !== null)
+      return native
     const hooks = context.hooks ?? null
     // The `PreToolUse` decision of the call, once known (a holder: the callback below sets it).
     const seen: { hook: PreToolUseDecision | null } = { hook: null }

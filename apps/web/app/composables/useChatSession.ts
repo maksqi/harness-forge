@@ -66,6 +66,17 @@
 // without a reload of the page (one request per such turn, none for turns without records).
 // Phase 12 (ADR-057; C46, complete from P12-0b, no P12-A owner): `hookActivity` gains `label`, the `statusMessage` of the
 // first matching handler (`data-activity.label`), which the tool rows show instead of "Running hook…" (W12.13).
+// Phase 14 (ADR-060, ADR-063; C54, complete from P14-0b, no P14-A owner): `webSearch` is the chat's web search mode
+// (`off` / `auto`): the pick, else the chat's `settings.webSearch`, else the global `webSearchDefault`; writing it saves
+// it on a persisted chat (`PATCH /chats/:id { settings: { webSearch } }`, like the permission mode) and every chat request
+// sends it (`ChatRequestBody.webSearch`; a request that creates the chat makes it the chat's own, open point 4).
+// `elicitations` are the pending MCP questions of the streaming reply (each running MCP tool part whose latest
+// preliminary output is `{ status: 'input-required', elicitation }`, minus the ones this session answered; oldest
+// first); `respondElicitation(id, answer)` posts the answer (`POST /chat/:id/elicitations/:elicitationId`): 'answered',
+// or 'gone' for a 404 / 409 `stale` (answered elsewhere, expired, the run ended); a 400 throws the HarnessError with
+// `details.issues`. The run state is `input` while the reply streams with a pending question (the sidebar's "Needs your
+// input"); such a session is never evicted. A reload shows the card again through the resume (the stream is replayed and
+// the tool re-sends the request every 25 s).
 import type { UseChatHelpers } from '@ai-sdk/vue'
 import type {
   BackgroundTask,
@@ -78,11 +89,14 @@ import type {
   HarnessUIMessage,
   HookEvent,
   ImageOptions,
+  McpElicitation,
+  McpElicitationAnswerBody,
   MessageBranch,
   QueueItem,
   QueueMessage,
   ReasoningEffort,
   ToolMode,
+  WebSearchMode,
   WorkspaceAccess,
 } from '@harness-forge/shared'
 import type { FileUIPart } from 'ai'
@@ -110,6 +124,7 @@ import {
 } from 'ai'
 import { computed, effectScope, getCurrentScope, nextTick, onScopeDispose, readonly, ref, shallowRef, watch } from 'vue'
 import { todoState } from '~/components/chat/agent/todos'
+import { pendingElicitationsOf } from '~/components/chat/parts/tool-elicitation-context'
 import { currentShellCwd, isWorkspaceToolName } from '~/components/chat/parts/tools/workspace-tools'
 import { ruleProjectId } from '~/components/workspace/allowlist/allow-rule'
 import { useApi, useApiFetch } from '~/composables/useApi'
@@ -117,7 +132,7 @@ import { useImageOptions } from '~/composables/useImageOptions'
 import { useServerEvents } from '~/composables/useServerEvents'
 import { useBackgroundTasksStore } from '~/stores/background-tasks'
 import { useChatQueueStore } from '~/stores/chat-queue'
-import { useChatsStore } from '~/stores/chats'
+import { isRunningState, useChatsStore } from '~/stores/chats'
 import { useModelsStore } from '~/stores/models'
 import { usePluginsStore } from '~/stores/plugins'
 import { useProjectsStore } from '~/stores/projects'
@@ -159,9 +174,10 @@ function withStreamKeys<T extends Record<string, unknown>>(schemas: T): T {
 
 /**
  * Lifecycle of a session as the UI sees it. (Not named `ChatRunState`: the chats store exports that name for the
- * sidebar dot, and Nuxt auto-imports both files.)
+ * sidebar dot, and Nuxt auto-imports both files.) + Phase 14: `input` = the reply streams and an MCP tool call waits for
+ * the user's answer to an elicitation.
  */
-export type ChatSessionRunState = 'idle' | 'submitted' | 'streaming' | 'approval' | 'error'
+export type ChatSessionRunState = 'idle' | 'submitted' | 'streaming' | 'approval' | 'input' | 'error'
 
 export interface ChatSendInput {
   text: string
@@ -340,6 +356,23 @@ export interface ChatSession {
    * host shows "It already finished."). Throws `HarnessError` for other failures.
    */
   stopBackgroundTask: (taskId: string) => Promise<'stopped' | 'gone'>
+  /**
+   * + Phase 14 (ADR-063): the chat's web search mode: the pick, else the chat's `settings.webSearch`, else the global
+   * `webSearchDefault`. Writing it records the pick and saves it on a persisted chat (`PATCH /chats/:id { settings: {
+   * webSearch } }`, like `toolMode`); every chat request sends it (`ChatRequestBody.webSearch`). The composer's toggle maps
+   * on → `auto`, off → `off`.
+   */
+  webSearch: WritableComputedRef<WebSearchMode>
+  /**
+   * + Phase 14 (ADR-060): the pending MCP questions of the streaming reply: the latest preliminary output `{ status:
+   * 'input-required' }` of each running MCP tool part, minus the ones answered in this session; oldest first.
+   */
+  elicitations: ComputedRef<readonly McpElicitation[]>
+  /**
+   * + Phase 14: `POST /chat/:id/elicitations/:elicitationId`: 'answered', or 'gone' for a 404 / 409 `stale` (answered in
+   * another tab, expired, the run ended). A 400 throws the `HarnessError` (`details.issues`).
+   */
+  respondElicitation: (id: string, answer: McpElicitationAnswerBody) => Promise<'answered' | 'gone'>
 }
 
 export interface ChatSessionRegistry {
@@ -397,6 +430,8 @@ export function buildChatRequestBody(input: {
    * a new user message only, like `projectId`.
    */
   outputStyle?: string | null
+  /** + Phase 14 (ADR-063): the chat's web search mode (`session.webSearch`); sent with every request when given. */
+  webSearch?: WebSearchMode
 }): ChatRequestBody {
   const message = input.messages.at(-1)
   if (!message)
@@ -422,6 +457,8 @@ export function buildChatRequestBody(input: {
     body.projectId = input.projectId
   if (kind === 'new' && input.outputStyle)
     body.outputStyle = input.outputStyle
+  if (input.webSearch)
+    body.webSearch = input.webSearch
   return body
 }
 
@@ -491,10 +528,12 @@ export function hasPendingApproval(messages: readonly HarnessUIMessage[]): boole
   return last?.role === 'assistant' && last.parts.some(part => isToolUIPart(part) && part.state === 'approval-requested')
 }
 
-/** The sidebar dot of a session state (`setRunState` of the chats store). */
+/** The sidebar dot of a session state (`setRunState` of the chats store). + Phase 14: `input` stays `input`. */
 export function toListRunState(state: ChatSessionRunState): ChatListRunState | null {
   if (state === 'submitted' || state === 'streaming')
     return 'running'
+  if (state === 'input')
+    return 'input'
   return state === 'approval' ? 'approval' : null
 }
 
@@ -565,6 +604,8 @@ interface ChatChoices {
   modelRef?: string | null
   reasoningEffort?: ReasoningEffort
   toolMode?: ToolMode
+  /** + Phase 14: the chat's web search mode. */
+  webSearch?: WebSearchMode
 }
 
 function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSession {
@@ -599,7 +640,13 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
       return
     const body = patch.modelRef !== undefined
       ? { modelRef: patch.modelRef }
-      : { settings: { ...(patch.reasoningEffort ? { reasoningEffort: patch.reasoningEffort } : {}), ...(patch.toolMode ? { toolMode: patch.toolMode } : {}) } }
+      : {
+          settings: {
+            ...(patch.reasoningEffort ? { reasoningEffort: patch.reasoningEffort } : {}),
+            ...(patch.toolMode ? { toolMode: patch.toolMode } : {}),
+            ...(patch.webSearch ? { webSearch: patch.webSearch } : {}),
+          },
+        }
     // Best effort: the next request stores the choice anyway.
     chats.update(id, body).catch(() => {})
   }
@@ -624,6 +671,14 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
     set: (value) => {
       picked.value = { ...picked.value, toolMode: value }
       persistChoice({ toolMode: value })
+    },
+  })
+  /** + Phase 14 (ADR-063): the pick, else the chat's `settings.webSearch`, else the global default. */
+  const webSearch = computed<WebSearchMode>({
+    get: () => picked.value.webSearch ?? stored.value.webSearch ?? settings.resolved.webSearchDefault,
+    set: (value) => {
+      picked.value = { ...picked.value, webSearch: value }
+      persistChoice({ webSearch: value })
     },
   })
 
@@ -661,7 +716,7 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
 
   /** Requests use the values of the moment they were sent; later default changes must not move this chat. */
   function pinChoices() {
-    stored.value = { modelRef: modelRef.value, reasoningEffort: reasoningEffort.value, toolMode: toolMode.value }
+    stored.value = { modelRef: modelRef.value, reasoningEffort: reasoningEffort.value, toolMode: toolMode.value, webSearch: webSearch.value }
   }
 
   // Assistant messages this session streamed itself (not replayed): their run.finished needs no reload.
@@ -791,6 +846,8 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
         projectId: firstRequest ? projectId.value : null,
         // + Phase 11: the same for the chat's output style.
         outputStyle: firstRequest ? outputStyle.value : null,
+        // + Phase 14: every request carries the chat's web search mode (the one that creates the chat stores it).
+        webSearch: webSearch.value,
       })
       const kind = chatRequestKind(trigger, body.message)
       request = { kind, userMessageId: kind === 'new' ? body.message.id : null }
@@ -861,10 +918,29 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
   }
 
   const busy = computed(() => chat.status.value === 'submitted' || chat.status.value === 'streaming')
+
+  // ---------- MCP questions (Phase 14, ADR-060) ----------
+
+  /** The requests this session answered (their cards close before the tool's next output arrives). */
+  const answeredElicitations = shallowRef<ReadonlySet<string>>(new Set())
+  const elicitations = computed<readonly McpElicitation[]>(() => {
+    if (!busy.value)
+      return []
+    const answered = answeredElicitations.value
+    return pendingElicitationsOf(chat.messages.value.at(-1))
+      .map(entry => entry.elicitation)
+      .filter(elicitation => !answered.has(elicitation.id))
+  })
+  // The answered requests belong to the stream that ended.
+  watch(busy, (isBusy) => {
+    if (!isBusy && answeredElicitations.value.size > 0)
+      answeredElicitations.value = new Set()
+  })
+
   const runState = computed<ChatSessionRunState>(() => {
     const status = chat.status.value
     if (status === 'submitted' || status === 'streaming')
-      return status
+      return elicitations.value.length > 0 ? 'input' : status
     if (status === 'error')
       return 'error'
     return hasPendingApproval(chat.messages.value) ? 'approval' : 'idle'
@@ -916,6 +992,7 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
       modelRef: detail.modelRef ?? undefined,
       reasoningEffort: detail.settings.reasoningEffort,
       toolMode: detail.settings.toolMode,
+      webSearch: detail.settings.webSearch,
     }
     storedStyle.value = detail.settings.outputStyle ?? null
     if (busy.value)
@@ -1014,9 +1091,9 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
       chat.clearError()
   }
 
-  /** The server or the chats store reports a run of this chat. */
+  /** The server or the chats store reports a run of this chat (+ Phase 14: `input` is a running state). */
   function reportsRun(): boolean {
-    return chats.runState[id] === 'running' || summary.value?.running === true
+    return isRunningState(chats.runState[id]) || summary.value?.running === true
   }
 
   function onPath(messageId: string): boolean {
@@ -1549,7 +1626,7 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
 
   /** A run of this chat is active: a request in flight, a resume, or a run the chats store reports. */
   function runActive(): boolean {
-    return busy.value || resuming !== null || chats.runState[id] === 'running'
+    return busy.value || resuming !== null || isRunningState(chats.runState[id])
   }
 
   /** Resolves once no request and no resume is in flight (`whenIdle()` waits at most 2 s for the request). */
@@ -1600,6 +1677,21 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
     return backgroundTasks.stop(id, taskId)
   }
 
+  async function respondElicitation(elicitationId: string, answer: McpElicitationAnswerBody): Promise<'answered' | 'gone'> {
+    try {
+      await api.chatElicitations.answer({ params: { id, elicitationId }, body: answer })
+    }
+    catch (error) {
+      const failure = toHarnessError(error)
+      const reason = conflictReason(failure)
+      if (failure.code === 'not_found' || reason === 'stale' || reason === null)
+        return 'gone'
+      throw failure
+    }
+    answeredElicitations.value = new Set([...answeredElicitations.value, elicitationId])
+    return 'answered'
+  }
+
   return {
     id,
     chat,
@@ -1641,6 +1733,9 @@ function createSession(id: string, isNew: boolean, deps: SessionDeps): ChatSessi
     accepted: readonly(accepted),
     backgroundTasks: backgroundTaskList,
     stopBackgroundTask,
+    webSearch,
+    elicitations,
+    respondElicitation,
   }
 }
 
@@ -1652,7 +1747,8 @@ function syncOrder() {
 
 function isEvictable(entry: SessionEntry): boolean {
   const state = entry.session.runState.value
-  return entry.holds === 0 && state !== 'submitted' && state !== 'streaming' && state !== 'approval'
+  // + Phase 14: a session with a pending MCP question (`input`) is never evicted.
+  return entry.holds === 0 && state !== 'submitted' && state !== 'streaming' && state !== 'approval' && state !== 'input'
 }
 
 function disposeEntry(id: string) {

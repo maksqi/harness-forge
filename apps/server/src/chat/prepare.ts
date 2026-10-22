@@ -54,6 +54,15 @@
 // (`PromptCommandResolution.modelUnavailable`) runs the request's model with the `command-model-unavailable` notice. The
 // turn's tools narrow to the command's `allowed-tools` without its `disallowed-tools` (`turnToolRestrictionFor`: the
 // catalog entry of the invoked name, subtracted from the registered tools; restrict-only).
+// Phase 14 (C52, ADR-061 / ADR-063; COMPLETE and FROZEN after P14-0b):
+// - the effective web search mode of the turn (`PreparedRun.webSearch`, `effectiveWebSearchMode`): the request body's
+//   `webSearch`, else the chat's `settings.webSearch`, else the global `webSearchDefault` (a chat of v1.8.1 has no
+//   setting, so it follows the global default, `off` unless changed); server-started turns (queue, task, hook) send no
+//   `webSearch`, so they follow the chat's setting. When the request creates the chat, its `webSearch` is saved as
+//   `settings.webSearch` (open point 4, like `outputStyle`); an existing chat keeps its setting (the composer persists
+//   a change with `PATCH /chats/:id` and sends it in the body too);
+// - every command resolution gets `CommandContext.projectId` (the chat's project: MCP prompts of that project's servers,
+//   W14.2) and the MCP managers through `deps` (`CommandServices.mcp` / `projectMcp`, `commands.ts`).
 import type {
   CatalogModel,
   ChatRequestBody,
@@ -66,6 +75,7 @@ import type {
   NoticeData,
   RunOrigin,
   Settings,
+  WebSearchMode,
 } from '@harness-forge/shared'
 import type { Logger } from '../logger.ts'
 import type { ResolvedImageModel, ResolvedModel, ResolvedModelBase } from '../providers/types.ts'
@@ -197,6 +207,12 @@ export interface PreparedRun {
    * model; null for image turns and command replies (and absent in v1.6 test doubles: no style).
    */
   outputStyle?: RunOutputStyle | null
+  /**
+   * The web search mode of the turn (Phase 14, ADR-063; `effectiveWebSearchMode`): the body's `webSearch`, else the
+   * chat's `settings.webSearch`, else the global `webSearchDefault`. Resolved per turn by `turnWebSearch` (`search/`);
+   * a sub-agent inherits it. Absent in v1.8 test doubles: `off`.
+   */
+  webSearch?: WebSearchMode
 }
 
 /** Options of `prepareRun`. */
@@ -474,6 +490,7 @@ async function buildUserMessage(context: PrepareContext): Promise<{ message: Har
     deferExpansion: true,
     argumentVars: commandArgumentVars(body.chatId),
     modelAliases: context.settings?.modelAliases ?? null,
+    projectId: context.turnWorkspace.projectId,
   })
   let command = resolved
   let expand: PendingExpansion | null = null
@@ -510,6 +527,7 @@ async function regeneratedCommand(context: PrepareContext, userMessage: HarnessU
     catalog: context.catalog,
     argumentVars: commandArgumentVars(context.body.chatId),
     modelAliases: context.settings?.modelAliases ?? null,
+    projectId: context.turnWorkspace.projectId,
   })
   return resolution?.kind === 'prompt' ? null : resolution
 }
@@ -538,8 +556,8 @@ export async function ensureChat(deps: Pick<AppDeps, 'chats'>, body: ChatRequest
 
 /**
  * `ensureChat` with whether this request created the chat (Phase 11). A new chat also gets the request's
- * `outputStyle` (ADR-051: a style name; null or absent = automatic) as `settings.outputStyle`; an existing chat keeps
- * its own.
+ * `outputStyle` (ADR-051: a style name; null or absent = automatic) as `settings.outputStyle` and (Phase 14, open point
+ * 4) the request's `webSearch` as `settings.webSearch`; an existing chat keeps its own.
  */
 export async function ensureRunChat(deps: Pick<AppDeps, 'chats'>, body: ChatRequestBody): Promise<{ chat: ChatRecord, created: boolean }> {
   const ensured = await deps.chats.ensure(body.chatId, {
@@ -547,11 +565,35 @@ export async function ensureRunChat(deps: Pick<AppDeps, 'chats'>, body: ChatRequ
     settings: { toolMode: body.toolMode, reasoningEffort: body.reasoningEffort },
     ...(body.projectId === undefined ? {} : { projectId: body.projectId }),
   })
-  const outputStyle = body.outputStyle
-  if (!ensured.created || typeof outputStyle !== 'string')
+  if (!ensured.created)
     return ensured
-  await deps.chats.touch(body.chatId, { settings: { outputStyle } })
-  return { chat: { ...ensured.chat, settings: { ...ensured.chat.settings, outputStyle } }, created: true }
+  const outputStyle = body.outputStyle
+  const webSearch = body.webSearch
+  const saved: ChatRecord['settings'] = {
+    ...(typeof outputStyle === 'string' ? { outputStyle } : {}),
+    ...(webSearch === 'off' || webSearch === 'auto' ? { webSearch } : {}),
+  }
+  if (Object.keys(saved).length === 0)
+    return ensured
+  await deps.chats.touch(body.chatId, { settings: saved })
+  return { chat: { ...ensured.chat, settings: { ...ensured.chat.settings, ...saved } }, created: true }
+}
+
+/**
+ * The web search mode of a turn (Phase 14, ADR-063): the request body's `webSearch`, else the chat's
+ * `settings.webSearch`, else the global `webSearchDefault`, else `off` (a value other than `off` / `auto` counts as
+ * absent).
+ */
+export function effectiveWebSearchMode(
+  body: Pick<ChatRequestBody, 'webSearch'>,
+  chat: { readonly settings: Pick<ChatRecord['settings'], 'webSearch'> },
+  settings: Partial<Pick<Settings, 'webSearchDefault'>>,
+): WebSearchMode {
+  for (const value of [body.webSearch, chat.settings.webSearch, settings.webSearchDefault] as unknown[]) {
+    if (value === 'off' || value === 'auto')
+      return value
+  }
+  return 'off'
 }
 
 /**
@@ -808,7 +850,8 @@ async function planRun(deps: AppDeps, run: Run, body: ChatRequestBody, logger: L
   const { expand, ...history } = planned
   const resolved: ResolvedModelBase = history.target.model
   deps.catalog.markUsed(resolved.providerId, resolved.modelId).catch((error: unknown) => logger.debug('cannot record the model use', { err: error }))
-  return { planned: { ...history, kind, chat, resolved, settings, catalog, requestModelRef: request.model.modelRef }, created, turn, expand }
+  const webSearch = effectiveWebSearchMode(body, chat, settings)
+  return { planned: { ...history, kind, chat, resolved, settings, catalog, requestModelRef: request.model.modelRef, webSearch }, created, turn, expand }
 }
 
 /** What `planHistory` decides (the rest of `PreparedRun` comes from `planRun`). */

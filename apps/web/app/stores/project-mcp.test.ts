@@ -7,7 +7,7 @@ import { createServerEvent, HarnessError } from '@harness-forge/shared'
 import { flushPromises } from '@vue/test-utils'
 import { createPinia, disposePinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { projectId, projectMcpList, projectMcpServer } from '~/utils/testing/fixtures'
+import { mcpAuthStart, projectId, projectMcpList, projectMcpServer } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
 import { useProjectMcpStore } from './project-mcp'
 
@@ -154,5 +154,28 @@ describe('project-mcp store', () => {
     api.projectMcp.setVariables.mockRejectedValueOnce(new HarnessError({ code: 'forbidden', message: 'Confirm your password.', action: 'login' }))
     await expect(store.saveVariables(P1, { MCP_TOKEN: null })).rejects.toMatchObject({ code: 'forbidden', action: 'login' })
     expect(store.byId(P1, 'memory')?.state).toBe('needs-variables')
+  })
+})
+
+describe('project-mcp store: sign-in (Phase 14, C54)', () => {
+  it('signIn starts a sign-in of a project server; signOut replaces its row', async () => {
+    api.projectMcp.list.mockResolvedValue(connected())
+    const store = useProjectMcpStore()
+    await store.fetch(P1)
+    api.mcpAuth.projectStart.mockResolvedValue(mcpAuthStart())
+    await expect(store.signIn(P1, 'memory', '/chat/0199a2b0-0000-7000-8000-000000000001')).resolves.toEqual(mcpAuthStart())
+    expect(api.mcpAuth.projectStart).toHaveBeenCalledWith({ params: { id: P1, serverId: 'memory' }, body: { returnTo: '/chat/0199a2b0-0000-7000-8000-000000000001' } })
+
+    const signedOut = projectMcpServer({ state: 'needs-auth', tools: [], missingVariables: [] })
+    api.mcpAuth.projectSignOut.mockResolvedValue(signedOut)
+    await expect(store.signOut(P1, 'memory')).resolves.toEqual(signedOut)
+    expect(api.mcpAuth.projectSignOut).toHaveBeenCalledWith({ params: { id: P1, serverId: 'memory' } })
+    expect(store.byId(P1, 'memory')).toEqual(signedOut)
+  })
+
+  it('a pending server cannot sign in: the 409 is thrown', async () => {
+    api.mcpAuth.projectStart.mockRejectedValue(new HarnessError({ code: 'conflict', message: 'Approve the server first.', details: { reason: 'untrusted' } }))
+    await expect(useProjectMcpStore().signIn(P1, 'memory')).rejects.toMatchObject({ code: 'conflict' })
+    expect(api.mcpAuth.projectStart).toHaveBeenCalledWith({ params: { id: P1, serverId: 'memory' }, body: {} })
   })
 })

@@ -44,6 +44,8 @@
 //   (`PrepareRunOptions.hookRecords`).
 // - W11.19: the stream response of a request whose new user message got prompt hook records carries their number
 //   (`PROMPT_HOOKS_HEADER`, `withPromptHooksHeader`), so the client reloads that message once its run finished.
+// Phase 14 (C52, ADR-063): the runner owns one once-per-chat notice memory (`notice-memory.ts`; cleared per chat on
+// `chat.deleted`, entirely on `key.rotated` and by `stopAll`) and hands it to every run (`RunContext.noticeMemory`).
 import type { ChatRequestBody, HarnessUIMessage, HookData, QueueChangedData, RunOrigin } from '@harness-forge/shared'
 import type { EventBus } from '../services/events/types.ts'
 import type { AppDeps } from '../types.ts'
@@ -58,6 +60,7 @@ import { assertRunsAllowed } from '../services/maintenance/index.ts'
 import { createBackgroundTasks } from './background/index.ts'
 import { abortReason, preStreamError } from './errors.ts'
 import { runQueuedPromptHooks, withPromptHooksHeader } from './hooks-prompt.ts'
+import { createNoticeMemory } from './notice-memory.ts'
 import { launchRun, TaskTracker } from './pipeline.ts'
 import { commitHistory, prepareRun, stoppedBeforeStart } from './prepare.ts'
 import { createChatQueue } from './queue.ts'
@@ -232,6 +235,8 @@ export function createChatRunnerWith(deps: AppDeps, options: ChatRunnerOptions =
   const lifecycle = new AbortController()
   const stopWaitMs = options.stopWaitMs ?? STOP_WAIT_MS
   const shutdownStopWaitMs = Math.min(stopWaitMs, options.shutdownStopWaitMs ?? SHUTDOWN_STOP_WAIT_MS)
+  // Phase 14: the once-per-chat notices (the bus is read lazily, with the first remembered notice).
+  const noticeMemory = createNoticeMemory(() => deps.events)
   // The services are read lazily inside the queue's methods (the runner is built inside the deps factory).
   const queue = createChatQueue(deps, {
     hasRun: chatId => registry.get(chatId) !== undefined,
@@ -379,6 +384,7 @@ export function createChatRunnerWith(deps: AppDeps, options: ChatRunnerOptions =
         onReleased: (ending, awaitingApproval, followUp) => onRunReleased(body.chatId, ending, awaitingApproval, followUp, { body, options: runOptions }),
         origin,
         background,
+        noticeMemory,
       })
       // W11.19: the records the prompt hooks added to the new user message (the client reloads it once).
       return withPromptHooksHeader(response, prepared.userMessage, origin)
@@ -441,6 +447,7 @@ export function createChatRunnerWith(deps: AppDeps, options: ChatRunnerOptions =
       }
       await Promise.all(registry.list().map(run => stopRun(run, 'The server is shutting down.', shutdownStopWaitMs)))
       await tasks.idle()
+      noticeMemory.stop()
     },
 
     queueList: chatId => queue.list(chatId),

@@ -31,7 +31,12 @@
 //   `childMaxSteps`, the preloaded `skills` text → the child's instructions, `disallowedTools` → removed from its tools
 //   before the definition's `tools`). W12.6 computes it from the definition; `DEFAULT_CHILD_SPEC` keeps the v1.7 child.
 // - `HostHooks.postCompact`: `PostCompact` right after the context guard's automatic compaction marker.
-import type { HarnessUIMessage, ReasoningEffort, Settings } from '@harness-forge/shared'
+// Phase 14 (C52, ADR-063; COMPLETE and FROZEN after P14-0b): a child inherits its parent turn's web search mode
+// (`childWebSearchMode`): a foreground child reads `ChildHostRun.webSearch` (`PreparedRun.webSearch` of its run, the
+// turn's effective mode); a background child's detached host has none, so it reads `settings.webSearchDefault`, which
+// the launch input sets to the launching turn's effective mode (`backgroundLaunchInput`, `subagent/index.ts`: the frozen
+// `BackgroundLaunchInput` has no mode field). The child resolves it again for its own model (`childTools`).
+import type { HarnessUIMessage, ReasoningEffort, Settings, WebSearchMode } from '@harness-forge/shared'
 import type { ModelMessage } from 'ai'
 import type { Logger } from '../../logger.ts'
 import type { ChatRecord } from '../../services/chats/types.ts'
@@ -54,6 +59,23 @@ export interface ChildHostRun {
   readonly history: readonly HarnessUIMessage[]
   /** The continued message of an approval continuation, else null (always null for a detached child). */
   readonly continued: HarnessUIMessage | null
+  /**
+   * Phase 14 (ADR-063): the web search mode of the parent turn (`PreparedRun.webSearch`); absent for a detached child
+   * (its `settings.webSearchDefault` carries the mode) and in v1.8 test doubles (see `childWebSearchMode`).
+   */
+  readonly webSearch?: WebSearchMode
+}
+
+/**
+ * The web search mode a child inherits (Phase 14, see the module comment): `prepared.webSearch`, else
+ * `prepared.settings.webSearchDefault`, else `off`.
+ */
+export function childWebSearchMode(prepared: Pick<ChildHostRun, 'webSearch'> & { readonly settings: Partial<Pick<Settings, 'webSearchDefault'>> }): WebSearchMode {
+  for (const value of [prepared.webSearch, prepared.settings.webSearchDefault] as unknown[]) {
+    if (value === 'off' || value === 'auto')
+      return value
+  }
+  return 'off'
 }
 
 /** The context of a child's host (`RunContext` of a chat run fits). */

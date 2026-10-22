@@ -22,6 +22,7 @@ import { useProjectsStore } from '~/stores/projects'
 import { useProvidersStore } from '~/stores/providers'
 import { useSettingsStore } from '~/stores/settings'
 import { useUiStore } from '~/stores/ui'
+import { useWebSearchStore } from '~/stores/web-search'
 import { testIds } from '~/utils/testids'
 import { installFakeMedia } from '~/utils/testing/fake-media'
 import { catalogModel, chatId, chatSummary, customizationList, messageId, pluginSummary, projectFileEntry, projectId, projectSummary, projectTrustList, queueItem, rememberResult, styleEntry, trustCommandItem } from '~/utils/testing/fixtures'
@@ -32,6 +33,7 @@ import ChatComposer from './ChatComposer.vue'
 import { anthropic, bodyAll, byTestId, haiku, llama, NuxtLinkStub, ollama, openai, seedStores, sonnet } from './composer-test-utils'
 import ComposerAddMenu from './ComposerAddMenu.vue'
 import SendStopButton from './SendStopButton.vue'
+import WebSearchToggle from './WebSearchToggle.vue'
 
 const mock = vi.hoisted(() => ({
   api: null as unknown,
@@ -1993,6 +1995,54 @@ describe('chatComposer', () => {
       await flushPromises()
       expect(wrapper.find(byTestId(testIds.composerRefusal)).exists()).toBe(false)
       wrapper.unmount()
+    })
+  })
+
+  describe('web search toggle (Phase 14, C54 mount)', () => {
+    it('mounts WebSearchToggle right after OutputStyleMenu while search is available; hidden for image models', async () => {
+      seedStores()
+      // No native search and no search API key (the resolver's `no-backend`) and the chat's mode is off: not shown yet.
+      const unavailable = mountComposer()
+      expect(unavailable.wrapper.find(byTestId(testIds.composerWebSearch)).exists()).toBe(false)
+      unavailable.wrapper.unmount()
+
+      useWebSearchStore().config = { backend: 'brave', keys: { brave: { set: true, hint: null, source: 'stored' }, tavily: { set: false, hint: null, source: null }, exa: { set: false, hint: null, source: null } }, maxResults: 5, pluginActive: true }
+      const { wrapper } = mountComposer()
+      const toggle = wrapper.get(byTestId(testIds.composerWebSearch))
+      expect(toggle.attributes()).toMatchObject({ 'data-state': 'off', 'data-mode': 'builtin', 'aria-pressed': 'false' })
+      const order = [...wrapper.element.querySelectorAll('[data-testid]')].map(node => node.getAttribute('data-testid'))
+      expect(order.indexOf(testIds.outputStyleTrigger)).toBeLessThan(order.indexOf(testIds.composerWebSearch))
+      wrapper.unmount()
+
+      seedStores({ models: [sonnet, gptImage] })
+      const image = mountComposer({ modelRef: gptImage.ref })
+      expect(image.wrapper.find(byTestId(testIds.composerWebSearch)).exists()).toBe(false)
+      image.wrapper.unmount()
+    })
+
+    it('a chat whose mode is auto shows the toggle pressed even while search is unavailable', async () => {
+      seedStores()
+      const wrapper = mount({
+        render: () => h(TooltipProvider, null, { default: () => h(ChatComposer, { chatId: chatId(1), status: 'ready', modelRef: sonnet.ref, reasoningEffort: 'auto', toolMode: 'ask', webSearch: 'auto' }) }),
+      }, { attachTo: document.body, global: { plugins: [pinia], stubs: { NuxtLink: NuxtLinkStub }, provide: { [CHAT_VIEW_ACTIONS as symbol]: chatViewActions } } })
+      expect(wrapper.get(byTestId(testIds.composerWebSearch)).attributes()).toMatchObject({ 'data-state': 'unavailable', 'aria-pressed': 'true', 'aria-disabled': 'true' })
+      wrapper.unmount()
+    })
+
+    it('feeds the resolver and re-emits a toggle as update:webSearch', async () => {
+      seedStores()
+      useWebSearchStore().config = { backend: 'brave', keys: { brave: { set: true, hint: null, source: 'stored' }, tavily: { set: false, hint: null, source: null }, exa: { set: false, hint: null, source: null } }, maxResults: 5, pluginActive: true }
+      const { wrapper, composer } = mountComposer()
+      const toggle = wrapper.getComponent(WebSearchToggle)
+      expect(toggle.props()).toMatchObject({ modelValue: false, availability: { kind: 'builtin' }, via: 'Brave Search' })
+      await wrapper.get(byTestId(testIds.composerWebSearch)).trigger('click')
+      expect(composer().emitted('update:webSearch')).toEqual([['auto']])
+      wrapper.unmount()
+
+      seedStores({ models: [catalogModel({ id: 'claude-sonnet-5', name: 'Claude Sonnet 5', webSearch: 'native' })] })
+      const native = mountComposer()
+      expect(native.wrapper.getComponent(WebSearchToggle).props()).toMatchObject({ availability: { kind: 'native', exclusive: false }, via: anthropic.name })
+      native.wrapper.unmount()
     })
   })
 })

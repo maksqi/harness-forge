@@ -7,12 +7,15 @@
 // eagerly (in `SERVICE_NAMES` order) so a failing factory fails the boot. A factory that needs itself through another
 // service's factory (a construction cycle) throws; defer such calls to the service methods or `start()`.
 import type { Env } from './env.ts'
+import type { ElicitationBrokerOptions } from './mcp/elicitation/types.ts'
 import type { SafeFetch } from './security/types.ts'
 import type { AppBase, AppDeps, AppServices, ServiceName } from './types.ts'
 import { createModelCatalog } from './catalog/index.ts'
 import { createChatRunner } from './chat/index.ts'
 import { envBootWarnings } from './env.ts'
+import { createElicitationBroker } from './mcp/elicitation/broker.ts'
 import { createMcpManager } from './mcp/index.ts'
+import { createMcpAuthService } from './mcp/oauth/index.ts'
 import { createProjectMcpManager } from './mcp/project.ts'
 import { createToolService } from './mcp/tools.ts'
 import { createPluginDrafts } from './plugins/drafts/index.ts'
@@ -72,6 +75,20 @@ export function createPluginSourceMarketplaces(deps: AppDeps): AppServices['mark
   return createMarketplaceService(deps, { safeFetch: pluginSourceFetch(deps.env) })
 }
 
+/**
+ * The options of the elicitation broker (Phase 14, ADR-060): the wait of the test-only `HF_TEST_ELICITATION_WAIT_MS` when
+ * it is honored (`env.testElicitationWaitMs`, only with `HF_MOCK_PROVIDER=1`); none otherwise (the broker's default
+ * `LIMITS.mcpElicitationWaitMs`, 480 s).
+ */
+export function elicitationBrokerOptions(env: Pick<Env, 'testElicitationWaitMs'>): ElicitationBrokerOptions {
+  return env.testElicitationWaitMs === null ? {} : { waitMs: env.testElicitationWaitMs }
+}
+
+/** The production elicitation broker (Phase 14): `createElicitationBroker` with `elicitationBrokerOptions(env)`. */
+export function createEnvElicitationBroker(deps: AppDeps): AppServices['elicitations'] {
+  return createElicitationBroker(deps, elicitationBrokerOptions(deps.env))
+}
+
 /** The production factory of every service. */
 export const SERVICE_FACTORIES: ServiceFactories = {
   keyring: createKeyring,
@@ -121,6 +138,9 @@ export const SERVICE_FACTORIES: ServiceFactories = {
   marketplaces: createPluginSourceMarketplaces,
   claudeImport: createClaudeImportService,
   projectDefinitions: createProjectDefinitionsService,
+  // Phase 14 (P14-0b): MCP OAuth (C50 stub, W14.1) and the elicitation broker (C50 stub, W14.3). Both lazy: no boot step.
+  mcpAuth: createMcpAuthService,
+  elicitations: createEnvElicitationBroker,
 }
 
 /** Instantiation order (dependencies first; construction-time access to later services still works lazily). */
@@ -186,7 +206,8 @@ export type BootStep = typeof BOOT_STEPS[number]
  * Phase 10); neither have the Phase 11 services (hook snapshots, the project config reader, project trust and the
  * project MCP runtimes are lazy; `<dataDir>/hooks` is created on the first hook run), nor have the Phase 12 services
  * (marketplaces, the home-folder import and the project definition editor are lazy; `<dataDir>/transcripts` is created
- * on the first hook that needs a transcript). Frozen order (Phase 10, confirmed in Phase 11 and Phase 12): `BOOT_STEPS`.
+ * on the first hook that needs a transcript), nor have the Phase 14 services (`mcpAuth` and `elicitations` live in memory
+ * and start empty). Frozen order (Phase 10, confirmed in Phase 11, Phase 12 and Phase 14): `BOOT_STEPS`.
  */
 export async function startDeps(deps: AppDeps): Promise<void> {
   for (const warning of envBootWarnings(deps.env))
@@ -209,6 +230,7 @@ export async function startDeps(deps: AppDeps): Promise<void> {
 /** The steps of `stopDeps`, in order (each named by its service). */
 export const SHUTDOWN_STEPS = [
   'claudeImport',
+  'elicitations',
   'data',
   'runs',
   'hooks',
@@ -220,6 +242,7 @@ export const SHUTDOWN_STEPS = [
   'marketplaces',
   'plugins',
   'mcp',
+  'mcpAuth',
   'catalog',
   'events',
 ] as const
@@ -227,7 +250,8 @@ export type ShutdownStep = typeof SHUTDOWN_STEPS[number]
 
 /**
  * Shutdown (ARCHITECTURE.md 5): drop the import plans first (Phase 12, `claudeImport.stop()`: the plans with their
- * payloads; a scan in flight is aborted) -> stop the automatic file sweep (Phase 8: its timer, and a sweep in flight is
+ * payloads; a scan in flight is aborted) -> cancel the elicitation waits (Phase 14, `elicitations.stop()`: every pending
+ * request answers `cancel`, reason `stopped`, so the MCP tool calls and the runs can finish) -> stop the automatic file sweep (Phase 8: its timer, and a sweep in flight is
  * aborted) -> the runs (`runs.stopAll()`; Phase 9: every chat's steer queue cleared first, so no queued message starts
  * a new turn; Phase 10: then every background task aborted, awaited at most 5 s, its row saved; then every run aborted
  * and persisted as `aborted`, its sub-agents through the run's signal) -> kill the running hook processes (Phase 11,
@@ -237,13 +261,15 @@ export type ShutdownStep = typeof SHUTDOWN_STEPS[number]
  * 11, `projectConfig.stop()`; project trust keeps no state to stop) -> drop the mention file index (Phase 9,
  * `projectFiles.stop()`) -> stop the checkpoint store (Phase 8: the prune timer, after the runs so no journal write is
  * cut off) -> abort the marketplace fetches in flight (Phase 12, `marketplaces.stop()`, before the plugins) -> dispose
- * plugins -> close MCP clients -> stop catalog timers -> close SSE streams. Every step runs even when an earlier one
+ * plugins -> close MCP clients -> drop the pending OAuth sign-ins (Phase 14, `mcpAuth.stop()`, after both MCP managers
+ * closed) -> stop catalog timers -> close SSE streams. Every step runs even when an earlier one
  * fails (failures are logged). The caller closes the HTTP server before and the database after. The project definition
- * editor keeps no state (no step). Frozen order (Phase 12): `SHUTDOWN_STEPS`.
+ * editor keeps no state (no step). Frozen order (Phase 14): `SHUTDOWN_STEPS`.
  */
 export async function stopDeps(deps: AppDeps): Promise<void> {
   const steps: Array<[ShutdownStep, () => Promise<void>]> = [
     ['claudeImport', () => deps.claudeImport.stop()],
+    ['elicitations', () => deps.elicitations.stop()],
     ['data', () => deps.data.stop()],
     ['runs', () => deps.runs.stopAll()],
     ['hooks', () => deps.hooks.stop()],
@@ -255,6 +281,7 @@ export async function stopDeps(deps: AppDeps): Promise<void> {
     ['marketplaces', () => deps.marketplaces.stop()],
     ['plugins', () => deps.plugins.stop()],
     ['mcp', () => deps.mcp.stop()],
+    ['mcpAuth', () => deps.mcpAuth.stop()],
     ['catalog', () => deps.catalog.stop()],
     ['events', () => deps.events.stop()],
   ]

@@ -55,7 +55,12 @@
 // polite region announces "A hook asked the agent to continue" once per hook carrier (`run.started` with `origin:
 // 'hook'`, once it shows) and "A hook blocked {tool}" once per `denied` record of this tab's stream (`hookAnnouncement`;
 // the records and carriers of a loaded path are never announced).
-import type { HarnessError, HookData, MessageBranch, ReasoningEffort, RestoreResult, ToolMode } from '@harness-forge/shared'
+// Phase 14 (ADR-060, ADR-063; C54 mounts, W14.9 owns the view in P14-A; frozen from Gate P14-0b): the view provides
+// TOOL_ELICITATIONS from its session (`createToolElicitationContext`: the tool rows are `v-memo`ed, so the pending MCP
+// question of a running call, the posting state and the answer reach `ToolPart` through it, like TOOL_APPROVAL_CONTEXT;
+// ChatTranscript has no session) and passes the chat's web search mode to the composer (`session.webSearch`, v-model
+// `webSearch`). A chat that waits for an answer (`input`) still counts as running.
+import type { HarnessError, HookData, MessageBranch, ReasoningEffort, RestoreResult, ToolMode, WebSearchMode } from '@harness-forge/shared'
 import type { FileUIPart } from 'ai'
 import type { ComposerRefusalData } from '~/components/chat/composer/output-style'
 import type { ChatComposerExposed, ComposerSubmitInput } from '~/components/chat/composer/types'
@@ -82,7 +87,7 @@ import { isBusyConflict, isRunActiveConflict, sendInputOf, useChatSession } from
 import { useServerEvents } from '~/composables/useServerEvents'
 import { useBackgroundTasksStore } from '~/stores/background-tasks'
 import { QUEUE_ITEM_GONE_MESSAGE } from '~/stores/chat-queue'
-import { useChatsStore } from '~/stores/chats'
+import { isRunningState, useChatsStore } from '~/stores/chats'
 import { useModelsStore } from '~/stores/models'
 import { usePluginsStore } from '~/stores/plugins'
 import { useProjectsStore } from '~/stores/projects'
@@ -106,6 +111,7 @@ import ChatNotFound from './ChatNotFound.vue'
 import ChatTranscript from './ChatTranscript.vue'
 import { hookAnnouncement, hookDataOf, isHookCarrierMessage } from './hooks/hook-notes'
 import { TOOL_APPROVAL_CONTEXT } from './parts/tool-approval-context'
+import { createToolElicitationContext, TOOL_ELICITATIONS } from './parts/tool-elicitation-context'
 import { toolApprovalLabel } from './parts/tool-row'
 import QueuedMessages from './queue/QueuedMessages.vue'
 
@@ -170,8 +176,10 @@ const todos = session.todos
 const activity = session.activity
 /** + Phase 11: the chat's own output style (null = Automatic). */
 const outputStyle = session.outputStyle
-/** A run of this chat is active (this tab's request, or one the chats store reports). */
-const runActive = computed(() => session.busy.value || chats.runState[props.chatId] === 'running')
+/** + Phase 14: the chat's web search mode. */
+const webSearch = session.webSearch
+/** A run of this chat is active (this tab's request, or one the chats store reports; + Phase 14: also `input`). */
+const runActive = computed(() => session.busy.value || isRunningState(chats.runState[props.chatId]))
 /** Queued messages wait for the next run while the chat awaits an approval. */
 const waitingForApproval = computed(() => session.runState.value === 'approval')
 /** Queued messages whose cancel is in flight. */
@@ -327,6 +335,9 @@ provide(TOOL_APPROVAL_CONTEXT, {
   projectId: () => projectId.value,
   shellCwd: () => session.cwd.value,
 })
+
+// + Phase 14 (ADR-060): the pending MCP questions of the running calls and their answers, for the tool rows.
+provide(TOOL_ELICITATIONS, createToolElicitationContext(session))
 
 // ---------- announcements (polite live region) ----------
 
@@ -498,7 +509,7 @@ onMounted(() => {
 })
 
 // A run that starts while the chat is shown (another tab, a continuation elsewhere) is followed live.
-watch(() => chats.runState[props.chatId] === 'running', (running) => {
+watch(() => isRunningState(chats.runState[props.chatId]), (running) => {
   if (running)
     void session.resumeIfRunning()
 })
@@ -908,6 +919,11 @@ function onOutputStyleChange(value: string | null) {
   outputStyle.value = value
 }
 
+/** + Phase 14: the chat's web search mode (the composer's toggle); applies from the next turn. */
+function onWebSearchChange(value: WebSearchMode) {
+  webSearch.value = value
+}
+
 /** The new-chat picker: local until the first send (a saved chat moves through `PATCH`, which can fail). */
 function setProject(value: string | null) {
   session.setProject(value).catch(failure => reportFailure('Could not move the chat', failure))
@@ -939,12 +955,14 @@ function setProject(value: string | null) {
             :previous-images="previousImages"
             :project-id="projectId"
             :output-style="outputStyle"
+            :web-search="webSearch"
             :disabled="noProvider"
             placeholder="Ask anything…"
             @update:model-ref="onModelChange"
             @update:reasoning-effort="onEffortChange"
             @update:tool-mode="onToolModeChange"
             @update:output-style="onOutputStyleChange"
+            @update:web-search="onWebSearchChange"
             @submit="onSubmit"
             @stop="onStop"
             @edit-last="onEditLast"
@@ -1021,12 +1039,14 @@ function setProject(value: string | null) {
               :previous-images="previousImages"
               :project-id="projectId"
               :output-style="outputStyle"
+              :web-search="webSearch"
               :disabled="noProvider"
               placeholder="Reply…"
               @update:model-ref="onModelChange"
               @update:reasoning-effort="onEffortChange"
               @update:tool-mode="onToolModeChange"
               @update:output-style="onOutputStyleChange"
+              @update:web-search="onWebSearchChange"
               @submit="onSubmit"
               @stop="onStop"
               @edit-last="onEditLast"

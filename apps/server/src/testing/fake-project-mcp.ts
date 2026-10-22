@@ -11,13 +11,28 @@
 // its reason. `list` answers the scripted list (else empty) with `variables[].set` from the stored values. `setVariables`
 // calls `requireFreshAuth` first when given, stores or clears the values in memory and answers the list. `reconnect`
 // answers the listed server (`not_found` otherwise). `stopProject` / `stop` are recorded. Any id is a project.
+//
+// Phase 14 (C50-T6): the prompt and resource members. `prompts` / `resources` answer the scripted listing of the project
+// (`promptLists` / `resourceLists`, else empty); `getPrompt` / `readResource` record the call and answer the scripted
+// result (`promptResults` keyed `<projectId>/<serverId>/<name>`, `resourceContents` keyed `<projectId>/<serverId>/<uri>`)
+// or `not_found`; an aborted signal rejects with its reason. `authTarget` is the real naming (`project:<projectId>`,
+// `mcp-oauth.<serverId>`). Hand-written global `McpManager` doubles spread `inertMcpManagerMembers()` (./fake-mcp.ts).
 import type { ProjectMcpList, ToolPolicy } from '@harness-forge/shared'
-import type { ProjectMcpManager, ProjectMcpTools } from '../mcp/types.ts'
+import type {
+  McpPromptInfo,
+  McpPromptResult,
+  McpResourceContents,
+  McpResourceInfo,
+  ProjectMcpListing,
+  ProjectMcpManager,
+  ProjectMcpTools,
+} from '../mcp/types.ts'
 import type { RegisteredTool } from '../registry/types.ts'
 import { HarnessError } from '@harness-forge/shared'
 import { CORE_MCP_PLUGIN_ID } from '../mcp/internal.ts'
 import { mcpToolDefinition } from '../mcp/mcp-tools.ts'
 import { noProjectMcpTools } from '../mcp/project.ts'
+import { emptyProjectMcpListing, projectMcpAuthStorage } from './fake-mcp.ts'
 
 /**
  * A project MCP tool (`mcp__<serverId>__<tool>`, owner `core-mcp`, `mcpServerId` set) whose call answers `text` (default
@@ -51,6 +66,20 @@ export interface FakeProjectMcpManagerOptions {
   tools?: Readonly<Record<string, ProjectMcpTools>>
   /** `list` answers per project id. */
   lists?: Readonly<Record<string, ProjectMcpList>>
+  /** Phase 14: `prompts` answers per project id. */
+  promptLists?: Readonly<Record<string, ProjectMcpListing<McpPromptInfo>>>
+  /** Phase 14: `resources` answers per project id. */
+  resourceLists?: Readonly<Record<string, ProjectMcpListing<McpResourceInfo>>>
+}
+
+/** A `getPrompt` / `readResource` call of the fake (Phase 14). */
+export interface FakeProjectMcpCall {
+  readonly projectId: string
+  readonly serverId: string
+  /** The prompt name (`getPrompt`) or the resource URI (`readResource`). */
+  readonly target: string
+  /** `getPrompt` only: the bound arguments. */
+  readonly args?: Readonly<Record<string, string>>
 }
 
 export interface FakeProjectMcpManager extends ProjectMcpManager {
@@ -64,6 +93,18 @@ export interface FakeProjectMcpManager extends ProjectMcpManager {
   readonly toolsCalls: Array<{ projectId: string, waitMs: number }>
   /** Every `stopProject` argument, in order. */
   readonly stoppedProjects: string[]
+  /** Phase 14: `prompts` answers per project id; tests may edit them. */
+  readonly promptLists: Map<string, ProjectMcpListing<McpPromptInfo>>
+  /** Phase 14: `resources` answers per project id; tests may edit them. */
+  readonly resourceLists: Map<string, ProjectMcpListing<McpResourceInfo>>
+  /** Phase 14: `getPrompt` answers keyed `<projectId>/<serverId>/<name>`; tests may edit them. */
+  readonly promptResults: Map<string, McpPromptResult>
+  /** Phase 14: `readResource` answers keyed `<projectId>/<serverId>/<uri>`; tests may edit them. */
+  readonly resourceContents: Map<string, McpResourceContents>
+  /** Phase 14: every `getPrompt` call, in order. */
+  readonly promptCalls: FakeProjectMcpCall[]
+  /** Phase 14: every `readResource` call, in order. */
+  readonly resourceCalls: FakeProjectMcpCall[]
   /** Number of calls of each member. */
   readonly calls: Record<keyof ProjectMcpManager, number>
 }
@@ -74,7 +115,25 @@ export function createFakeProjectMcpManager(options: FakeProjectMcpManagerOption
   const variables = new Map<string, Map<string, string>>()
   const toolsCalls: Array<{ projectId: string, waitMs: number }> = []
   const stoppedProjects: string[] = []
-  const calls: Record<keyof ProjectMcpManager, number> = { toolsFor: 0, list: 0, setVariables: 0, reconnect: 0, stopProject: 0, stop: 0 }
+  const promptLists = new Map(Object.entries(options.promptLists ?? {}))
+  const resourceLists = new Map(Object.entries(options.resourceLists ?? {}))
+  const promptResults = new Map<string, McpPromptResult>()
+  const resourceContents = new Map<string, McpResourceContents>()
+  const promptCalls: FakeProjectMcpCall[] = []
+  const resourceCalls: FakeProjectMcpCall[] = []
+  const calls: Record<keyof ProjectMcpManager, number> = {
+    toolsFor: 0,
+    list: 0,
+    setVariables: 0,
+    reconnect: 0,
+    stopProject: 0,
+    stop: 0,
+    prompts: 0,
+    getPrompt: 0,
+    resources: 0,
+    readResource: 0,
+    authTarget: 0,
+  }
 
   function listOf(projectId: string): ProjectMcpList {
     const list = lists.get(projectId) ?? { items: [], variables: [] }
@@ -88,6 +147,12 @@ export function createFakeProjectMcpManager(options: FakeProjectMcpManagerOption
     variables,
     toolsCalls,
     stoppedProjects,
+    promptLists,
+    resourceLists,
+    promptResults,
+    resourceContents,
+    promptCalls,
+    resourceCalls,
     calls,
     toolsFor: async (projectId, toolsOptions) => {
       calls.toolsFor += 1
@@ -128,6 +193,38 @@ export function createFakeProjectMcpManager(options: FakeProjectMcpManagerOption
     },
     stop: async () => {
       calls.stop += 1
+    },
+    prompts: async (projectId, listOptions) => {
+      calls.prompts += 1
+      listOptions?.signal?.throwIfAborted()
+      return promptLists.get(projectId) ?? emptyProjectMcpListing<McpPromptInfo>()
+    },
+    getPrompt: async (projectId, serverId, name, args, signal) => {
+      calls.getPrompt += 1
+      promptCalls.push({ projectId, serverId, target: name, args: { ...args } })
+      signal.throwIfAborted()
+      const result = promptResults.get(`${projectId}/${serverId}/${name}`)
+      if (result === undefined)
+        throw new HarnessError({ code: 'not_found', message: `The MCP prompt "${name}" of "${serverId}" was not found.` })
+      return result
+    },
+    resources: async (projectId, listOptions) => {
+      calls.resources += 1
+      listOptions?.signal?.throwIfAborted()
+      return resourceLists.get(projectId) ?? emptyProjectMcpListing<McpResourceInfo>()
+    },
+    readResource: async (projectId, serverId, uri, signal) => {
+      calls.readResource += 1
+      resourceCalls.push({ projectId, serverId, target: uri })
+      signal.throwIfAborted()
+      const contents = resourceContents.get(`${projectId}/${serverId}/${uri}`)
+      if (contents === undefined)
+        throw new HarnessError({ code: 'not_found', message: `The MCP resource was not found on "${serverId}".` })
+      return contents
+    },
+    authTarget: (projectId, serverId) => {
+      calls.authTarget += 1
+      return projectMcpAuthStorage(projectId, serverId)
     },
   }
 }

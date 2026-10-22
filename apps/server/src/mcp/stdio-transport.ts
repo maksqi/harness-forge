@@ -13,6 +13,12 @@
 // when the server process exits by itself (whatever it started is stopped with it), so a grandchild never outlives its
 // server. The spawn is still the same argument array without a shell; `processGroup: false` keeps the v1.6 behavior
 // (signals to the child only).
+//
+// Phase 14 (ADR-060 / ADR-061, C51; FROZEN after P14-0b, unchanged code): server requests (a JSON-RPC message with an
+// `id` and a `method`, e.g. `elicitation/create`) go to the client like responses, which answers them through its
+// `onElicitationRequest` handler; every server notification goes to `onNotification` (the managers refresh the tools on
+// `notifications/tools/list_changed` and the prompt / resource caches on `notifications/prompts/list_changed` /
+// `notifications/resources/list_changed`).
 import type { JSONRPCMessage, MCPTransport } from '@ai-sdk/mcp'
 import type { Buffer } from 'node:buffer'
 import type { ChildProcess } from 'node:child_process'

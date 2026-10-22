@@ -45,11 +45,16 @@
 // scope) lets SkillToolBody show a `context: fork` skill's content as its report.
 // v1.8.1: TOOL_APPROVAL_HOOKS gives the approval card the call's records (`hooks`), so it shows the reason of a
 // `PermissionRequest` record ("A PermissionRequest hook answered: {reason}"; the card's props stay frozen).
-import type { HookData, TodoItem } from '@harness-forge/shared'
+// Phase 14 (ADR-060, ADR-062; C54 mounts, W14.9 owns the row in P14-A; frozen from Gate P14-0b): a running MCP call with a
+// pending question (`TOOL_ELICITATIONS.forCall`, the rows are `v-memo`ed) renders ElicitationCard right under the row (its
+// answer goes through `TOOL_ELICITATIONS.respond`); a web search row (`isWebSearchPart`: the builtin `search_web`, or a
+// provider-executed search) renders WebSearchToolBody in its body. W14.9 adds "Waiting for your input", the result lines
+// of the final output's records and the search row's label.
+import type { HookData, McpElicitationAnswerBody, TodoItem } from '@harness-forge/shared'
 import type { ToolPartLike } from '../chat-format'
 import type { WorkspaceRowSummary } from './tools/workspace-tools'
 import type { AllowRules } from '~/components/workspace/allowlist/allow-rule'
-import { shellToolOutputSchema, skillOutputSchema, splitQualifiedName, WORKSPACE_TOOL_ACCESS } from '@harness-forge/shared'
+import { isProviderExecutedPart, shellToolOutputSchema, skillOutputSchema, splitQualifiedName, WORKSPACE_TOOL_ACCESS } from '@harness-forge/shared'
 import {
   BanIcon,
   BookOpenIcon,
@@ -107,13 +112,16 @@ import {
 } from '../chat-format'
 import { hookPluginId, toolHookDecision } from '../hooks/hook-notes'
 import HookNote from '../hooks/HookNote.vue'
+import ElicitationCard from './ElicitationCard.vue'
 import { TOOL_APPROVAL_CONTEXT } from './tool-approval-context'
 import { TOOL_APPROVAL_HOOKS } from './tool-approval-hooks'
+import { TOOL_ELICITATIONS } from './tool-elicitation-context'
 import { toolRowArgument } from './tool-row'
 import ToolApprovalCard from './ToolApprovalCard.vue'
 import ToolHookBadge from './tools/ToolHookBadge.vue'
 import ToolRowSummary from './tools/ToolRowSummary.vue'
 import ToolRuleBadge from './tools/ToolRuleBadge.vue'
+import WebSearchToolBody from './tools/WebSearchToolBody.vue'
 import {
   isWorkspaceToolName,
   workspaceRowSummary,
@@ -122,6 +130,7 @@ import {
 } from './tools/workspace-tools'
 import WorkspaceToolBody from './tools/WorkspaceToolBody.vue'
 import ToolValueBlock from './ToolValueBlock.vue'
+import { isWebSearchPart } from './web-search'
 
 const props = withDefaults(defineProps<{
   part: ToolPartLike
@@ -159,6 +168,8 @@ const scroll = inject(TRANSCRIPT_SCROLL, null)
 const approvalContext = inject(TOOL_APPROVAL_CONTEXT, null)
 /** + Phase 11: the hooks running in the chat's stream (absent on share pages). */
 const hookActivity = inject(HOOK_ACTIVITY, null)
+/** + Phase 14: the pending MCP questions of the chat's running calls (absent on share pages). */
+const elicitations = inject(TOOL_ELICITATIONS, null)
 watch(open, (isOpen) => {
   if (isOpen)
     scroll?.holdPosition()
@@ -412,6 +423,19 @@ const view = computed(() => {
   return running
 })
 
+/** + Phase 14 (ADR-060): the question this running call waits on, if any. */
+const pendingRequest = computed(() => (elicitations && props.part.toolCallId ? elicitations.forCall(props.part.toolCallId) : null))
+/** + Phase 14 (ADR-062): a web search row (the builtin `search_web`, or a provider-executed search). */
+const webSearchRow = computed(() => isWebSearchPart(props.part))
+const nativeSearch = computed(() => webSearchRow.value && isProviderExecutedPart(props.part))
+
+/** + Phase 14: the card's answer (a 400's field issues stay in TOOL_ELICITATIONS; W14.9 shows the other failures). */
+function onElicitationRespond(answer: McpElicitationAnswerBody) {
+  const request = pendingRequest.value
+  if (request && elicitations)
+    elicitations.respond(request.id, answer).catch(() => {})
+}
+
 /** + Phase 9: the plan card's decision as the approval of the call (`planMode` only with an approval). */
 function onPlanDecide(decision: { approved: boolean, mode?: 'edits' | 'ask', feedback?: string }) {
   const approval = props.part.approval
@@ -526,6 +550,14 @@ function onDecide(decision: { approved: boolean, alwaysAllow: boolean, acceptEdi
         <div v-if="hooks.length > 0" data-slot="tool-hook-notes" class="mb-2 flex min-w-0 flex-col gap-1">
           <HookNote v-for="data in hooks" :key="data.id" :data="data" variant="tool" :plugin-name="hookPluginName(data)" />
         </div>
+        <WebSearchToolBody
+          v-if="webSearchRow"
+          :input="part.input"
+          :output="hasOutput ? part.output : undefined"
+          :native="nativeSearch"
+          :running="status === 'running'"
+          class="mb-2"
+        />
         <AgentToolBody v-if="agentView">
           <TodoList v-if="agentView.kind === 'todo'" :todos="agentView.todos" />
           <SkillToolBody v-else-if="agentView.kind === 'skill'" :input="part.input" :output="hasOutput ? part.output : undefined" />
@@ -555,6 +587,14 @@ function onDecide(decision: { approved: boolean, alwaysAllow: boolean, acceptEdi
         </div>
       </AiToolContent>
     </AiTool>
+    <ElicitationCard
+      v-if="pendingRequest && elicitations"
+      :request="pendingRequest"
+      :busy="elicitations.busy(pendingRequest.id)"
+      :issues="elicitations.issues(pendingRequest.id)"
+      :gone="elicitations.gone(pendingRequest.id)"
+      @respond="onElicitationRespond"
+    />
     <PlanApprovalCard
       v-if="awaitingDecision && isPlanTool"
       :part="part"

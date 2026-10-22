@@ -17,7 +17,10 @@ import { jsonSchema } from 'ai'
 import { and, eq } from 'drizzle-orm'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { secrets } from '../db/schema.ts'
-import { outputJson, outputText, processAlive, readMcpPids, startHttpEchoServer, toolContext, waitFor } from './__fixtures__/harness.ts'
+import { createFakeElicitationBroker } from '../testing/fake-elicitations.ts'
+import { createFakeMcpAuthService, fakeMcpAuthInfo, mcpAuthTargetKey } from '../testing/fake-mcp-auth.ts'
+import { outputJson, outputText, processAlive, readMcpPids, runToolExecute, spyMcpCaches, startElicitServer, startHttpEchoServer, startStatusServer, toolContext, waitFor } from './__fixtures__/harness.ts'
+import { HEADER_REJECTED_MESSAGE, NEEDS_AUTH_MESSAGE } from './errors.ts'
 import { createProjectMcpTestApp, killAll, minServerItem, remoteServerItem } from './project-testing.ts'
 import { createProjectVariableStore } from './project-variables.ts'
 import { noProjectMcpTools } from './project.ts'
@@ -56,7 +59,7 @@ function tool(result: ProjectMcpTools, name: string): RegisteredTool {
 }
 
 async function call(result: ProjectMcpTools, name: string, input: Record<string, unknown> = {}): Promise<unknown> {
-  return tool(result, name).definition.execute(input, toolContext())
+  return (await runToolExecute(tool(result, name).definition.execute(input, toolContext()))).output
 }
 
 async function server(app: ProjectMcpTestApp, id: string): Promise<ProjectMcpServer> {
@@ -518,3 +521,94 @@ function remoteToolDefinition(): ToolDefinition {
     execute: async () => ({ ok: true }),
   }
 }
+
+// ---------- Phase 14 seams (C51) ----------
+
+describe('project MCP manager: Phase 14 seams', () => {
+  it('a 401 is needs-auth (auth_invalid, unavailable to runs) and no run restarts it; a reconnect tries once more', async () => {
+    const endpoint = await startStatusServer(401)
+    servers.push(endpoint)
+    const mcpAuth = createFakeMcpAuthService()
+    const app = await open({ overrides: { mcpAuth } })
+    const item = remoteServerItem('Locked', endpoint.url)
+    const keyed = remoteServerItem('Keyed', endpoint.url, { authorization: 'Bearer wrong-key-1234' })
+    app.setServers([item, keyed])
+    await app.approve(item, keyed)
+    const result = await tools(app, 5000)
+    expect(result.tools).toEqual([])
+    expect(result.unavailable.sort()).toEqual(['Keyed', 'Locked'])
+    const locked = await server(app, 'locked')
+    expect(projectMcpListSchema.parse({ items: [locked], variables: [] }).items[0]).toMatchObject({
+      state: 'needs-auth',
+      error: { code: 'auth_invalid', status: 401, message: NEEDS_AUTH_MESSAGE },
+      auth: null,
+    })
+    expect((await server(app, 'keyed')).error).toEqual({ code: 'auth_invalid', status: 401, message: HEADER_REJECTED_MESSAGE })
+    const initializes = (): number => endpoint.methods.filter(method => method === 'initialize').length
+    expect(initializes()).toBe(2)
+    // The provider of the transport without an Authorization header, with the project target.
+    expect(mcpAuth.providers).toEqual([{ target: { kind: 'project', projectId: app.project.id, serverId: 'locked' }, mode: 'connect' }])
+
+    // Later runs do not restart a needs-auth server.
+    expect((await tools(app, 5000)).unavailable.sort()).toEqual(['Keyed', 'Locked'])
+    expect(initializes()).toBe(2)
+    expect(await app.t.deps.projectMcp.reconnect(app.project.id, 'locked')).toMatchObject({ state: 'needs-auth' })
+    expect(initializes()).toBe(3)
+
+    // The sign-in state of an approved remote server (W14.1 implements `info`).
+    mcpAuth.infos.set(mcpAuthTargetKey({ kind: 'project', projectId: app.project.id, serverId: 'locked' }), fakeMcpAuthInfo())
+    expect((await server(app, 'locked')).auth).toEqual(fakeMcpAuthInfo())
+    expect(app.t.deps.projectMcp.authTarget(app.project.id, 'locked')).toEqual({ kind: 'project', scope: `project:${app.project.id}`, name: 'mcp-oauth.locked' })
+
+    // Listings name it unavailable; a request is refused with needs-auth.
+    expect(await app.t.deps.projectMcp.prompts(app.project.id)).toMatchObject({ items: [], unavailable: [{ serverId: 'locked', status: 'needs-auth' }, { serverId: 'keyed', status: 'needs-auth' }] })
+    await expect(app.t.deps.projectMcp.getPrompt(app.project.id, 'locked', 'greet', {}, new AbortController().signal))
+      .rejects
+      .toMatchObject({ code: 'conflict', details: { reason: 'needs-auth' } })
+  })
+
+  it('declares the elicitation capability, hands requests to the broker and fills the caches; listings and requests', async () => {
+    const endpoint = await startElicitServer()
+    servers.push(endpoint)
+    const fake = createFakeElicitationBroker()
+    fake.handlerAnswer = { action: 'accept', content: { name: 'Ada' } }
+    const caches = spyMcpCaches()
+    const app = await open({ overrides: { elicitations: fake }, manager: { createPromptCache: caches.prompts, createResourceCache: caches.resources } })
+    const item = remoteServerItem('Elicit', endpoint.url)
+    const pending = minServerItem('Later')
+    app.setServers([item, pending])
+    await app.approve(item)
+    const result = await tools(app)
+    expect(JSON.parse(outputText(await call(result, 'mcp__elicit__ask')))).toEqual({ action: 'accept', content: { name: 'Ada' } })
+    expect(fake.handled[0]?.runtimeKey).toMatch(new RegExp(`^project:${app.project.id}/elicit#\\d+$`))
+    await waitFor(() => caches.refreshed.length === 2)
+    expect(caches.refreshed).toEqual(expect.arrayContaining([
+      { kind: 'prompts', key: `${app.project.id}/elicit`, serverName: 'Elicit', projectId: app.project.id },
+      { kind: 'resources', key: `${app.project.id}/elicit`, serverName: 'Elicit', projectId: app.project.id },
+    ]))
+
+    // The pending server is not named; the connected one lists through the (empty) caches.
+    expect(await app.t.deps.projectMcp.prompts(app.project.id)).toEqual({ items: [], truncated: false, unavailable: [], shadowed: new Set() })
+    expect(await app.t.deps.projectMcp.resources(app.project.id, { waitMs: 100 })).toEqual({ items: [], truncated: false, unavailable: [], shadowed: new Set() })
+    await expect(app.t.deps.projectMcp.prompts('prj_ZZZZZZZZZZZZZZZZ')).rejects.toMatchObject({ code: 'not_found' })
+    const signal = new AbortController().signal
+    await expect(app.t.deps.projectMcp.getPrompt(app.project.id, 'elicit', 'greet', {}, signal)).rejects.toMatchObject({ code: 'not_implemented' })
+    await expect(app.t.deps.projectMcp.readResource(app.project.id, 'elicit', 'file:///a', signal)).rejects.toMatchObject({ code: 'not_implemented' })
+    await expect(app.t.deps.projectMcp.getPrompt(app.project.id, 'later', 'greet', {}, signal)).rejects.toMatchObject({ code: 'conflict', details: { reason: 'untrusted' } })
+    await expect(app.t.deps.projectMcp.readResource(app.project.id, 'nope', 'file:///a', signal)).rejects.toMatchObject({ code: 'not_found' })
+  })
+
+  it('the listings start approved servers that are not running and wait at most waitMs', async () => {
+    const endpoint = await startElicitServer()
+    servers.push(endpoint)
+    const app = await open()
+    const item = remoteServerItem('Elicit', endpoint.url)
+    app.setServers([item])
+    await app.approve(item)
+    expect(await stateOf(app, 'elicit')).toBe('idle')
+    const first = await app.t.deps.projectMcp.prompts(app.project.id)
+    expect(first.unavailable).toEqual([{ serverId: 'elicit', status: 'connecting' }])
+    await waitFor(async () => (await stateOf(app, 'elicit')) === 'connected')
+    expect((await app.t.deps.projectMcp.resources(app.project.id)).unavailable).toEqual([])
+  })
+})

@@ -19,6 +19,9 @@
 // kind `mcp`; its `review` opens ProjectTrustDialog. A saved server stays pending until it is approved here: after a
 // save (`saved`) the dialog refetches its rows and their trust items quietly (W12.13), so a new or changed server shows
 // "Needs approval" with Review… at once (`project-mcp.changed` / `project-trust.changed` update them too).
+// Phase 14 (ADR-059; C54 mounts, W14.7 implements; frozen from Gate P14-0b): a row's `signIn` / `signOut` go through
+// `useMcpSignIn` (`{ kind: 'project', projectId, serverId }`); a failure shows in the dialog's error. W14.7 adds the
+// sign-out confirmation and the "Signing in…" state.
 import type { ProjectMcpList, ProjectMcpServer, TrustItem } from '@harness-forge/shared'
 import type { ProjectFileTarget } from '~/components/settings/customize/customize'
 import { LIMITS, PROJECT_MCP_JSON_PATH } from '@harness-forge/shared'
@@ -35,6 +38,7 @@ import { cn } from '@/lib/utils'
 import ConfirmPasswordDialog from '~/components/common/ConfirmPasswordDialog.vue'
 import ProjectFileEditor from '~/components/settings/customize/ProjectFileEditor.vue'
 import { isFreshAuthCancelled, useFreshAuth } from '~/composables/useFreshAuth'
+import { useMcpSignIn } from '~/composables/useMcpSignIn'
 import { useProjectMcpStore } from '~/stores/project-mcp'
 import { useProjectTrustStore } from '~/stores/project-trust'
 import { useProjectsStore } from '~/stores/projects'
@@ -57,6 +61,7 @@ const mcp = useProjectMcpStore()
 const trust = useProjectTrustStore()
 const projects = useProjectsStore()
 const freshAuth = useFreshAuth()
+const mcpSignIn = useMcpSignIn()
 const ids = { variables: useId(), note: useId() }
 const root = useTemplateRef<HTMLElement>('root')
 
@@ -226,6 +231,29 @@ async function reconnect(server: ProjectMcpServer): Promise<void> {
   }
 }
 
+/** + Phase 14 (ADR-059): Sign in / Sign out of a row (`useMcpSignIn`); a failure shows in the dialog's error. */
+async function signInOut(server: ProjectMcpServer, action: 'in' | 'out'): Promise<void> {
+  const projectId = props.projectId
+  if (!projectId)
+    return
+  const current = session
+  actionError.value = null
+  const target = { kind: 'project' as const, projectId, serverId: server.id }
+  try {
+    if (action === 'in')
+      await mcpSignIn.start(target, { name: server.name })
+    else
+      await mcpSignIn.signOut(target, server.name)
+  }
+  catch (failure) {
+    if (current !== session)
+      return
+    const harnessError = toHarnessError(failure)
+    actionError.value = { code: harnessError.code, message: harnessError.message }
+    await focusError()
+  }
+}
+
 function openReview(server: ProjectMcpServer): void {
   review.value = { open: true, focusKey: server.sha256 }
 }
@@ -362,6 +390,8 @@ function onOpenChange(value: boolean): void {
                   @toggle="toggleRow(server.id)"
                   @reconnect="reconnect(server)"
                   @review="openReview(server)"
+                  @sign-in="signInOut(server, 'in')"
+                  @sign-out="signInOut(server, 'out')"
                 />
               </div>
             </div>

@@ -1,9 +1,11 @@
 import type { McpServer } from '@harness-forge/shared'
 import { HarnessError } from '@harness-forge/shared'
 import { describe, expect, it } from 'vitest'
+import { mcpServer as mcpServerFixture } from '~/utils/testing/fixtures'
 import {
   buildCreateInput,
   buildUpdatePatch,
+  canSignIn,
   emptyForm,
   formFromServer,
   isBlankRow,
@@ -12,13 +14,19 @@ import {
   MCP_STATUS_LABELS,
   mcpStatusText,
   newRow,
+  OAUTH_CALLBACK_PATH,
+  oauthDraftOf,
+  oauthInputOf,
+  oauthUpdateOf,
   parseArgs,
   policyLabel,
+  redirectUriFor,
   requiresFreshAuth,
   rowKey,
   saveErrorFields,
   schemaErrors,
   secretRecord,
+  signsOut,
   slugify,
   storedPlaceholder,
   toolCountLabel,
@@ -248,5 +256,42 @@ describe('validation', () => {
     })
     expect(saveErrorFields(invalid, form, 'create')).toEqual({ url: 'Bad URL', form: 'Something else' })
     expect(saveErrorFields(new HarnessError({ code: 'provider_error', message: 'Boom' }), form, 'create')).toEqual({ form: 'Boom' })
+  })
+})
+
+describe('oauth sign-in helpers (Phase 14, C54 signatures)', () => {
+  const remote = (overrides: Partial<McpServer> = {}) => mcpServerFixture({ id: 'linear', name: 'Linear', transport: { type: 'http', url: 'https://mcp.linear.app/mcp', headers: {}, oauth: null }, ...overrides })
+
+  it('canSignIn: a needs-auth server that is on, remote and has no Authorization header', () => {
+    expect(canSignIn(remote({ status: 'needs-auth' }))).toBe(true)
+    expect(canSignIn(remote({ status: 'connected' }))).toBe(false)
+    expect(canSignIn(remote({ status: 'needs-auth', enabled: false }))).toBe(false)
+    expect(canSignIn(remote({ status: 'needs-auth', transport: { type: 'sse', url: 'https://x.example.com/sse', headers: { authorization: stored }, oauth: null } }))).toBe(false)
+    expect(canSignIn(remote({ status: 'needs-auth', transport: { type: 'stdio', command: 'npx', args: [], env: {} } }))).toBe(false)
+  })
+
+  it('the redirect URI is the origin plus /oauth/callback', () => {
+    expect(OAUTH_CALLBACK_PATH).toBe('/oauth/callback')
+    expect(redirectUriFor('http://127.0.0.1:3000')).toBe('http://127.0.0.1:3000/oauth/callback')
+    expect(redirectUriFor('https://hf.example.com/')).toBe('https://hf.example.com/oauth/callback')
+  })
+
+  it('a connected server that holds tokens reads "Signed in"', () => {
+    expect(mcpStatusText(remote({ tools: ['mcp__linear__a'], auth: { signedIn: true, expiresAt: null, scope: null, client: 'dynamic', issuer: null } }))).toBe('Connected · 1 tool · Signed in')
+    expect(mcpStatusText(remote({ tools: [] }))).toBe('Connected · 0 tools')
+    expect(mcpStatusText(remote({ status: 'needs-auth' }))).toBe('Sign in required')
+  })
+
+  it('the OAuth draft of a server; its create and update bodies keep a stored secret', () => {
+    const configured = remote({ transport: { type: 'http', url: 'https://mcp.linear.app/mcp', headers: {}, oauth: { clientId: 'hf-linear', clientSecret: { set: true, hint: null, source: 'stored' }, scopes: 'read' } } })
+    expect(oauthDraftOf(null)).toEqual({ clientId: '', scopes: '', clientSecret: '', removeSecret: false })
+    const draft = oauthDraftOf(configured)
+    expect(draft).toEqual({ clientId: 'hf-linear', scopes: 'read', clientSecret: '', removeSecret: false })
+    expect(oauthInputOf({ clientId: ' ', scopes: '', clientSecret: 'x', removeSecret: false })).toBeUndefined()
+    expect(oauthInputOf({ ...draft, clientSecret: 's3cret' })).toEqual({ clientId: 'hf-linear', scopes: 'read', clientSecret: 's3cret' })
+    expect(oauthUpdateOf(configured, draft)).toEqual({ clientId: 'hf-linear', scopes: 'read', clientSecret: null })
+    expect(oauthUpdateOf(configured, { ...draft, removeSecret: true })).toEqual({ clientId: 'hf-linear', scopes: 'read' })
+    expect(signsOut({ ...configured, auth: { signedIn: true, expiresAt: null, scope: null, client: 'configured', issuer: null } }, { url: 'https://mcp.linear.app/mcp', type: 'http', clientId: 'other' })).toBe(true)
+    expect(signsOut(configured, { url: 'https://other.example.com/mcp', type: 'http', clientId: 'hf-linear' })).toBe(false)
   })
 })

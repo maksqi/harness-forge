@@ -18,11 +18,13 @@ import {
   DENIED_BY_HOOK,
   DENIED_BY_OVERRIDE,
   DENIED_BY_POLICY,
+  DENIED_NOT_PROVIDER_EXECUTED,
   DENIED_TOOLS_OFF,
   DENIED_UNAVAILABLE,
   effectiveOverride,
   evaluatePolicy,
   isPlanExitTool,
+  nativeToolApproval,
   resolveApproval,
   staticApprovalOutcome,
   toApprovalStatus,
@@ -827,5 +829,76 @@ describe('createToolApproval: PermissionRequest and the allow record (Phase 12, 
     const followed = hooked({ results: { PermissionRequest: fakeHookResult({ decision: 'allow', record: followedRecord }) } })
     expect(await createToolApproval(context({ tool: { pluginId: 'demo', definition: definition('ask') }, hooks: followed.hooks }))(call)).toBe('approved')
     expect(followed.injected).toEqual([followedRecord])
+  })
+})
+
+describe('createToolApproval: provider-executed native search calls (Phase 14, C52-T1)', () => {
+  const NATIVE = new Set(['web_search'])
+
+  /** A context whose every hook seam records its calls (the `tool.approve` hook, PreToolUse, PermissionRequest, settle). */
+  function recorded(overrides: Partial<ToolApprovalContext> = {}) {
+    const run = vi.fn(async () => {})
+    const preToolUse = vi.fn(async () => null)
+    const permissionRequest = vi.fn(async () => null)
+    const settle = vi.fn()
+    const policy = vi.fn(() => 'safe' as const)
+    const tool = { pluginId: 'demo', definition: definition(policy) }
+    const ctx = context({
+      tool,
+      registry: { hooks: { run, on: () => ({ dispose() {} }), list: () => [] } },
+      hooks: { preToolUse, permissionRequest, settle },
+      nativeTools: NATIVE,
+      ...overrides,
+    })
+    const hookCalls = (): number => run.mock.calls.length + preToolUse.mock.calls.length + permissionRequest.mock.calls.length + settle.mock.calls.length + policy.mock.calls.length
+    return { approve: createToolApproval(ctx), hookCalls, settle }
+  }
+
+  const nativeCall = (providerExecuted?: boolean) => ({
+    toolCall: { toolName: 'web_search', toolCallId: 'srvtoolu_1', input: { query: 'cats' }, ...(providerExecuted === undefined ? {} : { providerExecuted }) },
+    messages: [],
+  })
+
+  it('a provider-executed call of a native tool is not-applicable, before any hook, policy, settle or record', async () => {
+    for (const toolMode of ['ask', 'edits', 'plan', 'auto'] as const) {
+      const { approve, hookCalls } = recorded({ toolMode })
+      expect(await approve(nativeCall(true))).toBe('not-applicable')
+      expect(hookCalls()).toBe(0)
+    }
+  })
+
+  it('the same name without providerExecuted (a model calling it as a function) is denied, still without hooks', async () => {
+    for (const flag of [undefined, false]) {
+      const { approve, hookCalls } = recorded()
+      expect(await approve(nativeCall(flag))).toEqual({ type: 'denied', reason: DENIED_NOT_PROVIDER_EXECUTED })
+      expect(hookCalls()).toBe(0)
+    }
+  })
+
+  it('unknown names stay denied (also provider-executed ones); offered function tools resolve as before', async () => {
+    const { approve, settle } = recorded()
+    expect(await approve({ toolCall: { toolName: 'google_search', toolCallId: 'c2', input: {}, providerExecuted: true }, messages: [] })).toEqual({ type: 'denied', reason: DENIED_UNAVAILABLE })
+    expect(await approve({ toolCall: { toolName: 'demo_tool', toolCallId: 'c3', input: {} }, messages: [] })).toBe('not-applicable')
+    // The function tool's call settled its hook records as before.
+    expect(settle).toHaveBeenCalledWith('c3', { harnessAsked: false, asked: false })
+    // Without native tools (absent or empty) a provider-executed call of an unoffered name is denied.
+    for (const nativeTools of [undefined, new Set<string>()]) {
+      const plain = createToolApproval(context(nativeTools === undefined ? {} : { nativeTools }))
+      expect(await plain(nativeCall(true))).toEqual({ type: 'denied', reason: DENIED_UNAVAILABLE })
+    }
+  })
+
+  it('nativeToolApproval answers null for every other name', () => {
+    expect(nativeToolApproval(undefined, { toolName: 'web_search', providerExecuted: true })).toBeNull()
+    expect(nativeToolApproval(NATIVE, { toolName: 'demo_tool', providerExecuted: true })).toBeNull()
+    expect(nativeToolApproval(NATIVE, { toolName: 'web_search', providerExecuted: true })).toBe('not-applicable')
+    expect(nativeToolApproval(NATIVE, { toolName: 'web_search' })).toEqual({ type: 'denied', reason: DENIED_NOT_PROVIDER_EXECUTED })
+  })
+
+  it('a child approval keeps the flag through its call id prefix: not-applicable, never the sub-agent denial', async () => {
+    const { approve } = recorded()
+    const child = async (options: Parameters<typeof approve>[0]) => denyUserApproval(await approve({ ...options, toolCall: { ...options.toolCall, toolCallId: `call_parent/${options.toolCall.toolCallId}` } }))
+    expect(await child(nativeCall(true))).toBe('not-applicable')
+    expect(await child(nativeCall())).toEqual({ type: 'denied', reason: DENIED_NOT_PROVIDER_EXECUTED })
   })
 })

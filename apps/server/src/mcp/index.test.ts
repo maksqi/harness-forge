@@ -1,9 +1,18 @@
+import type { MCPClient, MCPClientConfig } from '@ai-sdk/mcp'
 import type { McpTestApp } from './__fixtures__/harness.ts'
+import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import process from 'node:process'
+import { createMCPClient } from '@ai-sdk/mcp'
 import { HarnessError, mcpServerSchema, mcpToolName } from '@harness-forge/shared'
+import { eq } from 'drizzle-orm'
 import { afterEach, describe, expect, it } from 'vitest'
 import { BUILTIN_PLUGINS } from '../builtin-plugins/index.ts'
+import { mcpServers } from '../db/schema.ts'
 import { createTestApp } from '../testing/create-test-app.ts'
+import { createFakeElicitationBroker } from '../testing/fake-elicitations.ts'
+import { createFakeMcpAuthService, fakeMcpAuthInfo, mcpAuthTargetKey } from '../testing/fake-mcp-auth.ts'
 import { createRecordingEventBus } from '../testing/fakes.ts'
 import {
   callTool,
@@ -13,11 +22,15 @@ import {
   outputJson,
   outputText,
   processAlive,
+  spyMcpCaches,
+  startElicitServer,
   startHttpEchoServer,
   startSseEchoServer,
+  startStatusServer,
   waitFor,
 } from './__fixtures__/harness.ts'
-import { CORE_MCP_PLUGIN_ID, createMcpManagerCore } from './index.ts'
+import { HEADER_REJECTED_MESSAGE, mcpConfigError, NEEDS_AUTH_MESSAGE } from './errors.ts'
+import { CORE_MCP_PLUGIN_ID, createMcpManagerCore, MCP_NO_ELICITATION_PROTOCOL } from './index.ts'
 
 const SECRET = 'echo-secret-value-123456'
 
@@ -378,5 +391,355 @@ describe('user http servers', () => {
       return current.status === 'error' ? current : null
     })
     expect(server.error).toMatchObject({ code: 'provider_unreachable' })
+  })
+})
+
+// ---------- Phase 14 seams (C51) ----------
+
+/** A dependency-free stdio server (written to a temp folder) with prompts and resources whose tool `notify` sends list_changed. */
+const NOTIFY_SERVER = `
+import process from 'node:process'
+import { createInterface } from 'node:readline'
+const send = message => process.stdout.write(JSON.stringify(message) + '\\n')
+createInterface({ input: process.stdin }).on('line', (line) => {
+  const { id, method, params } = JSON.parse(line)
+  if (id === undefined || id === null)
+    return
+  if (method === 'initialize')
+    return send({ jsonrpc: '2.0', id, result: { protocolVersion: params.protocolVersion, capabilities: { tools: {}, prompts: { listChanged: true }, resources: { listChanged: true } }, serverInfo: { name: 'notify', version: '1.0.0' } } })
+  if (method === 'tools/list')
+    return send({ jsonrpc: '2.0', id, result: { tools: [{ name: 'notify', inputSchema: { type: 'object', properties: {} } }] } })
+  if (method === 'tools/call') {
+    send({ jsonrpc: '2.0', method: 'notifications/prompts/list_changed' })
+    send({ jsonrpc: '2.0', method: 'notifications/resources/list_changed' })
+    return send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: 'sent' }] } })
+  }
+  if (method === 'prompts/list')
+    return send({ jsonrpc: '2.0', id, result: { prompts: [] } })
+  if (method === 'resources/list')
+    return send({ jsonrpc: '2.0', id, result: { resources: [] } })
+  send({ jsonrpc: '2.0', id, error: { code: -32601, message: 'Method not found' } })
+}).on('close', () => process.exit(0))
+`
+
+async function statusOf(h: McpTestApp, id: string, status: string) {
+  return waitFor(async () => {
+    const server = await h.t.deps.mcp.get(id)
+    return server.status === status ? server : null
+  })
+}
+
+describe('phase 14: the transport configuration (C51-T1)', () => {
+  it('gives http / sse transports without an Authorization header the connect-mode provider, never a fetch', async () => {
+    const configs: MCPClientConfig[] = []
+    const mcpAuth = createFakeMcpAuthService()
+    const h = await open({
+      overrides: { mcpAuth },
+      manager: {
+        retryDelaysMs: [],
+        createClient: async (config) => {
+          configs.push(config)
+          throw mcpConfigError('The test stops here.')
+        },
+      },
+    })
+    await h.t.deps.mcp.create({ id: 'web', name: 'Web', transport: { type: 'http', url: 'http://127.0.0.1:9/mcp', headers: { 'X-Token': 'x-token-value-1234' } } })
+    await h.t.deps.mcp.create({ id: 'legacy', name: 'Legacy', transport: { type: 'sse', url: 'http://127.0.0.1:9/sse' } })
+    await h.t.deps.mcp.create({ id: 'keyed', name: 'Keyed', transport: { type: 'http', url: 'http://127.0.0.1:9/mcp', headers: { authorization: 'Bearer header-key-1234' } } })
+    await waitFor(() => configs.length === 3)
+    const byUrl = (type: string, header: boolean) => configs.find((config) => {
+      const transport = config.transport as Record<string, unknown>
+      return transport.type === type && 'headers' in transport && ('authorization' in (transport.headers as object)) === header
+    })
+    for (const config of [byUrl('http', false), byUrl('sse', false)]) {
+      const transport = config?.transport as Record<string, unknown>
+      expect(Object.keys(transport).sort()).toEqual(['authProvider', 'headers', 'redirect', 'type', 'url'])
+      expect(transport.redirect).toBe('error')
+      expect(transport).not.toHaveProperty('fetch')
+      expect(typeof (transport.authProvider as { tokens?: unknown }).tokens).toBe('function')
+      expect(config?.capabilities).toEqual({ elicitation: {} })
+    }
+    const keyed = byUrl('http', true)?.transport as Record<string, unknown>
+    expect(Object.keys(keyed).sort()).toEqual(['headers', 'redirect', 'type', 'url'])
+    expect(keyed.redirect).toBe('error')
+    expect(mcpAuth.providers).toEqual(expect.arrayContaining([
+      { target: { kind: 'global', serverId: 'web' }, mode: 'connect' },
+      { target: { kind: 'global', serverId: 'legacy' }, mode: 'connect' },
+    ]))
+    expect(mcpAuth.providers.some(call => call.target.serverId === 'keyed')).toBe(false)
+  })
+})
+
+describe('phase 14: needs-auth (C51-T2)', () => {
+  it('a 401 is needs-auth after one connect attempt (no backoff retry, no tools); a reconnect tries once more', async () => {
+    const endpoint = await startStatusServer(401)
+    try {
+      const h = await open({ manager: { retryDelaysMs: [20, 20, 20] } })
+      await h.t.deps.mcp.create({ id: 'locked', name: 'Locked', transport: { type: 'http', url: endpoint.url } })
+      const server = await statusOf(h, 'locked', 'needs-auth')
+      expect(mcpServerSchema.parse(server)).toMatchObject({ status: 'needs-auth', error: { code: 'auth_invalid', status: 401, message: NEEDS_AUTH_MESSAGE }, tools: [], connectedAt: null, auth: null })
+      expect(JSON.stringify(server)).not.toContain('secret-body-text')
+      await new Promise(resolve => setTimeout(resolve, 300))
+      expect(endpoint.methods.filter(method => method === 'initialize')).toHaveLength(1)
+      const logs = (await h.t.deps.plugins.logs('core-mcp')).map(entry => entry.message)
+      expect(logs.filter(message => message === '[locked] Needs a sign-in.')).toHaveLength(1)
+      expect(logs.some(message => message.includes('Reconnecting in'))).toBe(false)
+      expect(h.t.deps.registry.tools.list().filter(tool => tool.mcpServerId === 'locked')).toEqual([])
+      expect(mcpInternalsStatus(h, 'locked')).toBe('needs-auth')
+
+      const again = await h.t.deps.mcp.reconnect('locked')
+      expect(again.status).toBe('needs-auth')
+      expect(endpoint.methods.filter(method => method === 'initialize')).toHaveLength(2)
+    }
+    finally {
+      await endpoint.close()
+    }
+  })
+
+  it('a server with an Authorization header that answers 401 is needs-auth with the header message', async () => {
+    const endpoint = await startStatusServer(401)
+    try {
+      const h = await open({ manager: { retryDelaysMs: [20, 20] } })
+      await h.t.deps.mcp.create({ id: 'keyed', name: 'Keyed', transport: { type: 'http', url: endpoint.url, headers: { Authorization: 'Bearer wrong-key-1234' } } })
+      const server = await statusOf(h, 'keyed', 'needs-auth')
+      expect(server.error).toEqual({ code: 'auth_invalid', message: HEADER_REJECTED_MESSAGE, status: 401 })
+      await new Promise(resolve => setTimeout(resolve, 200))
+      expect(endpoint.methods.filter(method => method === 'initialize')).toHaveLength(1)
+      // No OAuth discovery for a server with its own credentials.
+      expect(endpoint.paths.some(path => path.startsWith('/.well-known/'))).toBe(false)
+    }
+    finally {
+      await endpoint.close()
+    }
+  })
+
+  it('a 500 is still an error that retries with backoff', async () => {
+    const endpoint = await startStatusServer(500)
+    try {
+      const h = await open({ manager: { retryDelaysMs: [20, 20] } })
+      await h.t.deps.mcp.create({ id: 'broken', name: 'Broken', transport: { type: 'http', url: endpoint.url } })
+      await waitFor(() => endpoint.methods.filter(method => method === 'initialize').length === 3)
+      const server = await statusOf(h, 'broken', 'error')
+      expect(server.error).toMatchObject({ code: 'provider_error', status: 500 })
+    }
+    finally {
+      await endpoint.close()
+    }
+  })
+})
+
+function mcpInternalsStatus(h: McpTestApp, id: string): unknown {
+  return (h.t.deps.mcp as unknown as { serverStatus: (id: string) => unknown }).serverStatus(id)
+}
+
+describe('phase 14: the DTO decoration (C51-T3)', () => {
+  it('a v1.8.1 row has oauth null and auth null; the row\'s oauth and the sign-in state are shown, never a secret', async () => {
+    const endpoint = await startHttpEchoServer()
+    try {
+      const mcpAuth = createFakeMcpAuthService()
+      const h = await open({ overrides: { mcpAuth } })
+      const plain = await h.t.deps.mcp.create({ id: 'plain', name: 'Plain', transport: { type: 'http', url: endpoint.url } })
+      expect(plain.transport).toEqual({ type: 'http', url: endpoint.url, headers: {}, oauth: null })
+      expect(plain.auth).toBeNull()
+      await connected(h, 'plain')
+
+      await h.t.deps.mcp.create({ id: 'oauth', name: 'OAuth', enabled: false, transport: { type: 'http', url: endpoint.url } })
+      await h.t.deps.db.update(mcpServers).set({ transport: { type: 'http', url: endpoint.url, headerNames: [], oauth: { clientId: 'client-1', scopes: 'read write' } } }).where(eq(mcpServers.id, 'oauth'))
+      await h.t.deps.secrets.set('mcp:oauth', 'oauth.clientSecret', 'client-secret-value-1234')
+      mcpAuth.infos.set(mcpAuthTargetKey({ kind: 'global', serverId: 'oauth' }), fakeMcpAuthInfo({ scope: 'read' }))
+      const server = mcpServerSchema.parse(await h.t.deps.mcp.get('oauth'))
+      expect(server.transport).toEqual({
+        type: 'http',
+        url: endpoint.url,
+        headers: {},
+        oauth: { clientId: 'client-1', clientSecret: { set: true, hint: expect.any(String), source: 'stored' }, scopes: 'read write' },
+      })
+      expect(server.auth).toEqual(fakeMcpAuthInfo({ scope: 'read' }))
+      expect(JSON.stringify(await h.t.deps.mcp.list())).not.toContain('client-secret-value-1234')
+
+      const stdio = await h.t.deps.mcp.create({ id: 'local', name: 'Local', enabled: false, transport: echoStdio() })
+      expect(stdio.auth).toBeNull()
+      expect(mcpAuth.calls.info).toBeGreaterThan(0)
+    }
+    finally {
+      await endpoint.close()
+    }
+  })
+
+  it('a plugin declaration shows its oauth as declared (no client secret)', async () => {
+    const endpoint = await startHttpEchoServer()
+    try {
+      const h = await open({
+        beforeStart: async (t) => {
+          const { mkdirSync, writeFileSync } = await import('node:fs')
+          const dir = join(t.env.paths.plugins, 'oauth-plugin')
+          mkdirSync(dir, { recursive: true })
+          writeFileSync(join(dir, 'plugin.json'), `${JSON.stringify({
+            manifestVersion: 1,
+            id: 'oauth-plugin',
+            name: 'OAuth plugin',
+            version: '1.0.0',
+            engines: { harness: '^1.0.0' },
+            settings: { type: 'object', properties: { clientId: { type: 'string', title: 'Client id' } } },
+            contributes: { mcpServers: [{ id: 'oauth-plugin', name: 'Remote', transport: { type: 'http', url: endpoint.url, oauth: { clientId: '{{settings.clientId}}', scopes: 'read' } } }] },
+          })}\n`)
+          await t.deps.plugins.saveRecord({ id: 'oauth-plugin', source: 'copy', version: '1.0.0' })
+        },
+      })
+      const server = mcpServerSchema.parse(await connected(h, 'oauth-plugin'))
+      expect(server.transport).toMatchObject({ type: 'http', oauth: { clientId: '{{settings.clientId}}', clientSecret: { set: false, hint: null, source: null }, scopes: 'read' } })
+      expect(server.auth).toBeNull()
+      expect(h.t.deps.mcp.authTarget('oauth-plugin')).toEqual({ kind: 'plugin', scope: 'plugin:oauth-plugin', name: 'mcp-oauth.oauth-plugin' })
+    }
+    finally {
+      await endpoint.close()
+    }
+  })
+
+  it('authTarget: personal servers, unknown ids', async () => {
+    const h = await open()
+    await h.t.deps.mcp.create({ id: 'mine', name: 'Mine', enabled: false, transport: { type: 'http', url: 'http://127.0.0.1:9/mcp' } })
+    expect(h.t.deps.mcp.authTarget('mine')).toEqual({ kind: 'user', scope: 'mcp:mine', name: 'oauth.record' })
+    expect(h.t.deps.mcp.authTarget('nope')).toBeNull()
+  })
+})
+
+describe('phase 14: elicitation (C51-T4)', () => {
+  it('declares the capability and hands the server\'s request to the broker (the C50 stub declines it)', async () => {
+    const endpoint = await startElicitServer()
+    try {
+      const h = await open()
+      await h.t.deps.mcp.create({ id: 'elicit', name: 'Elicit', transport: { type: 'http', url: endpoint.url } })
+      await connected(h, 'elicit')
+      expect(JSON.parse(outputText(await callTool(h.t, 'mcp__elicit__ask')))).toEqual({ action: 'decline' })
+    }
+    finally {
+      await endpoint.close()
+    }
+  })
+
+  it('registers each call with the broker under the key of the client whose handler gets the request', async () => {
+    const endpoint = await startElicitServer()
+    try {
+      const fake = createFakeElicitationBroker()
+      const begun: Array<Parameters<typeof fake.begin>[0]> = []
+      fake.handlerAnswer = { action: 'accept', content: { name: 'Ada' } }
+      const h = await open({ overrides: { elicitations: { ...fake, begin: (call) => {
+        begun.push(call)
+        return fake.begin(call)
+      } } } })
+      await h.t.deps.mcp.create({ id: 'elicit', name: 'Elicit server', transport: { type: 'http', url: endpoint.url } })
+      await connected(h, 'elicit')
+      expect(JSON.parse(outputText(await callTool(h.t, 'mcp__elicit__ask')))).toEqual({ action: 'accept', content: { name: 'Ada' } })
+      expect(fake.handled).toHaveLength(1)
+      expect(fake.handled[0]?.request.params.message).toBe('Your name?')
+      expect(fake.handled[0]?.runtimeKey).toMatch(/^mcp:elicit#\d+$/)
+      expect(begun).toEqual([expect.objectContaining({ runtimeKey: fake.handled[0]?.runtimeKey, serverId: 'elicit', serverName: 'Elicit server', toolCallId: 'call_1', interactive: false })])
+      expect(fake.inFlight).toEqual([])
+    }
+    finally {
+      await endpoint.close()
+    }
+  })
+
+  it(`reconnects once without the capability when a server negotiates ${MCP_NO_ELICITATION_PROTOCOL}, remembered until the declaration changes`, async () => {
+    const configs: MCPClientConfig[] = []
+    const createClient = async (config: MCPClientConfig): Promise<MCPClient> => {
+      configs.push(config)
+      const client = await createMCPClient({ ...config, experimental_events: undefined })
+      if (config.capabilities?.elicitation === undefined)
+        return client
+      return new Proxy(client, {
+        get: (target, key) => {
+          if (key === 'initializeResult')
+            return { ...target.initializeResult, protocolVersion: MCP_NO_ELICITATION_PROTOCOL }
+          const value: unknown = Reflect.get(target, key)
+          return typeof value === 'function' ? value.bind(target) : value
+        },
+      })
+    }
+    const h = await open({ manager: { createClient } })
+    await h.t.deps.mcp.create({ id: 'echo', name: 'Echo', transport: echoStdio() })
+    await connected(h, 'echo')
+    expect(configs.map(config => config.capabilities)).toEqual([{ elicitation: {} }, undefined])
+    expect(outputText(await callTool(h.t, 'mcp__echo__echo', { text: 'still works' }))).toBe('still works')
+
+    await h.t.deps.mcp.reconnect('echo')
+    expect(configs.map(config => config.capabilities)).toEqual([{ elicitation: {} }, undefined, undefined])
+
+    await h.t.deps.mcp.update('echo', { name: 'Echo 2' })
+    await waitFor(() => configs.length === 5)
+    expect(configs.slice(3).map(config => config.capabilities)).toEqual([{ elicitation: {} }, undefined])
+    await connected(h, 'echo')
+  })
+})
+
+describe('phase 14: prompts and resources (C51-T6)', () => {
+  it('fills the caches of servers with the capabilities after connecting and lists through them', async () => {
+    const endpoint = await startElicitServer()
+    try {
+      const caches = spyMcpCaches()
+      const h = await open({ manager: { createPromptCache: caches.prompts, createResourceCache: caches.resources } })
+      await h.t.deps.mcp.create({ id: 'elicit', name: 'Elicit', transport: { type: 'http', url: endpoint.url } })
+      await h.t.deps.mcp.create({ id: 'echo', name: 'Echo', transport: echoStdio() })
+      await h.t.deps.mcp.create({ id: 'off', name: 'Off', enabled: false, transport: echoStdio() })
+      await connected(h, 'elicit')
+      await connected(h, 'echo')
+      await waitFor(() => caches.refreshed.length === 2)
+      expect(caches.refreshed).toEqual(expect.arrayContaining([
+        { kind: 'prompts', key: 'elicit', serverName: 'Elicit', projectId: null },
+        { kind: 'resources', key: 'elicit', serverName: 'Elicit', projectId: null },
+      ]))
+      expect(await h.t.deps.mcp.prompts()).toEqual({ items: [], truncated: false, unavailable: [] })
+      expect(await h.t.deps.mcp.resources()).toEqual({ items: [], truncated: false, unavailable: [] })
+      const signal = new AbortController().signal
+      await expect(h.t.deps.mcp.getPrompt('elicit', 'greet', {}, signal)).rejects.toMatchObject({ code: 'not_implemented' })
+      await expect(h.t.deps.mcp.readResource('elicit', 'file:///a', signal)).rejects.toMatchObject({ code: 'not_implemented' })
+      await expect(h.t.deps.mcp.getPrompt('echo', 'greet', {}, signal)).rejects.toMatchObject({ code: 'not_found' })
+      await expect(h.t.deps.mcp.getPrompt('nope', 'greet', {}, signal)).rejects.toMatchObject({ code: 'not_found' })
+      await expect(h.t.deps.mcp.getPrompt('off', 'greet', {}, signal)).rejects.toMatchObject({ code: 'provider_unreachable' })
+      const aborted = new AbortController()
+      aborted.abort(new Error('gone'))
+      await expect(h.t.deps.mcp.readResource('elicit', 'file:///a', aborted.signal)).rejects.toThrow('gone')
+    }
+    finally {
+      await endpoint.close()
+    }
+  })
+
+  it('names servers that are not connected as unavailable and refuses requests to a needs-auth server', async () => {
+    const endpoint = await startStatusServer(401)
+    try {
+      const h = await open({ manager: { retryDelaysMs: [] } })
+      await h.t.deps.mcp.create({ id: 'locked', name: 'Locked', transport: { type: 'http', url: endpoint.url } })
+      await statusOf(h, 'locked', 'needs-auth')
+      expect(await h.t.deps.mcp.prompts()).toEqual({ items: [], truncated: false, unavailable: [{ serverId: 'locked', status: 'needs-auth' }] })
+      expect((await h.t.deps.mcp.resources()).unavailable).toEqual([{ serverId: 'locked', status: 'needs-auth' }])
+      await expect(h.t.deps.mcp.getPrompt('locked', 'greet', {}, new AbortController().signal)).rejects.toMatchObject({ code: 'conflict', details: { reason: 'needs-auth' } })
+    }
+    finally {
+      await endpoint.close()
+    }
+  })
+
+  it('refreshes the caches on a stdio prompts / resources list_changed notification', async () => {
+    const dir = await realpath(await mkdtemp(join(tmpdir(), 'hf-mcp-notify-')))
+    try {
+      const script = join(dir, 'notify-server.mjs')
+      await writeFile(script, NOTIFY_SERVER)
+      const caches = spyMcpCaches()
+      const h = await open({ manager: { createPromptCache: caches.prompts, createResourceCache: caches.resources } })
+      await h.t.deps.mcp.create({ id: 'notify', name: 'Notify', transport: { type: 'stdio', command: process.execPath, args: [script] } })
+      await connected(h, 'notify')
+      await waitFor(() => caches.refreshed.length === 2)
+      expect(outputText(await callTool(h.t, 'mcp__notify__notify'))).toBe('sent')
+      await waitFor(() => caches.refreshed.length === 4)
+      expect(caches.refreshed.map(entry => entry.kind).sort()).toEqual(['prompts', 'prompts', 'resources', 'resources'])
+    }
+    finally {
+      await app?.close()
+      app = null
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 })

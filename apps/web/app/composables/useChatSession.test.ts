@@ -12,6 +12,7 @@ import { useBackgroundTasksStore } from '~/stores/background-tasks'
 import { useChatsStore } from '~/stores/chats'
 import { useModelsStore } from '~/stores/models'
 import { useProjectsStore } from '~/stores/projects'
+import { useSettingsStore } from '~/stores/settings'
 import { useShellRulesStore } from '~/stores/shell-rules'
 import {
   backgroundTask,
@@ -19,15 +20,19 @@ import {
   chatDetail,
   chatId,
   chatSummary,
+  elicitationId,
   hookCarrier,
   hookData,
   hookPart,
   hookRecordId,
+  mcpElicitation,
+  mcpToolProgress,
   messageBranch,
   messageId,
   projectId,
   projectSummary,
   queueItem,
+  settings as settingsFixture,
   shellRule,
   steerData,
   taskResultCarrier,
@@ -47,6 +52,7 @@ import {
   resetChatSessions,
   samePathIds,
   sendInputOf,
+  toListRunState,
   useChatSession,
   useChatSessionRegistry,
   useDraftChatId,
@@ -390,8 +396,9 @@ describe('useChatSession: requests', () => {
     expect(server.calls).toHaveLength(1)
     const { url, method, body } = server.calls[0]!
     expect([method, url]).toEqual(['POST', '/api/chat'])
-    expect(Object.keys(body!).sort()).toEqual(['chatId', 'message', 'modelRef', 'parentId', 'reasoningEffort', 'toolMode', 'trigger'])
-    expect(body).toMatchObject({ chatId: chatId(1), trigger: 'submit-message', parentId: null, modelRef: MODEL, reasoningEffort: 'high', toolMode: 'auto' })
+    // + Phase 14: every request carries the chat's web search mode (the global default `off` here).
+    expect(Object.keys(body!).sort()).toEqual(['chatId', 'message', 'modelRef', 'parentId', 'reasoningEffort', 'toolMode', 'trigger', 'webSearch'])
+    expect(body).toMatchObject({ chatId: chatId(1), trigger: 'submit-message', parentId: null, modelRef: MODEL, reasoningEffort: 'high', toolMode: 'auto', webSearch: 'off' })
     expect(body!.message.role).toBe('user')
     expect(body!.message.id).toMatch(/^msg_[\dA-Za-z]{16}$/)
     expect(body!.message.parts).toEqual([{ type: 'text', text: 'ping' }])
@@ -2840,5 +2847,125 @@ describe('useChatSession: hook records of a new user message (W11.19)', () => {
     await until(() => session.chat.messages.value[0]?.parts.length === 3, 'the stored copy')
     expect(session.chat.messages.value.map(message => message.id)).toEqual([sent.id, A1])
     expect(api.chats.get).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ---------- MCP 2.0 and web search (Phase 14, C54) ----------
+
+/** A reply whose MCP tool call waits on `request` (its preliminary output) until `gate`, then finishes. */
+function elicitationReply(gate: Promise<void>, request = mcpElicitation(), messageId = ASSISTANT_ID): StreamWriter {
+  return async (write) => {
+    write({ type: 'start', messageId, messageMetadata: { modelRef: MODEL, startedAt: 1 } })
+    write({ type: 'start-step' })
+    write({ type: 'tool-input-available', toolCallId: 'call_mcp', toolName: 'mcp__fixture__ask', input: {} })
+    write({ type: 'tool-output-available', toolCallId: 'call_mcp', output: mcpToolProgress(request), preliminary: true })
+    await gate
+    write({ type: 'tool-output-available', toolCallId: 'call_mcp', output: { content: [{ type: 'text', text: 'Sent.' }] } })
+    write({ type: 'finish-step' })
+    write({ type: 'finish', finishReason: 'stop' })
+  }
+}
+
+describe('useChatSession: web search and MCP questions (Phase 14, C54)', () => {
+  const U1 = 'msg_user000000000001'
+  const user = userMessage(U1, 'q')
+
+  it('buildChatRequestBody sends the web search mode with every request when given', () => {
+    const base = { chatId: chatId(1), modelRef: MODEL, reasoningEffort: 'auto' as const, toolMode: 'ask' as const }
+    expect(buildChatRequestBody({ ...base, messages: [user], trigger: 'submit-message', messageId: undefined, webSearch: 'auto' }).webSearch).toBe('auto')
+    expect(buildChatRequestBody({ ...base, messages: [user], trigger: 'regenerate-message', messageId: undefined, webSearch: 'off' }).webSearch).toBe('off')
+    expect(buildChatRequestBody({ ...base, messages: [user, assistantMessage(ASSISTANT_ID, 'a')], trigger: 'submit-message', messageId: ASSISTANT_ID, webSearch: 'auto' }).webSearch).toBe('auto')
+    expect(buildChatRequestBody({ ...base, messages: [user], trigger: 'submit-message', messageId: undefined })).not.toHaveProperty('webSearch')
+  })
+
+  it('the sidebar state of `input` is `input`', () => {
+    expect(toListRunState('input')).toBe('input')
+    expect(toListRunState('streaming')).toBe('running')
+    expect(toListRunState('approval')).toBe('approval')
+    expect(toListRunState('idle')).toBeNull()
+  })
+
+  it('webSearch: the pick, else the chat\'s setting, else the global default; a pick is saved on a persisted chat and sent', async () => {
+    api.chatQueue.list.mockResolvedValue({ items: [] })
+    useSettingsStore().settings = settingsFixture({ webSearchDefault: 'auto' })
+    const plain = await loadedSession(31, { messages: [user, assistantMessage(ASSISTANT_ID, 'a')] })
+    expect(plain.webSearch.value).toBe('auto')
+    const own = await loadedSession(32, { messages: [user, assistantMessage(ASSISTANT_ID, 'a')], settings: { webSearch: 'off' } })
+    expect(own.webSearch.value).toBe('off')
+
+    own.webSearch.value = 'auto'
+    expect(own.webSearch.value).toBe('auto')
+    expect(api.chats.update).toHaveBeenCalledWith({ params: { id: chatId(32) }, body: { settings: { webSearch: 'auto' } } })
+    server.reply(textReply('searched', 'msg_assistant0000002'))
+    await own.submit({ text: 'look it up', files: [] })
+    await until(() => own.chat.status.value === 'ready', 'ready')
+    expect(chatBodies()[0]!.webSearch).toBe('auto')
+  })
+
+  it('a new chat keeps its pick local and sends it with its requests', async () => {
+    const session = newSession(33)
+    expect(session.webSearch.value).toBe('off')
+    session.webSearch.value = 'auto'
+    expect(api.chats.update).not.toHaveBeenCalled()
+    server.reply(textReply('first'))
+    await session.send({ text: 'hello', files: [] })
+    expect(chatBodies()[0]!.webSearch).toBe('auto')
+  })
+
+  it('a pending MCP question of the streaming reply is an elicitation and the run state `input` until it is answered', async () => {
+    api.chatElicitations.answer.mockResolvedValue({ action: 'decline' })
+    const session = newSession(34)
+    const gate = deferred()
+    server.reply(elicitationReply(gate.promise))
+    const sending = session.send({ text: 'ask me', files: [] })
+    await until(() => session.elicitations.value.length === 1, 'the question')
+    expect(session.elicitations.value).toEqual([mcpElicitation()])
+    expect(session.runState.value).toBe('input')
+    expect(useChatsStore().runState[chatId(34)]).toBe('input')
+
+    await expect(session.respondElicitation(elicitationId(1), { action: 'decline' })).resolves.toBe('answered')
+    expect(api.chatElicitations.answer).toHaveBeenCalledWith({ params: { id: chatId(34), elicitationId: elicitationId(1) }, body: { action: 'decline' } })
+    expect(session.elicitations.value).toEqual([])
+    expect(session.runState.value).toBe('streaming')
+    expect(useChatsStore().runState[chatId(34)]).toBe('running')
+
+    gate.resolve()
+    await sending
+    expect(session.runState.value).toBe('idle')
+    expect(session.elicitations.value).toEqual([])
+  })
+
+  it('respondElicitation: a 404 or a 409 stale is gone; a 400 throws the field issues', async () => {
+    const session = newSession(35)
+    api.chatElicitations.answer.mockRejectedValueOnce(new HarnessError({ code: 'not_found', message: 'Not found.' }))
+    await expect(session.respondElicitation(elicitationId(1), { action: 'cancel' })).resolves.toBe('gone')
+    api.chatElicitations.answer.mockRejectedValueOnce(conflict('stale'))
+    await expect(session.respondElicitation(elicitationId(1), { action: 'cancel' })).resolves.toBe('gone')
+    const issues = [{ field: 'email', code: 'format', message: 'Enter an email address.' }]
+    api.chatElicitations.answer.mockRejectedValueOnce(new HarnessError({ code: 'validation_error', message: 'Invalid answer.', details: { issues } }))
+    await expect(session.respondElicitation(elicitationId(1), { action: 'accept', content: { email: 'x' } })).rejects.toMatchObject({ code: 'validation_error', details: { issues } })
+  })
+
+  it('never evicts a session that waits for an answer', async () => {
+    const registry = useChatSessionRegistry()
+    const gate = deferred()
+    server.reply(elicitationReply(gate.promise))
+    const waiting = newSession(1)
+    const sending = waiting.send({ text: 'ask me', files: [] })
+    await until(() => waiting.runState.value === 'input', 'input')
+    for (let n = 2; n <= MAX_CHAT_SESSIONS + 2; n++)
+      newSession(n)
+    expect(registry.get(chatId(1))).toBe(waiting)
+    gate.resolve()
+    await sending
+  })
+
+  it('a chat the chats store reports as waiting for input is running: a submit is queued', async () => {
+    api.chatQueue.list.mockResolvedValue({ items: [] })
+    acceptQueue()
+    const session = await loadedSession(36, { messages: [user, assistantMessage(ASSISTANT_ID, 'a')] })
+    useChatsStore().setRunState(chatId(36), 'input')
+    await expect(session.submit({ text: 'meanwhile', files: [] })).resolves.toBe('queued')
+    expect(chatBodies()).toHaveLength(0)
   })
 })

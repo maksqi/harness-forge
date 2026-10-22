@@ -79,6 +79,11 @@
 //   = the resolved type), so its matchers test the agent type and its Claude Code names; a prompt `SubagentStop` hook's
 //   `ok: false` continues the child for one more round unless `impossible` (the shared `promptHookOutcome` turns it
 //   into a block or not), within the Phase 11 cap of `LIMITS.subagentStopContinuationsMax` rounds.
+// Phase 14 (C52, ADR-063; COMPLETE and FROZEN after P14-0b): every child (foreground and background) inherits the
+// parent turn's web search mode (`childWebSearchMode`, `host.ts`) and resolves it for its own model in `childTools`
+// (`ChildToolsInput.webSearch`); the native search's provider options are deep-merged over the child's run params. A
+// background launch carries the mode as `settings.webSearchDefault` of its launch input (`backgroundLaunchInput`), which
+// is what its detached host reads.
 import type { AgentDefinitionFields, CustomizationEntry, RunOrigin, Settings, TaskAgent, TaskInput, TaskOutput, TaskStatus, TaskType, ToolMode } from '@harness-forge/shared'
 import type { ModelMessage, TextStreamPart, ToolSet } from 'ai'
 import type { Logger } from '../../logger.ts'
@@ -104,11 +109,11 @@ import { abortReason, isAbortError, mapRunError } from '../errors.ts'
 import { hookModelMessage } from '../hooks.ts'
 import { SUBAGENT_INSTRUCTIONS_MARKER } from '../markers.ts'
 import { resolveClaudeModel } from '../model-aliases.ts'
-import { buildRunParams, joinInstructions, orderAgentTypes } from '../params.ts'
+import { buildRunParams, joinInstructions, mergeProviderOptions, orderAgentTypes } from '../params.ts'
 import { capUtf8, skillBody } from '../skills.ts'
 import { createPrepareStep, noopStepPiece } from '../steps.ts'
 import { RunTracker, toMessageUsage } from '../usage.ts'
-import { childFirstMessage, childMaxSteps, DEFAULT_CHILD_SPEC } from './host.ts'
+import { childFirstMessage, childMaxSteps, childWebSearchMode, DEFAULT_CHILD_SPEC } from './host.ts'
 import { oneLine, resultPreview, TaskProgress } from './progress.ts'
 import { childCallIdPrefix, childToolMode, childTools } from './tools.ts'
 
@@ -810,6 +815,8 @@ async function* executeChild(host: ChildHost, task: TaskInput, choice: AgentChoi
       disallowedTools: spec.disallowedTools,
       hooks,
       projectTools: host.projectTools,
+      // Phase 14 (ADR-063): the parent turn's web search mode, resolved for this child's model.
+      webSearch: childWebSearchMode(session.ctx.prepared),
     })
     // The preamble (its marker first), then the agent's body (a builtin: the read-only line of `explore`), then the
     // user's global instructions.
@@ -865,7 +872,8 @@ async function* executeChild(host: ChildHost, task: TaskInput, choice: AgentChoi
         stopWhen: hooks === null ? isStepCount(budget) : [isStepCount(budget), hooks.stopCondition],
         abortSignal: signal,
         maxRetries: CHILD_MAX_RETRIES,
-        providerOptions: params.providerOptions,
+        // Phase 14: the native search's provider options over the child's.
+        providerOptions: tools.providerOptions === undefined ? params.providerOptions : mergeProviderOptions(params.providerOptions, tools.providerOptions),
         ...(Object.keys(params.headers).length > 0 ? { headers: params.headers } : {}),
         ...(params.reasoning === undefined ? {} : { reasoning: params.reasoning }),
         ...(params.temperature === undefined ? {} : { temperature: params.temperature }),
@@ -988,9 +996,14 @@ async function* runChild(run: ChildRun, task: TaskInput, options: RunSubagentOpt
   }
 }
 
-/** The launch input of a background `task` call: the parent's values (see `BackgroundLaunchInput`). */
+/**
+ * The launch input of a background `task` call: the parent's values (see `BackgroundLaunchInput`). Phase 14: its
+ * `settings.webSearchDefault` is the parent turn's effective web search mode (`childWebSearchMode`), the mode the
+ * detached child inherits (the frozen launch input has no mode field of its own).
+ */
 export function backgroundLaunchInput(input: SubagentRunnerInput, task: TaskInput, options: RunSubagentOptions): BackgroundLaunchInput {
   const { session } = input
+  const settings = session.ctx.prepared.settings
   return {
     chatId: session.chatId,
     messageId: session.assistantId,
@@ -1001,7 +1014,7 @@ export function backgroundLaunchInput(input: SubagentRunnerInput, task: TaskInpu
     toolMode: input.toolMode,
     workspace: input.workspace,
     scope: input.scope,
-    settings: session.ctx.prepared.settings,
+    settings: { ...settings, webSearchDefault: childWebSearchMode(session.ctx.prepared) },
     reasoningEffort: session.ctx.reasoningEffort,
     chatInstructions: session.ctx.prepared.chat.settings.instructions,
     catalog: input.catalog,

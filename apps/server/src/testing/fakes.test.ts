@@ -3,7 +3,7 @@
 // fake project service has its own file (./fake-projects.test.ts). Phase 8 (W8.7): `createFakeFilesService` is the real
 // files service (pins and the store gate).
 import type { PluginContext } from '@harness-forge/plugin-sdk'
-import type { ChatCreate, HarnessUIMessage, QueueAddBody } from '@harness-forge/shared'
+import type { ChatCreate, HarnessUIMessage, McpElicitationForm, QueueAddBody } from '@harness-forge/shared'
 import type { ResolvedImageModel } from '../providers/types.ts'
 import type { ChatsService } from '../services/chats/types.ts'
 import type { TestApp } from './create-test-app.ts'
@@ -41,14 +41,18 @@ import { MOCK_TRANSCRIPT, mockImageColor } from '../builtin-plugins/mock/media.t
 import { encodeSolidPng } from '../builtin-plugins/mock/png.ts'
 import { chats, chatShares, files, messages, usage } from '../db/schema.ts'
 import { createMemoryLogger } from '../logger.ts'
+import { McpAuthRequired } from '../mcp/oauth/types.ts'
 import { createProvidersTestApp, fakeMediaProviders } from '../providers/testing.ts'
 import { messageInsertValues } from '../services/chats/store.ts'
 import { createFilesService } from '../services/files/index.ts'
 import { seedStoredFile } from '../services/files/store.test-util.ts'
 import { createTestApp } from './create-test-app.ts'
 import { createFakeClaudeImportService, fakeClaudeImportItem } from './fake-claude-import.ts'
+import { createFakeElicitationBroker } from './fake-elicitations.ts'
 import { createFakeHookService, createFakeHookSnapshot, fakeHookRecord, fakeHookResult, fakePromptHookRecord, fakePromptHookResult, hookTargetKey } from './fake-hooks.ts'
 import { createFakeMarketplaceService, fakeMarketplaceEntry, marketplaceSourceKey } from './fake-marketplaces.ts'
+import { createFakeMcpAuthService, FAKE_ACCESS_TOKEN, FAKE_AUTHORIZATION_URL, fakeMcpAuthInfo, mcpAuthTargetKey } from './fake-mcp-auth.ts'
+import { emptyMcpListing, emptyProjectMcpListing, inertMcpManagerMembers, projectMcpAuthStorage } from './fake-mcp.ts'
 import { createFakeProjectConfigService, fakeProjectConfigSnapshot, fakeProjectHookItem, fakeProjectMcpServerItem } from './fake-project-config.ts'
 import { createFakeProjectDefinitionsService, projectDefinitionFileKey } from './fake-project-definitions.ts'
 import { createFakeProjectMcpManager, fakeProjectMcpTool, fakeProjectMcpTools } from './fake-project-mcp.ts'
@@ -1425,5 +1429,149 @@ describe('phase 12 fakes: project definitions', () => {
     service.missingProjects.add(PROJECT)
     await expect(service.read(PROJECT, '.mcp.json')).rejects.toMatchObject({ code: 'not_found' })
     expect(service.calls).toMatchObject({ read: 5, write: 5, remove: 4 })
+  })
+})
+
+describe('phase 14 fakes: MCP OAuth, elicitations, the MCP manager members', () => {
+  const ORIGIN = 'http://127.0.0.1:8787'
+  const GLOBAL = { kind: 'global', serverId: 'docs' } as const
+  const PROJECT = { kind: 'project', projectId: 'prj_AAAAAAAAAAAAAAAA', serverId: 'docs' } as const
+  const NAME_FORM: McpElicitationForm = { fields: [{ name: 'name', type: 'string', title: 'Name', description: null, required: true }] }
+
+  it('fake MCP OAuth: scripted info, start / complete flows (single use, stale), sign-out, providers and counters', async () => {
+    let clock = 1_000_000
+    const fake = createFakeMcpAuthService({ infos: { [mcpAuthTargetKey(PROJECT)]: fakeMcpAuthInfo({ client: 'configured' }) }, now: () => clock })
+    expect(mcpAuthTargetKey(GLOBAL)).toBe('global:docs')
+    expect(mcpAuthTargetKey(PROJECT)).toBe('project:prj_AAAAAAAAAAAAAAAA:docs')
+    expect(await fake.info(GLOBAL)).toBeNull()
+    expect(await fake.info(PROJECT)).toMatchObject({ signedIn: true, client: 'configured' })
+
+    const first = await fake.start(GLOBAL, { origin: ORIGIN, returnTo: '/plugins?tab=mcp' })
+    const second = await fake.start(GLOBAL, { origin: ORIGIN, returnTo: null })
+    expect(first.redirectUri).toBe(`${ORIGIN}/oauth/callback`)
+    expect(first.expiresAt).toBe(clock + LIMITS.mcpOAuthFlowMs)
+    const url = new URL(second.authorizationUrl!)
+    expect(`${url.origin}${url.pathname}`).toBe(FAKE_AUTHORIZATION_URL)
+    expect(url.searchParams.get('redirect_uri')).toBe(`${ORIGIN}/oauth/callback`)
+    // A new start replaces the old flow (one per server).
+    expect(fake.flows.size).toBe(1)
+    const firstState = new URL(first.authorizationUrl!).searchParams.get('state')!
+    const state = url.searchParams.get('state')!
+    expect(state.length).toBeGreaterThanOrEqual(16)
+    await expect(fake.complete({ state: firstState, code: 'code' }, { origin: ORIGIN })).rejects.toMatchObject({ code: 'conflict', details: { reason: 'stale' } })
+    await expect(fake.complete({ state, code: 'code' }, { origin: 'http://localhost:3000' })).rejects.toMatchObject({ details: { reason: 'stale' } })
+    const restarted = await fake.start(GLOBAL, { origin: ORIGIN, returnTo: '/plugins?tab=mcp' })
+    const restartedState = new URL(restarted.authorizationUrl!).searchParams.get('state')!
+    expect(await fake.complete({ state: restartedState, code: 'the-code' }, { origin: ORIGIN })).toEqual({ target: GLOBAL, status: 'connected', returnTo: '/plugins?tab=mcp' })
+    await expect(fake.complete({ state: restartedState, code: 'the-code' }, { origin: ORIGIN })).rejects.toMatchObject({ details: { reason: 'stale' } })
+    expect(await fake.info(GLOBAL)).toMatchObject({ signedIn: true })
+    expect(fake.completes.map(entry => entry.code)).toEqual([true, true, true, true])
+    expect(JSON.stringify(fake.completes)).not.toContain('the-code')
+    // Signed in: a start answers without a flow; the connect provider answers the tokens.
+    expect((await fake.start(GLOBAL, { origin: ORIGIN, returnTo: null })).authorizationUrl).toBeNull()
+    const provider = fake.provider(GLOBAL, 'connect')
+    expect(await provider.tokens()).toEqual({ access_token: FAKE_ACCESS_TOKEN, token_type: 'Bearer' })
+    expect(await provider.clientInformation()).toEqual({ client_id: 'fake-client' })
+    // An error answer, an expired flow.
+    const errored = await fake.start(PROJECT, { origin: ORIGIN, returnTo: null })
+    await expect(fake.complete({ state: new URL(errored.authorizationUrl!).searchParams.get('state')!, error: 'access_denied', errorDescription: 'The user said no.' }, { origin: ORIGIN }))
+      .rejects
+      .toMatchObject({ code: 'provider_error', details: { target: PROJECT } })
+    const expiring = await fake.start(PROJECT, { origin: ORIGIN, returnTo: null })
+    clock += LIMITS.mcpOAuthFlowMs
+    await expect(fake.complete({ state: new URL(expiring.authorizationUrl!).searchParams.get('state')!, code: 'c' }, { origin: ORIGIN })).rejects.toMatchObject({ details: { reason: 'stale' } })
+    // Scripted start errors; sign-out; providers without tokens throw McpAuthRequired.
+    fake.startErrors.set(mcpAuthTargetKey(PROJECT), new HarnessError({ code: 'conflict', message: 'Approve the server first.', details: { reason: 'untrusted' } }))
+    await expect(fake.start(PROJECT, { origin: ORIGIN, returnTo: null })).rejects.toMatchObject({ details: { reason: 'untrusted' } })
+    await fake.signOut(GLOBAL)
+    expect(await fake.info(GLOBAL)).toBeNull()
+    expect(() => fake.provider(GLOBAL, 'connect').clientInformation()).toThrow(McpAuthRequired)
+    expect(fake.signOuts).toEqual([GLOBAL])
+    expect(fake.providers).toEqual([{ target: GLOBAL, mode: 'connect' }, { target: GLOBAL, mode: 'connect' }])
+    await fake.start(GLOBAL, { origin: ORIGIN, returnTo: null })
+    await fake.stop()
+    expect(fake.flows.size).toBe(0)
+    expect(fake.calls).toEqual({ start: 8, complete: 6, signOut: 1, provider: 2, info: 4, stop: 1 })
+  })
+
+  it('fake elicitations: live handles, scripted requests, validated answers, pendingCount, cancelChat and stop', async () => {
+    const fake = createFakeElicitationBroker({ waitMs: 5000, now: () => 1000 })
+    const call = { runtimeKey: 'global:docs:1', chatId: 'chat-a', toolCallId: 'call-1', serverId: 'docs', serverName: 'Docs', interactive: true, signal: new AbortController().signal }
+    const handle = fake.begin(call)
+    expect(fake.inFlight).toEqual([call])
+    const changes: Array<string | null> = []
+    handle.onChange(() => changes.push(handle.pending()?.id ?? null))
+    expect(() => fake.request({ chatId: 'chat-b', toolCallId: 'call-1' }, { message: 'x', form: NAME_FORM })).toThrow(/in flight/)
+    const reply = fake.request(call, { message: 'Your name?', form: NAME_FORM })
+    expect(() => fake.request(call, { message: 'again', form: NAME_FORM })).toThrow(/already waits/)
+    expect(reply.elicitation).toMatchObject({ serverId: 'docs', serverName: 'Docs', message: 'Your name?', expiresAt: 6000 })
+    expect([handle.pending(), handle.waiting(), fake.pendingCount('chat-a'), fake.pendingCount('chat-b')]).toEqual([reply.elicitation, true, 1, 0])
+    // 404 for another chat's id, 400 with field issues, then the answer.
+    await expect(fake.answer('chat-b', reply.elicitation.id, { action: 'decline' })).rejects.toMatchObject({ code: 'not_found' })
+    await expect(fake.answer('chat-a', reply.elicitation.id, { action: 'accept', content: {} })).rejects.toMatchObject({ code: 'validation_error', details: { issues: [{ path: ['content', 'name'] }] } })
+    expect(await fake.answer('chat-a', reply.elicitation.id, { action: 'accept', content: { name: 'Ada' } })).toEqual({ action: 'accept' })
+    expect(await reply.result).toEqual({ action: 'accept', content: { name: 'Ada' } })
+    await expect(fake.answer('chat-a', reply.elicitation.id, { action: 'decline' })).rejects.toMatchObject({ code: 'conflict', details: { reason: 'stale' } })
+    expect(fake.answers).toEqual([{ chatId: 'chat-a', elicitationId: reply.elicitation.id, action: 'accept', fields: ['name'] }])
+    expect(handle.records()).toEqual([{ id: reply.elicitation.id, message: 'Your name?', fields: ['name'], action: 'accept', reason: 'user' }])
+    expect(JSON.stringify(handle.records())).not.toContain('Ada')
+    expect(changes).toEqual([reply.elicitation.id, null])
+    expect([handle.pending(), handle.waiting(), fake.pendingCount('chat-a')]).toEqual([null, false, 0])
+    // cancelChat, end and stop cancel with reason stopped.
+    const second = fake.request(call, { message: 'Again?', form: NAME_FORM })
+    fake.cancelChat('chat-a')
+    expect(await second.result).toEqual({ action: 'cancel' })
+    expect(handle.records().at(-1)).toMatchObject({ action: 'cancel', reason: 'stopped' })
+    const third = fake.request(call, { message: 'Third?', form: NAME_FORM })
+    handle.end()
+    handle.end()
+    expect(await third.result).toEqual({ action: 'cancel' })
+    expect(fake.inFlight).toEqual([])
+    const other = fake.begin({ ...call, chatId: 'chat-c' })
+    const fourth = fake.request({ chatId: 'chat-c', toolCallId: 'call-1' }, { message: 'Fourth?', form: NAME_FORM })
+    await fake.stop()
+    expect(await fourth.result).toEqual({ action: 'cancel' })
+    expect(other.records()).toHaveLength(1)
+    // The handler records the request and answers handlerAnswer.
+    const handler = fake.handler('global:docs:1')
+    const request = { method: 'elicitation/create' as const, params: { message: 'Hi', requestedSchema: {} } }
+    expect(await handler(request)).toEqual({ action: 'decline' })
+    fake.handlerAnswer = { action: 'cancel' }
+    expect(await handler(request)).toEqual({ action: 'cancel' })
+    expect(fake.handled).toEqual([{ runtimeKey: 'global:docs:1', request }, { runtimeKey: 'global:docs:1', request }])
+    expect(fake.cancelledChats).toEqual(['chat-a'])
+    expect(fake.calls).toMatchObject({ begin: 2, handler: 1, answer: 4, cancelChat: 1, stop: 1 })
+  })
+
+  it('the MCP manager members: inert members for hand-written managers, the fake project manager scripts prompts and resources', async () => {
+    const inert = inertMcpManagerMembers()
+    const signal = new AbortController().signal
+    expect(await inert.prompts()).toEqual(emptyMcpListing())
+    expect(await inert.resources()).toEqual({ items: [], truncated: false, unavailable: [] })
+    await expect(inert.getPrompt('docs', 'greet', {}, signal)).rejects.toMatchObject({ code: 'not_found' })
+    await expect(inert.readResource('docs', 'file:///a.txt', signal)).rejects.toMatchObject({ code: 'not_found' })
+    expect(inert.authTarget('docs')).toBeNull()
+    const aborted = new AbortController()
+    aborted.abort(new Error('stopped'))
+    await expect(inert.getPrompt('docs', 'greet', {}, aborted.signal)).rejects.toThrow('stopped')
+
+    const fake = createFakeProjectMcpManager()
+    const projectId = 'prj_AAAAAAAAAAAAAAAA'
+    expect(await fake.prompts(projectId)).toEqual(emptyProjectMcpListing())
+    expect(await fake.resources(projectId, { waitMs: 0 })).toEqual({ items: [], truncated: false, unavailable: [], shadowed: new Set() })
+    const prompt = { serverId: 'docs', serverName: 'Docs', name: 'greet', commandName: 'mcp__docs__greet', title: null, description: 'Greets.', arguments: [{ name: 'who', required: true }] }
+    fake.promptLists.set(projectId, { items: [prompt], truncated: false, unavailable: [{ serverId: 'down', status: 'needs-auth' }], shadowed: new Set(['docs']) })
+    expect((await fake.prompts(projectId)).items).toEqual([prompt])
+    fake.promptResults.set(`${projectId}/docs/greet`, { messages: [{ role: 'user', content: { type: 'text', text: 'Hello Ada' } }] })
+    expect(await fake.getPrompt(projectId, 'docs', 'greet', { who: 'Ada' }, signal)).toEqual({ messages: [{ role: 'user', content: { type: 'text', text: 'Hello Ada' } }] })
+    await expect(fake.getPrompt(projectId, 'docs', 'missing', {}, signal)).rejects.toMatchObject({ code: 'not_found' })
+    fake.resourceContents.set(`${projectId}/docs/file:///a.txt`, { contents: [{ uri: 'file:///a.txt', text: 'A' }] })
+    expect(await fake.readResource(projectId, 'docs', 'file:///a.txt', signal)).toEqual({ contents: [{ uri: 'file:///a.txt', text: 'A' }] })
+    await expect(fake.readResource(projectId, 'docs', 'file:///b.txt', aborted.signal)).rejects.toThrow('stopped')
+    expect(fake.promptCalls).toEqual([{ projectId, serverId: 'docs', target: 'greet', args: { who: 'Ada' } }, { projectId, serverId: 'docs', target: 'missing', args: {} }])
+    expect(fake.resourceCalls.map(call => call.target)).toEqual(['file:///a.txt', 'file:///b.txt'])
+    expect(fake.authTarget(projectId, 'docs')).toEqual({ kind: 'project', scope: `project:${projectId}`, name: 'mcp-oauth.docs' })
+    expect(projectMcpAuthStorage(projectId, 'docs')).toEqual(fake.authTarget(projectId, 'docs'))
+    expect(fake.calls).toMatchObject({ prompts: 2, resources: 1, getPrompt: 2, readResource: 2, authTarget: 2 })
   })
 })

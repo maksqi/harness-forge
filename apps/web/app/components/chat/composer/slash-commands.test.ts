@@ -165,7 +165,7 @@ describe('groups, argument hints and /remember (Phase 10)', () => {
       { name: 'review', description: 'Review a file for bugs', kind: 'server', group: 'project', argumentHint: '<file> [focus]', namespace: 'frontend' },
       { name: 'standup', description: 'Draft my standup notes', kind: 'server', group: 'personal' },
     ])
-    expect(['harness', 'project', 'user', 'plugin'].map(source => slashGroupOf({ source: source as 'harness' }))).toEqual(['app', 'project', 'personal', 'plugin'])
+    expect(['harness', 'project', 'user', 'plugin', 'mcp'].map(source => slashGroupOf({ source: source as 'harness' }))).toEqual(['app', 'project', 'personal', 'plugin', 'mcp'])
   })
 
   it('shows the argument hint only while the text is the command name plus blanks on one line', () => {
@@ -204,6 +204,8 @@ describe('groups, argument hints and /remember (Phase 10)', () => {
       { value: 'project', label: 'Project' },
       { value: 'personal', label: 'Personal' },
       { value: 'plugin', label: 'Plugins' },
+      // Phase 14 (ADR-061): the prompts of MCP servers, before Skills.
+      { value: 'mcp', label: 'MCP' },
       // Phase 11 (ADR-052): user-invocable skills, last.
       { value: 'skill', label: 'Skills' },
     ])

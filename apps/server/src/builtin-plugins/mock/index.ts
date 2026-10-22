@@ -10,7 +10,10 @@
 // mocks, PROVIDERS.md 8 "Customization mocks (Phase 10)", FROZEN after Gate P10-0b): `mock:agents` (./agents.ts) and
 // `mock:background` (./background.ts); Phase 11 (PROVIDERS.md 8 "Hook mocks (Phase 11)", FROZEN after Gate P11-0b):
 // `mock:hooks` (./hooks.ts), the 17th language model; Phase 12 (PROVIDERS.md 8 "Prompt hook mock (Phase 12)", FROZEN
-// after Gate P12-0b): `mock:prompt-hook` (./prompt-hook.ts), the 18th language model, which answers prompt hooks.
+// after Gate P12-0b): `mock:prompt-hook` (./prompt-hook.ts), the 18th language model, which answers prompt hooks;
+// Phase 14 (PROVIDERS.md 8 "MCP and search mocks (Phase 14)", FROZEN after Gate P14-0b): `mock:search` (./search.ts, the
+// 19th: the provider's own web search) with the provider's `webSearch` hook (plugin API 1.7.0; the native tool for
+// `mock:search` only) and `mock:search-tool` (./search-tool.ts, the 20th: calls the builtin `search_web`).
 import type { HarnessErrorInit, ModelInfo, PluginManifest, ProviderDefinition, ReasoningLevel, ToolDefinition } from '@harness-forge/plugin-sdk'
 import { APICallError } from '@ai-sdk/provider'
 import { definePlugin } from '@harness-forge/plugin-sdk'
@@ -34,6 +37,8 @@ import {
   MOCK_TOOL_NAME,
 } from './models.ts'
 import { MOCK_PROMPT_HOOK_MODEL_ID } from './prompt-hook.ts'
+import { MOCK_SEARCH_TOOL_MODEL_ID } from './search-tool.ts'
+import { MOCK_SEARCH_MODEL_ID, mockWebSearch } from './search.ts'
 
 export {
   MOCK_AGENT_CONTENT,
@@ -131,6 +136,32 @@ export {
   mockPromptHookText,
 } from './prompt-hook.ts'
 export type { MockPromptHookMarker, MockPromptHookMatch } from './prompt-hook.ts'
+export {
+  MOCK_SEARCH_ERROR_MAX_CHARS,
+  MOCK_SEARCH_FAILED_PREFIX,
+  MOCK_SEARCH_RESULTS_PREFIX,
+  MOCK_SEARCH_TOOL_MODEL_ID,
+  MOCK_SEARCH_TOOL_QUERY_MAX_CHARS,
+  mockSearchResultText,
+  mockSearchTitles,
+  mockSearchToolPlan,
+  mockSearchToolQuery,
+} from './search-tool.ts'
+export {
+  MOCK_SEARCH_DONE,
+  MOCK_SEARCH_MODEL_ID,
+  MOCK_SEARCH_OFF,
+  MOCK_SEARCH_QUERY_MAX_CHARS,
+  MOCK_SEARCH_SOURCES,
+  MOCK_SEARCH_USAGE,
+  MOCK_WEB_SEARCH_TOOL_ID,
+  MOCK_WEB_SEARCH_TOOL_NAME,
+  mockSearchOffersNative,
+  mockSearchQuery,
+  mockWebSearch,
+  mockWebSearchTool,
+} from './search.ts'
+export type { MockSearchSource, MockWebSearchResult } from './search.ts'
 export { MOCK_SHELL_DONE_PREFIX } from './shell.ts'
 export { MOCK_STEER_STEP_DELAY_MS, MOCK_STEER_STEPS_MAX } from './steer.ts'
 export {
@@ -189,16 +220,17 @@ function mockModel(id: string, name: string, capabilities: Partial<Record<MockCa
 }
 
 /**
- * The twenty-one mock models (listing and seeds): the four chat models of v1, then the Phase 6 models in the order of
+ * The twenty-three mock models (listing and seeds): the four chat models of v1, then the Phase 6 models in the order of
  * PROVIDERS.md 8, then `workspace` (Phase 7), `checkpoint` and `shell` (Phase 8), then the agent mocks of Phase 9
  * (`compact` with a 2000-token context window, `plan`, `todo`, `subagent`, `steer`; the `tools` capability only), then
  * the customization mocks of Phase 10 (`agents`, `background`; the `tools` capability only), then `hooks` (Phase 11;
  * the `tools` capability only), then `prompt-hook` (Phase 12; no capabilities: it never calls a tool, it answers
- * prompt hooks). The media models carry explicit kinds: `image` (vision, the same cost), `transcription` and `speech`
- * (with `voices`). `image-chat`, `image-tool`, `workspace`, `checkpoint`, `shell` and the agent, customization and hook
- * mocks say `kind: 'chat'` explicitly: an explicit kind always wins over `classify()`, so their ids can never be read as
- * dedicated image models. Counts since Phase 12: listing 21, `GET /api/models` 19 (transcribe and speech hidden), the
- * provider's `modelCount` 18 (visible chat models).
+ * prompt hooks), then `search` and `search-tool` (Phase 14; the `tools` capability only; `search` has native search
+ * through the provider's `webSearch` hook). The media models carry explicit kinds: `image` (vision, the same cost),
+ * `transcription` and `speech` (with `voices`). `image-chat`, `image-tool`, `workspace`, `checkpoint`, `shell` and the
+ * agent, customization, hook and search mocks say `kind: 'chat'` explicitly: an explicit kind always wins over
+ * `classify()`, so their ids can never be read as dedicated image models. Counts since Phase 14: listing 23, `GET
+ * /api/models` 21 (transcribe and speech hidden), the provider's `modelCount` 20 (visible chat models; 18 in Phase 12).
  */
 export function mockModels(): ModelInfo[] {
   return [
@@ -223,6 +255,8 @@ export function mockModels(): ModelInfo[] {
     mockModel('background', 'Mock Background', { tools: true }, { kind: 'chat' }),
     mockModel('hooks', 'Mock Hooks', { tools: true }, { kind: 'chat' }),
     mockModel(MOCK_PROMPT_HOOK_MODEL_ID, 'Mock Prompt Hook', {}, { kind: 'chat' }),
+    mockModel(MOCK_SEARCH_MODEL_ID, 'Mock Search', { tools: true }, { kind: 'chat' }),
+    mockModel(MOCK_SEARCH_TOOL_MODEL_ID, 'Mock Search Tool', { tools: true }, { kind: 'chat' }),
   ]
 }
 
@@ -283,6 +317,10 @@ export const mockProvider: ProviderDefinition = {
   transcriptionOptions() {
     // The mock models detect nothing: a language hint is ignored (PROVIDERS.md 13).
     return undefined
+  },
+  webSearch(model) {
+    // Plugin API 1.7.0 (ADR-062): the provider-executed `web_search` tool for `mock:search` only (./search.ts).
+    return mockWebSearch(model)
   },
 }
 

@@ -402,8 +402,9 @@ export const chatRequestBodySchema = z.strictObject({
   outputStyle: catalogNameSchema.nullable().optional(),
   /**
    * The web search mode of this turn (Phase 14, ADR-063): the composer sends the effective mode (picked > chat setting >
-   * global `webSearchDefault`); omitted = the chat's `settings.webSearch`, else the global default. Never stored by this
-   * request (the composer persists a change with `PATCH /chats/:id`). Resolved per turn by `resolveWebSearch`.
+   * global `webSearchDefault`); omitted = the chat's `settings.webSearch`, else the global default. Stored only when the
+   * request creates the chat (as `settings.webSearch`, like `toolMode`); for an existing chat the composer persists a
+   * change with `PATCH /chats/:id`. Resolved per turn by `resolveWebSearch`.
    */
   webSearch: webSearchModeSchema.optional(),
 })

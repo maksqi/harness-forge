@@ -37,7 +37,15 @@
 // `<top>/link` → `/etc/passwd`), `wrong-comment` (another 40-hex sha as the zip comment), `wrong-top-folder` (the top
 // folder `<repo>-wrong/`). Every other request answers 404; methods other than GET and HEAD answer 405.
 //
+// Phase 14 (C50-T6, FROZEN after Gate P14-0b): `POST` is answered for the URLs registered with `serve()` (the same
+// registered response as GET; the `core-search` backends and the OAuth revocation post there) and still 405 for every
+// other path and method; the log entry of a request with a body carries it as UTF-8 text (`body`), so a probe can
+// assert what was sent (never a real key: tests use fake ones). The HTTP front end reads at most
+// `FAKE_REMOTE_MAX_BODY_BYTES` of a request body (more answers 413); `createFakeSafeFetch` passes `options.body` and,
+// like `safeFetch`, never follows a redirect of a POST, refuses a body with GET / HEAD and a body over 64 KiB.
+//
 // Light on purpose (Node built-ins, `fflate`, the shared package): probes and e2e specs import it directly.
+import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import type { SafeFetch, SafeFetchOptions, SafeFetchResult } from '../security/types.ts'
 import { Buffer } from 'node:buffer'
@@ -102,6 +110,8 @@ export interface FakeRemoteRequest {
   /** The path below the host, with its query string. */
   readonly path: string
   readonly status: number
+  /** Phase 14: the request body as UTF-8 text, when the request had one (a POST). */
+  readonly body?: string
 }
 
 export interface FakeRequest {
@@ -111,7 +121,17 @@ export interface FakeRequest {
   readonly path: string
   /** Lowercase names. */
   readonly headers?: Readonly<Record<string, string | undefined>>
+  /** Phase 14: the request body (a POST). */
+  readonly body?: Uint8Array
 }
+
+/** Largest request body the HTTP front end reads (Phase 14; more answers 413). */
+export const FAKE_REMOTE_MAX_BODY_BYTES = 1_048_576
+
+/** Largest POST body `createFakeSafeFetch` accepts: `SAFE_FETCH_MAX_BODY_BYTES` of `security/ssrf.ts` (64 KiB). */
+export const FAKE_SAFE_FETCH_MAX_BODY_BYTES = 65_536
+
+const decoder = new TextDecoder()
 
 export interface FakeNpmVersion {
   readonly files?: FakeFiles
@@ -135,7 +155,10 @@ export interface FakeRemoteRoutes {
   readonly resolve: (repo: string, ref: string) => string | null
   /** The GitHub API answers 403 with `x-ratelimit-remaining: 0` while limited. */
   readonly setRateLimited: (limited: boolean, options?: { readonly resetAt?: number }) => void
-  /** Serves `response` (bytes, text or a full response) at an absolute https URL (archive hosts, hosted files). */
+  /**
+   * Serves `response` (bytes, text or a full response) at an absolute https URL (archive hosts, hosted files) for GET,
+   * HEAD and (Phase 14) POST.
+   */
   readonly serve: (url: string, response: string | Uint8Array | FakeServedResponse) => void
   /** Registers an npm package on `registry.npmjs.org` (`tags` default: `latest` = the last version). */
   readonly npmPackage: (name: string, versions: Readonly<Record<string, FakeNpmVersion>>, tags?: Readonly<Record<string, string>>) => void
@@ -423,8 +446,15 @@ export function createFakeRemoteRoutes(): FakeRemoteRoutes {
     },
     handle(request, context = {}) {
       const response = answer(request, context.npmOrigin ?? `https://${NPM_REGISTRY_HOST}`)
-      if (response !== null)
-        requests.push({ method: request.method, host: request.host, path: request.path, status: response.status })
+      if (response !== null) {
+        requests.push({
+          method: request.method,
+          host: request.host,
+          path: request.path,
+          status: response.status,
+          ...(request.body === undefined ? {} : { body: decoder.decode(request.body) }),
+        })
+      }
       return response
     },
   }
@@ -434,9 +464,10 @@ export function createFakeRemoteRoutes(): FakeRemoteRoutes {
     const known = host === GITHUB_API_HOST || host === GITHUB_RAW_HOST || host === GITHUB_CODELOAD_HOST || host === NPM_REGISTRY_HOST || servedHosts.has(host)
     if (!known)
       return null
-    if (request.method !== 'GET' && request.method !== 'HEAD')
-      return textResponse(405, 'Method Not Allowed')
     const registered = served.get(`${host}${request.path}`)
+    // Phase 14: a POST is answered only by a `serve()` route; every other method (and a POST elsewhere) is 405.
+    if (request.method !== 'GET' && request.method !== 'HEAD' && !(request.method === 'POST' && registered !== undefined))
+      return textResponse(405, 'Method Not Allowed')
     if (registered !== undefined) {
       const headers: Record<string, string> = {}
       for (const [name, value] of Object.entries(registered.headers ?? {}))
@@ -588,6 +619,28 @@ export async function startFakeRemote(options: { readonly routes?: FakeRemoteRou
   const server = createServer((req, res) => {
     res.on('error', () => {})
     req.socket.on('error', () => {})
+    // Phase 14: the request body (a POST) is read first, at most `FAKE_REMOTE_MAX_BODY_BYTES`.
+    const chunks: Buffer[] = []
+    let size = 0
+    let refused = false
+    req.on('data', (chunk: Buffer) => {
+      size += chunk.length
+      if (size > FAKE_REMOTE_MAX_BODY_BYTES) {
+        refused = true
+        req.pause()
+        if (!res.headersSent)
+          res.writeHead(413, { 'content-type': TEXT_TYPE, 'connection': 'close' }).end('The request body is too large.')
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.once('end', () => {
+      if (!refused)
+        respond(req, res, size === 0 ? undefined : Buffer.concat(chunks))
+    })
+  })
+
+  function respond(req: IncomingMessage, res: ServerResponse, requestBody: Buffer | undefined): void {
     const raw = req.url ?? '/'
     const slash = raw.indexOf('/', 1)
     const host = (slash === -1 ? raw.slice(1) : raw.slice(1, slash)).split('?')[0]!.toLowerCase()
@@ -596,25 +649,26 @@ export async function startFakeRemote(options: { readonly routes?: FakeRemoteRou
     for (const [name, value] of Object.entries(req.headers))
       headers[name] = Array.isArray(value) ? value.join(', ') : value
     const method = req.method ?? 'GET'
-    const response = routes.handle({ method, host, path, headers }, { npmOrigin: `${base}/${NPM_REGISTRY_HOST}` })
+    const body = requestBody === undefined ? {} : { body: new Uint8Array(requestBody.buffer, requestBody.byteOffset, requestBody.byteLength) }
+    const response = routes.handle({ method, host, path, headers, ...body }, { npmOrigin: `${base}/${NPM_REGISTRY_HOST}` })
     if (response === null) {
-      routes.requests.push({ method, host, path, status: 502 })
+      routes.requests.push({ method, host, path, status: 502, ...(requestBody === undefined ? {} : { body: decoder.decode(requestBody) }) })
       res.writeHead(502, { 'content-type': TEXT_TYPE })
       res.end(`The fake remote does not serve ${host || 'this request'}.`)
       return
     }
-    const body = response.body
-    const length = body instanceof Uint8Array ? body.length : body.zeros
+    const answer = response.body
+    const length = answer instanceof Uint8Array ? answer.length : answer.zeros
     res.writeHead(response.status, { 'content-length': String(length), ...response.headers })
     if (method === 'HEAD') {
       res.end()
       return
     }
-    if (body instanceof Uint8Array) {
-      res.end(Buffer.from(body.buffer, body.byteOffset, body.byteLength))
+    if (answer instanceof Uint8Array) {
+      res.end(Buffer.from(answer.buffer, answer.byteOffset, answer.byteLength))
       return
     }
-    let left = body.zeros
+    let left = answer.zeros
     const pump = (): void => {
       while (left > 0 && !res.destroyed) {
         const size = Math.min(left, ZERO_CHUNK.length)
@@ -628,7 +682,7 @@ export async function startFakeRemote(options: { readonly routes?: FakeRemoteRou
         res.end()
     }
     pump()
-  })
+  }
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject)
     server.listen(0, '127.0.0.1', () => {
@@ -667,6 +721,19 @@ export interface FakeSafeFetch {
 
 const REDIRECT_STATUSES: ReadonlySet<number> = new Set([301, 302, 303, 307, 308])
 
+/** The body of a fake request, checked like `safeFetch` does (Phase 14): POST only, at most 64 KiB. */
+function requestBodyOf(method: string, body: string | Uint8Array | undefined): Uint8Array | null {
+  if (method !== 'POST') {
+    if (body !== undefined)
+      throw new HarnessError({ code: 'validation_error', message: 'Only a POST request can have a body.' })
+    return null
+  }
+  const bytes = body === undefined ? new Uint8Array(0) : typeof body === 'string' ? encoder.encode(body) : body.slice()
+  if (bytes.byteLength > FAKE_SAFE_FETCH_MAX_BODY_BYTES)
+    throw new HarnessError({ code: 'validation_error', message: `The request body is larger than the limit of ${FAKE_SAFE_FETCH_MAX_BODY_BYTES} bytes.` })
+  return bytes
+}
+
 function abortError(reason: unknown): Error {
   if (reason instanceof Error)
     return reason
@@ -699,6 +766,7 @@ export function createFakeSafeFetch(routes: FakeRemoteRoutes): FakeSafeFetch {
   async function fetchOnce(input: string, options: SafeFetchOptions): Promise<SafeFetchResult> {
     const protocols = options.protocols ?? ['http:', 'https:']
     const method = options.method ?? 'GET'
+    const body = requestBodyOf(method, options.body)
     const maxRedirects = options.maxRedirects ?? 5
     const headers: Record<string, string> = {}
     for (const [name, value] of Object.entries(options.headers ?? {}))
@@ -714,11 +782,12 @@ export function createFakeSafeFetch(routes: FakeRemoteRoutes): FakeSafeFetch {
       if (url.username !== '' || url.password !== '')
         throw new HarnessError({ code: 'validation_error', message: 'Invalid URL: URLs with credentials are not allowed.' })
       url.hash = ''
-      const response = routes.handle({ method, host: url.host, path: `${url.pathname}${url.search}`, headers })
+      const response = routes.handle({ method, host: url.host, path: `${url.pathname}${url.search}`, headers, ...(body === null ? {} : { body }) })
       if (response === null)
         throw new HarnessError({ code: 'validation_error', message: `The host "${url.host}" is not served by the fake remote: only registered hosts can be fetched.` })
       const location = response.headers.location
-      if (REDIRECT_STATUSES.has(response.status) && typeof location === 'string' && location.trim() !== '') {
+      // Phase 14: like `safeFetch`, a POST never follows a redirect (the 3xx is the result).
+      if (method !== 'POST' && REDIRECT_STATUSES.has(response.status) && typeof location === 'string' && location.trim() !== '') {
         if (redirects >= maxRedirects)
           throw new HarnessError({ code: 'provider_error', message: `Too many redirects: ${url.host} redirected more than ${maxRedirects} times.` })
         if (!URL.canParse(location, url.href))
@@ -729,8 +798,8 @@ export function createFakeSafeFetch(routes: FakeRemoteRoutes): FakeSafeFetch {
       const size = response.body instanceof Uint8Array ? response.body.length : response.body.zeros
       if (method !== 'HEAD' && size > options.maxBytes)
         throw new HarnessError({ code: 'payload_too_large', message: `The response is larger than the limit of ${options.maxBytes} bytes.`, details: { limitBytes: options.maxBytes } })
-      const body = method === 'HEAD' ? new Uint8Array(0) : response.body instanceof Uint8Array ? response.body.slice() : new Uint8Array(size)
-      return { url: url.href, status: response.status, headers: new Headers(response.headers), body }
+      const answer = method === 'HEAD' ? new Uint8Array(0) : response.body instanceof Uint8Array ? response.body.slice() : new Uint8Array(size)
+      return { url: url.href, status: response.status, headers: new Headers(response.headers), body: answer }
     }
   }
 

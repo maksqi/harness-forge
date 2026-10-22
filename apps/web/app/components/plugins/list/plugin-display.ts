@@ -26,6 +26,7 @@ import {
   BoxesIcon,
   CircleOffIcon,
   FolderCodeIcon,
+  GlobeIcon,
   LayoutGridIcon,
   PlugZapIcon,
   ServerIcon,
@@ -340,6 +341,8 @@ export function pluginDetailRoute(id: string, tab?: 'overview' | 'configuration'
 export const BUILTIN_PLUGIN_GLYPHS: Readonly<Record<string, Component>> = {
   'core-providers': BoxesIcon,
   'core-tools': WrenchIcon,
+  // Phase 14 (ADR-063): the builtin web search tool `search_web`.
+  'core-search': GlobeIcon,
   'core-commands': SquareSlashIcon,
   'core-mcp': ServerIcon,
   'core-workspace': FolderCodeIcon,

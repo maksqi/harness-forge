@@ -51,7 +51,14 @@
 // The slash menu's Skills group comes from `GET /commands` (`kind: 'skill'`); in a project chat with project commands,
 // opening the menu fetches the project's trust list (15 s max age), and its pending `command` items mark their
 // commands "Needs approval".
-import type { ClientCommand, ImageOptions, MessageUsage, ProjectFileEntry, QueueItem, ReasoningEffort, ToolMode } from '@harness-forge/shared'
+// Phase 14 (ADR-062, ADR-063; C54 mounts, W14.8 implements; frozen from Gate P14-0b): `webSearch` = the chat's web search
+// mode (`session.webSearch`) with `update:webSearch`; WebSearchToggle sits after OutputStyleMenu (hidden for image
+// models and while the model is unknown), on = `auto`, its availability from `webSearchAvailability` (the selected
+// model's `webSearch`, `capabilities.tools`, the setting `webSearchNative`, the web-search store's `builtinAvailable`, the
+// permission mode, one function tool while tools are on; docs/UI.md 7.35, open point 5). Until W14.8 fits the unavailable
+// toggle into the 390 px toolbar (the model picker keeps its 40 px touch target), the C54 mount shows it only while
+// search is available or the chat's mode is `auto`.
+import type { ClientCommand, ImageOptions, MessageUsage, ProjectFileEntry, QueueItem, ReasoningEffort, ToolMode, WebSearchMode } from '@harness-forge/shared'
 import type { ChatStatus } from 'ai'
 import type { DictationRange } from './dictation'
 import type { ComposerRefusalData, OutputStyleScope } from './output-style'
@@ -87,6 +94,7 @@ import { useProjectsStore } from '~/stores/projects'
 import { useProvidersStore } from '~/stores/providers'
 import { useSettingsStore } from '~/stores/settings'
 import { useUiStore } from '~/stores/ui'
+import { useWebSearchStore } from '~/stores/web-search'
 import { testIds } from '~/utils/testids'
 import { CHAT_VIEW_ACTIONS } from '../chat-context'
 import { queueItemFiles, restoredDraft } from '../queue/queued-messages'
@@ -128,6 +136,8 @@ import {
 } from './slash-commands'
 import SlashArgumentHint from './SlashArgumentHint.vue'
 import SlashMenu from './SlashMenu.vue'
+import { webSearchAvailability, webSearchVia } from './web-search'
+import WebSearchToggle from './WebSearchToggle.vue'
 
 const props = withDefaults(defineProps<{
   chatId: string
@@ -154,6 +164,11 @@ const props = withDefaults(defineProps<{
    * (the project's style, else the global default).
    */
   outputStyle?: string | null
+  /**
+   * + Phase 14 (C54 declares it, W14.8 uses it): the chat's web search mode (`session.webSearch`); the toggle is on for
+   * `auto`. Default `off`.
+   */
+  webSearch?: WebSearchMode
 }>(), {
   usage: null,
   chatCostUsd: null,
@@ -162,6 +177,7 @@ const props = withDefaults(defineProps<{
   previousImages: 0,
   projectId: null,
   outputStyle: null,
+  webSearch: 'off',
 })
 
 const emit = defineEmits<{
@@ -174,6 +190,8 @@ const emit = defineEmits<{
   'edit-last': []
   /** + Phase 11: the chat's output style chosen in OutputStyleMenu or with `/output-style` (null = Automatic). */
   'update:outputStyle': [value: string | null]
+  /** + Phase 14: the web search toggle (on → `auto`, off → `off`). */
+  'update:webSearch': [value: WebSearchMode]
 }>()
 
 const models = useModelsStore()
@@ -248,6 +266,27 @@ const effectivePlaceholder = computed(() => {
 
 function onImageOptionsChange(value: ImageOptions) {
   imageOptions.set({ n: value.n, aspectRatio: value.aspectRatio, editPrevious: value.editPrevious })
+}
+
+// ---------- web search (Phase 14, ADR-062, ADR-063; W14.8) ----------
+
+const webSearchStore = useWebSearchStore()
+/** What turning web search on would do (the server's rule, open point 5). */
+const webSearchState = computed(() => webSearchAvailability({
+  toolMode: props.toolMode,
+  native: current.model.value?.webSearch ?? null,
+  preferNative: settings.resolved.webSearchNative,
+  builtinAvailable: webSearchStore.builtinAvailable,
+  modelTools: current.model.value?.capabilities.tools === true,
+  functionTools: props.toolMode === 'off' ? 0 : 1,
+}))
+const webSearchBy = computed(() => webSearchVia(webSearchState.value, current.provider.value?.name ?? null, webSearchStore.config?.backend ?? null))
+/** A chat model is selected, and search is available or on (W14.8 settles the unavailable toggle). */
+const showWebSearch = computed(() => !isImageModel.value && current.model.value !== undefined
+  && (webSearchState.value.kind !== 'unavailable' || props.webSearch === 'auto'))
+
+function onWebSearchToggle(on: boolean) {
+  emit('update:webSearch', on ? 'auto' : 'off')
 }
 
 // ---------- output style (Phase 11, ADR-051; W11.10) ----------
@@ -1111,6 +1150,15 @@ const TEXTAREA_CLASS = [
               :automatic="automaticOutputStyle"
               :return-focus-to="focusTarget"
               @update:model-value="onOutputStyleChange"
+            />
+            <WebSearchToggle
+              v-if="showWebSearch"
+              :model-value="webSearch === 'auto'"
+              :availability="webSearchState"
+              :via="webSearchBy"
+              :disabled="disabled"
+              :return-focus-to="focusTarget"
+              @update:model-value="onWebSearchToggle"
             />
             <ImageOptionsMenu
               v-model:open="imageOptionsOpen"

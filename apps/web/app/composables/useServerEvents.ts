@@ -29,6 +29,10 @@
 // Phase 12 (ADR-054; C46 wires it, complete from P12-0b, no P12-A owner): `marketplace.changed` goes to the marketplaces
 // store (the summary is replaced or dropped), `plugin.changed` also to the marketplaces store (installed and update
 // states), and a reconnect refreshes its loaded list and details (`marketplaces.refreshLoaded()`).
+// Phase 14 (ADR-060, ADR-063; C54, complete from P14-0b, no P14-A owner): no new event type. `chat.updated` /
+// `chat.created` carry `awaitingInput` into the chats store (its `applyEvent`: the `input` run state, "Needs your input";
+// an event without the key leaves it unchanged); `plugin.changed` also goes to the web-search store (`core-search`'s
+// settings and keys), and a reconnect refetches its loaded configuration.
 import type { ServerEvent, ServerEventOf, ServerEventType } from '@harness-forge/shared'
 import type { Ref } from 'vue'
 import type { EventStreamStatus } from '~/utils/event-stream'
@@ -51,6 +55,7 @@ import { useProvidersStore } from '~/stores/providers'
 import { useSettingsStore } from '~/stores/settings'
 import { useShellRulesStore } from '~/stores/shell-rules'
 import { useUiStore } from '~/stores/ui'
+import { useWebSearchStore } from '~/stores/web-search'
 import { useWorkspaceStore } from '~/stores/workspace'
 
 type AnyHandler = (event: ServerEvent) => void
@@ -129,7 +134,7 @@ function applyKeyRotated(): void {
 }
 
 /**
- * Applies one event (docs/UI.md 11): `chat.*` / `run.*` -> chats; `provider.changed` -> providers (+ models
+ * Applies one event (docs/UI.md 11): `chat.*` / `run.*` -> chats (+ Phase 14: `awaitingInput`); `provider.changed` -> providers (+ models
  * refetch); `catalog.changed` -> models; `plugin.changed` -> plugins (+ providers and models refetch); `plugin.log`
  * -> plugins; `project.changed` -> projects + chats + workspace + shell rules; `workspace.changed` -> workspace (and
  * `run.finished` / `chat.deleted` -> workspace too); `key.rotated` -> the chat list reloads, toast; `queue.changed` /
@@ -137,7 +142,7 @@ function applyKeyRotated(): void {
  * `plugin.changed` -> customizations (Phase 10); `hooks.changed` -> hooks, `project-trust.changed` -> project trust + hooks +
  * project MCP, `project-mcp.changed` -> project MCP, `plugin.changed` / `customization.changed` / `project.changed` -> hooks
  * (and `project.changed` -> project trust + project MCP) (Phase 11); `marketplace.changed` / `plugin.changed` ->
- * marketplaces (Phase 12). Then leaves `/chat/<id>` when the open chat was deleted, and notifies
+ * marketplaces (Phase 12); `plugin.changed` -> web search (Phase 14). Then leaves `/chat/<id>` when the open chat was deleted, and notifies
  * `useServerEvents().on()` subscribers (the chat sessions listed by `key.rotated` reload their path there).
  */
 export function dispatchServerEvent(event: ServerEvent, options: DispatchOptions = {}): void {
@@ -171,6 +176,7 @@ export function dispatchServerEvent(event: ServerEvent, options: DispatchOptions
       safely(() => useCustomizationsStore().applyEvent(event))
       safely(() => useHooksStore().applyEvent(event))
       safely(() => useMarketplacesStore().applyEvent(event))
+      safely(() => useWebSearchStore().applyEvent(event))
       break
     case 'plugin.log':
       safely(() => usePluginsStore().applyEvent(event))
@@ -231,7 +237,8 @@ export function dispatchServerEvent(event: ServerEvent, options: DispatchOptions
  * (`chatQueue.refreshLoaded()`, Phase 9), and the loaded background task lists and customization lists
  * (`backgroundTasks.refreshLoaded()`, `customizations.refreshLoaded()`, Phase 10), and the loaded hook listings, project
  * trust lists and project MCP lists (`hooks`, `projectTrust`, `projectMcp` `.refreshLoaded()`, Phase 11), and the
- * loaded marketplace list and details (`marketplaces.refreshLoaded()`, Phase 12).
+ * loaded marketplace list and details (`marketplaces.refreshLoaded()`, Phase 12), and the loaded web search configuration
+ * (`webSearch.fetch()`, Phase 14).
  */
 export async function refetchLoadedStores(): Promise<void> {
   const auth = useAuthStore()
@@ -250,6 +257,7 @@ export async function refetchLoadedStores(): Promise<void> {
   const projectTrust = useProjectTrustStore()
   const projectMcp = useProjectMcpStore()
   const marketplaces = useMarketplacesStore()
+  const webSearch = useWebSearchStore()
   const tasks: Array<Promise<unknown>> = [
     auth.fetchStatus(),
     settings.fetch(),
@@ -273,5 +281,7 @@ export async function refetchLoadedStores(): Promise<void> {
     tasks.push(projects.fetchAll())
   if (shellRules.loaded)
     tasks.push(shellRules.fetchAll())
+  if (webSearch.loadedAt !== null)
+    tasks.push(webSearch.fetch())
   await Promise.allSettled(tasks)
 }

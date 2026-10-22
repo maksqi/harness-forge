@@ -10,6 +10,7 @@ import { useAuthStore } from '~/stores/auth'
 import { testIds } from '~/utils/testids'
 import { authStatus } from '~/utils/testing/fixtures'
 import { createMockApi } from '~/utils/testing/mock-api'
+import McpOAuthFields from './McpOAuthFields.vue'
 import McpServerDialog from './McpServerDialog.vue'
 
 const mock = vi.hoisted(() => ({ api: null as unknown }))
@@ -418,5 +419,44 @@ describe('mcpServerDialog: edit', () => {
     expect(passwordDialog()).not.toBeNull()
     await confirmPassword('correct horse battery staple')
     expect(api.mcp.update).toHaveBeenCalledWith({ params: { id: 'github' }, body: { transport: { type: 'stdio', command: 'npx' } } })
+  })
+})
+
+describe('mcpServerDialog: OAuth fields (Phase 14, C54 mounts)', () => {
+  it('the HTTP and SSE tabs render McpOAuthFields with the redirect URI built in script; stdio does not', async () => {
+    const { wrapper } = mountDialog()
+    await settle()
+    await chooseTransport('http')
+    const fields = wrapper.findComponent(McpOAuthFields)
+    expect(fields.exists()).toBe(true)
+    expect(fields.props()).toMatchObject({
+      modelValue: { clientId: '', scopes: '', clientSecret: '', removeSecret: false },
+      secretState: null,
+      redirectUri: `${window.location.origin}/oauth/callback`,
+      disabled: false,
+      signedIn: false,
+    })
+    expect(one(`[data-testid="${testIds.mcpOauthSection}"]`, dialog())).not.toBeNull()
+    await chooseTransport('sse')
+    expect(one(`[data-testid="${testIds.mcpOauthSection}"]`, dialog())).not.toBeNull()
+    await chooseTransport('stdio')
+    expect(one(`[data-testid="${testIds.mcpOauthSection}"]`, dialog())).toBeNull()
+    wrapper.unmount()
+  })
+
+  it('an edited server fills the draft from its OAuth settings; an Authorization header disables the fields', async () => {
+    const server = mcpServer({
+      transport: { type: 'http', url: 'https://mcp.example.com/mcp', headers: { Authorization: { set: true, hint: STORED_HINT, source: 'stored' } }, oauth: { clientId: 'hf-github', clientSecret: { set: true, hint: null, source: 'stored' }, scopes: 'repo' } },
+      auth: { signedIn: true, expiresAt: null, scope: 'repo', client: 'configured', issuer: 'https://github.example.com' },
+    })
+    const { wrapper } = mountDialog(server)
+    await settle()
+    expect(wrapper.findComponent(McpOAuthFields).props()).toMatchObject({
+      modelValue: { clientId: 'hf-github', scopes: 'repo', clientSecret: '', removeSecret: false },
+      secretState: { set: true, hint: null, source: 'stored' },
+      disabled: true,
+      signedIn: true,
+    })
+    wrapper.unmount()
   })
 })

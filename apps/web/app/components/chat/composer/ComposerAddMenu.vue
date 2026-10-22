@@ -3,6 +3,8 @@
 // slash menu. The composer does both (it owns the hidden file input and the text).
 // Phase 9 (ADR-042; C25 declares, W9.8 adds the item; frozen from Gate P9-0b): in a project chat (`projectChat`),
 // "Mention a file" (`composer-mention`, `AtSign`) emits `mention`; the composer inserts `@` and opens the mention menu.
+// Phase 14 (ADR-061; C54 declares, W14.8 uses; frozen from Gate P14-0b): with `mentionResources` (a chat with tools on,
+// where `@` also lists MCP resources) the item is offered in any chat and reads "Mention a file or resource".
 import { AtSignIcon, PaperclipIcon, PlusIcon, SquareTerminalIcon } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import {
@@ -19,9 +21,12 @@ const props = withDefaults(defineProps<{
   returnFocusTo?: HTMLElement | null
   /** + Phase 9: the chat has a project ("Mention a file" is offered); default false. */
   projectChat?: boolean
+  /** + Phase 14: `@` also lists MCP resources ("Mention a file or resource"); default false. */
+  mentionResources?: boolean
 }>(), {
   returnFocusTo: null,
   projectChat: false,
+  mentionResources: false,
 })
 
 const emit = defineEmits<{
@@ -66,9 +71,9 @@ function onCloseAutoFocus(event: Event) {
               <SquareTerminalIcon aria-hidden="true" />
               Commands
             </DropdownMenuItem>
-            <DropdownMenuItem v-if="projectChat" :data-testid="testIds.composerMention" class="rounded-md" @select="emit('mention')">
+            <DropdownMenuItem v-if="projectChat || mentionResources" :data-testid="testIds.composerMention" class="rounded-md" @select="emit('mention')">
               <AtSignIcon aria-hidden="true" />
-              Mention a file
+              {{ mentionResources ? 'Mention a file or resource' : 'Mention a file' }}
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>

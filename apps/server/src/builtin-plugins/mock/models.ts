@@ -14,6 +14,10 @@
 // Phase 11 (PROVIDERS.md 8 "Hook mocks (Phase 11)", FROZEN after Gate P11-0b): `mock:hooks` (./hooks.ts: hooks, project
 // MCP servers, output styles, command extras). Phase 12 (PROVIDERS.md 8 "Prompt hook mock (Phase 12)", FROZEN after Gate
 // P12-0b): `mock:prompt-hook` (./prompt-hook.ts: answers prompt hooks; its own model with no waits and a fixed usage).
+// Phase 14 (PROVIDERS.md 8 "MCP and search mocks (Phase 14)", FROZEN after Gate P14-0b): `mock:search` (./search.ts: the
+// provider's own web search, a provider-executed `web_search` call with sources; the provider's `webSearch` hook) and
+// `mock:search-tool` (./search-tool.ts: calls the builtin `search_web` tool); both are their own models with no waits
+// and a fixed usage.
 import type {
   LanguageModelV4,
   LanguageModelV4CallOptions,
@@ -38,6 +42,8 @@ import { mockHooksPlan } from './hooks.ts'
 import { mockAspectRatioOption, mockImagePng, mockImageSize } from './media.ts'
 import { mockPlanModePlan } from './plan-mode.ts'
 import { createMockPromptHookModel, MOCK_PROMPT_HOOK_MODEL_ID, mockPromptHookAnswer, mockPromptHookText } from './prompt-hook.ts'
+import { createMockSearchToolModel, MOCK_SEARCH_TOOL_MODEL_ID, mockSearchToolPlan } from './search-tool.ts'
+import { createMockSearchModel, MOCK_SEARCH_MODEL_ID, mockSearchText } from './search.ts'
 import { mockShellPlan } from './shell.ts'
 import { mockSteerPlan } from './steer.ts'
 import { mockSubagentPlan } from './subagent.ts'
@@ -50,7 +56,7 @@ export const MOCK_TOOL_NAME = 'mock_approval_tool'
 /**
  * The language model ids of the mock provider (`createLanguageModel`): the four v1 models, the two Phase 6 ones,
  * `workspace` (Phase 7), `checkpoint` and `shell` (Phase 8), the five agent mocks of Phase 9, the two customization
- * mocks of Phase 10, `hooks` (Phase 11) and `prompt-hook` (Phase 12).
+ * mocks of Phase 10, `hooks` (Phase 11), `prompt-hook` (Phase 12) and `search`, `search-tool` (Phase 14): 20 ids.
  */
 export const MOCK_MODEL_IDS = [
   'echo',
@@ -71,6 +77,8 @@ export const MOCK_MODEL_IDS = [
   'background',
   'hooks',
   'prompt-hook',
+  'search',
+  'search-tool',
 ] as const
 export type MockModelId = (typeof MOCK_MODEL_IDS)[number]
 
@@ -316,6 +324,12 @@ export function mockPlan(modelId: MockModelId, options: LanguageModelV4CallOptio
     case 'prompt-hook':
       // The answer only: `createMockLanguageModel` serves this id with ./prompt-hook.ts (no waits, fixed usage).
       return textPlan(mockPromptHookAnswer(mockPromptHookText(options.prompt)))
+    case 'search':
+      // The text only: `createMockLanguageModel` serves this id with ./search.ts (the provider-executed call, the sources).
+      return textPlan(mockSearchText(options))
+    case 'search-tool':
+      // The step; `createMockLanguageModel` serves this id with ./search-tool.ts (no waits, fixed usage).
+      return mockSearchToolPlan(options)
     default:
       return echoPlan(options.prompt)
   }
@@ -432,6 +446,10 @@ function isMockModelId(modelId: string): modelId is MockModelId {
 export function createMockLanguageModel(modelId: string): LanguageModelV4 {
   if (modelId === MOCK_PROMPT_HOOK_MODEL_ID)
     return createMockPromptHookModel()
+  if (modelId === MOCK_SEARCH_MODEL_ID)
+    return createMockSearchModel()
+  if (modelId === MOCK_SEARCH_TOOL_MODEL_ID)
+    return createMockSearchToolModel()
   const failure = modelId === 'error' ? mockAuthError : isMockModelId(modelId) ? null : () => unknownModelError(modelId)
   return new MockLanguageModelV4({
     provider: MOCK_PROVIDER_ID,

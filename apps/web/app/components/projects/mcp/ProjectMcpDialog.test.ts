@@ -21,8 +21,12 @@ import ProjectMcpDialog from './ProjectMcpDialog.vue'
 const mocks = vi.hoisted(() => ({
   api: null as unknown,
   toast: Object.assign(vi.fn(), { success: vi.fn(), error: vi.fn() }),
+  start: vi.fn(),
+  signOut: vi.fn(),
 }))
 vi.mock('~/composables/useApi', () => ({ useApi: () => mocks.api }))
+// + Phase 14: a row's Sign in / Sign out go through useMcpSignIn (W14.7 implements it).
+vi.mock('~/composables/useMcpSignIn', () => ({ useMcpSignIn: () => ({ start: mocks.start, signOut: mocks.signOut, complete: vi.fn(), busyKey: { value: null } }) }))
 vi.mock('vue-sonner', () => ({ toast: mocks.toast }))
 
 const P1 = projectId(1)
@@ -311,5 +315,37 @@ describe('projectMcpDialog: a saved .mcp.json (Phase 12, W12.13-T6)', () => {
     await flushPromises()
     await nextTick()
     expect(byTestId(testIds.projectTrustDialog)).not.toBeNull()
+  })
+})
+
+describe('projectMcpDialog: sign-in (Phase 14, C54 mounts)', () => {
+  const signedIn = { signedIn: true, expiresAt: null, scope: null, client: 'dynamic' as const, issuer: null }
+  function remote() {
+    return projectMcpList({
+      items: [
+        projectMcpServer({ id: 'docs', name: 'docs', transport: 'http', state: 'needs-auth', missingVariables: [] }),
+        projectMcpServer({ id: 'wiki', name: 'wiki', transport: 'http', state: 'connected', missingVariables: [], auth: signedIn }),
+      ],
+      variables: [],
+    })
+  }
+
+  it('a row\'s Sign in and Sign out go through useMcpSignIn with the project target', async () => {
+    mocks.start.mockReset().mockResolvedValue('redirected')
+    mocks.signOut.mockReset().mockResolvedValue(undefined)
+    await mountDialog(remote())
+    await click(byTestId(testIds.projectMcpSignIn, row('docs')))
+    expect(mocks.start).toHaveBeenCalledWith({ kind: 'project', projectId: P1, serverId: 'docs' }, { name: 'docs' })
+    await click(byTestId(testIds.projectMcpSignOut, row('wiki')))
+    expect(mocks.signOut).toHaveBeenCalledWith({ kind: 'project', projectId: P1, serverId: 'wiki' }, 'wiki')
+  })
+
+  it('a refused sign-in shows the dialog\'s error', async () => {
+    mocks.start.mockReset().mockRejectedValue(new HarnessError({ code: 'conflict', message: 'Approve the server first.', details: { reason: 'untrusted' } }))
+    await mountDialog(remote())
+    await click(byTestId(testIds.projectMcpSignIn, row('docs')))
+    const error = byTestId(testIds.projectMcpError)!
+    expect(error.dataset.code).toBe('conflict')
+    expect(error.textContent).toContain('Approve the server first.')
   })
 })

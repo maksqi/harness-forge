@@ -418,7 +418,13 @@ describe('childTools: a custom agent\'s allowlist (Phase 10, W10.3-T2)', () => {
     })
     expect(child.byName.get('mcp__srv__lookup')?.definition).toBe(projectTools.tools[0]?.definition)
     const options: ToolExecutionOptions<unknown> = { toolCallId: 'c1', messages: [], context: undefined }
-    const output = await child.tools.mcp__srv__lookup!.execute!({}, options)
+    const result: unknown = await child.tools.mcp__srv__lookup!.execute!({}, options)
+    // Phase 14 (C51): an MCP tool's `execute` is an async generator; its last value is the final output.
+    let output = result
+    if (typeof result === 'object' && result !== null && Symbol.asyncIterator in result) {
+      for await (const value of result as AsyncIterable<unknown>)
+        output = value
+    }
     expect(JSON.stringify(output)).toContain('project lookup')
     expect(seen).toEqual([])
   })

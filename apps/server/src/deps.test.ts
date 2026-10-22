@@ -1,5 +1,7 @@
 import type { AddressInfo } from 'node:net'
 import type { CreateDepsOptions } from './deps.ts'
+import type { ElicitationBroker } from './mcp/elicitation/types.ts'
+import type { McpAuthService } from './mcp/oauth/types.ts'
 import type { MarketplaceService } from './plugins/marketplaces/types.ts'
 import type { CheckpointService } from './services/checkpoints/types.ts'
 import type { ClaudeImportService } from './services/claude-import/types.ts'
@@ -11,8 +13,10 @@ import type { FakeBackgroundTasks } from './testing/fake-background-tasks.ts'
 import type { FakeCheckpointService } from './testing/fake-checkpoints.ts'
 import type { FakeClaudeImportService } from './testing/fake-claude-import.ts'
 import type { FakeCustomizationService } from './testing/fake-customizations.ts'
+import type { FakeElicitationBroker } from './testing/fake-elicitations.ts'
 import type { FakeHookService } from './testing/fake-hooks.ts'
 import type { FakeMarketplaceService } from './testing/fake-marketplaces.ts'
+import type { FakeMcpAuthService } from './testing/fake-mcp-auth.ts'
 import type { FakeProjectConfigService } from './testing/fake-project-config.ts'
 import type { FakeProjectDefinitionsService } from './testing/fake-project-definitions.ts'
 import type { FakeProjectFileService } from './testing/fake-project-files.ts'
@@ -34,8 +38,10 @@ import { openDatabase } from './db/client.ts'
 import {
   BOOT_STEPS,
   createDeps,
+  createEnvElicitationBroker,
   createPluginSourceInstaller,
   createPluginSourceMarketplaces,
+  elicitationBrokerOptions,
   pluginSourceFetch,
   SERVICE_FACTORIES,
   SERVICE_NAMES,
@@ -45,6 +51,9 @@ import {
 } from './deps.ts'
 import { EnvError, loadEnv } from './env.ts'
 import { createMemoryLogger } from './logger.ts'
+import { createElicitationBroker } from './mcp/elicitation/broker.ts'
+import { createMcpAuthService } from './mcp/oauth/index.ts'
+import { isMcpAuthRequired, McpAuthRequired } from './mcp/oauth/types.ts'
 import { createProjectMcpManager } from './mcp/project.ts'
 import { createPluginInstaller } from './plugins/install/index.ts'
 import { createRedactor } from './security/redact.ts'
@@ -63,8 +72,10 @@ import { createTestApp } from './testing/create-test-app.ts'
 import { createFakeBackgroundTasks } from './testing/fake-background-tasks.ts'
 import { createFakeClaudeImportService } from './testing/fake-claude-import.ts'
 import { createFakeCustomizationService } from './testing/fake-customizations.ts'
+import { createFakeElicitationBroker } from './testing/fake-elicitations.ts'
 import { createFakeHookService } from './testing/fake-hooks.ts'
 import { createFakeMarketplaceService } from './testing/fake-marketplaces.ts'
+import { createFakeMcpAuthService } from './testing/fake-mcp-auth.ts'
 import { createFakeProjectConfigService } from './testing/fake-project-config.ts'
 import { createFakeProjectDefinitionsService } from './testing/fake-project-definitions.ts'
 import { createFakeProjectFileService } from './testing/fake-project-files.ts'
@@ -567,7 +578,7 @@ describe('phase 8 skeleton (checkpoints, shell rules, the data service lifecycle
     expect(order).toEqual([...BOOT_STEPS])
   })
 
-  it('stopDeps order: claudeImport (first) -> data -> runs -> hooks -> projectMcp -> customizations -> projectConfig -> projectFiles -> checkpoints -> marketplaces -> plugins -> mcp -> catalog -> events; a failing step still lets the next run', async () => {
+  it('stopDeps order: claudeImport (first) -> elicitations -> data -> runs -> hooks -> projectMcp -> customizations -> projectConfig -> projectFiles -> checkpoints -> marketplaces -> plugins -> mcp -> mcpAuth -> catalog -> events; a failing step still lets the next run', async () => {
     const t = await createTestApp()
     cleanups.push(() => t.close())
     const order: string[] = []
@@ -582,6 +593,9 @@ describe('phase 8 skeleton (checkpoints, shell rules, the data service lifecycle
           // Phase 12: the import plans first, the marketplace fetches right before the plugins.
           case 'claudeImport': return { ...target.claudeImport, stop: step('claudeImport', true) }
           case 'marketplaces': return { ...target.marketplaces, stop: step('marketplaces') }
+          // Phase 14: the elicitation waits before the runs, the pending sign-ins after the MCP clients.
+          case 'elicitations': return { ...target.elicitations, stop: step('elicitations', true) }
+          case 'mcpAuth': return { ...target.mcpAuth, stop: step('mcpAuth') }
           case 'data': return { ...target.data, stop: step('data', true) }
           case 'runs': return { ...target.runs, stopAll: step('runs') }
           // Phase 11: the hook processes, then the project MCP runtimes, right after the runs.
@@ -606,10 +620,10 @@ describe('phase 8 skeleton (checkpoints, shell rules, the data service lifecycle
       },
     })
     await expect(stopDeps(deps)).resolves.toBeUndefined()
-    expect(order).toEqual(['claudeImport', 'data', 'runs', 'hooks', 'projectMcp', 'customizations', 'projectConfig', 'projectFiles', 'checkpoints', 'marketplaces', 'plugins', 'mcp', 'catalog', 'events'])
+    expect(order).toEqual(['claudeImport', 'elicitations', 'data', 'runs', 'hooks', 'projectMcp', 'customizations', 'projectConfig', 'projectFiles', 'checkpoints', 'marketplaces', 'plugins', 'mcp', 'mcpAuth', 'catalog', 'events'])
     expect(order).toEqual([...SHUTDOWN_STEPS])
     const failures = t.logs.records.filter(record => record.msg === 'shutdown step failed').map(record => record.step)
-    expect(failures).toEqual(['claudeImport', 'data', 'hooks', 'projectFiles', 'checkpoints'])
+    expect(failures).toEqual(['claudeImport', 'elicitations', 'data', 'hooks', 'projectFiles', 'checkpoints'])
   })
 
   it('startDeps logs HF_TEST_FILE_SWEEP_DELAY_MS without HF_MOCK_PROVIDER=1 as a warning (ignored)', async () => {
@@ -691,7 +705,7 @@ describe('phase 9 skeleton (project files, the steer queue members, the stop ord
   it('the stop order: the runs (queues first, inside stopAll) -> the file index -> checkpoints', async () => {
     // Phase 10: the customization catalog sits between the runs and the file index; Phase 11: the hook processes, the
     // project MCP runtimes and the project config caches too.
-    expect(SHUTDOWN_STEPS).toEqual(['claudeImport', 'data', 'runs', 'hooks', 'projectMcp', 'customizations', 'projectConfig', 'projectFiles', 'checkpoints', 'marketplaces', 'plugins', 'mcp', 'catalog', 'events'])
+    expect(SHUTDOWN_STEPS).toEqual(['claudeImport', 'elicitations', 'data', 'runs', 'hooks', 'projectMcp', 'customizations', 'projectConfig', 'projectFiles', 'checkpoints', 'marketplaces', 'plugins', 'mcp', 'mcpAuth', 'catalog', 'events'])
     expect(SHUTDOWN_STEPS.indexOf('projectFiles')).toBe(SHUTDOWN_STEPS.indexOf('runs') + 5)
     // A runner's stopAll runs to its end (queues cleared, runs stopped) before the index is dropped.
     const t = await createTestApp()
@@ -974,7 +988,7 @@ describe('phase 11 skeleton (hooks, project config, project trust, project MCP, 
   })
 
   it('sHUTDOWN_STEPS: the hook processes and the project MCP runtimes stop right after the runs; project config after the customizations', () => {
-    expect(SHUTDOWN_STEPS).toEqual(['claudeImport', 'data', 'runs', 'hooks', 'projectMcp', 'customizations', 'projectConfig', 'projectFiles', 'checkpoints', 'marketplaces', 'plugins', 'mcp', 'catalog', 'events'])
+    expect(SHUTDOWN_STEPS).toEqual(['claudeImport', 'elicitations', 'data', 'runs', 'hooks', 'projectMcp', 'customizations', 'projectConfig', 'projectFiles', 'checkpoints', 'marketplaces', 'plugins', 'mcp', 'mcpAuth', 'catalog', 'events'])
     expect(SHUTDOWN_STEPS.indexOf('hooks')).toBe(SHUTDOWN_STEPS.indexOf('runs') + 1)
     expect(SHUTDOWN_STEPS.indexOf('projectMcp')).toBe(SHUTDOWN_STEPS.indexOf('hooks') + 1)
     expect(SHUTDOWN_STEPS.indexOf('projectConfig')).toBeGreaterThan(SHUTDOWN_STEPS.indexOf('customizations'))
@@ -1055,7 +1069,7 @@ describe('phase 12 skeleton (marketplaces, the home-folder import, project defin
   })
 
   it('sHUTDOWN_STEPS: the import plans first; the marketplace fetches after the checkpoints, right before the plugins', () => {
-    expect(SHUTDOWN_STEPS).toEqual(['claudeImport', 'data', 'runs', 'hooks', 'projectMcp', 'customizations', 'projectConfig', 'projectFiles', 'checkpoints', 'marketplaces', 'plugins', 'mcp', 'catalog', 'events'])
+    expect(SHUTDOWN_STEPS).toEqual(['claudeImport', 'elicitations', 'data', 'runs', 'hooks', 'projectMcp', 'customizations', 'projectConfig', 'projectFiles', 'checkpoints', 'marketplaces', 'plugins', 'mcp', 'mcpAuth', 'catalog', 'events'])
     expect(SHUTDOWN_STEPS[0]).toBe('claudeImport')
     expect(SHUTDOWN_STEPS.indexOf('marketplaces')).toBe(SHUTDOWN_STEPS.indexOf('checkpoints') + 1)
     expect(SHUTDOWN_STEPS.indexOf('plugins')).toBe(SHUTDOWN_STEPS.indexOf('marketplaces') + 1)
@@ -1128,5 +1142,158 @@ describe('phase 12 skeleton (marketplaces, the home-folder import, project defin
     const unset = await createTestApp({ start: false, env: { HF_CLAUDE_HOME: undefined } })
     cleanups.push(() => unset.close())
     expect(unset.env.claudeHome?.startsWith(unset.env.dataDir)).toBe(true)
+  })
+})
+
+describe('phase 14 skeleton (MCP OAuth, the elicitation broker, the stop order)', () => {
+  const PHASE_14 = ['mcpAuth', 'elicitations'] as const
+  const GLOBAL = { kind: 'global', serverId: 'docs' } as const
+  const PROJECT = { kind: 'project', projectId: 'prj_AAAAAAAAAAAAAAAA', serverId: 'docs' } as const
+
+  function testCall(signal: AbortSignal) {
+    return { runtimeKey: 'global:docs:1', chatId: testChatId(1), toolCallId: 'call-1', serverId: 'docs', serverName: 'Docs', interactive: true, signal }
+  }
+
+  it('wires both services with the C50 factories; the MCP OAuth stub signs nobody in (smoke test per member)', async () => {
+    const t = await createTestApp()
+    cleanups.push(() => t.close())
+    for (const name of PHASE_14)
+      expect(SERVICE_NAMES, name).toContain(name)
+    expect(SERVICE_FACTORIES.mcpAuth).toBe(createMcpAuthService)
+    expect(SERVICE_FACTORIES.elicitations).toBe(createEnvElicitationBroker)
+    const auth = t.deps.mcpAuth
+
+    expect(await auth.info(GLOBAL)).toBeNull()
+    expect(await auth.info(PROJECT)).toBeNull()
+    // The connect mode: no tokens (no Authorization header), and anything that needs a client or a redirect throws.
+    const provider = auth.provider(GLOBAL, 'connect')
+    expect(await provider.tokens()).toBeUndefined()
+    expect(provider.clientMetadata.redirect_uris).toEqual(['http://127.0.0.1/oauth/callback'])
+    expect(provider.clientMetadata.token_endpoint_auth_method).toBe('none')
+    expect(String(provider.redirectUrl)).toBe('http://127.0.0.1/oauth/callback')
+    await provider.saveTokens({ access_token: 'ignored-token', token_type: 'Bearer' })
+    expect(await provider.tokens()).toBeUndefined()
+    for (const member of [() => provider.clientInformation(), () => provider.redirectToAuthorization(new URL('https://auth.example.invalid/authorize')), () => provider.codeVerifier(), () => provider.saveCodeVerifier('v'), () => provider.state?.()]) {
+      let thrown: unknown
+      try {
+        await member()
+      }
+      catch (error) {
+        thrown = error
+      }
+      expect(thrown).toBeInstanceOf(McpAuthRequired)
+      expect(isMcpAuthRequired(thrown)).toBe(true)
+      expect((thrown as McpAuthRequired).target).toEqual(GLOBAL)
+    }
+    for (const mode of ['start', 'callback'] as const)
+      expect(() => auth.provider(PROJECT, mode)).toThrow(expect.objectContaining({ code: 'not_implemented' }))
+    await expect(auth.start(GLOBAL, { origin: 'http://127.0.0.1:8787', returnTo: null })).rejects.toMatchObject({ code: 'not_implemented' })
+    await expect(auth.complete({ state: 's'.repeat(16), code: 'c' }, { origin: 'http://127.0.0.1:8787' })).rejects.toMatchObject({ code: 'not_implemented' })
+    await expect(auth.signOut(PROJECT)).rejects.toMatchObject({ code: 'not_implemented' })
+    await expect(auth.stop()).resolves.toBeUndefined()
+    // isMcpAuthRequired also recognizes a copy by name, and nothing else.
+    expect(isMcpAuthRequired(Object.assign(new Error('x'), { name: 'McpAuthRequired' }))).toBe(true)
+    expect(isMcpAuthRequired(new Error('x'))).toBe(false)
+    expect(new McpAuthRequired().message).toBe('The MCP server needs a sign-in.')
+  })
+
+  it('the elicitation broker stub attributes nothing: idle handles, every request declined, 404 answers (smoke test per member)', async () => {
+    const t = await createTestApp()
+    cleanups.push(() => t.close())
+    const broker = t.deps.elicitations
+    const controller = new AbortController()
+    const handle = broker.begin(testCall(controller.signal))
+    expect([handle.pending(), handle.waiting(), handle.records()]).toEqual([null, false, []])
+    let changes = 0
+    const unsubscribe = handle.onChange(() => {
+      changes += 1
+    })
+    unsubscribe()
+    handle.end()
+    handle.end()
+    expect(changes).toBe(0)
+    const handler = broker.handler('global:docs:1')
+    await expect(handler({ method: 'elicitation/create', params: { message: 'Your name?', requestedSchema: { type: 'object', properties: {} } } })).resolves.toEqual({ action: 'decline' })
+    expect(t.logs.records.some(record => record.msg === 'mcp elicitation declined' && record.reason === 'not-interactive' && record.level === 'debug')).toBe(true)
+    // The request message is never logged.
+    expect(JSON.stringify(t.logs.records)).not.toContain('Your name?')
+    await expect(broker.answer(testChatId(1), 'eli_AAAAAAAAAAAAAAAA', { action: 'decline' })).rejects.toMatchObject({ code: 'not_found' })
+    expect(broker.pendingCount(testChatId(1))).toBe(0)
+    expect(broker.cancelChat(testChatId(1))).toBeUndefined()
+    await expect(broker.stop()).resolves.toBeUndefined()
+    expect(createElicitationBroker(t.deps, { waitMs: 1000 }).pendingCount('x')).toBe(0)
+  })
+
+  it('no boot step (BOOT_STEPS unchanged): startDeps never touches them; shutdown stops elicitations and mcpAuth only', async () => {
+    expect(BOOT_STEPS).toEqual(['projects', 'checkpoints', 'runs', 'installer', 'plugins', 'catalog', 'mcp', 'data'])
+    const touched: string[] = []
+    const watched = <K extends typeof PHASE_14[number]>(name: K, make: (d: AppDeps) => AppDeps[K]) => (d: AppDeps): AppDeps[K] => new Proxy(make(d), {
+      get(target, key, receiver) {
+        touched.push(`${name}.${String(key)}`)
+        return Reflect.get(target, key, receiver) as unknown
+      },
+    })
+    const t = await createTestApp({
+      factories: {
+        mcpAuth: watched('mcpAuth', createMcpAuthService),
+        elicitations: watched('elicitations', createEnvElicitationBroker),
+      },
+    })
+    cleanups.push(() => t.close())
+    const booted = touched.filter(entry => !entry.endsWith('.provider') && !entry.endsWith('.info') && !entry.endsWith('.handler'))
+    expect(booted).toEqual([])
+    touched.length = 0
+    await t.close()
+    expect(touched).toEqual(['elicitations.stop', 'mcpAuth.stop'])
+  })
+
+  it('sHUTDOWN_STEPS: the elicitation waits right after the import plans (before the runs), the pending sign-ins right after the MCP clients', () => {
+    expect(SHUTDOWN_STEPS).toEqual(['claudeImport', 'elicitations', 'data', 'runs', 'hooks', 'projectMcp', 'customizations', 'projectConfig', 'projectFiles', 'checkpoints', 'marketplaces', 'plugins', 'mcp', 'mcpAuth', 'catalog', 'events'])
+    expect(SHUTDOWN_STEPS.indexOf('elicitations')).toBe(SHUTDOWN_STEPS.indexOf('claudeImport') + 1)
+    expect(SHUTDOWN_STEPS.indexOf('elicitations')).toBeLessThan(SHUTDOWN_STEPS.indexOf('runs'))
+    expect(SHUTDOWN_STEPS.indexOf('elicitations')).toBeLessThan(SHUTDOWN_STEPS.indexOf('projectMcp'))
+    expect(SHUTDOWN_STEPS.indexOf('mcpAuth')).toBe(SHUTDOWN_STEPS.indexOf('mcp') + 1)
+    expect(SHUTDOWN_STEPS.indexOf('mcpAuth')).toBeGreaterThan(SHUTDOWN_STEPS.indexOf('projectMcp'))
+  })
+
+  it('hF_TEST_ELICITATION_WAIT_MS reaches the broker options only with HF_MOCK_PROVIDER=1; the ignored value is a boot warning', async () => {
+    expect(elicitationBrokerOptions({ testElicitationWaitMs: null })).toEqual({})
+    expect(elicitationBrokerOptions({ testElicitationWaitMs: 2500 })).toEqual({ waitMs: 2500 })
+    const honored = await createTestApp({ start: false, elicitations: 'fake', env: { HF_MOCK_PROVIDER: '1', HF_TEST_ELICITATION_WAIT_MS: '2500' } })
+    cleanups.push(() => honored.close())
+    expect(honored.env.testElicitationWaitMs).toBe(2500)
+    const fake = honored.deps.elicitations as FakeElicitationBroker
+    const chatId = testChatId(1)
+    fake.begin({ ...testCall(new AbortController().signal), chatId })
+    const before = Date.now()
+    const reply = fake.request({ chatId, toolCallId: 'call-1' }, { message: 'm', form: { fields: [] } })
+    expect(reply.elicitation.expiresAt - before).toBeGreaterThanOrEqual(2500)
+    expect(reply.elicitation.expiresAt - before).toBeLessThan(2500 + 1000)
+    const ignored = await createTestApp({ env: { HF_TEST_ELICITATION_WAIT_MS: '2500' } })
+    cleanups.push(() => ignored.close())
+    expect(ignored.env.testElicitationWaitMs).toBeNull()
+    expect(ignored.logs.records.filter(record => record.level === 'warn').map(record => record.msg)).toContain('the test-only elicitation wait is ignored: it is honored only with HF_MOCK_PROVIDER=1')
+  })
+
+  it('createTestApp accepts mcpAuth and elicitations: the fakes and ready services; overrides and factories win', async () => {
+    const t = await createTestApp({ start: false, mcpAuth: 'fake', elicitations: 'fake' })
+    cleanups.push(() => t.close())
+    expect((t.deps.mcpAuth as FakeMcpAuthService).calls.start).toBe(0)
+    expect((t.deps.elicitations as FakeElicitationBroker).inFlight).toEqual([])
+
+    const ready: { mcpAuth: McpAuthService, elicitations: ElicitationBroker } = {
+      mcpAuth: createFakeMcpAuthService(),
+      elicitations: createFakeElicitationBroker(),
+    }
+    const u = await createTestApp({ start: false, ...ready })
+    cleanups.push(() => u.close())
+    for (const name of PHASE_14)
+      expect(u.deps[name], name).toBe(ready[name])
+
+    const override = createFakeMcpAuthService()
+    const v = await createTestApp({ start: false, mcpAuth: 'fake', elicitations: 'fake', overrides: { mcpAuth: override }, factories: { elicitations: createEnvElicitationBroker } })
+    cleanups.push(() => v.close())
+    expect(v.deps.mcpAuth).toBe(override)
+    expect('inFlight' in v.deps.elicitations).toBe(false)
   })
 })

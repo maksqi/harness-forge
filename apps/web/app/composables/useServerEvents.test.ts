@@ -18,6 +18,7 @@ import { useProjectsStore } from '~/stores/projects'
 import { useProvidersStore } from '~/stores/providers'
 import { useShellRulesStore } from '~/stores/shell-rules'
 import { useUiStore } from '~/stores/ui'
+import { useWebSearchStore } from '~/stores/web-search'
 import { useWorkspaceStore } from '~/stores/workspace'
 import {
   backgroundTask,
@@ -491,5 +492,34 @@ describe('marketplace events (Phase 12, C46-T7)', () => {
     const refresh = vi.spyOn(useMarketplacesStore(), 'refreshLoaded')
     await refetchLoadedStores()
     expect(refresh).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('mCP 2.0 and web search events (Phase 14, C54)', () => {
+  it('carries awaitingInput of chat.updated into the chats store; an event without it changes nothing', () => {
+    const chats = useChatsStore()
+    const row = chatSummary({ id: chatId(1), running: true })
+    dispatchServerEvent(createServerEvent('chat.updated', { ...row, awaitingInput: true, activeLeafId: null }, 1))
+    expect(chats.statusOf(chatId(1))).toBe('input')
+    dispatchServerEvent(createServerEvent('chat.updated', { ...row, title: 'Renamed', activeLeafId: null }, 2))
+    expect(chats.statusOf(chatId(1))).toBe('input')
+    dispatchServerEvent(createServerEvent('chat.updated', { ...row, awaitingInput: false, activeLeafId: null }, 3))
+    expect(chats.statusOf(chatId(1))).toBe('running')
+  })
+
+  it('routes plugin.changed to the web-search store', () => {
+    const apply = vi.spyOn(useWebSearchStore(), 'applyEvent')
+    dispatchServerEvent(createServerEvent('plugin.changed', { id: 'core-search', plugin: null }, 1))
+    expect(apply.mock.calls.map(([event]) => event.type)).toEqual(['plugin.changed'])
+  })
+
+  it('refetches the web search configuration on a reconnect only once it was loaded', async () => {
+    const webSearch = useWebSearchStore()
+    const fetch = vi.spyOn(webSearch, 'fetch').mockResolvedValue({ backend: 'brave', keys: { brave: { set: true, hint: null, source: 'stored' }, tavily: { set: false, hint: null, source: null }, exa: { set: false, hint: null, source: null } }, maxResults: 5, pluginActive: true })
+    await refetchLoadedStores()
+    expect(fetch).not.toHaveBeenCalled()
+    webSearch.loadedAt = 1
+    await refetchLoadedStores()
+    expect(fetch).toHaveBeenCalledTimes(1)
   })
 })

@@ -24,26 +24,51 @@
 //   the secret scope deleted); at shutdown (`stop`). Every state change emits `project-mcp.changed` (coalesced).
 // - Variable values, resolved env / args / headers and URLs are never logged; connection errors are logged with their
 //   code only (the redacted message at `debug`), stderr lines of stdio servers at `debug` in the `core-mcp` plugin log.
+//
+// Phase 14 (ADR-059 … ADR-061, C51; the seams are COMPLETE and FROZEN after P14-0b), as in the global manager
+// (`index.ts`):
+// - OAuth: an http / sse transport without an `Authorization` header gets the connect-mode `authProvider`
+//   (`deps.mcpAuth.provider({ kind: 'project', projectId, serverId }, 'connect')`; no `fetch`, `redirect: 'error'`); an
+//   auth failure while connecting or calling a tool is the state `needs-auth` (`auth_invalid { status: 401 }`): its tools
+//   are left out of every run (the run's notice `project-mcp-unavailable` names it) and **no run restarts it** (only a
+//   sign-in, a reconnect, a variables or item change); `ProjectMcpServer.auth` = `deps.mcpAuth.info` for approved remote
+//   servers; `authTarget` = `project:<projectId>` / `mcp-oauth.<serverId>`.
+// - Elicitation: `capabilities: { elicitation: {} }`, the broker's handler per client (runtime key
+//   `project:<projectId>/<serverId>#<generation>`), the `2026-07-28` fallback remembered per server and item hash.
+// - Prompts and resources: the caches (keys `<projectId>/<serverId>`) are filled after connecting and on a stdio
+//   `list_changed`; `prompts` / `resources` start the approved servers like `toolsFor` (waiting at most `waitMs`);
+//   `getPrompt` / `readResource` wait up to `LIMITS.projectMcpConnectWaitMs` for a server that is not connected yet.
 import type { MCPClient, MCPClientConfig, MCPTransport } from '@ai-sdk/mcp'
 import type { Disposable, ToolCallContext } from '@harness-forge/plugin-sdk'
-import type { HarnessErrorInit, ProjectMcpList, ProjectMcpServer, ProjectMcpState, ServerEvent } from '@harness-forge/shared'
+import type { HarnessErrorInit, McpAuthInfo, McpAuthTarget, ProjectMcpList, ProjectMcpServer, ProjectMcpState, ServerEvent } from '@harness-forge/shared'
 import type { RegisteredTool } from '../registry/types.ts'
 import type { ProjectConfigSnapshot, ProjectMcpServerItem } from '../services/project-config/types.ts'
 import type { AppDeps } from '../types.ts'
 import type { McpListedTool } from './mcp-tools.ts'
 import type { ResolvedProjectTransport } from './project-view.ts'
+import type { McpCachedList, McpCacheServer } from './prompts.ts'
 import type { StdioExit } from './stdio-transport.ts'
-import type { ProjectMcpManager, ProjectMcpTools, ProjectMcpToolsOptions } from './types.ts'
-import { createMCPClient } from '@ai-sdk/mcp'
+import type { McpListingUnavailable, ProjectMcpListing, ProjectMcpListingOptions, ProjectMcpManager, ProjectMcpTools, ProjectMcpToolsOptions } from './types.ts'
+import { createMCPClient, ElicitationRequestSchema } from '@ai-sdk/mcp'
 import { HarnessError, isHarnessError, LIMITS } from '@harness-forge/shared'
 import { appVersion } from '../paths.ts'
-import { connectionErrorInit, errorMessage, isConnectionFailure, mcpConfigError } from './errors.ts'
-import { MCP_CONNECT_TIMEOUT_MS, MCP_RECONNECT_WAIT_MS } from './index.ts'
+import { authRequiredInit, connectionErrorInit, errorMessage, isAuthRequired, isConnectionFailure, mcpConfigError } from './errors.ts'
+import {
+  hasAuthorizationHeader,
+  MCP_CLIENT_CAPABILITIES,
+  MCP_CONNECT_TIMEOUT_MS,
+  MCP_RECONNECT_WAIT_MS,
+  needsAuthConflict,
+  negotiatedWithoutElicitation,
+  OAUTH_SERVER_SECRET_PREFIX,
+} from './index.ts'
 import { CORE_MCP_PLUGIN_ID } from './internal.ts'
 import { mcpToolDefinition, mcpToolTitle } from './mcp-tools.ts'
 import { DEFAULT_MCP_POLICY } from './policy.ts'
 import { createProjectVariableStore } from './project-variables.ts'
 import { expandTransport, missingVariables, projectMcpVariables, referencedVariables } from './project-view.ts'
+import { createPromptCache } from './prompts.ts'
+import { createResourceCache } from './resources.ts'
 import { createStdioTransport } from './stdio-transport.ts'
 
 /** Timeout of one `tools/list` page (the global manager's). */
@@ -73,10 +98,17 @@ export interface ProjectMcpManagerOptions {
   changePollMs?: number
   /** `createMCPClient` (tests may wrap it). */
   createClient?: (config: MCPClientConfig) => Promise<MCPClient>
+  /** Phase 14: the prompt cache factory (tests may wrap it; default `createPromptCache`). */
+  createPromptCache?: typeof createPromptCache
+  /** Phase 14: the resource cache factory (tests may wrap it; default `createResourceCache`). */
+  createResourceCache?: typeof createResourceCache
 }
 
-/** Internal states; `stale` = the item failed verify-before-run (listed as `pending`, never `unavailable`). */
-type RuntimeStatus = 'idle' | 'connecting' | 'connected' | 'error' | 'stale'
+/**
+ * Internal states; `stale` = the item failed verify-before-run (listed as `pending`, never `unavailable`); Phase 14:
+ * `needs-auth` = the server answered 401 (not restarted by runs).
+ */
+type RuntimeStatus = 'idle' | 'connecting' | 'connected' | 'error' | 'stale' | 'needs-auth'
 
 interface Runtime {
   readonly projectId: string
@@ -91,6 +123,10 @@ interface Runtime {
   /** The stdio transport of the current attempt (closed by a stop even before the client exists). */
   transport: MCPTransport | null
   controller: AbortController | null
+  /** Phase 14: aborts the background cache refreshes of the current client (aborted by `detach`). */
+  listing: AbortController | null
+  /** Phase 14: the transport of the last attempt sends an `Authorization` header (a 401 cannot be fixed by a sign-in). */
+  authHeader: boolean
   attempt: Promise<void> | null
   tools: RegisteredTool[]
   /** Tool names of the last successful listing (kept while stopped). */
@@ -154,6 +190,25 @@ function safeModeConflict(): HarnessError {
   })
 }
 
+/** A request to a project server that is not approved (Phase 14). */
+function untrustedConflict(name: string): HarnessError {
+  return new HarnessError({
+    code: 'conflict',
+    message: `Approve the project MCP server "${name}" first.`,
+    details: { reason: 'untrusted' },
+  })
+}
+
+/** The cache key of a project server (`<projectId>/<serverId>`). */
+function cacheKey(projectId: string, serverId: string): string {
+  return `${projectId}/${serverId}`
+}
+
+/** An empty project listing (nothing approved, safe mode, an unreadable folder). */
+function emptyListing<T>(): ProjectMcpListing<T> {
+  return { items: [], truncated: false, unavailable: [], shadowed: new Set<string>() }
+}
+
 export function createProjectMcpManager(deps: AppDeps): ProjectMcpManager {
   return createProjectMcpManagerCore(deps)
 }
@@ -177,8 +232,22 @@ export function createProjectMcpManagerCore(deps: AppDeps, options: ProjectMcpMa
   const pollTimers = new Map<string, NodeJS.Timeout>()
   /** Per-project serialization of re-reads and variable changes. */
   const queues = new Map<string, Promise<void>>()
+  /**
+   * Phase 14 (ADR-060): `<projectId>/<serverId>` -> the item hash of servers that negotiated the protocol that cannot
+   * elicit: they connect without the capability while their item is unchanged.
+   */
+  const withoutElicitation = new Map<string, string>()
   let stopped = false
   let clientVersion: string | undefined
+  /** Phase 14 (ADR-061): the prompt and resource caches (keys `<projectId>/<serverId>`). */
+  const promptCache = (options.createPromptCache ?? createPromptCache)({
+    logger: deps.logger.child({ component: 'project-mcp' }),
+    onChange: (server) => {
+      if (!stopped && server.projectId !== null && !deleted.has(server.projectId))
+        deps.events.emit('customization.changed', { kind: 'command', projectId: server.projectId })
+    },
+  })
+  const resourceCache = (options.createResourceCache ?? createResourceCache)({ logger: deps.logger.child({ component: 'project-mcp' }) })
 
   const redact = (text: string): string => deps.redactor.redactText(text)
 
@@ -275,6 +344,8 @@ export function createProjectMcpManagerCore(deps: AppDeps, options: ProjectMcpMa
         client: null,
         transport: null,
         controller: null,
+        listing: null,
+        authHeader: false,
         attempt: null,
         tools: [],
         lastToolNames: [],
@@ -314,6 +385,8 @@ export function createProjectMcpManagerCore(deps: AppDeps, options: ProjectMcpMa
     runtime.generation += 1
     runtime.controller?.abort()
     runtime.controller = null
+    runtime.listing?.abort()
+    runtime.listing = null
     if (runtime.idleTimer !== null) {
       clearTimeout(runtime.idleTimer)
       runtime.idleTimer = null
@@ -323,10 +396,15 @@ export function createProjectMcpManagerCore(deps: AppDeps, options: ProjectMcpMa
     const transport = runtime.transport
     runtime.client = null
     runtime.transport = null
-    if (client !== null)
+    if (client !== null) {
       trackClose(() => client.close())
-    else if (transport !== null)
+      // Phase 14: the cached prompts and resources belong to the closed client.
+      promptCache.drop(cacheKey(runtime.projectId, runtime.id))
+      resourceCache.drop(cacheKey(runtime.projectId, runtime.id))
+    }
+    else if (transport !== null) {
       trackClose(() => transport.close())
+    }
   }
 
   function stopRuntime(runtime: Runtime, reason: string): void {
@@ -406,6 +484,10 @@ export function createProjectMcpManagerCore(deps: AppDeps, options: ProjectMcpMa
   function onDisconnected(runtime: Runtime, generation: number, error: unknown): void {
     if (stopped || generation !== runtime.generation)
       return
+    if (isAuthRequired(error)) {
+      onNeedsAuth(runtime, generation, error)
+      return
+    }
     detach(runtime)
     const init = connectionErrorInit(error, redact)
     runtime.status = 'error'
@@ -433,17 +515,41 @@ export function createProjectMcpManagerCore(deps: AppDeps, options: ProjectMcpMa
     return tools.slice(0, LIMITS.projectMcpToolsMax)
   }
 
-  async function callTool(runtime: Runtime, generation: number, name: string, input: Record<string, unknown>, c: ToolCallContext) {
+  /**
+   * Phase 14 (ADR-059): the server needs a sign-in (or rejected its `Authorization` header): close it, `needs-auth` with
+   * the permanent `auth_invalid { status: 401 }`; runs do not restart it. Answers the error init.
+   */
+  function onNeedsAuth(runtime: Runtime, generation: number, error: unknown): HarnessErrorInit {
+    const init = authRequiredInit(error, redact, { header: runtime.authHeader })
+    if (stopped || generation !== runtime.generation)
+      return init
+    detach(runtime)
+    runtime.status = 'needs-auth'
+    runtime.error = init
+    deps.logger.info('project MCP server needs a sign-in', { projectId: runtime.projectId, serverId: runtime.id, header: runtime.authHeader })
+    scheduleEmit(runtime.projectId)
+    return init
+  }
+
+  /**
+   * One tool call on the server's current client. `signal` is the call's active-budget signal (it follows `c.signal`):
+   * an abort never counts as a connection failure. Phase 14: an auth failure moves the server to `needs-auth`.
+   */
+  async function callTool(runtime: Runtime, generation: number, name: string, input: Record<string, unknown>, signal: AbortSignal) {
     const client = generation === runtime.generation ? runtime.client : null
     if (client === null)
       throw new Error(`The project MCP server "${runtime.item.server.name}" is not connected.`)
     runtime.inflight += 1
     armIdle(runtime)
     try {
-      return await client.callTool({ name, arguments: input, options: { signal: c.signal } })
+      return await client.callTool({ name, arguments: input, options: { signal } })
     }
     catch (error) {
-      if (!c.signal.aborted && isConnectionFailure(error))
+      if (!signal.aborted && isAuthRequired(error)) {
+        const init = onNeedsAuth(runtime, generation, error)
+        throw new Error(`The MCP tool "${name}" failed: ${init.message}`)
+      }
+      if (!signal.aborted && isConnectionFailure(error))
         onDisconnected(runtime, generation, error)
       throw new Error(`The MCP tool "${name}" failed: ${redact(errorMessage(error))}`)
     }
@@ -459,7 +565,8 @@ export function createProjectMcpManagerCore(deps: AppDeps, options: ProjectMcpMa
       serverId: runtime.id,
       pluginId: CORE_MCP_PLUGIN_ID,
       serverPolicy: DEFAULT_MCP_POLICY,
-      call: (name: string, input: Record<string, unknown>, c: ToolCallContext) => callTool(runtime, generation, name, input, c),
+      call: (name: string, input: Record<string, unknown>, _c: ToolCallContext, signal: AbortSignal) => callTool(runtime, generation, name, input, signal),
+      elicitation: { broker: deps.elicitations, runtimeKey: runtimeKey(runtime, generation), serverName: runtime.item.server.name },
     }
     const seen = new Set<string>()
     const tools: RegisteredTool[] = []
@@ -503,8 +610,14 @@ export function createProjectMcpManagerCore(deps: AppDeps, options: ProjectMcpMa
   }
 
   function createTransport(runtime: Runtime, generation: number, transport: ResolvedProjectTransport, root: string): MCPClientConfig['transport'] {
-    if (transport.type !== 'stdio')
-      return { type: transport.type, url: transport.url, headers: { ...transport.headers }, redirect: 'error' }
+    if (transport.type !== 'stdio') {
+      // Phase 14 (ADR-059): without an `Authorization` header the connect-mode OAuth provider; never a `fetch` option.
+      const headers = { ...transport.headers }
+      if (hasAuthorizationHeader(headers))
+        return { type: transport.type, url: transport.url, headers, redirect: 'error' }
+      const authTarget: McpAuthTarget = { kind: 'project', projectId: runtime.projectId, serverId: runtime.id }
+      return { type: transport.type, url: transport.url, headers, redirect: 'error', authProvider: deps.mcpAuth.provider(authTarget, 'connect') }
+    }
     const stdio = createStdioTransport({
       command: transport.command,
       args: transport.args,
@@ -515,11 +628,81 @@ export function createProjectMcpManagerCore(deps: AppDeps, options: ProjectMcpMa
       onNotification: (method) => {
         if (method === 'notifications/tools/list_changed')
           void refreshTools(runtime, generation)
+        else if (method === 'notifications/prompts/list_changed')
+          refreshCaches(runtime, generation, { prompts: true, resources: false })
+        else if (method === 'notifications/resources/list_changed')
+          refreshCaches(runtime, generation, { prompts: false, resources: true })
       },
       onExit: exit => onDisconnected(runtime, generation, new Error(`The MCP server process exited (${describeExit(exit)}).`)),
     })
     runtime.transport = stdio
     return stdio
+  }
+
+  /** The cache entry descriptor of a project server. */
+  function cacheServer(runtime: Runtime): McpCacheServer {
+    return { key: cacheKey(runtime.projectId, runtime.id), serverId: runtime.id, serverName: runtime.item.server.name, projectId: runtime.projectId }
+  }
+
+  /** Phase 14 (ADR-061): fills the prompt / resource caches of a connected client (the capabilities decide). */
+  function refreshCaches(runtime: Runtime, generation: number, kinds: { prompts: boolean, resources: boolean }): void {
+    const client = runtime.client
+    if (stopped || client === null || generation !== runtime.generation)
+      return
+    const capabilities = client.initializeResult.capabilities
+    if (runtime.listing === null)
+      runtime.listing = new AbortController()
+    const signal = runtime.listing.signal
+    const server = cacheServer(runtime)
+    if (kinds.prompts && capabilities.prompts)
+      track(promptCache.refresh(server, client, signal))
+    if (kinds.resources && capabilities.resources)
+      track(resourceCache.refresh(server, client, signal))
+  }
+
+  /** Phase 14 (ADR-060): the key of a client in the elicitation broker. */
+  function runtimeKey(runtime: Runtime, generation: number): string {
+    return `project:${runtime.projectId}/${runtime.id}#${generation}`
+  }
+
+  /**
+   * Opens a client; with the elicitation capability unless the item is known to negotiate the protocol that cannot
+   * elicit (then it is reconnected once without it and remembered for the item's hash).
+   */
+  async function openClient(runtime: Runtime, generation: number, item: ProjectMcpServerItem, transport: ResolvedProjectTransport, root: string, signal: AbortSignal, timeout: number): Promise<MCPClient> {
+    const open = (elicitation: boolean): Promise<MCPClient> => createClient({
+      transport: createTransport(runtime, generation, transport, root),
+      clientName: 'harness-forge',
+      version: version(),
+      onUncaughtError: (error) => {
+        if (generation === runtime.generation)
+          deps.logger.debug('project MCP client error', { projectId: runtime.projectId, serverId: runtime.id, message: redact(errorMessage(error)) })
+      },
+      initializationOptions: { signal, timeout },
+      ...(elicitation ? { capabilities: MCP_CLIENT_CAPABILITIES } : {}),
+    })
+    const key = cacheKey(runtime.projectId, runtime.id)
+    if (withoutElicitation.get(key) === item.sha256)
+      return open(false)
+    const client = await open(true)
+    if (!negotiatedWithoutElicitation(client))
+      return client
+    withoutElicitation.set(key, item.sha256)
+    deps.logger.debug('project MCP server cannot elicit on its protocol: reconnecting without the capability', { projectId: runtime.projectId, serverId: runtime.id })
+    trackClose(() => client.close())
+    if (generation !== runtime.generation || stopped)
+      throw new Error('The MCP connection attempt was cancelled.')
+    return open(false)
+  }
+
+  /** Phase 14 (ADR-060): the client's elicitation requests go to the broker (never fails the connection). */
+  function registerElicitation(runtime: Runtime, generation: number, client: MCPClient): void {
+    try {
+      client.onElicitationRequest(ElicitationRequestSchema, deps.elicitations.handler(runtimeKey(runtime, generation)))
+    }
+    catch (error) {
+      deps.logger.warn('project MCP elicitation handler not registered', { projectId: runtime.projectId, serverId: runtime.id, err: error })
+    }
   }
 
   async function runConnect(runtime: Runtime, generation: number, item: ProjectMcpServerItem, root: string, signal: AbortSignal): Promise<void> {
@@ -546,21 +729,14 @@ export function createProjectMcpManagerCore(deps: AppDeps, options: ProjectMcpMa
       const timeout = await connectTimeoutMs()
       if (!current())
         return
-      client = await createClient({
-        transport: createTransport(runtime, generation, transport, root),
-        clientName: 'harness-forge',
-        version: version(),
-        onUncaughtError: (error) => {
-          if (generation === runtime.generation)
-            deps.logger.debug('project MCP client error', { projectId: runtime.projectId, serverId: runtime.id, message: redact(errorMessage(error)) })
-        },
-        initializationOptions: { signal, timeout },
-      })
+      runtime.authHeader = transport.type !== 'stdio' && hasAuthorizationHeader(transport.headers)
+      client = await openClient(runtime, generation, item, transport, root, signal, timeout)
       if (!current()) {
         const stale = client
         trackClose(() => stale.close())
         return
       }
+      registerElicitation(runtime, generation, client)
       const listed = await listAllTools(client, signal)
       if (!current()) {
         const stale = client
@@ -576,6 +752,7 @@ export function createProjectMcpManagerCore(deps: AppDeps, options: ProjectMcpMa
       pollChanges(runtime.projectId)
       deps.logger.info('project MCP server connected', { projectId: runtime.projectId, serverId: runtime.id, transport: transport.type, tools: runtime.tools.length })
       scheduleEmit(runtime.projectId)
+      refreshCaches(runtime, generation, { prompts: true, resources: true })
     }
     catch (error) {
       if (client !== null && runtime.client !== client) {
@@ -591,6 +768,10 @@ export function createProjectMcpManagerCore(deps: AppDeps, options: ProjectMcpMa
         trackClose(() => transport.close())
       }
       runtime.controller = null
+      if (isAuthRequired(error)) {
+        onNeedsAuth(runtime, generation, error)
+        return
+      }
       const init = connectionErrorInit(error, redact)
       runtime.status = 'error'
       runtime.error = init
@@ -713,7 +894,7 @@ export function createProjectMcpManagerCore(deps: AppDeps, options: ProjectMcpMa
     const approved = context?.approved ?? await deps.projectTrust.approved(projectId)
     const stored = context?.stored ?? await variables.names(projectId)
     const globals = globalServerIds()
-    return snapshot.mcpServers.slice(0, LIMITS.projectMcpServersMax).map((item) => {
+    return Promise.all(snapshot.mcpServers.slice(0, LIMITS.projectMcpServersMax).map(async (item) => {
       const missing = missingVariables(item.server.transport, stored)
       const runtime = currentRuntime(projectId, item)
       const state = stateOf(item, approved, missing, runtime)
@@ -726,15 +907,26 @@ export function createProjectMcpManagerCore(deps: AppDeps, options: ProjectMcpMa
         sha256: item.sha256,
         tools: tools.slice(0, LIMITS.projectMcpToolsMax),
         missingVariables: missing.slice(0, LIMITS.projectMcpVariablesMax),
-        // Phase 14 (ADR-059): the sign-in state lands with W14.1.
-        auth: null,
+        // Phase 14 (ADR-059): the sign-in state of an approved remote server (null for stdio and pending servers).
+        auth: item.server.transport.type !== 'stdio' && approved.has(item.sha256) ? await authInfo(projectId, item.server.id) : null,
       }
-      if (state === 'error' && runtime?.error)
+      if ((state === 'error' || state === 'needs-auth') && runtime?.error)
         view.error = runtime.error
       if (state !== 'pending' && state !== 'disabled' && globals.has(item.server.id))
         view.shadows = item.server.id
       return view
-    })
+    }))
+  }
+
+  /** Phase 14 (ADR-059): the sign-in state of a project server (`deps.mcpAuth.info`; never rejects). */
+  async function authInfo(projectId: string, serverId: string): Promise<McpAuthInfo | null> {
+    try {
+      return await deps.mcpAuth.info({ kind: 'project', projectId, serverId })
+    }
+    catch (error) {
+      deps.logger.debug('project MCP sign-in state unavailable', { projectId, serverId, err: error })
+      return null
+    }
   }
 
   /** Reads the project again (fresh), stops what changed and restarts the open servers in `restart` that may start. */
@@ -827,6 +1019,10 @@ export function createProjectMcpManagerCore(deps: AppDeps, options: ProjectMcpMa
       }
     }
     await stopRuntimes(projectId)
+    for (const key of [...withoutElicitation.keys()]) {
+      if (key.startsWith(`${projectId}/`))
+        withoutElicitation.delete(key)
+    }
     const count = await variables.deleteAll(projectId)
     if (count > 0)
       deps.logger.info('project MCP variables deleted with their project', { projectId, count })
@@ -919,45 +1115,74 @@ export function createProjectMcpManagerCore(deps: AppDeps, options: ProjectMcpMa
     }
   }
 
+  /** What `readyServers` decided for a project (the servers were started and waited for). */
+  interface ReadyProject {
+    readonly decided: RunPlan
+    readonly stored: ReadonlySet<string>
+  }
+
+  /**
+   * Starts the approved servers of a project that may start and are not running (never one that is `needs-auth`: only a
+   * sign-in, a reconnect or a change restarts it) and waits at most `waitMs` for them (`toolsFor`, the prompt and
+   * resource listings). Null when nothing is approved or the project has no servers (the folder is then not read at
+   * all), in safe mode, and after the project was deleted. Rejects for an abort of `signal` and for read errors.
+   */
+  async function readyServers(projectId: string, signal: AbortSignal, waitMs: number): Promise<ReadyProject | null> {
+    signal.throwIfAborted()
+    if (stopped || deleted.has(projectId) || deps.env.safeMode)
+      return null
+    follow()
+    // Nothing approved and nothing running: the folder is not read at all (no project config read per run).
+    const approved = await deps.projectTrust.approved(projectId)
+    if (approved.size === 0 && !projects.has(projectId))
+      return null
+    let snapshot = await deps.projectConfig.snapshot(projectId, { signal })
+    if (snapshot.mcpServers.length === 0 && !projects.has(projectId))
+      return null
+    const stored = await variables.names(projectId)
+    retire(projectId, snapshot, approved, stored)
+    let decided = plan(projectId, snapshot, approved, stored)
+    if (decided.toStart.length > 0 && snapshot.root !== null) {
+      // Right before a start the folder is read again: a changed `.mcp.json` item is a new hash (pending).
+      snapshot = await deps.projectConfig.snapshot(projectId, { signal, refresh: true })
+      retire(projectId, snapshot, approved, stored)
+      decided = plan(projectId, snapshot, approved, stored)
+    }
+    signal.throwIfAborted()
+    if (stopped || deleted.has(projectId))
+      return null
+    const waits: Promise<void>[] = []
+    const root = snapshot.root
+    // No await from here to the starts: a concurrent run sees `connecting` and waits for the same attempt.
+    for (const item of decided.wanted) {
+      const runtime = runtimeFor(projectId, item)
+      const changed = runtime.item.sha256 !== item.sha256
+      const startable = changed || (!isOpen(runtime) && runtime.attempt === null && runtime.status !== 'needs-auth')
+      if (startable && root !== null)
+        waits.push(startRuntime(runtime, item, root))
+      else if (runtime.attempt !== null)
+        waits.push(runtime.attempt)
+    }
+    await waitReady(waits, waitMs, signal)
+    return { decided, stored }
+  }
+
+  /** The global ids the approved servers of a plan replace in the project's chats. */
+  function shadowedBy(decided: RunPlan): Set<string> {
+    const globals = globalServerIds()
+    return new Set(decided.approved.map(item => item.server.id).filter(id => globals.has(id)))
+  }
+
   async function toolsFor(projectId: string, toolsOptions: ProjectMcpToolsOptions): Promise<ProjectMcpTools> {
     const { signal } = toolsOptions
     signal.throwIfAborted()
     if (stopped || deleted.has(projectId) || deps.env.safeMode)
       return noProjectMcpTools()
-    follow()
     try {
-      // Nothing approved and nothing running: the folder is not read at all (no project config read per run).
-      const approved = await deps.projectTrust.approved(projectId)
-      if (approved.size === 0 && !projects.has(projectId))
+      const ready = await readyServers(projectId, signal, toolsOptions.waitMs)
+      if (ready === null)
         return noProjectMcpTools()
-      let snapshot = await deps.projectConfig.snapshot(projectId, { signal })
-      if (snapshot.mcpServers.length === 0 && !projects.has(projectId))
-        return noProjectMcpTools()
-      const stored = await variables.names(projectId)
-      retire(projectId, snapshot, approved, stored)
-      let decided = plan(projectId, snapshot, approved, stored)
-      if (decided.toStart.length > 0 && snapshot.root !== null) {
-        // Right before a start the folder is read again: a changed `.mcp.json` item is a new hash (pending).
-        snapshot = await deps.projectConfig.snapshot(projectId, { signal, refresh: true })
-        retire(projectId, snapshot, approved, stored)
-        decided = plan(projectId, snapshot, approved, stored)
-      }
-      signal.throwIfAborted()
-      if (stopped || deleted.has(projectId))
-        return noProjectMcpTools()
-      const waits: Promise<void>[] = []
-      const root = snapshot.root
-      // No await from here to the starts: a concurrent run sees `connecting` and waits for the same attempt.
-      for (const item of decided.wanted) {
-        const runtime = runtimeFor(projectId, item)
-        const startable = runtime.item.sha256 !== item.sha256 || (!isOpen(runtime) && runtime.attempt === null)
-        if (startable && root !== null)
-          waits.push(startRuntime(runtime, item, root))
-        else if (runtime.attempt !== null)
-          waits.push(runtime.attempt)
-      }
-      await waitReady(waits, toolsOptions.waitMs, signal)
-
+      const { decided } = ready
       const tools: RegisteredTool[] = []
       const names = new Map<string, string>()
       const unavailable: string[] = []
@@ -972,15 +1197,137 @@ export function createProjectMcpManagerCore(deps: AppDeps, options: ProjectMcpMa
           unavailable.push(item.server.name)
         }
       }
-      const globals = globalServerIds()
-      const shadowed = new Set(decided.approved.map(item => item.server.id).filter(id => globals.has(id)))
-      return { tools: tools.sort(byName), shadowed, unavailable, names }
+      return { tools: tools.sort(byName), shadowed: shadowedBy(decided), unavailable, names }
     }
     catch (error) {
       // The run's abort is the only rejection.
       signal.throwIfAborted()
       deps.logger.warn('project MCP tools are not available', { projectId, err: isHarnessError(error) ? error.code : error })
       return noProjectMcpTools()
+    }
+  }
+
+  // ---------- prompts and resources (Phase 14, ADR-061) ----------
+
+  /**
+   * The cached entries of a project's approved servers (started like `toolsFor`, waiting at most `options.waitMs`):
+   * connected servers with the capability list through `read`; the others are `unavailable` with their state (pending
+   * servers and safe mode name nothing). `not_found` for an unknown project; never rejects for a server problem.
+   */
+  async function projectListing<T>(
+    projectId: string,
+    listingOptions: ProjectMcpListingOptions,
+    capability: 'prompts' | 'resources',
+    read: (server: McpCacheServer, client: MCPClient, signal: AbortSignal | undefined) => Promise<McpCachedList<T>>,
+  ): Promise<ProjectMcpListing<T>> {
+    const signal = listingOptions.signal
+    signal?.throwIfAborted()
+    await deps.projects.get(projectId)
+    let ready: ReadyProject | null
+    try {
+      ready = await readyServers(projectId, signal ?? new AbortController().signal, listingOptions.waitMs ?? 0)
+    }
+    catch (error) {
+      signal?.throwIfAborted()
+      deps.logger.warn(`project MCP ${capability} are not available`, { projectId, err: isHarnessError(error) ? error.code : error })
+      return emptyListing()
+    }
+    if (ready === null)
+      return emptyListing()
+    const unavailable: McpListingUnavailable[] = []
+    const reads: Promise<McpCachedList<T>>[] = []
+    for (const item of ready.decided.approved) {
+      if (missingVariables(item.server.transport, ready.stored).length > 0) {
+        unavailable.push({ serverId: item.server.id, status: 'needs-variables' })
+        continue
+      }
+      const runtime = currentRuntime(projectId, item)
+      if (runtime?.status === 'stale')
+        continue
+      const client = runtime?.status === 'connected' ? runtime.client : null
+      if (runtime === undefined || client === null) {
+        unavailable.push({ serverId: item.server.id, status: runtime?.status ?? 'idle' })
+        continue
+      }
+      if (!client.initializeResult.capabilities[capability])
+        continue
+      armIdle(runtime)
+      reads.push(read(cacheServer(runtime), client, signal).catch((error: unknown) => {
+        deps.logger.debug(`project MCP ${capability} listing failed`, { projectId, serverId: item.server.id, err: error })
+        return { items: [], truncated: false }
+      }))
+    }
+    const lists = await Promise.all(reads)
+    signal?.throwIfAborted()
+    return {
+      items: lists.flatMap(list => list.items),
+      truncated: lists.some(list => list.truncated),
+      unavailable,
+      shadowed: shadowedBy(ready.decided),
+    }
+  }
+
+  /**
+   * One prompt / resource request to an approved project server: `not_found` (project, server, capability), `conflict`
+   * `untrusted` (pending), `disabled` (safe mode), `needs-auth`, `provider_unreachable` (not connected within
+   * `LIMITS.projectMcpConnectWaitMs`), the server's failures mapped like the global manager's.
+   */
+  async function onProjectServer<T>(
+    projectId: string,
+    serverId: string,
+    capability: 'prompts' | 'resources',
+    signal: AbortSignal,
+    request: (server: McpCacheServer, client: MCPClient) => Promise<T>,
+  ): Promise<T> {
+    signal.throwIfAborted()
+    await deps.projects.get(projectId)
+    const snapshot = await deps.projectConfig.snapshot(projectId, { signal })
+    const item = snapshot.mcpServers.find(entry => entry.server.id === serverId)
+    if (item === undefined)
+      throw notFoundServer(serverId)
+    if (deps.env.safeMode)
+      throw safeModeConflict()
+    if (!(await deps.projectTrust.approved(projectId)).has(item.sha256))
+      throw untrustedConflict(item.server.name)
+    let runtime = currentRuntime(projectId, item)
+    if (runtime?.status !== 'connected' && runtime?.status !== 'needs-auth') {
+      await readyServers(projectId, signal, LIMITS.projectMcpConnectWaitMs).catch((error: unknown) => {
+        signal.throwIfAborted()
+        deps.logger.debug('project MCP server not ready', { projectId, serverId, err: isHarnessError(error) ? error.code : error })
+      })
+      runtime = currentRuntime(projectId, item)
+    }
+    if (runtime?.status === 'needs-auth')
+      throw needsAuthConflict(item.server.name)
+    const client = runtime?.status === 'connected' ? runtime.client : null
+    if (runtime === undefined || client === null)
+      throw new HarnessError({ code: 'provider_unreachable', message: `The project MCP server "${item.server.name}" is not connected.`, action: 'retry' })
+    if (!client.initializeResult.capabilities[capability])
+      throw new HarnessError({ code: 'not_found', message: `The project MCP server "${item.server.name}" has no ${capability}.` })
+    const generation = runtime.generation
+    runtime.inflight += 1
+    armIdle(runtime)
+    try {
+      return await request(cacheServer(runtime), client)
+    }
+    catch (error) {
+      signal.throwIfAborted()
+      if (isHarnessError(error))
+        throw error
+      if (isAuthRequired(error)) {
+        onNeedsAuth(runtime, generation, error)
+        throw needsAuthConflict(item.server.name)
+      }
+      if (isConnectionFailure(error)) {
+        onDisconnected(runtime, generation, error)
+        throw new HarnessError({ code: 'provider_unreachable', message: `The project MCP server "${item.server.name}" is not reachable: ${redact(errorMessage(error))}`, action: 'retry' })
+      }
+      throw new HarnessError({ code: 'provider_error', message: `The project MCP server "${item.server.name}" failed: ${redact(errorMessage(error))}` })
+    }
+    finally {
+      runtime.inflight -= 1
+      if (generation === runtime.generation)
+        armIdle(runtime)
     }
   }
 
@@ -1069,6 +1416,18 @@ export function createProjectMcpManagerCore(deps: AppDeps, options: ProjectMcpMa
       }
     },
 
+    prompts: (projectId, listingOptions = {}) => projectListing(projectId, listingOptions, 'prompts', (server, client, signal) => promptCache.list(server, client, signal)),
+
+    getPrompt: (projectId, serverId, name, args, signal) =>
+      onProjectServer(projectId, serverId, 'prompts', signal, (server, client) => promptCache.get(server, client, name, args, signal)),
+
+    resources: (projectId, listingOptions = {}) => projectListing(projectId, listingOptions, 'resources', (server, client, signal) => resourceCache.list(server, client, signal)),
+
+    readResource: (projectId, serverId, uri, signal) =>
+      onProjectServer(projectId, serverId, 'resources', signal, (server, client) => resourceCache.read(server, client, uri, signal)),
+
+    authTarget: (projectId, serverId) => ({ kind: 'project', scope: `project:${projectId}`, name: `${OAUTH_SERVER_SECRET_PREFIX}${serverId}` }),
+
     stop: async () => {
       if (stopped)
         return
@@ -1094,6 +1453,9 @@ export function createProjectMcpManagerCore(deps: AppDeps, options: ProjectMcpMa
       await Promise.allSettled(pending)
       await Promise.allSettled([...background])
       await Promise.allSettled([...closing])
+      promptCache.clear()
+      resourceCache.clear()
+      withoutElicitation.clear()
     },
   }
 }

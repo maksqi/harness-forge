@@ -489,3 +489,32 @@ describe('phase 12 (W12.7): the expandArguments options at the call sites', () =
     expect(parseSlashCommand('/review-kit:review x')).toEqual({ name: 'review-kit:review', input: 'x' })
   })
 })
+
+describe('mCP prompt commands: the P14-0b seams (C52-T3)', () => {
+  it('parseSlashCommand reads /mcp__<server>__<prompt> names (underscores and capitals too) next to catalog names', () => {
+    expect(parseSlashCommand('/mcp__fake__greet Ada')).toEqual({ name: 'mcp__fake__greet', input: 'Ada' })
+    expect(parseSlashCommand('  /mcp__docs__Search_All  the docs ')).toEqual({ name: 'mcp__docs__Search_All', input: 'the docs' })
+    expect(parseSlashCommand('/mcp__x__y')).toEqual({ name: 'mcp__x__y', input: '' })
+    expect(parseSlashCommand('/mcp__fake__greet,now')).toBeNull()
+    expect(parseSlashCommand(`/mcp__${'a'.repeat(60)}`)).toBeNull()
+    expect(parseSlashCommand('/mcp__')).toBeNull()
+    // Catalog names keep their rules.
+    expect(parseSlashCommand('/mcp-tools run')).toEqual({ name: 'mcp-tools', input: 'run' })
+    expect(parseSlashCommand('/Summarize x')).toBeNull()
+  })
+
+  it('resolveCommand: an MCP prompt name that names no prompt resolves to nothing (plain text), with or without MCP services', async () => {
+    const mcp = { prompts: async () => ({ items: [], truncated: false, unavailable: [] }), getPrompt: async () => {
+      throw new Error('never called by the stub')
+    } }
+    expect(await resolveCommand(services({}), '/mcp__fake__greet Ada', context)).toBeNull()
+    expect(await resolveCommand({ ...services({}), mcp } as CommandServices, '/mcp__fake__greet Ada', { ...context, projectId: 'prj_0123456789abcdef' })).toBeNull()
+  })
+
+  it('isServerCommandFor: an MCP prompt name is no server command yet; listServerCommands takes the MCP listings', async () => {
+    const deps = { registry: services({}).registry, customizations: createFakeCustomizationService() } as unknown as Parameters<typeof isServerCommandFor>[0]
+    expect(await isServerCommandFor(deps, null, '/mcp__fake__greet Ada')).toBe(false)
+    const listings = { global: { items: [], truncated: false, unavailable: [] }, project: null }
+    expect(listServerCommands(services({}).registry, null, listings)).toEqual(listServerCommands(services({}).registry, null))
+  })
+})

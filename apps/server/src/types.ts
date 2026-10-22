@@ -6,6 +6,8 @@ import type { ChatRunner } from './chat/types.ts'
 import type { Db } from './db/client.ts'
 import type { Env } from './env.ts'
 import type { Logger } from './logger.ts'
+import type { ElicitationBroker } from './mcp/elicitation/types.ts'
+import type { McpAuthService } from './mcp/oauth/types.ts'
 import type { McpManager, ProjectMcpManager, ToolService } from './mcp/types.ts'
 import type { MarketplaceService } from './plugins/marketplaces/types.ts'
 import type { BuiltinPlugin, PluginDrafts, PluginFiles, PluginHost, PluginInstaller } from './plugins/types.ts'
@@ -167,6 +169,18 @@ export interface AppServices {
    * (Phase 12, ADR-056; C43 stub, W12.4). No state: no boot or shutdown step.
    */
   readonly projectDefinitions: ProjectDefinitionsService
+  /**
+   * OAuth sign-ins of remote MCP servers: the pending flows, the token records in `SecretStore` and the connect-mode
+   * `OAuthClientProvider` of the MCP transports (Phase 14, ADR-059; C50 stub, W14.1). Lazy (no boot step); `stop()`
+   * after the MCP managers (the pending flows dropped).
+   */
+  readonly mcpAuth: McpAuthService
+  /**
+   * The MCP elicitation broker: the calls in flight per MCP client, the waits for the user and their answers (Phase 14,
+   * ADR-060; C50 stub, W14.3). Lazy (no boot step); `stop()` right after the import plans, before the runs (every wait
+   * answers `cancel`, reason `stopped`, so the runs can finish).
+   */
+  readonly elicitations: ElicitationBroker
 }
 
 export interface AppDeps extends AppBase, AppServices {}

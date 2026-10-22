@@ -69,11 +69,19 @@ export type UsagePurpose = 'chat' | 'title' | 'image' | 'transcription' | 'speec
 
 /**
  * `mcp_servers.transport`: only header / env NAMES are stored; their values are secrets (scope `mcp:<id>`, names
- * `header.<Name>` / `env.<NAME>`).
+ * `header.<Name>` / `env.<NAME>`). Phase 14 (ADR-059): an http / sse record may hold `oauth` (the configured client id
+ * and scopes; absent in v1.8 rows = none, dynamic client registration); the client secret and the token record are
+ * secrets (`oauth.clientSecret`, `oauth.record`). A TypeScript change only: the column is JSON (no migration).
  */
 export type McpTransportRecord
-  = | { type: 'http' | 'sse', url: string, headerNames: string[] }
+  = | { type: 'http' | 'sse', url: string, headerNames: string[], oauth?: McpTransportOAuthRecord }
     | { type: 'stdio', command: string, args: string[], envNames: string[] }
+
+/** `oauth` of an http / sse `McpTransportRecord` (Phase 14): null = not configured (dynamic registration, no scopes). */
+export interface McpTransportOAuthRecord {
+  clientId: string | null
+  scopes: string | null
+}
 
 /** Global settings (API `Settings` keys) and internal keys (prefix `_`, never returned by the API). */
 export const settings = sqliteTable('settings', {

@@ -19,6 +19,9 @@
 // typing filters on every segment of a name (`/migrate` finds `/review-kit:db:migrate`); a row shows the plugin
 // namespace muted and cuts a long name in the middle (`slashNameDisplay`, the full name in its title). The menu lists
 // what the server lists: a bare alias of a plugin command (`/review`) is never added here (the server resolves it).
+// Phase 14 (ADR-061; C54 declares the group, W14.8 owns the rows; signatures frozen from Gate P14-0b): the group MCP
+// (`mcp`, label "MCP", between Plugins and Skills) holds the prompts of connected MCP servers (`source: 'mcp'`, names
+// `mcp__<server>__<prompt>`).
 import type { ClientCommand, CommandSummary, ProjectTrustList, ReasoningEffort, ToolMode } from '@harness-forge/shared'
 import type { OutputStyleOption } from './output-style'
 import { CLIENT_COMMANDS, isClientCommand, QUALIFIED_NAME_MAX_CHARS, splitQualifiedName } from '@harness-forge/shared'
@@ -26,8 +29,11 @@ import { EFFORT_LABELS } from './effort'
 import { resolveStyleQuery, styleOptions } from './output-style'
 import { EDITS_NEEDS_PROJECT, isProjectOnlyMode, PLAN_NEEDS_PROJECT, TOOL_MODE_OPTIONS } from './permission'
 
-/** The groups of the slash menu, in display order (docs/UI.md 7.8, Phase 10; + Phase 11: `skill`, last). */
-export type SlashGroup = 'app' | 'project' | 'personal' | 'plugin' | 'skill'
+/**
+ * The groups of the slash menu, in display order (docs/UI.md 7.8, Phase 10; + Phase 11: `skill`, last; + Phase 14: `mcp`,
+ * before Skills).
+ */
+export type SlashGroup = 'app' | 'project' | 'personal' | 'plugin' | 'mcp' | 'skill'
 
 /** The groups in display order with their headings (`data-group` = `value`). */
 export const SLASH_GROUPS: readonly { value: SlashGroup, label: string }[] = [
@@ -35,6 +41,7 @@ export const SLASH_GROUPS: readonly { value: SlashGroup, label: string }[] = [
   { value: 'project', label: 'Project' },
   { value: 'personal', label: 'Personal' },
   { value: 'plugin', label: 'Plugins' },
+  { value: 'mcp', label: 'MCP' },
   { value: 'skill', label: 'Skills' },
 ]
 
@@ -80,7 +87,7 @@ export function clientSlashItems(): SlashItem[] {
 
 /**
  * The menu group of a server command: harness -> App, project -> Project, user -> Personal, plugin -> Plugins; + Phase
- * 11: a skill (`kind: 'skill'`) of any source -> Skills.
+ * 11: a skill (`kind: 'skill'`) of any source -> Skills; + Phase 14: an MCP prompt (`source: 'mcp'`) -> MCP.
  */
 export function slashGroupOf(command: Pick<CommandSummary, 'source' | 'kind'>): SlashGroup {
   if (command.kind === 'skill')
@@ -94,9 +101,8 @@ export function slashGroupOf(command: Pick<CommandSummary, 'source' | 'kind'>): 
       return 'personal'
     case 'plugin':
       return 'plugin'
-    // Phase 14 (ADR-061): MCP prompts sit with the plugin commands until W14.8 adds the MCP group.
     case 'mcp':
-      return 'plugin'
+      return 'mcp'
   }
 }
 

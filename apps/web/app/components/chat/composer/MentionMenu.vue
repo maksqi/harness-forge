@@ -11,7 +11,11 @@
 // region announces "{n} files" / "No matching files" 500 ms after the rows settle.
 // Root `mention-menu` (`data-state` loading | ready | error, `data-count`; `role="listbox"`, `aria-busy` while loading);
 // `mention-menu-item` per entry (`data-path`, `data-kind`).
-import type { ProjectFileEntry } from '@harness-forge/shared'
+// Phase 14 (ADR-061; C54 declares, W14.8 implements; frozen from Gate P14-0b): the optional `resources` (the MCP resources
+// of `useResourceMentions`) and `resourcesState`, and the emit `select-resource`; W14.8 renders them as a second
+// `role="group"` section "MCP resources" of the same listbox (`mention-menu-section`, `data-value` files | resources;
+// rows `mention-menu-resource`, `data-server-id`, `data-uri`), so `aria-activedescendant` keeps working across both.
+import type { McpResourceEntry, ProjectFileEntry } from '@harness-forge/shared'
 import { FileTextIcon, FolderIcon, Loader2Icon } from '@lucide/vue'
 import { computed, nextTick, onBeforeUnmount, ref, useId, watch } from 'vue'
 import { cn } from '@/lib/utils'
@@ -31,13 +35,21 @@ const props = withDefaults(defineProps<{
   truncated: boolean
   /** The project's name ("Files in {project}"). */
   projectName: string | null
+  /** + Phase 14: the MCP resources matching the query (`useResourceMentions().items`); default none. */
+  resources?: readonly McpResourceEntry[]
+  /** + Phase 14: the state of the resource listing (`useResourceMentions().state`); default `idle`. */
+  resourcesState?: 'idle' | 'loading' | 'ready' | 'error'
 }>(), {
   errorMessage: null,
+  resources: () => [],
+  resourcesState: 'idle',
 })
 
 const emit = defineEmits<{
-  select: [entry: ProjectFileEntry]
-  close: []
+  'select': [entry: ProjectFileEntry]
+  'close': []
+  /** + Phase 14: an MCP resource was picked (the composer inserts its mention and attaches it). */
+  'select-resource': [entry: McpResourceEntry]
 }>()
 
 /** "Searching files…" shows only when a search takes longer than this. */
