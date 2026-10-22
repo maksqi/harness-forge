@@ -376,7 +376,8 @@ Wave M1 (D1 docs + code agents, no phase doc). Plugin API stays 1.6.0 (`Reasonin
   (`experimental_events: undefined`), `ReasoningLevel` `max`
 - [x] A streamed mermaid block that kept "Failed to render diagram: [mermaidWorkerClient] No worker instance set" (also
   on v1.7): a main-thread stand-in for markstream's parser worker (`markdown-workers.ts`)
-- [~] Dependabot pull requests #9, #10, #11, #13 and #14 superseded by the updates
+- [x] Dependabot pull requests #9, #10, #11, #13 and #14 superseded by the updates (closed by Dependabot); #15 (the
+  `ai` 7.0.148 patch group, released after the update) merged green
 - [x] Docs reconciliation (wave-log hashes, Node requirements, SSE event count, env lists, stale e2e `fixme` notes,
   plugin API `max`)
 - [x] Backlog items
@@ -388,8 +389,9 @@ Wave M1 (D1 docs + code agents, no phase doc). Plugin API stays 1.6.0 (`Reasonin
   - [x] B5 a marketplace plugin's entry overlay kept in its export (`.hf-entry-overlay.json`, CCR-1) + the Phase 12
     leftovers (`marketplace.changed` for marketplace installs, the scan 409, "New project hook", the Claude model names
     wording, CCR-2)
-- [ ] Unpin the CI runners (`ubuntu-24.04` → `ubuntu-26.04`; follow-up)
-- [ ] Tag `v1.8.1` after a green CI run
+- [ ] Move the CI runners to `ubuntu-26.04`: deferred to the backlog (on 2026-10-22 `ubuntu-latest` is still Ubuntu
+  24.04, `ubuntu-26.04` is a separate image and actionlint 1.7.12 does not know its label)
+- [x] Tag `v1.8.1` (on `27699db`, after a green CI run)
 
 ## Backlog (not in v1.8.1)
 
@@ -413,7 +415,8 @@ private repositories and higher rate limits · Claude Code LSP servers, themes, 
 on the shell `PATH` · `http`, `mcp_tool` and `agent` hook handlers · OAuth-only remote MCP servers of Claude Code
 plugins · editing Claude Code plugins in the plugin editor · run the live provider suite for prompt hooks and Claude
 Code plugins with real models · pnpm 12 (the Rust CLI) · TypeScript 7 (blocked by ADR-013: `.vue` files that import
-prop types break).
+prop types break) · move the CI runners to `ubuntu-26.04` once `ubuntu-latest` points at it and actionlint knows the
+label (checked 2026-10-22: `ubuntu-latest` is still 24.04).
 
 ## Wave log
 
@@ -473,4 +476,4 @@ prop types break).
 | P12-A | W12.1 – W12.13, G12P (gate probes), W12.16 / W12.17 (fix-ups for the gate items) (+ coordinator: SDK 1.6.0 `CommandDefinition` / `SkillDefinition` frontmatter fields (+ mirror, pins), `renderCommandExpansion` variables in parts without placeholders, `hookEntrySchema.position`-era CCRs, `settings` store rollback of object settings, `HOOK_ACTIVITY.label`, `AgentDefinition.model` comment, examples' d.ts regenerated, two e2e pins (the kept `model: sonnet` alias note, the "Plugin not trusted" row), the P11-A regression copy updated for Phase 12 (`type` key, `transcript_path`, prompt hooks read), the archived `upgrade-v14` seed restored for P9-A; decisions: `skill` tool timeout 600 s, a prompt hook's missing handler model falls back to `hookModelRef`; refused: re-running W12.1's denied `chmod` (surfaced to the user)) | audit ok (331+ paths, no agent touched a frozen file); 13720 tests, `git status` unchanged; build ok; CSP 38/38; G12P probes 345/347 → the red security item (a sensitive `${user_config.*}` value in `GET /hooks` exec-form `args`) fixed by W12.16 (group 1 48/48 on the rebuild) + 1 spec-differs decision; `pnpm test` group 4/4; regressions P11-A copy (feature sections green) / P10-A copy / P9-A / P8-A passed; e2e 191 passed on a fresh `.tmp/e2e` (incl. the fixed `mobile/agent.spec.ts:191` flake, 3× green); `pnpm audit --prod` clean (6 ignored); screenshot review moved to P12-B (W12.14 writes the specs) | `1e62a59` |
 | P12-B | W12.14 (e2e), W12.15 (docs-final), W12.18 / W12.19 (fix-ups), W12.20 (investigation), G12D (Docker probe) (+ coordinator: resumed W12.14 / W12.15 / G12D after an account usage-limit stop; the `mock:hooks` turn-rule CCR (a request right after a tool result opens the turn: an ended or superseded turn was misread, pre-existing since Phase 7); the five e2e `fixme`s re-enabled after the fixes; `renderCommandExpansion` variables, comments, the two Phase 12 switches 40 px, the `hookEntrySchema` untrusted-Claude-plugin comment; DECISIONS ADR-053 / ADR-057 / ADR-058 + `HF_TEST_REMOTE_URL` wording, AGENT.md exec-form fact, Dockerfile two-mount recipe, README images; refused: re-running W12.1's denied `chmod`) | audit ok; e2e 221 tests (W12.14: 3 green runs of the new specs, `mobile/agent.spec.ts:191` 10/10); docs reconciled (API, ARCHITECTURE, UI, PLUGINS, PROVIDERS, guides, README "v1.8") | `b9216f5` (with the final gate) |
 | Final gate v1.8 | coordinator | frozen install ok (TypeScript 6.0.3); 13740 tests, `git status` unchanged by `pnpm check`, the only `.claude*` path in the repository is `examples/plugins/claude-review-kit/.claude-plugin/plugin.json`; build ok; CSP 38/38; G12P probes 360/360 on the final build (the missing-handler-model check updated to the decided fallback) + regressions P11-A copy / P10-A copy / P9-A / P8-A passed; e2e 215 passed ×3 (chromium + mobile + tablet, 6 screenshot tests skipped); `@screenshots` dark + light (152 per theme) reviewed for the new screens (Marketplaces desktop + 390 px, GitHub tab, Claude preview, import wizard, project file editor, hook editor Prompt type, partial trust selection), README images refreshed + `marketplaces-dark`, `claude-import-dark`; `pnpm audit --prod` clean (6 ignored, still unpatched; katex low via mermaid); real v1.7 → v1.8 upgrade on a fresh seed by the `b3fa452` build: G12B 98/98 + G12P upgrade 69/69 (every v1.7 approval kept, nothing new ran before approval, approving the new prompt hook works); Docker (G12D) 63/63: scan off by default, a read-only mounted home scanned as uid 1000 without opening the canaries, Claude plugin scripts 0755 and hooks / MCP only after trust as uid 1000, no orphans after `docker stop` | `b9216f5` |
-| M1 (v1.8.1) | A1 – A4, B1 – B5, D1, F1 (+ coordinator: dependency updates, the `vue-stick-to-bottom` pnpm patch, the katex and esbuild overrides, the `@ai-sdk/mcp` `createMCPClient` overload, Vitest 5) | check green (13815 tests, 668 files, no Vue / pinia / unhandled warnings in the log), e2e 215 + 221 with screenshots, built-page CSP 38/38, `pnpm audit` only the two ignored, `db:generate` no changes, Docker image (`/api/health` 1.8.1), actionlint clean; mermaid streaming check 15/15 (was 3/5 failing, also on v1.7) | (the v1.8.1 commits) |
+| M1 (v1.8.1) | A1 – A4, B1 – B5, D1, F1 (+ coordinator: dependency updates, the `vue-stick-to-bottom` pnpm patch, the katex and esbuild overrides, the `@ai-sdk/mcp` `createMCPClient` overload, Vitest 5) | check green (13815 tests, 668 files, no Vue / pinia / unhandled warnings in the log), e2e 215 + 221 with screenshots, built-page CSP 38/38, `pnpm audit` only the two ignored, `db:generate` no changes, Docker image (`/api/health` 1.8.1), actionlint clean; mermaid streaming check 15/15 (was 3/5 failing, also on v1.7) | `934d909`, `e72d611`, `27699db` (tag `v1.8.1`) |

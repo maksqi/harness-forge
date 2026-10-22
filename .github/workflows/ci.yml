@@ -19,8 +19,9 @@ defaults:
     # bash -eo pipefail
     shell: bash
 
-# Every job (here, in audit.yml and in live.yml) runs on a pinned ubuntu-24.04 image: ubuntu-latest moved to Ubuntu 26
-# on 2026-10-19, and Playwright's --with-deps and the Docker job should move only on purpose.
+# Every job (here, in audit.yml and in live.yml) runs on a pinned ubuntu-24.04 image, so Playwright's --with-deps and
+# the Docker job move only on purpose. Checked 2026-10-22: ubuntu-latest is still Ubuntu 24.04; ubuntu-26.04 is a
+# separate image that actionlint 1.7.12 does not know yet.
 jobs:
   actionlint:
     name: Lint workflows (actionlint + shellcheck)
