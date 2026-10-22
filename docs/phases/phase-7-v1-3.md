@@ -10,8 +10,8 @@ flows, tables and security rules from `docs/ARCHITECTURE.md` (3, 5, 6.2, 6.13 �
 plugin API 1.2.0 and the builtin `core-workspace` from `docs/PLUGINS.md` (1, 9, 10); the `mock:workspace` model from
 `docs/PROVIDERS.md` (8); the user guide `docs/guides/using-projects.md`.
 
-**Status (2026-10-03):** P7-00 is done (the math tests as `0cc670e`; Dependabot #5, #6 and #4 merged, see
-"Deviations"); P7-0a (`9468f4f`), P7-0b (`bf61035`) and P7-A (`b4ff064`) passed their gates. P7-B (W7.14 feature e2e
+**Status (2026-10-03):** P7-00 is done (the math tests as `7bd717c`; Dependabot #5, #6 and #4 merged, see
+"Deviations"); P7-0a (`0636e4f`), P7-0b (`74f7022`) and P7-A (`0e90524`) passed their gates. P7-B (W7.14 feature e2e
 specs, W7.15 docs) and the final gate are done: Phase 7 shipped as v1.3. "Deviations from the plan" lists where
 the build differs from the plan sections below (those are kept as planned); "Outcome" at the end of this file is
 written by the coordinator at the final gate.
@@ -336,7 +336,7 @@ No CCR is pre-approved for P7-A; the coordinator batches CCRs at Gate P7-A.
 The coordinator runs this before P7-0a closes; merges are authorized by the user's choice, local commits are pushed
 only when the user asks.
 
-1. **Math tests (done, `0cc670e`; first committed as `3af05be` and rebased onto the merges)** — `W/components/chat/parts/markdown/math.test.ts` (the KaTeX `\frac{a}{b}`
+1. **Math tests (done, `7bd717c`; first committed as `3af05be` and rebased onto the merges)** — `W/components/chat/parts/markdown/math.test.ts` (the KaTeX `\frac{a}{b}`
    annotation, `mhchem` `\ce{H2O}`, the CSS import) and `e2e/specs/core/math.spec.ts` (`mock:echo`; MathML
    annotations present, no `katex-error`, the KaTeX font family), so the katex 0.18 bump has a guard.
 2. **Dependabot #2 (ai-sdk) → #3 (motion-v) → #4 (katex 0.18)** (as built: #2 and #3 were closed and replaced by #5
@@ -1485,11 +1485,11 @@ Phase 7 is done (v1.3). Gate results (copied from the ROADMAP wave log; "audit" 
 
 | Wave | Agents | Gate result | Commit |
 |---|---|---|---|
-| P7-00 | coordinator | math tests (unit + e2e) green on katex 0.16 and on the PR #4 build (katex 0.19); Dependabot #5 (replaced #2), #6 (replaced #3) and #4 squash-merged on GitHub after green check / e2e / docker; two new build-tooling advisories ignored in `pnpm-workspace.yaml` | `aac10a5`, `121db32`, `9341590`, `0cc670e` |
-| P7-0a | coordinator (K1, K2), C13, D7 | audit ok (78 paths, 15 C13 compile-fix files accepted); 5195 tests; build ok; CSP 38/38; 9 new routes mounted (501 / 400); e2e 62; Docker image with bash + git | `9468f4f` |
-| P7-0b | coordinator (K3), C14, C15, C16 | audit ok (135 paths); `0004_projects` without a rebuild; 5424 tests; e2e 62; upgrade probe on a seeded v1.2 copy 15/15; FREEZE | `bf61035` |
-| P7-A | W7.1 – W7.13 | audit ok (218 paths, no frozen file touched); 6995 tests; e2e 62; probes 47/47; screenshots reviewed | `b4ff064` |
-| P7-B + final gate | W7.14, W7.15, coordinator | new e2e specs 3× green; docs reconciled; e2e 77 ×3 (chromium + mobile + tablet); real v1.2 → v1.3 upgrade from a `b5bb2ec` worktree 26/26 (incl. rotation and cleanup on upgraded data); Docker `rotate-key` round trip | `chore: final gate for harness-forge v1.3` |
+| P7-00 | coordinator | math tests (unit + e2e) green on katex 0.16 and on the PR #4 build (katex 0.19); Dependabot #5 (replaced #2), #6 (replaced #3) and #4 squash-merged on GitHub after green check / e2e / docker; two new build-tooling advisories ignored in `pnpm-workspace.yaml` | `aac10a5`, `121db32`, `9341590`, `7bd717c` |
+| P7-0a | coordinator (K1, K2), C13, D7 | audit ok (78 paths, 15 C13 compile-fix files accepted); 5195 tests; build ok; CSP 38/38; 9 new routes mounted (501 / 400); e2e 62; Docker image with bash + git | `0636e4f` |
+| P7-0b | coordinator (K3), C14, C15, C16 | audit ok (135 paths); `0004_projects` without a rebuild; 5424 tests; e2e 62; upgrade probe on a seeded v1.2 copy 15/15; FREEZE | `74f7022` |
+| P7-A | W7.1 – W7.13 | audit ok (218 paths, no frozen file touched); 6995 tests; e2e 62; probes 47/47; screenshots reviewed | `0e90524` |
+| P7-B + final gate | W7.14, W7.15, coordinator | new e2e specs 3× green; docs reconciled; e2e 77 ×3 (chromium + mobile + tablet); real v1.2 → v1.3 upgrade from a `b5bb2ec` worktree 26/26 (incl. rotation and cleanup on upgraded data); Docker `rotate-key` round trip | `8879e6e` |
 
 Fixes made by the coordinator at the gates: CCR comments in `providers/types.ts`, `chats/types.ts`, `files/types.ts`;
 `deps.test.ts` / `fakes.test.ts` updates; the approval card context (W7.10 follow-up); the approval checkbox hit area

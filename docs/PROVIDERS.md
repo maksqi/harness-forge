@@ -85,7 +85,10 @@ Known alternative base URLs (Advanced):
 
 ## 3. Model listing
 
-`listModels` results are cached 24 h in `model_cache`; a failed refresh keeps the last good list. Chat seeds are used
+`listModels` results are cached 24 h in `model_cache`; a failed refresh keeps the last good list. With `HF_OFFLINE=1`
+(v1.8.1) the catalog never lists on its own (no 15-minute background cycle, no check of a newly registered provider):
+the cached listing or the seeds keep serving, and only an explicit refresh (`POST /providers/:id/models/refresh`), the
+provider test and the checks after a credential save or a created provider list. Chat seeds are used
 only when there is neither a listing nor a cached listing; seeds with an explicit media kind (`image`, `transcription`,
 `speech`) are always listed, even next to a live listing (Phase 6). An explicit `kind` of any layer (custom model,
 listing, plugin model, seed) wins; otherwise `classify()` decides (the image id pattern first, then models.dev
@@ -129,7 +132,9 @@ is used).
 - The host calls `provider.reasoning(effort, model)` only when the effort is not `auto`, `model.capabilities.reasoning`
   is true and the effort is offered for the model (`ModelInfo.reasoningEfforts`); otherwise it behaves as `auto`.
 - `reasoning()` returns `ReasoningParams`: `reasoning` is the AI SDK v7 top-level call option
-  (`none | minimal | low | medium | high | xhigh`) that each official package translates to its native parameters;
+  (`none | minimal | low | medium | high | xhigh | max`; `max` is the portable level of `@ai-sdk/provider` 4.0.23+,
+  v1.8.1) that each official package translates to its native parameters (the harness effort `max` still maps to
+  `xhigh` or to a provider option, see the table below);
   `providerOptions` carries provider-specific options. Reasoning settings inside `providerOptions` take full
   precedence over the top-level value (never merged), so a mapping uses one or the other for the effort.
 - **Always-on options** are not effort parameters and are applied on every request (model wrapper, section 2):
@@ -357,7 +362,9 @@ Settings → Media. The provider's `modelCount` is 18 (visible chat models; the 
 directory whose cached mock listing predates a model (the e2e server's `.tmp/e2e`: `workspace` in Phase 7, `checkpoint`
 and `shell` in Phase 8, the five agent mocks in Phase 9, the two customization mocks in Phase 10, `hooks` in Phase 11,
 `prompt-hook` in Phase 12) shows the new models only after a
-refresh: move it aside before a gate.
+refresh: move it aside before a gate. Since v1.8.1 an `HF_OFFLINE=1` server (`pnpm start:e2e`) lists the mock provider
+only on an explicit refresh, so on fresh e2e data its models come from the seeds (`source: 'seed'`, no "Updated …"
+text on the provider row).
 
 Common behavior (deterministic):
 
@@ -824,7 +831,8 @@ Implemented in `apps/server/src/live/media.ts` (W6.14); no media check has run y
 
 - **Opt-in on top of the opt-in suite**: `HF_LIVE_MEDIA=1 pnpm test:live` (the flag may also sit in `.env`; accepted
   values `1` / `true` / `yes` / `on`, and `0` / `false` / `no` / `off` / unset; any other value fails the run), so
-  `HF_LIVE=1` and the provider keys are needed as well; paid, never run by `pnpm test`, by agents or on CI pushes.
+  the provider keys are needed as well (`pnpm test:live` sets `HF_LIVE=1` itself); paid, never run by `pnpm test`, by
+  agents or on CI pushes.
 - **Layout**: each media check is its own Vitest test with its own in-process app (like the chat checks); they run after
   every chat check, in the order speech, transcription, image.
 - **Image**: OpenAI `gpt-image-1-mini` (one image, 1:1 sent as `size: '1024x1024'`, the returned size is checked) and

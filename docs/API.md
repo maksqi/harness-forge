@@ -97,7 +97,7 @@ to `/login` only on `code === 'unauthorized'`, never on the HTTP status alone.
 | Code | `details` shape |
 |---|---|
 | `validation_error` | `{ issues: Array<{ path: Array<string \| number>; message: string; code: string }> }` (zod issues, flattened) |
-| `conflict` | `{ reason: 'run-active' \| 'exists' \| 'stale' \| 'disabled' \| 'env-password' \| 'insecure-bind' \| 'busy' \| 'only-version' \| 'env-key' \| 'key-mismatch' \| 'run-idle' \| 'queue-full' \| 'hook-blocked' \| 'untrusted' \| 'offline', chatId?: string, hook?: HookData }` (15 reasons) (`run-active`: a run holds the chat, or its active leaf moved during a version switch or delete, section 5.9, or a chat of the project runs while the project is deleted, or the chat runs while it is moved, sections 5.9 and 5.22, or a chat of the project runs during a rewind, revert or undo, section 5.24; `exists`: a chat or message id is already used, a project already uses the folder, the new folder exists, section 5.22, or the shell rule already exists, section 5.25, or the id of a queued message is already queued or stored, section 5.26, or 100 personal hooks are stored, section 5.31, or 50 variables of a project, section 5.33 (Phase 11); `stale`: a plugin file or package changed since it was read or reviewed, or a chat request was stopped before its history was stored, section 5.10, or the file to revert changed since the client read it (`expectedSha`), section 5.24, or (Phase 11) a project trust approval whose hash is no longer current ("The project files changed while you reviewed them. Review them again."), section 5.32; `busy`: another maintenance operation (import, delete-all, key rotation, file cleanup) is running, sections 5.19 and 5.23, or a chat request arrives while a key rotation runs, section 5.10, or (Phase 12) the shutdown stopped a Claude Code folder scan, section 5.35; `only-version`: the message to delete has no other version, section 5.9; `env-key`: the master key comes from `HF_MASTER_KEY` and is rotated offline, section 5.23; `key-mismatch`: the master key fails the stored key check, section 5.23; `run-idle` (Phase 9): a message was queued for a chat with no active run and no pending approval (send it with `POST /chat` instead), section 5.26; `queue-full` (Phase 9): the chat already has 10 queued messages, section 5.26; `hook-blocked` (Phase 11, ADR-048): a `UserPromptSubmit` hook blocked (exit 2, `decision: 'block'`, `continue: false`, or a plugin `prompt.submit` `block`) or a `SessionStart` hook answered `continue: false`, and nothing was stored or queued (the message is "A hook blocked this message: <reason>", or "A hook blocked this message." without one; `chatId` is set), sections 5.10 and 5.26; only this reason sets `hook` = the `HookData` record of the blocking event (section 4.31; checked by `conflictDetailsSchema` only as an object, its shape is `hookDataSchema`); `untrusted` (Phase 11, ADR-049 / ADR-052): a project command file with `` !`cmd` `` spans whose trust hash is not approved, section 5.10 (the web opens the project trust review); `disabled` also answers a command with spans while `HF_WORKSPACE_SHELL=0` and a project MCP reconnect in safe mode (Phase 11); `offline` (Phase 12, ADR-054): `HF_OFFLINE=1` refuses adding or refreshing a `github` or `url` marketplace and installing from a `github` source or a marketplace entry that needs the network (folder marketplaces and their relative entries, npm and URL installs are unchanged), sections 5.16 and 5.34; Phase 12 also answers `exists` for a marketplace name already added, a 51st marketplace (section 5.34) and a plugin id installed from another source, format or origin (section 5.16), `stale` for a project definition file whose sha256 is not `expectedSha256` (section 5.36) and `disabled` for the import scan while `HF_CLAUDE_HOME=0` (section 5.35)) |
+| `conflict` | `{ reason: 'run-active' \| 'exists' \| 'stale' \| 'disabled' \| 'env-password' \| 'insecure-bind' \| 'busy' \| 'only-version' \| 'env-key' \| 'key-mismatch' \| 'run-idle' \| 'queue-full' \| 'hook-blocked' \| 'untrusted' \| 'offline', chatId?: string, hook?: HookData, pluginId?: string }` (15 reasons; `pluginId` since v1.8.1, only with `untrusted` for a Claude Code plugin command; `conflictDetailsSchema.pluginId`) (`run-active`: a run holds the chat, or its active leaf moved during a version switch or delete, section 5.9, or a chat of the project runs while the project is deleted, or the chat runs while it is moved, sections 5.9 and 5.22, or a chat of the project runs during a rewind, revert or undo, section 5.24; `exists`: a chat or message id is already used, a project already uses the folder, the new folder exists, section 5.22, or the shell rule already exists, section 5.25, or the id of a queued message is already queued or stored, section 5.26, or 100 personal hooks are stored, section 5.31, or 50 variables of a project, section 5.33 (Phase 11); `stale`: a plugin file or package changed since it was read or reviewed, or a chat request was stopped before its history was stored, section 5.10, or the file to revert changed since the client read it (`expectedSha`), section 5.24, or (Phase 11) a project trust approval whose hash is no longer current ("The project files changed while you reviewed them. Review them again."), section 5.32; `busy`: another maintenance operation (import, delete-all, key rotation, file cleanup) is running, sections 5.19 and 5.23, or a chat request arrives while a key rotation runs, section 5.10, or (Phase 12) the shutdown stopped a Claude Code folder scan, section 5.35; `only-version`: the message to delete has no other version, section 5.9; `env-key`: the master key comes from `HF_MASTER_KEY` and is rotated offline, section 5.23; `key-mismatch`: the master key fails the stored key check, section 5.23; `run-idle` (Phase 9): a message was queued for a chat with no active run and no pending approval (send it with `POST /chat` instead), section 5.26; `queue-full` (Phase 9): the chat already has 10 queued messages, section 5.26; `hook-blocked` (Phase 11, ADR-048): a `UserPromptSubmit` hook blocked (exit 2, `decision: 'block'`, `continue: false`, or a plugin `prompt.submit` `block`) or a `SessionStart` hook answered `continue: false`, and nothing was stored or queued (the message is "A hook blocked this message: <reason>", or "A hook blocked this message." without one; `chatId` is set), sections 5.10 and 5.26; only this reason sets `hook` = the `HookData` record of the blocking event (section 4.31; checked by `conflictDetailsSchema` only as an object, its shape is `hookDataSchema`); `untrusted` (Phase 11, ADR-049 / ADR-052): a project command file with `` !`cmd` `` spans whose trust hash is not approved, section 5.10 (the web opens the project trust review); v1.8.1: also a Claude Code plugin command whose plugin's files changed after it was trusted, with `details.pluginId` (the web opens `/plugins/<id>`); `disabled` also answers a command with spans while `HF_WORKSPACE_SHELL=0` and a project MCP reconnect in safe mode (Phase 11); `offline` (Phase 12, ADR-054): `HF_OFFLINE=1` refuses adding or refreshing a `github` or `url` marketplace and installing from a `github` source or a marketplace entry that needs the network (folder marketplaces and their relative entries, npm and URL installs are unchanged), sections 5.16 and 5.34; Phase 12 also answers `exists` for a marketplace name already added, a 51st marketplace (section 5.34) and a plugin id installed from another source, format or origin (section 5.16), `stale` for a project definition file whose sha256 is not `expectedSha256` (section 5.36) and `disabled` for the import scan while `HF_CLAUDE_HOME=0` (section 5.35)) |
 | `payload_too_large` | `{ limitBytes: number }`, or `{ limitEntries: number }` when `GET /data/export` refuses a backup for its entry count (section 5.19) |
 | `plugin_error` | `{ pluginId: string; phase?: 'load' \| 'setup' \| 'dispose' \| 'hook' \| 'tool' \| 'build' \| 'install' }` |
 | `internal_error` | `{ requestId: string }` |
@@ -1407,7 +1407,8 @@ section 4.32: `{ projectId, pending }`) says the approvals or the executable ite
 items that wait for a review, the trust chip count); `project-mcp.changed` (`ProjectMcpChangedData`, section 4.32:
 `{ projectId, servers }`) carries the servers of a project after a state change. Phase 12 (19 event types):
 `marketplace.changed` (`MarketplaceChangedData`, section 4.33: `{ id, marketplace }`, `marketplace: null` = removed)
-after every marketplace add, refresh (also a failed one, which stores `lastError`) and remove; a refresh that changes
+after every marketplace add, refresh (also a failed one, which stores `lastError`) and remove, and since v1.8.1 after
+installing, updating or removing a plugin from one of its entries (for that marketplace); a refresh that changes
 the update state of installed plugins also emits `plugin.changed` for each of them (the update badges follow it);
 `workspace.changed` gains the source `user` (a project definition file saved or deleted from the UI, `chatId` and
 `batchId` null, section 5.36).
@@ -3186,8 +3187,12 @@ removed with the chat, never in a backup; absent when it cannot be written, and 
 (`SessionEnd`). Plugin hooks also get the plugin's extra environment (`CLAUDE_PLUGIN_DATA`, `CLAUDE_PLUGIN_OPTION_<KEY>`
 of a Claude Code plugin; never `process.env`); a Claude Code plugin's exec-form `${user_config.KEY}` is filled only at
 spawn (section 4.33). The hooks of an untrusted harness plugin (its manifest's `contributes.hooks`) are listed by `GET
-/hooks` with `state: 'pending'` (`source: 'plugin'`; the web shows "Plugin not trusted"); an untrusted Claude Code
-plugin's hooks show only on its plugin page (`claude.executables`).
+/hooks` with `state: 'pending'` (`source: 'plugin'`; the web shows "Plugin not trusted"); since v1.8.1 so are an
+untrusted Claude Code plugin's hooks (read as written in its hook files, so no option value appears; in v1.8 they
+showed only on its plugin page, `claude.executables`). Since v1.8.1 a Claude Code plugin's whole tree is hashed again
+right before each of its command hooks spawns (async ones too): on a mismatch nothing spawns, the record carries the
+non-blocking `error` "The plugin's files changed after it was trusted, so this hook did not run. Review and trust the
+plugin again." (also in `GET /hooks/runs`), and the plugin is reloaded once (→ `untrusted`, `plugin.changed`).
 
 ```ts
 type PersonalHook =                     // personalHookSchema (GET via the listing, create / update answers);
@@ -3348,7 +3353,8 @@ type HookData = {                       // hookDataSchema (chat.ts): data of 'da
                                         // 'allowed' when a hook also decided; <= 64 KiB of JSON); the tool part
                                         // keeps the model's input
   harnessAsked?: true                   // Phase 12 (ADR-057): a PreToolUse hook allowed the call but the harness still
-}                                       // asked (plan mode, an 'always' tool, ...): "Allowed by hook · still asks"
+                                        // asked (plan mode, an 'always' tool, ...): "Allowed by hook · still asks";
+}                                       // v1.8.1: an allowed PermissionRequest record of a call that still asks too
 type HookResult = {                     // hookResultSchema: one hook of a record
   source: HookSource
   label: string                         // <= 200 chars: the redacted command with whitespace collapsed (a project
@@ -3682,7 +3688,9 @@ type MarketplaceChangedData = { id: MarketplaceId; marketplace: MarketplaceSumma
                                         // marketplaceChangedDataSchema: data of marketplace.changed (null = removed)
 
 type PluginOrigin =                     // pluginOriginSchema (PluginDetail.origin; column plugins.origin without the
-  | {                                   // server-side entry overlay), discriminated on kind
+  | {                                   // server-side entry overlay), discriminated on kind; v1.8.1: the column may
+                                        // also hold the server-only { kind: 'overlay', overlay } of a re-imported
+                                        // export, which the DTO reports as null
       kind: 'marketplace'
       marketplaceId: MarketplaceId; marketplace: MarketplaceName   // the name at install time
       plugin: string                    // the entry name
@@ -4006,7 +4014,9 @@ body exceeds its limit; `500 internal_error`.
 
 **`POST /providers/:id/models/refresh`** — `models.refresh`
 - Params `{ id: ProviderId }`. No body.
-- Forces a live listing now (bypasses the 24 h TTL); on failure the last good listing is kept.
+- Forces a live listing now (bypasses the 24 h TTL); on failure the last good listing is kept. Also with
+  `HF_OFFLINE=1`, which since v1.8.1 stops only the automatic listings (the background cycle and the check of a newly
+  registered provider).
 - Response `200 ListResponse<CatalogModel>` — the provider's models after the refresh, hidden included. Emits
   `catalog.changed` and `provider.changed`.
 - Errors: `404 not_found` (unknown provider; not routed through the model resolvers, so not
@@ -4243,8 +4253,12 @@ body exceeds its limit; `500 internal_error`.
   available."); a project command file whose trust hash is not approved is `409 conflict` with `reason: 'untrusted'`
   ("/<name> runs shell lines you haven't approved. Review the project's files to run it."). A body whose expansion with
   empty span outputs is over 64 KB is the 64 KB `400` of Phase 10 (checked first). A project command file's trust hash
-  is checked again right before its spans run (verify-before-run; a mismatch is the same 409 `untrusted`). Nothing is
-  stored in each case; the 409s remove a chat row this request created, the 400s keep it.
+  is checked again right before its spans run (verify-before-run; a mismatch is the same 409 `untrusted`). Since v1.8.1
+  a Claude Code plugin command's spans re-check the plugin's whole tree the same way (at check 4 of the expansion and
+  again right before the spans run): a mismatch is `409 conflict` `{ reason: 'untrusted', pluginId }` ("/<name> runs
+  shell lines of a plugin whose files changed after it was trusted. Review and trust the plugin again to run it."),
+  nothing spawns and the plugin is loaded once (→ `untrusted`). Nothing is stored in each case; the 409s remove a chat
+  row this request created, the 400s keep it.
 - A turn the server starts after a `Stop` hook blocked (`origin: 'hook'`, at most 5 in a row, never while an approval
   is pending) is announced by `run.started` with its carrier message (only `data-hook` parts) as `userMessageId` and
   resumed the same way; a client cannot send `data-hook` parts.
@@ -4409,7 +4423,8 @@ overlay, the `claude` info of a Claude Code plugin (read again when the host has
   touched) and the `plugins` row. Unless `keepData=true` also purges `plugin_settings`, `plugin_kv`, secrets of
   scope `plugin:<id>`, the private data dir `data/plugins/.data/<id>/`, and credentials/configs of the plugin's
   providers.
-- Response `204`. Emits `plugin.changed` (`plugin: null`), `provider.changed`, `catalog.changed` as applicable.
+- Response `204`. Emits `plugin.changed` (`plugin: null`), `provider.changed`, `catalog.changed` as applicable; for a
+  plugin installed from a marketplace entry also `marketplace.changed` (v1.8.1).
 - Errors: `404 not_found`; `403 forbidden` (builtin).
 
 **`POST /plugins/:id/enable`** — `plugins.enable`
@@ -4505,7 +4520,8 @@ overlay, the `claude` info of a Claude Code plugin (read again when the host has
   requested format; their hash is the tree hash, so the zip bytes need not be stable) inspected in the last 30 minutes; when the source now yields other
   files (a moved npm tag or range, an edited folder), the install is refused. Zip uploads and URL installs are
   pinned by their bytes / SRI integrity.
-- Response `201 PluginDetail`. Emits `plugin.changed` (+ `catalog.changed`, `provider.changed`).
+- Response `201 PluginDetail`. Emits `plugin.changed` (+ `catalog.changed`, `provider.changed`); an install or update
+  from a marketplace entry also `marketplace.changed` for that marketplace (v1.8.1).
 - Errors: as `inspect`; `400 validation_error` (incompatible `engines.harness`); `403 forbidden` (reserved or
   builtin id, fresh auth missing); `409 conflict` (`reason: 'exists'`, id installed from a different source, format or origin, or a folder
   `plugins/<id>` without a row;
@@ -4525,11 +4541,22 @@ overlay, the `claude` info of a Claude Code plugin (read again when the host has
   `.npmrc` and links), its entries in the UTF-8 byte order of their paths, installable with `POST /plugins/install`.
   Phase 12: a Claude Code plugin (`format: 'claude'`) is exported as its installed tree: the same paths and bytes, each
   file's owner exec bit kept in the Unix attributes (0755, else 0644; a harness plugin's files are all 0644), no root
-  `plugin.json` needed, the same skip rules and caps. Inspecting the zip gives the plugin's whole-tree hash, except for a
-  plugin installed from a marketplace entry: its entry overlay is not a file in the zip, so the export's hash differs.
+  `plugin.json` needed, the same skip rules and caps. Inspecting the zip gives the plugin's whole-tree hash. v1.8.1: a
+  plugin whose origin has an entry overlay (a marketplace install, or a re-import of such an export) gets one extra file,
+  `<id>/.hf-entry-overlay.json` (`{ "format": "hf-entry-overlay/v1", "entry": { name, strict, version?, description?,
+  overlay } }`), so its export hashes like the installed plugin (in v1.8 the overlay was left out and the hash
+  differed). A zip upload or URL archive install reads that root file strictly (at most
+  `CLAUDE_PLUGIN_LIMITS.manifestBytes`, exactly these keys, the entry re-parsed by the marketplace parser and
+  `entryOverlay` and equal to the file's; else `400 validation_error`), removes it from the stored tree, applies it like
+  a marketplace entry overlay (an unchanged re-import keeps an existing pin), adds a review warning ("The archive
+  carries the marketplace entry fields of an exported plugin (.hf-entry-overlay.json): …") and stores it as the
+  server-only origin `{ kind: 'overlay', overlay }` (the DTO `origin` stays null). It grants nothing: a plugin that runs
+  anything still needs the trust approval and fresh auth. Other sources (npm, folders, GitHub, marketplace entries,
+  links) treat it as an ordinary file.
 - Errors: `404 not_found`; `403 forbidden` (builtin); `400 validation_error` (a harness plugin without `plugin.json`;
-  a Claude Code plugin folder without files, "The plugin folder has no files, so it cannot be exported."; a name the
-  installer would refuse; more than 2000 files and folders); `413 payload_too_large` (more than 100 MB).
+  a Claude Code plugin folder without files, "The plugin folder has no files, so it cannot be exported."; a Claude
+  Code plugin whose tree already holds a root `.hf-entry-overlay.json` (v1.8.1); a name the installer would refuse;
+  more than 2000 files and folders); `413 payload_too_large` (more than 100 MB).
 
 ### 5.17 `plugin-drafts.ts`
 
@@ -5344,8 +5371,9 @@ duration and the outcome). Personal hooks are never in backups and survive delet
   with `type: 'prompt'`, `command: ''`, their `prompt`, `model` (as written) and `continueOnBlock` (only
   `hooksEnabled` and `HF_SAFE_MODE` make them `blocked`); every entry shows the handler fields it has (`args`, `async`,
   `if`, `statusMessage`); a project entry carries its `position`; the `contributes.hooks` of an untrusted harness
-  plugin (which registers nothing) are listed from its manifest with `state: 'pending'`, while an untrusted Claude Code
-  plugin's hooks are not listed (its plugin page shows them); a Claude Code plugin's exec-form `command` / `args` are
+  plugin (which registers nothing) are listed from its manifest with `state: 'pending'`, and since v1.8.1 an untrusted
+  Claude Code plugin's hooks too (from its hook files as written, so no option value; cached per plugin and host trust
+  hash; no DTO change; v1.8 did not list them); a Claude Code plugin's exec-form `command` / `args` are
   listed as registered (plugin folders as absolute paths, every `${user_config.KEY}` as written: no option value is
   ever listed).
 - Errors: `404 not_found` (unknown project). An unavailable project folder is not an error (`project.available: false`).
@@ -5462,7 +5490,8 @@ deleting the project removes them (at once while the project MCP manager is in u
 
 Plugin marketplaces (Phase 12, ADR-054; DTOs in section 4.33). Every route needs a session; none needs fresh auth
 (adding a marketplace installs nothing: installs go through `pluginInstall.install` with the source `marketplace`,
-which needs fresh auth when the plugin runs anything). Every add, refresh and remove emits `marketplace.changed`.
+which needs fresh auth when the plugin runs anything). Every add, refresh and remove emits `marketplace.changed`; since
+v1.8.1 so does installing, updating or removing a plugin from a marketplace entry (after its `plugin.changed`).
 Marketplace logs carry only the id, the name, the repository and a 12-character sha (never the JSON). Marketplaces are
 never in backups and survive delete-all. Logs: `marketplace added` / `marketplace refreshed` / `marketplace removed` at
 `info`, `marketplace refresh failed` at `warn` (with the error code). A server shutdown aborts the fetches in flight
@@ -6019,12 +6048,13 @@ Tool part states (`tool-<name>` and `dynamic-tool`):
   neither an `execute` tool nor an `always` policy, and never in plan mode. When the harness still asks (plan mode, an
   `execute` tool, an `always` policy) the record keeps the hook's own outcome `allowed` and, since Phase 12, carries
   `harnessAsked: true` (the records of a call are held until its approval settles; the web shows "Allowed by hook ·
-  still asks"). Phase 12: `PermissionRequest` runs once per call that would show the approval card (main agent only,
-  after `PreToolUse`, with the input it rewrote; not again on the approved continuation): a `deny` (or a block) makes
-  the call `output-denied` ("Blocked by hook: …"), an `allow` approves it under the same rule as a `PreToolUse` allow
-  (its `updatedInput` becomes the call's input), else the card shows; a prompt hook's "no" there changes nothing. Its
-  record and a `PostToolUseFailure` record (a call that failed after its approval; its context or block reason reaches
-  the model at the next step like `PostToolUse`, `continue: false` stops the run) carry the call's `toolCallId`.
+  still asks"; since v1.8.1 an `allowed` `PermissionRequest` record of such a call too). Phase 12: `PermissionRequest`
+  runs once per call that would show the approval card (main agent only, after `PreToolUse`, with the input it rewrote;
+  not again on the approved continuation): a `deny` (or a block) makes the call `output-denied` ("Blocked by hook: …"),
+  an `allow` approves it under the same rule as a `PreToolUse` allow (its `updatedInput` becomes the call's input), else
+  the card shows; a prompt hook's "no" there changes nothing (since v1.8.1 the card shows its reason). Its record and a
+  `PostToolUseFailure` record (a call that failed after its approval; its context or block reason reaches the model at
+  the next step like `PostToolUse`, `continue: false` stops the run) carry the call's `toolCallId`.
 - **Running hooks**: a transient `data-activity` chunk `{ kind: 'hooks', event, toolCallId?, label? }` while the hooks
   of `PreToolUse`, `PostToolUse`, `Stop` or `PreCompact` (Phase 12 also `PostToolUseFailure`, `PermissionRequest` and
   `PostCompact`) of a chat run run (also when only plugin code hooks run), then `{ kind: 'idle' }`; never stored. The
@@ -6126,7 +6156,7 @@ Tool part states (`tool-<name>` and `dynamic-tool`):
 | `hooks.changed` | a personal hook was created, updated or deleted, the setting `hooksEnabled` changed, a plugin with hooks changed (`projectId: null`); a project's approvals changed, a write touched a `.claude/` or `.harness/` path of the project (`workspace.changed`), a rebuild of the project's items found other hook items, or an approved project hook failed verify-before-run (`{ projectId }`) (Phase 11, ADR-048) | `HooksChangedData` (`{ projectId }`) | hooks store: mark the scope stale and refetch what is shown (Settings → Customize → Hooks) |
 | `project-trust.changed` | an approval was added or revoked; a rebuild of the project's items found other hashes (after a settings, `.mcp.json`, command or referenced file changed, `project.changed`, `run.finished` of a chat of the project, or a verify-before-run mismatch); a list found another pending count than the last one announced; the project was deleted (`pending: 0`) (Phase 11, ADR-049); every save or delete of a project definition file from the UI (Phase 12, section 5.36) | `ProjectTrustChangedData` (`{ projectId, pending }`) | project-trust store: update the pending count (trust chip) and refetch an open review dialog |
 | `project-mcp.changed` | a project MCP server changed state (connected, stopped, error, needs variables, ...), its tools changed or it was removed (coalesced; never for a deleted project) (Phase 11, ADR-050) | `ProjectMcpChangedData` (`{ projectId, servers }`) | project-mcp store: replace the project's servers |
-| `marketplace.changed` | a marketplace was added, refreshed (also a refresh that failed and stored `lastError`) or removed (Phase 12, ADR-054); a refresh that changes the update state of installed plugins also emits `plugin.changed` for each of them | `MarketplaceChangedData` (`{ id, marketplace }`, `marketplace: null` = removed) | marketplaces store: upsert or remove; the update badges follow `plugin.changed` |
+| `marketplace.changed` | a marketplace was added, refreshed (also a refresh that failed and stored `lastError`) or removed (Phase 12, ADR-054); since v1.8.1 also after a plugin was installed, updated or removed from one of its entries; a refresh that changes the update state of installed plugins also emits `plugin.changed` for each of them | `MarketplaceChangedData` (`{ id, marketplace }`, `marketplace: null` = removed) | marketplaces store: upsert or remove; the update badges follow `plugin.changed` |
 
 Phase 12 adds `marketplace.changed` (19 event types) and the `workspace.changed` source `user` (a project definition
 file saved or deleted from the UI, followed by `project-trust.changed`); an import apply emits exactly one `customization.changed` and one `hooks.changed` (also when nothing of that kind

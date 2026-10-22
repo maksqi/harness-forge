@@ -47,8 +47,10 @@ code reviewer.
 
 ## Adapt it
 
-- Any of the eight events works the same way: `PreToolUse` can deny or rewrite a tool call, `UserPromptSubmit` can add
-  context to a prompt or refuse it, `Stop` can ask the agent to go on. At most 50 handlers per plugin.
+- Any of the 13 hook events works the same way: `PreToolUse` can deny or rewrite a tool call, `UserPromptSubmit` can add
+  context to a prompt or refuse it, `Stop` can ask the agent to go on. At most 50 handlers per plugin. The five events
+  of plugin API 1.6.0 (`PostToolUseFailure`, `PermissionRequest`, `SubagentStart`, `PostCompact`, `SessionEnd`) and
+  prompt handlers need `"engines": { "harness": "^1.6.0" }`.
 - A matcher is a name list (`Bash|Write`), `*` or `mcp__<server>__*`; regular expressions are not supported.
 - Style names use `a-z`, `0-9` and `-` (up to 64 characters); `default`, `explanatory` and `learning` are the built-ins.
   A personal or project style with the same name wins over the plugin's.

@@ -242,8 +242,8 @@ Hook model) and, for `PreToolUse` and `PostToolUse`, **Continue on block**.
   agent goes on with the reason); `PostToolUse` ends the reply (with `continueOnBlock`: the reason goes back to the
   agent); `PostToolUseFailure` sends the reason to the agent; `UserPromptSubmit` refuses your message; `Stop` and
   `SubagentStop` make the agent continue (unless `impossible`: then it ends, and a `Stop` hook's reason is only shown,
-  "A Stop hook answered: …"); `PermissionRequest` only records the reason (the card still shows). **`ok: true` decides nothing**: a prompt
-  hook's answer never approves a call.
+  "A Stop hook answered: …"); `PermissionRequest` only records the reason (the card still shows, with that reason since
+  v1.8.1). **`ok: true` decides nothing**: a prompt hook's answer never approves a call.
 - **Switches and trust**: **Run hooks** (`hooksEnabled: false`) and safe mode turn prompt hooks off
   (`HF_WORKSPACE_SHELL=0` does not: they run no shell); a project's prompt hooks need approval like its command hooks
   (the review shows the prompt, the model and the handler fields); a plugin whose hooks are all prompt hooks needs no
@@ -524,13 +524,14 @@ that text at the start of every chat of the project.
 ## 12. Troubleshooting
 
 - **My hook never runs**: check the Hooks tab: **Off**, **Needs approval** (a project hook), **Plugin not trusted**
-  (v1.8: the hook of a plugin that waits for your trust; **Review plugin…** opens its review, and a Claude Code
-  plugin's hooks are listed on its plugin page instead), the **Run hooks** switch or a server alert
-  (`HF_WORKSPACE_SHELL=0`, safe mode). A hook of a settings file or a plugin that the tab does not list at all was
-  dropped: the notes above the list say why ("{file}: …": a matcher with regular-expression characters, an `http`
-  hook, an unknown event, an `if` rule harness-forge cannot read). An imported hook may be **Off** (Import from Claude
-  Code turns command hooks off). For a tool hook, check the matcher (and its **Only when** rule) against the tool's
-  names (section 5).
+  (v1.8: the hook of a plugin that waits for your trust; **Review plugin…** opens its review; v1.8.1: a Claude Code
+  plugin's rows offer **Open plugin**, its review lives on the plugin page, and a Claude Code plugin whose files
+  changed after the trust starts none of its command hooks, `!` lines or stdio MCP servers until you trust it again),
+  the **Run hooks** switch or a server alert (`HF_WORKSPACE_SHELL=0`, safe mode). A hook of a settings file or a plugin
+  that the tab does not list at all was dropped: the notes above the list say why ("{file}: …": a matcher with
+  regular-expression characters, an `http` hook, an unknown event, an `if` rule harness-forge cannot read). An imported
+  hook may be **Off** (Import from Claude Code turns command hooks off). For a tool hook, check the matcher (and its
+  **Only when** rule) against the tool's names (section 5).
 - **The hook ran but nothing happened**: exit 0 without JSON is silent except for `UserPromptSubmit` and `SessionStart`
   (whose stdout is context); JSON must be one object, with `hookSpecificOutput.hookEventName` equal to the event.
 - **"A PostToolUse hook failed: exit 1"**: the note does not show stderr (only an exit 2 uses it, as the reason); run

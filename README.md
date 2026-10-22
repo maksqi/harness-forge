@@ -3,13 +3,14 @@
 harness-forge is a self-hosted, bring-your-own-key (BYOK) AI chat and agent harness. It runs as one Node process
 with a web UI. Connect your own API keys for Claude, ChatGPT, Gemini, Grok, DeepSeek, Kimi, Qwen, GLM and more, or
 point it at a local Ollama. Then chat, watch the models reason, and let them call tools, or let them work on the files
-of a project folder on your server. By default, every tool call that can change something waits for your approval. A **Plugins** tab adds LLM providers, models, tools, MCP servers, slash commands, sub-agent types, skills, hooks and
-output styles, either
-from a JSON manifest, from code you edit in the browser or as Claude Code plugins (from a folder, a zip, a GitHub
-repository or a marketplace). The interface is a simplified take on the Claude Code desktop app, and it starts in dark
-mode.
+of a project folder on your server. By default, every tool call that can change something waits for your approval. A
+**Plugins** tab adds LLM providers, models, tools, MCP servers, slash commands, sub-agent types, skills, hooks and
+output styles, either from a JSON manifest, from code you edit in the browser or as Claude Code plugins (from a folder,
+a zip, a GitHub repository or a marketplace). The interface is a simplified take on the Claude Code desktop app, and it
+starts in dark mode.
 
-> **Status:** v1.8 ("Claude Code ecosystem"): what you already have in Claude Code works here too. Claude Code plugins
+> **Status:** v1.8.1, a maintenance release of v1.8 (dependency updates, CI and backlog fixes; plugin API stays
+> 1.6.0). v1.8 ("Claude Code ecosystem"): what you already have in Claude Code works here too. Claude Code plugins
 > install in their own format from a folder, a zip, a GitHub repository or a marketplace entry; their commands, agents,
 > skills and output styles keep the plugin's prefix (`/review-kit:review`; a bare name works when nothing else has it),
 > their `userConfig` becomes the plugin's settings form, and a plugin that runs programs needs your trust over a
@@ -292,7 +293,9 @@ models (with their voices) and icons are in [`docs/PROVIDERS.md`](docs/PROVIDERS
 
 ### Development
 
-Requirements: **Node >= 22.12** and **pnpm 11**.
+Requirements: **Node 24.15+** (`.nvmrc` says `24`; Docker and CI use Node 24) and **pnpm 11** (the `packageManager`
+version). Other Node lines: pnpm 11 needs >= 22.13, building the web app (Nuxt 4.6) needs
+`^22.22.3 || ^24.15.0 || >= 26`, and the built server alone runs on Node >= 22.12.
 
 ```sh
 pnpm install
@@ -374,7 +377,7 @@ Every variable is optional. [`.env.example`](.env.example) lists them with comme
 | `HF_MOCK_PROVIDER` | unset | `1` registers the dev-only `mock` provider (deterministic models for tests and demos) |
 | `HF_SAFE_MODE` | unset | `1` loads builtin plugins only (recovery when a plugin breaks the start); v1.7: also runs no command hook and starts no project MCP server; v1.8: and no prompt hook |
 | `HF_PLUGIN_WATCH` | unset | `1` hot-reloads code plugins in the data directory when their files change (linked folders always reload) |
-| `HF_OFFLINE` | unset | `1` never downloads the models.dev catalog (the bundled snapshot is used); v1.8: also refuses adding or refreshing GitHub or URL marketplaces and installing from GitHub or from a marketplace entry that needs the network (a folder marketplace, zip, folder, npm and URL installs still work) |
+| `HF_OFFLINE` | unset | `1` never downloads the models.dev catalog (the bundled snapshot is used); v1.8: also refuses adding or refreshing GitHub or URL marketplaces and installing from GitHub or from a marketplace entry that needs the network (a folder marketplace, zip, folder, npm and URL installs still work); v1.8.1: and never lists provider models on its own (the cached listing or the seed models stay; **Refresh**, the provider test and saving a key still list). It is a set of switches, not "no network": chats still reach your providers |
 | `HF_INSECURE` | unset | `1` allows a non-loopback bind without a password (only behind another authentication layer); it also disables the DNS-rebinding guard that restricts a password-less server to `localhost` host names |
 | `HF_WORKSPACE_ROOTS` | `<data dir>/workspaces` | folders that may hold project folders: a comma list of absolute paths; a relative path, `/`, a missing folder (or a file), the data directory or a folder inside it (other than `<data dir>/workspaces`) stops the start. See [using projects](docs/guides/using-projects.md) |
 | `HF_WORKSPACE_SHELL` | `1` | `0` removes the `shell` tool from every chat (the file tools keep working); v1.7: also runs no command hook and no `` !`cmd` `` line of a command; no setting in the app can turn it back on |
@@ -510,9 +513,10 @@ harness-forge is built for **one user** on their own machine or server.
   payloads and outputs are never logged at the `info` level.
 - **Claude Code plugins, marketplaces and the import (v1.8).** Nothing from the network runs before you
   review it: a Claude Code plugin that runs programs needs your trust (with your password) over a fingerprint of all its
-  files (checked again whenever the plugin loads, reloads or is trusted, so an edited script stays blocked from then
-  on), GitHub sources are pinned to a resolved commit and downloaded over HTTPS (never with git), and marketplaces
-  never refresh or update by themselves. A plugin's sensitive `userConfig` values are stored encrypted, never appear in
+  files (checked again whenever the plugin loads, reloads or is trusted, and since v1.8.1 right before any of its
+  hooks, `` !`cmd` `` lines or stdio MCP servers starts, so an edited script does not run), GitHub sources are pinned
+  to a resolved commit and downloaded over HTTPS (never with git), and marketplaces never refresh or update by
+  themselves. A plugin's sensitive `userConfig` values are stored encrypted, never appear in
   its Markdown or in API answers, and reach a hook only when its process starts. The import reads only an allowlist of
   your Claude Code folder (never credentials or conversations), keeps file contents and secret values on the server,
   needs your password to scan or apply, and imports hooks and commands that run shell lines turned off. Saving a
@@ -674,9 +678,8 @@ A few settings live in GitHub, not in the repository:
   required reviewer and add the provider keys as environment secrets named like their variables (`ANTHROPIC_API_KEY`,
   `OPENAI_API_KEY`, ...; the list is in [`docs/PROVIDERS.md`](docs/PROVIDERS.md#12-live-provider-suite)). Then run
   the "Live providers" workflow by hand.
-- **Dependabot on pnpm 11**: watch the first npm update run. If it fails on the pnpm 11 lockfile, drop the `npm` block
-  of `.github/dependabot.yml` and use Renovate instead (the fallback noted in that file); pnpm itself is upgraded by
-  hand.
+- **Dependabot on pnpm 11**: the npm updates work on the pnpm 11 workspace, its catalog and lockfile; pnpm itself
+  (`packageManager`) is upgraded by hand, so check the next Dependabot run after a pnpm upgrade.
 
 Everything in the repository is written in English (`pnpm check:english` enforces it). AI coding agents read
 [`AGENT.md`](AGENT.md) first.

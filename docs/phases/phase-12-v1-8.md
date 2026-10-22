@@ -507,7 +507,7 @@ reconciled docs (W12.15) follow these, not the task text further down.
   - Accepted from G12P: the inspection's executables list every command handler, also a refused shell-form
     `${user_config.*}` one and one of an unknown event (a conservative trust consent); `HF_OFFLINE=1` stops the
     models.dev download and the plugin-source requests but not the provider listing refresh of a stored key (v1.7
-    behavior; backlog candidate).
+    behavior; backlog candidate; since v1.8.1 offline mode stops every automatic listing, explicit refreshes still list).
   - Regressions: the copies live at `.tmp/gates/P12-A-p11a-regression/` and `.tmp/gates/P12-A-p10a-regression/` (not the
     paths of open point 18); the P11-A copy was updated for the Phase 12 changes (`type` is a known `POST /hooks` key,
     `transcript_path` in the payload, the prompt hook of a project settings file is read and listed as pending); P9-A
@@ -546,18 +546,23 @@ reconciled docs (W12.15) follow these, not the task text further down.
     right). Also fixed with it: the `skill` timeout comments of `core-agent`, the "rename only" comment of
     `SH/util/claude-import.ts`, the "Core MCP" comments of `ClaudeImportDialog.vue`, AGENT.md (the exec-form spawn
     substitution) and the `Dockerfile` recipe (the two-mount form).
-  - Still open (the docs describe the code; fix-up candidates or accepted): reloading a Claude plugin that runs commands
-    needs no fresh auth; installing or removing a marketplace plugin emits only `plugin.changed`;
-    `ClaudeImportApplyBody.instructions` never decides (the item's action wins) and any action on an `unchanged` /
-    `unsupported` / `invalid` item is a 400; the scan's "could not be read in time" 409 looks unreachable; `\$` and
-    `${NAME}` now apply to every command body (v1.6 / v1.7 bodies included); the import note `model-alias` says "model
-    aliases" (UI.md 15 keeps "aliases" out of UI copy); the hook editor's title "New project hook" is never shown (New
-    hook with Where = a project file keeps "New hook").
-  - Comments and files outside W12.15's globs that still state the plan: `S/services/claude-import/{types,apply}.ts`
-    (the stub note, `warnings`), `S/chat/commands.ts:245`, `S/plugins/types.ts` / `SH/schemas/plugins.ts` (`sourceRef`,
-    trust hash), the prompt-hook model line of `settings/customize/hooks.ts` ("Settings → General → Hook model": the
-    select sits in General → Agent) and `examples/plugins/claude-review-kit/README.md` (the `/review` alias: the builtin
-    `/review` always wins).
+  - Still open at the v1.8 gate (the docs describe the code; fix-up candidates or accepted). v1.8.1 (wave M1) settled
+    them as follows.
+    - Resolved in v1.8.1: installing, updating or removing a marketplace plugin also emits `marketplace.changed` (it
+      emitted only `plugin.changed`); the scan's "could not be read in time" 409 while resolving the root is gone (a
+      deadline already past gives an empty plan with the `timeout` warning); a new hook whose Where is a settings file
+      is titled "New project hook"; the claude-import stub comments of `S/services/claude-import/{types,apply}.ts` and
+      the dead `warnings` array (apply returns `warnings: []`, as API.md 5.35 says); the import note and diagnostic
+      `model-alias` now read "Claude model names run the model chosen under Settings → General → Agent → Claude model
+      names; without one, …" (CCR-2; UI.md 15 keeps "aliases" out of UI copy); and the export of a marketplace plugin
+      keeps its entry overlay (`.hf-entry-overlay.json`, CCR-1).
+    - Accepted: reloading a Claude plugin that runs commands needs no fresh auth (like enabling it and like declarative
+      plugins: the trust pin is re-checked and nothing new runs); `ClaudeImportApplyBody.instructions` never decides
+      (the item's action wins; documented) and any action on an `unchanged` / `unsupported` / `invalid` item is a 400;
+      `commandInvocationSchema.disallowedTools?` stays deferred.
+    - Still open: `\$` and `${NAME}` now apply to every command body (v1.6 / v1.7 bodies included); the comments of
+      `S/chat/commands.ts:245` and `S/plugins/types.ts` / `SH/schemas/plugins.ts` (`sourceRef`, trust hash), which
+      still state the plan.
 
 ## Rules for every Phase 12 agent
 
@@ -3076,8 +3081,8 @@ Completed by the coordinator at each gate ("audit" is the ownership audit of `sc
 | P12-0a | coordinator (K1, K2, contract skeletons, K3 seed by K3S), C40, C41, C42, D16, D17 | audit ok (117 paths); frozen install ok (TypeScript 6.0.3, `yaml` 2.9.1); 12678 tests; build ok (web js +9.5 KB gz vs v1.7); CSP 38/38; `pluginApiVersion` 1.6.0; the 12 new routes answer 501 / 400; e2e 191 on a fresh `.tmp/e2e` (after the customize pin; the pre-existing `mobile/agent.spec.ts:191` flake → W12.13); `pnpm audit --prod` clean (6 ignored); v1.7 seed 30 chats / 160 messages / 14 approvals | `215fe1f` |
 | P12-0b | coordinator (K3), C43, C44, C45, C46, G12B | audit ok (190 paths); `0009` = 1 CREATE TABLE + 1 CREATE UNIQUE INDEX + 6 ALTER ADD (a second generate: no changes); 12988 tests; build ok; CSP 38/38; e2e 191; v1.7 upgrade probe 95/98 (the v1.8-only project prompt hook not listed yet → W12.5, moved to Gate P12-A; nothing ran) + seam probe 76/76; audit clean; FREEZE | `9809bab` |
 | P12-A | W12.1 – W12.13, G12P, W12.16 / W12.17 (fix-ups at the gate) | audit ok (331+ paths, no agent touched a frozen file); 13720 tests; build ok; CSP 38/38; G12P probes 345/347 → the red security item fixed by W12.16 (group 1 48/48 on the rebuild) + 1 spec-differs decision (the prompt-hook model fallback); `pnpm test` group 4/4 (git status identical, no `.claude*` in the repository); regressions P11-A copy / P10-A copy / P9-A / P8-A passed; e2e 191 on a fresh `.tmp/e2e` (the fixed `mobile/agent.spec.ts:191` 3× green); audit clean; screenshot review moved to P12-B | `1e62a59` |
-| P12-B | W12.14, W12.15, W12.18 / W12.19 (fix-ups for the bugs W12.14 found), W12.20 (investigation), G12D (Docker probe) | audit ok; the new specs 3× green (W12.14), five `fixme`s re-enabled after the fixes (the `mock:hooks` turn-rule CCR, the hooks store race, the Select in a Sheet, the 40 px switches, the Claude plugin export); docs reconciled with the code (W12.15), README "v1.8" | (final gate commit) |
-| Final gate v1.8 | coordinator | frozen install ok (TypeScript 6.0.3); 13740 tests, `git status` unchanged by `pnpm check`, the only `.claude*` path in the repository is the review-kit `plugin.json`; build ok; CSP 38/38; G12P probes 360/360 on fresh data + regressions P11-A copy / P10-A copy / P9-A / P8-A passed; e2e 215 passed ×3 (6 screenshot tests skipped); `@screenshots` dark + light reviewed, README images refreshed (+ `marketplaces-dark`, `claude-import-dark`); `pnpm audit --prod` clean (6 ignored); real v1.7 → v1.8 upgrade on a fresh seed: G12B 98/98 + G12P upgrade 69/69 (every v1.7 approval kept, nothing new ran before approval); Docker G12D 63/63 (scan off by default, a read-only mounted home as uid 1000 without the canaries, plugin scripts 0755, hooks / MCP after trust only, no orphans) | `chore: final gate for harness-forge v1.8` |
+| P12-B | W12.14, W12.15, W12.18 / W12.19 (fix-ups for the bugs W12.14 found), W12.20 (investigation), G12D (Docker probe) | audit ok; the new specs 3× green (W12.14), five `fixme`s re-enabled after the fixes (the `mock:hooks` turn-rule CCR, the hooks store race, the Select in a Sheet, the 40 px switches, the Claude plugin export); docs reconciled with the code (W12.15), README "v1.8" | `b9216f5` (with the final gate) |
+| Final gate v1.8 | coordinator | frozen install ok (TypeScript 6.0.3); 13740 tests, `git status` unchanged by `pnpm check`, the only `.claude*` path in the repository is the review-kit `plugin.json`; build ok; CSP 38/38; G12P probes 360/360 on fresh data + regressions P11-A copy / P10-A copy / P9-A / P8-A passed; e2e 215 passed ×3 (6 screenshot tests skipped); `@screenshots` dark + light reviewed, README images refreshed (+ `marketplaces-dark`, `claude-import-dark`); `pnpm audit --prod` clean (6 ignored); real v1.7 → v1.8 upgrade on a fresh seed: G12B 98/98 + G12P upgrade 69/69 (every v1.7 approval kept, nothing new ran before approval); Docker G12D 63/63 (scan off by default, a read-only mounted home as uid 1000 without the canaries, plugin scripts 0755, hooks / MCP after trust only, no orphans) | `b9216f5` |
 
 ---
 

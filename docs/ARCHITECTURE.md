@@ -174,7 +174,7 @@ boundary and `plugin-sdk` re-exports the plugin data shapes (API.md 3.2).
 | `services/project-files/` | The project files service (Phase 9, ADR-042, section 6.21; `types.ts` frozen, `AppDeps.projectFiles`): the per-project in-memory file index for `@` mentions (built with `workspace/walk.ts`, secret-looking paths left out, single-flight, 30 s TTL, at most 8 projects, dropped on `workspace.changed`, `project.changed` and `run.finished` of a chat of the project), `search(projectId, q, limit)` ranked by the shared `rankPaths`, and `attach(projectId, path)` (path guard, `.git` / secret refusal, 5 MiB cap, then `files.upload`). |
 | `services/projects/` | `ProjectService` (Phase 7, ADR-031, section 6.13): `roots.ts` (the allowed roots, checked first in `startDeps` by `start()`, and the folder checks), `index.ts` (project CRUD, the folder browser, `openWorkspace()`, `chatCount`, `project.changed`), `project-file.ts` (`AGENTS.md` / `CLAUDE.md` with its `@file.md` lines). Phase 10: project deletion is refused (409 `run-active`) while a background task of one of its chats runs. Phase 11: `ProjectSummary.outputStyle` (the column `projects.output_style`, set through the project update; 6.31); deleting a project cascades its approvals (`project_trust`), deletes its secret scope `project:<projectId>` and stops its MCP runtimes (6.30). |
 | `services/customizations/` | The customization catalog (Phase 10, ADR-044 / ADR-045, sections 6.23 – 6.25; `types.ts` frozen from P10-0b, `AppDeps.customizations`): `discover.ts` (the guarded scan of a project's `.harness/` and `.claude/` folders: frontmatter only), the user store over the `customizations` table (`cus_` ids, raw markdown), `catalog.ts` (the merge of built-in, plugin, user and project entries with the shared `resolvePrecedence`, diagnostics, the per-project cache with a 10 s TTL and single-flight builds, the invalidation subscriptions), `load(entry)` (re-reads and re-validates one body for a run), `memory.ts` (`/remember`, 6.27); `customization.changed` events. Phase 11 (ADR-051, ADR-052): the fourth kind `style` (folders `.harness/output-styles` and `.claude/output-styles`, 8 project folders; the builtin styles; plugin styles from `registry.styles`), `styles()` / `style(name)`, and the skill keys `user-invocable` / `disable-model-invocation` (6.31, 6.32). Phase 12 (ADR-053, ADR-055, ADR-058): the new frontmatter keys in the entries (6.38) and the plugin API 1.6.0 fields of plugin entries (`plugins.ts`); `qualified.ts` (the snapshot getters and the slash resolution take a qualified name exactly and a bare name as its alias when exactly one active entry ends in `:<bare>` and nothing has the bare name; a harness plugin's `<pluginId>:<name>` reaches its bare entry; 6.33); `import.ts` (`importDefinitions(items)`: one batch through the write queue; create, overwrite keeping `enabled` or rename; `!` commands turned off unless enabled; one `customization.changed {}` when anything changed; 6.35) and `CustomizationRestoreResult.turnedOff`. |
-| `services/hooks/` | The hook service (Phase 11, ADR-048, section 6.28; `types.ts` frozen from P11-0b, `AppDeps.hooks`): `HookService { snapshot(scope), list, create, update, remove, runs, invalidate, stop }`; the merge of the personal rows (table `hooks`, `hok_` ids), the approved project items of `projectConfig.snapshot` and the plugin hooks (`registry.hookCommands`, code events through `registry.hooks`), the matcher, the runner (stdin payload, caps, parallel handlers, the server-wide semaphore of 16 processes, timeouts, process-group kills), the kill switches, the combination of outcomes (the shared `util/hooks.ts`), the in-memory run log (200 entries, `GET /hooks/runs`) and `hooks.changed` events. Phase 12 (ADR-057, 6.37): `prompt-hooks.ts` (the prompt-hook runner inside the snapshot), `exec-form.ts` (`args`), `transcripts.ts` (`transcript_path` files), `session-end.ts` (the detached `SessionEnd` runs of a chat delete), personal rows with `type`, `prompt`, `model` and `options`, `importPersonal(items)` (one `hooks.changed`), the prompt-hook limiter of 8 calls next to the semaphore of 16 processes, and the `contributes.hooks` of untrusted harness plugins listed as `pending` rows (plugin prompt rows keyed `plugin:<id>:prompt:<n>`). |
+| `services/hooks/` | The hook service (Phase 11, ADR-048, section 6.28; `types.ts` frozen from P11-0b, `AppDeps.hooks`): `HookService { snapshot(scope), list, create, update, remove, runs, invalidate, stop }`; the merge of the personal rows (table `hooks`, `hok_` ids), the approved project items of `projectConfig.snapshot` and the plugin hooks (`registry.hookCommands`, code events through `registry.hooks`), the matcher, the runner (stdin payload, caps, parallel handlers, the server-wide semaphore of 16 processes, timeouts, process-group kills), the kill switches, the combination of outcomes (the shared `util/hooks.ts`), the in-memory run log (200 entries, `GET /hooks/runs`) and `hooks.changed` events. Phase 12 (ADR-057, 6.37): `prompt-hooks.ts` (the prompt-hook runner inside the snapshot), `exec-form.ts` (`args`), `transcripts.ts` (`transcript_path` files), `session-end.ts` (the detached `SessionEnd` runs of a chat delete), personal rows with `type`, `prompt`, `model` and `options`, `importPersonal(items)` (one `hooks.changed`), the prompt-hook limiter of 8 calls next to the semaphore of 16 processes, and the `contributes.hooks` of untrusted harness plugins listed as `pending` rows (plugin prompt rows keyed `plugin:<id>:prompt:<n>`); v1.8.1: the hooks of untrusted Claude Code plugins listed the same way (`readClaudePluginHooks`) and the whole-tree check before every Claude plugin command hook spawn (`verifyClaudePluginTree`, `PLUGIN_CHANGED_ERROR`, `plugins/claude/trust.ts`). |
 | `services/project-config/` | The project config reader (Phase 11, ADR-049, section 6.29; `types.ts` frozen, `AppDeps.projectConfig`): `snapshot(projectId, { signal, refresh })` reads the `hooks` key of `.harness/settings{,.local}.json` and `.claude/settings{,.local}.json` and the project's `.mcp.json` through the workspace path guard (no links, regular files, ≤ 256 KiB before `JSON.parse`), parses them with the shared helpers, hashes the script files each item names, and caches the result per project for 10 s (at most 50 projects; dropped on a `workspace.changed` that touches a config, `.claude/` / `.harness/` or referenced file, `project.changed` and `run.finished` of the project, then rebuilt after 1 s); `verify(projectId, item)` (verify-before-run, opens nothing); a rebuild whose hashes changed emits `project-trust.changed` (and `hooks.changed` when hook items changed); it never opens the workspace (0 folder opens per run). Phase 12 (ADR-056, ADR-057): `hook-items.ts` (prompt handlers read with `{ prompts: true }` and merged at their declaration place, so the command items keep their v1.7 order; the v2 hash item; the script files of exec-form `args` as referenced files; `projectPromptSpec`); a file saved from the UI (`workspace.changed` with `source: 'user'`, or the first `invalidate(projectId)` before any read) announces the new pending count once (`project-trust.changed`, plus `hooks.changed` when hook items changed or no earlier build existed). |
 | `services/project-trust/` | Project trust (Phase 11, ADR-049, section 6.29; `types.ts` frozen, `AppDeps.projectTrust`): the `project_trust` table (one row per project and approved sha256), `approved(projectId)` (memoized), `list` (hooks, MCP servers and project commands with `!` spans, with their hashes and states), `approve` (a batch, fresh auth, 409 `stale`), `revoke` (idempotent, answers the list, also removes orphaned hashes), `pending(projectId)` and `project-trust.changed` events; approve and revoke also emit `hooks.changed`; the trust service only emits, and the project MCP manager reacts by stopping the runtimes whose hash was revoked or replaced. Phase 12: prompt hooks and hooks with the new handler fields are trust items too (layout v2 only when such fields exist, so every v1.7 approval keeps its hash; 6.37). |
 | `services/claude-import/` | The home-folder import (Phase 12, ADR-055, section 6.35; `types.ts` frozen from P12-0b, `AppDeps.claudeImport`): `index.ts` (`home`, `scan`, `upload`, `apply`, `stop`), `collected.ts` (`HomeCollector`: the allowlist, the caps, strict UTF-8, `.claude.json` reduced at once to its MCP server maps), `collect-disk.ts` (the scan of `HF_CLAUDE_HOME`: the allowlist only, links followed to regular files outside the data directory, caps, a 10 s deadline, then the files read so far and a `timeout` warning), `collect-upload.ts` (the multipart folder files or one zip through `openZip` + `EntryCollector`), `baseline.ts` (the current personal rows, hooks, MCP servers, shell rules, tool overrides and settings), `plans.ts` (the in-memory plans: `cip_` ids, 10 minutes, at most 4, dropped on apply, expiry, key rotation and shutdown) and `apply.ts` (one pass through `customizations.importDefinitions`, `hooks.importPersonal`, the MCP servers, the shell rules, the tool overrides and the settings); the planner is the shared `planClaudeImport`. |
@@ -187,7 +187,7 @@ boundary and `plugin-sdk` re-exports the plugin data shapes (API.md 3.2).
 | `services/events/` | In-process event bus + SSE fan-out for `/api/events` (section 6.7); Phase 7: `disconnectAll()` (flushes queued events, then closes every stream; after a key rotation and a password change). |
 | `registry/` | Typed registries for providers, models, tools, MCP server declarations, commands and hooks; every registration returns a `Disposable` and is tagged with its owner plugin id. Phase 10 (plugin API 1.4.0): the kinds `agent` and `skill` (`registry.agents`, `registry.skills`; name pattern, reserved names, 64 KiB bodies, tool names and model refs checked at registration, a duplicate name across plugins is a `conflict`), and the contributions `agents` / `skills` of a plugin summary. Phase 11 (plugin API 1.5.0, frozen `types.ts` edit): `registry.styles` (plugin output styles, `contributes.outputStyles` and `ctx.outputStyles.register`) and `registry.hookCommands` (the command hooks of `contributes.hooks`, only while their plugin is active and trusted), the new code hook events of `HookMap` (`prompt.submit`, `session.start`, `run.stop`, `subagent.stop`, `compact.before`, `notification`; `tool.after` may set `context`), and the contributions `commandHooks` (a count; `hooks` keeps listing the code hook names) / `outputStyles` (names). Phase 12 (plugin API 1.6.0, frozen `types.ts` edit): qualified names (`<pluginId>:<name>`, accepted only when the first segment is the owner's id; 6.33), markdown command syntax (`syntax: 'markdown'`), skill `baseDir`, prompt handlers and the five new events in `contributes.hooks`, `HookCommandsRegistration.env` (`CLAUDE_PLUGIN_DATA`, `CLAUDE_PLUGIN_OPTION_<KEY>`; the registered exec-form `args` keep `${user_config.KEY}` as written, filled at spawn) and `.prompts`, and `McpServerRegistry.register(…, { claudeName })` (the `mcp__plugin_<name>_<server>` alias hooks and tool lists can use). |
 | `plugins/host.ts` | Plugin host: discovery, load order, lifecycle state machine, enable/disable/reload, boot sentinel, safe mode. Phase 12: dispatches by `plugins.format` through `formats.ts` (`readPluginDirectoryFor(format, dir, opts)`; `inspectDirectoryFor` answers `inspectDirectory` for both formats; `detectFolderFormat` for a hand-placed folder): a Claude Code plugin's trust requirement and hash come from its reader (the whole-tree hash), its contributions from the Claude registration, a hand-placed folder's format is detected, saving its settings reloads it, and it is never editable (6.33). |
-| `plugins/claude/` | Claude Code plugins (Phase 12, ADR-053, section 6.33): `detect.ts` (layout and root prefix), `reader.ts` (`readClaudePluginDirectory` → `PluginDirectoryRead` + `ClaudePluginRead`), `layout.ts` (component path rules: replace / add / merge, `./` paths inside the root), `files.ts` (definition files through `readDefinitionFile` with the plugin root), `tree-hash.ts` (`hf-claude-plugin/v1`), `variables.ts`, `user-config.ts`, `mcp.ts`, `hooks.ts`, `register.ts` (`registerClaudeContributions(ctx, read, runtime)`), `skill-files.ts` (the `skill` tool's `file` reads), `info.ts` (the inspection's `claude` block) and `types.ts` (frozen from P12-0b); `plugin.json` and `marketplace.json` are parsed only by the shared `util/claude-plugins.ts`. |
+| `plugins/claude/` | Claude Code plugins (Phase 12, ADR-053, section 6.33): `detect.ts` (layout and root prefix), `reader.ts` (`readClaudePluginDirectory` → `PluginDirectoryRead` + `ClaudePluginRead`), `layout.ts` (component path rules: replace / add / merge, `./` paths inside the root), `files.ts` (definition files through `readDefinitionFile` with the plugin root), `tree-hash.ts` (`hf-claude-plugin/v1`), `variables.ts`, `user-config.ts`, `mcp.ts`, `hooks.ts`, `register.ts` (`registerClaudeContributions(ctx, read, runtime)`), `skill-files.ts` (the `skill` tool's `file` reads), `info.ts` (the inspection's `claude` block), `trust.ts` (v1.8.1: `verifyClaudePluginTree` / `createClaudeTrustGuard` before every command hook spawn, stdio MCP connect and `!` span run, `readClaudePluginHooks` for the pending rows of `GET /hooks`) and `types.ts` (frozen from P12-0b); `plugin.json` and `marketplace.json` are parsed only by the shared `util/claude-plugins.ts`. |
 | `plugins/marketplaces/` | Marketplaces (Phase 12, ADR-054, section 6.34; `types.ts` frozen, `AppDeps.marketplaces`): `MarketplaceService { list, add, get, refresh, remove, stop }` (`index.ts`) over the `marketplaces` table (`store.ts`), `fetch.ts` (the GitHub / URL / folder source readers), `github.ts` (ref → commit, a file of a commit, the GitHub error mapping; shared with the installer), `catalog.ts` (the validated, normalized catalog), `sources.ts` (an entry → a staged source or an unsupported reason), `updates.ts` (update availability) and `testing.ts` (`createSourcesTestApp`); `marketplace.changed` events. |
 | `plugins/loader.ts` | Reads + validates `plugin.json`, checks id/dir/engines/trust, imports the entry module (cache-busted URL). |
 | `plugins/context.ts` | Builds the per-plugin `PluginContext` (`ctx`): scoped logger, settings, secrets, storage, registries, hooks, `ai`, `fetch`, `signal`, and `images` (plugin API 1.1.0: `images.generate` through `ImageService`). |
@@ -285,7 +285,7 @@ sequenceDiagram
   Deps->>Host: start(): builtins (static imports, trusted), then unless HF_SAFE_MODE=1 data/plugins/* + linked folders, sorted by id, each guarded
   Host-->>Deps: registry populated (providers, models, tools, MCP decls, commands, hooks)
   Deps->>Cat: start(): models.dev snapshot (bundled or data/cache refresh), model_cache
-  Cat-)Cat: background: refresh stale listings (>24 h); weekly models.dev unless HF_OFFLINE=1
+  Cat-)Cat: background unless HF_OFFLINE=1: refresh stale listings (>24 h), weekly models.dev
   Deps->>MCP: start(): connect declared MCP servers in the background (never blocks boot)
   Deps->>Deps: data.start(): the automatic file sweep timer, first check 24 h after boot (Phase 8, ADR-039)
   Main->>HTTP: createApp(deps): /api/*, plus the SPA with 200.html fallback when the web build exists
@@ -757,7 +757,12 @@ Rules: the web calls `POST /api/chat/:id/stop` first and then `stop()` of `useCh
 only a disconnect). Stopping a chat without a run is a no-op (`{ stopped: false }`). `DELETE /api/chats/:id` stops
 the run first. Server shutdown aborts every run through the same path. `stop` waits up to 15 s (5 s at shutdown) for
 the run to persist; a run that does not settle is released by force: its late end callback stores nothing and, when
-it was streaming, `run.finished` reports `aborted`. A run stopped while still `preparing` ends its request with
+it was streaming, `run.finished` reports `aborted`. Since `ai` 7.0.130 (v1.8.1) `streamText` itself listens for the
+abort: it rejects its result promises (handled), cancels the model stream and ends with `abort`, so a provider that
+ignores the signal no longer holds a run; Stop ends it at once through the normal abort path and the empty reply is
+stored with `metadata.aborted = true`. Only a stalled pipeline step (the generated-file store, persistence) can still
+keep a run from settling; that run is the one released by force after the stop wait, and nothing is stored. A run
+stopped while still `preparing` ends its request with
 `409 conflict` (`details.reason: 'stale'`) before its history is committed (delete-all relies on this, 6.9).
 
 **Stop order** (Phase 9, ADR-042 / ADR-043): the `chat.stop` route first calls `clearQueue(id, 'stopped')` (every item
@@ -936,7 +941,12 @@ sequenceDiagram
   and `userMessageId?` (a turn the server started from the queue); Phase 10 adds `task.changed` (`{ chatId, task }`,
   6.26: at most one per second per background task plus every status change) and `customization.changed` (`{ kind?,
   id?, projectId? }`, 6.23), and `run.started.origin` gains `task` (a turn the server started from finished background
-  tasks; 15 event types in all). `disconnectAll()` flushes the queued
+  tasks); Phase 11 adds `hooks.changed` (`{ projectId }`, null for personal and plugin hooks, 6.28),
+  `project-trust.changed` (`{ projectId, pending }`, 6.29) and `project-mcp.changed` (`{ projectId, servers }`, 6.30),
+  and `run.started.origin` gains `hook` (a turn the server started after a blocking `Stop` hook); Phase 12 adds
+  `marketplace.changed` (`{ id, marketplace }`, `marketplace` null = removed, 6.34) and the `workspace.changed` source
+  `user` (a project definition file saved or deleted from the UI, 6.36); 19 event types in all. `disconnectAll()`
+  flushes the queued
   events and then closes every connection: after a key rotation (`key.rotated` is the last event a stream sees) and
   after a password change, so a revoked session stops listening at once; the browsers reconnect with backoff, and a
   revoked one gets 401 and the login page.
@@ -3263,7 +3273,7 @@ verified (`projectConfig.verify`: the scanned item is hashed again with its refe
 file is not re-read); a mismatch skips it, drops the project's config cache, logs at `info` and emits
 `project-trust.changed { projectId, pending }` plus `hooks.changed { projectId }` (6.29).
 
-**The eight events** (insertion points in `apps/server/src/chat/`):
+**The eight events of Phase 11** (insertion points in `apps/server/src/chat/`; Phase 12 adds five more, 6.37):
 
 | Event | Where it fires | What a hook can do | Stored |
 |---|---|---|---|
@@ -3726,12 +3736,25 @@ body with `` !`cmd` `` spans (`planCommandExpansion`); pure markdown, http MCP s
 overlay exists (6.34). A link or a special file makes the plugin `error`; a linked folder skips `.git` and
 `node_modules`, ignores links and stays pinned by path (`pathPin`). File digests are cached per (path, size, mtime,
 ctime, inode, device; at most 20,000 files); caps 2,000 entries and 100 MB. The hash is computed again on every load,
-reload (a settings save too), trust and hot reload, not before each spawn. **Any** changed file (a script a hook runs, a
-skill's reference file, an exec bit) makes the plugin `untrusted` from that point until the user trusts it again (fresh
-auth, 8.4 of UI.md); until then an edited script can still run (accepted: project items are re-hashed right before every
-spawn, 6.29). **Exec bits** are kept for this format only: the owner exec bit from zip external attributes, the tar
-header mode or `lstat` of a copied folder becomes mode 0755 (else 0644) and is part of the hash; harness plugins stay
-0644. An exec bit alone runs nothing: hooks and MCP servers start only while the plugin is trusted and active.
+reload (a settings save too), trust and hot reload, and since v1.8.1 right before every command hook spawn (async hooks
+too): `verifyClaudePluginTree` (`plugins/claude/trust.ts`) reads the plugin's row and hashes its whole tree again (the
+canonical root, the linked-folder path-pin rule, the marketplace overlay, the digest cache; concurrent checks of one
+plugin share one hash; every failure fails closed). On a mismatch nothing spawns, a non-blocking `error`
+(`PLUGIN_CHANGED_ERROR`, "The plugin's files changed after it was trusted, so this hook did not run. …") goes into the
+`data-hook` record and the run log, and the plugin is reloaded once (→ `untrusted`). The same check (each consumer's
+`createClaudeTrustGuard`) runs before a Claude Code plugin's stdio MCP server connects or reconnects (a mismatch is a
+permanent `forbidden` error, no process starts, the plugin reloads → `untrusted`) and before a Claude Code plugin
+command's `` !`cmd` `` spans run (at check 4 of the expansion and again right before the spans; a mismatch is 409
+`conflict` `{ reason: 'untrusted', pluginId }`, nothing spawns, the plugin is loaded once). Harness plugins (their pin
+covers the `plugin.json` the registration holds) and prompt hooks are unchanged. **Any** changed file (a script a hook
+runs, a skill's reference file, an exec bit) makes the plugin `untrusted` from that point until the user trusts it again
+(fresh auth, 8.4 of UI.md). Known limits: each check costs a `readdir` per folder and an `lstat`, `open` and `fstat` per
+file (≤ 2,000 files), a small window between the hash and the exec remains, and a hook that writes into its own plugin
+folder untrusts the plugin. (v1.8 hashed only on load, reload and trust, so an edited script could still run until then;
+project items were already re-hashed right before every spawn, 6.29.) **Exec bits** are kept for this format only: the
+owner exec bit from zip external attributes, the tar header mode or `lstat` of a copied folder becomes mode 0755 (else
+0644) and is part of the hash; harness plugins stay 0644. An exec bit alone runs nothing: hooks and MCP servers start
+only while the plugin is trusted and active.
 
 **Registration** (`register.ts`, `registerClaudeContributions(ctx, read, runtime)`, through the same `ctx` registries as
 a harness plugin, plugin API 1.6.0):
@@ -3773,8 +3796,17 @@ Claude Code plugin. Safe mode loads none (like every user plugin).
 bit kept in the Unix external attributes (0755, else 0644), no root `plugin.json` needed, and the skip rules and caps of
 every export (`node_modules`, `.git`, `.env*`, `.npmrc` and links left out; 2,000 entries, 100 MB); a folder without
 files is a 400 ("The plugin folder has no files, so it cannot be exported."). Inspecting the zip gives the installed
-whole-tree hash, except for a plugin installed from a marketplace entry: its entry overlay is part of the hash but not a
-file, so the export hashes differently.
+whole-tree hash. Since v1.8.1 (CCR-1, `install/overlay-file.ts`) a plugin whose origin carries an entry overlay is
+exported with one extra root file, `<id>/.hf-entry-overlay.json` (`{ "format": "hf-entry-overlay/v1", "entry": { name,
+strict, version?, description?, overlay } }`, 0644; in v1.8 the overlay was not in the zip and the export hashed
+differently); a tree that already holds that root name cannot be exported (400). A zip upload or URL archive install
+of a Claude Code plugin reads it strictly (`readEntryOverlayFile`: at most `CLAUDE_PLUGIN_LIMITS.manifestBytes`, exactly
+these keys, the entry re-parsed by `parseMarketplaceJson` and `entryOverlay` and equal to the file's; else 400
+`validation_error`), removes it from the staged tree, applies it like a marketplace entry overlay (`mergeEntryOverlay`,
+so the inspection and the tree hash are the exported plugin's and an unchanged re-import keeps an existing pin), adds a
+review warning (`OVERLAY_FILE_NOTE`) and stores the server-only origin `{ kind: 'overlay', overlay }` (the DTO origin
+stays null, the source the archive's). It grants nothing: a plugin that runs anything still needs the trust approval
+and fresh auth of any install. npm, folder, GitHub, marketplace and linked sources never read it (an ordinary file).
 
 **Inspection** (`claudePluginInfoSchema`, in `PluginInspection.claude` and `PluginDetail.claude`): `name`,
 `displayName?`, `version` (raw) | null, `namespace`, `components { commands, agents, skills, outputStyles, hooks,
@@ -3840,8 +3872,9 @@ shows it as a card and nothing is requested before the user clicks Add.
 GitHub, the sha256 of the JSON for a URL, null for a folder), the validated catalog (≤ 1 MiB, ≤ 1,000 entries),
 `fetched_at` and the last error; at most 50 marketplaces. An installed plugin records where it came from in
 `plugins.origin` (`StoredPluginOrigin`: `{ kind: 'marketplace', marketplaceId, marketplace, plugin, sourceKind,
-commit?, archiveSha256?, npmVersion?, path?, version, overlay? }` or `{ kind: 'github', repo, ref, commit, path }`;
-the DTO drops `overlay`); `plugins.source` gains `github` and `marketplace`.
+commit?, archiveSha256?, npmVersion?, path?, version, overlay? }` or `{ kind: 'github', repo, ref, commit, path }`,
+and since v1.8.1 the server-only `{ kind: 'overlay', overlay }` of a re-imported export; the DTO drops `overlay` and
+reports an `overlay` origin as null); `plugins.source` gains `github` and `marketplace`.
 
 | Route (module `marketplaces`) | Answer |
 |---|---|
@@ -3906,8 +3939,10 @@ reroutes every plugin-source and marketplace fetch (GitHub API, raw, codeload, m
 `<base>/registry.npmjs.org` too. Route tests use `createSourcesTestApp` (`plugins/marketplaces/testing.ts`).
 
 `marketplace.changed { id, marketplace: MarketplaceSummary | null }` (null = removed) follows add, refresh (a failed one
-too) and remove. Marketplaces are configuration of the server: never in backups, kept by delete-all (6.9). Logs carry
-the marketplace id, name, repository and a 12-character sha only (12).
+too) and remove, and since v1.8.1 every install, update or uninstall of a plugin from one of its entries
+(`emitInstalledChange`, after the plugin's row was saved or removed; a failure is only logged). Marketplaces are
+configuration of the server: never in backups, kept by delete-all (6.9). Logs carry the marketplace id, name,
+repository and a 12-character sha only (12).
 
 ### 6.35 Import from a Claude Code home folder (ADR-055)
 
@@ -4135,13 +4170,17 @@ continueOnBlock?, args?, async?, if?, statusMessage? }`; a prompt row stores `co
 or an `if` rule on an event without a tool, is a 400); `importPersonal(items)` serves the Claude Code import (command
 hooks turned off unless the item enables them; options trimmed, `continueOnBlock` / `async` stored only when true; one
 `hooks.changed`). `GET /hooks` also lists the `contributes.hooks` of harness plugins waiting for trust as `state:
-'pending'` plugin rows (the web labels them "Plugin not trusted"); an untrusted Claude Code plugin's hooks show only on
-its plugin page (`claude.executables`).
+'pending'` plugin rows (the web labels them "Plugin not trusted"); since v1.8.1 so are an untrusted Claude Code plugin's
+hooks (`readClaudePluginHooks`: its hook files as written, so no option value appears; cached per plugin and host trust
+hash; no DTO change), and the Hooks tab offers **Open plugin** on Claude rows (in v1.8 they showed only on the plugin
+page, `claude.executables`).
 
 **Allowed, still asks** (`HookData.harnessAsked?: true`): `preToolUse` keeps its record pending until `approval.ts`
 calls `settle(callId, { harnessAsked })` (also from the catch path), so a hook `allow` that the harness still shows a
-card for is recorded as such; the replay map of answered decisions is unchanged. The `data-hook` part's `hooks[]`
-entries gain `kind?: 'command' | 'prompt'` and `model?`.
+card for is recorded as such; the replay map of answered decisions is unchanged. Since v1.8.1 an `allowed`
+`PermissionRequest` record is marked `harnessAsked` too when the call still asks (the optional
+`ToolCallSettlement.asked`, set by `approval.ts`: the call's final approval asks the user, whoever decided it). The
+`data-hook` part's `hooks[]` entries gain `kind?: 'command' | 'prompt'` and `model?`.
 
 **Transcripts** (`services/hooks/transcripts.ts`): the payload gains `transcript_path` =
 `<dataDir>/transcripts/<chatId>.jsonl` (folder 0700, file 0600), written **lazily**, only when a matching command or
@@ -4408,7 +4447,7 @@ a compaction summary or a sub-agent); kept when a chat is deleted.
 | `installed_at` | timestamp | NOT NULL |
 | `updated_at` | timestamp | NOT NULL |
 | `format` | text | NOT NULL DEFAULT `harness`; `harness` \| `claude` (Phase 12, ADR-053, 6.33; added by `0009`) |
-| `origin` | json `StoredPluginOrigin` | NULL; where a `github` or `marketplace` install came from: `{ kind: 'marketplace', marketplaceId, marketplace, plugin, sourceKind, commit?, archiveSha256?, npmVersion?, path?, version, overlay? }` or `{ kind: 'github', repo, ref, commit, path }`; the DTO drops `overlay` (Phase 12, ADR-054, 6.34; added by `0009`) |
+| `origin` | json `StoredPluginOrigin` | NULL; where a `github` or `marketplace` install came from: `{ kind: 'marketplace', marketplaceId, marketplace, plugin, sourceKind, commit?, archiveSha256?, npmVersion?, path?, version, overlay? }` or `{ kind: 'github', repo, ref, commit, path }`; v1.8.1: or `{ kind: 'overlay', overlay }` (the entry overlay of a re-imported export, 6.33; server-only); the DTO drops `overlay` and reports an `overlay` origin as null (Phase 12, ADR-054, 6.34; added by `0009`) |
 
 `plugins.source` gains `github` and `marketplace` in Phase 12 (a TypeScript enum, no migration).
 
@@ -4664,9 +4703,10 @@ seed models of the builtin plugins), and the catalog refreshes a cached listing 
 without the migration a listing cached by v1.1 would hide those models for up to a day (the e2e server's cached mock
 listing hid the new chat seeds `mock:image-chat` and `mock:image-tool`). The migration therefore ages every successful
 listing by one listing TTL (`fetched_at - 86400000`) once, so it counts as stale at the first start of v1.2 and is
-fetched again in the catalog's first background cycle, while it stays the last good listing the catalog serves (a
-failed refresh keeps it). Rows without a successful fetch (`fetched_at` null: "never listed") are left alone. The UI
-shows such a listing as one day older than it is until the refresh. `db/upgrade.test.ts` checks that `0003` is exactly
+fetched again in the catalog's first background cycle (with `HF_OFFLINE=1`, since v1.8.1, only by an explicit refresh:
+no background cycle runs offline), while it stays the last good listing the catalog serves (a failed refresh keeps
+it). Rows without a successful fetch (`fetched_at` null: "never listed") are left alone. The UI shows such a listing
+as one day older than it is until the refresh. `db/upgrade.test.ts` checks that `0003` is exactly
 that one `UPDATE`, that it keeps the cached models and ages `fetched_at` by the TTL, and that never-fetched rows stay
 null.
 
@@ -4764,7 +4804,7 @@ Summary; the full rules (per-provider listing quirks, seeds, reasoning mapping) 
 
 | Source | Where | Refresh |
 |---|---|---|
-| Live listing | provider `listModels()` (declarative: `GET {baseURL}/models`, Ollama `/api/tags`) | cached 24 h in `model_cache`; background refresh when stale; last good kept on failure; forced by `POST /providers/:id/models/refresh` and after credentials change |
+| Live listing | provider `listModels()` (declarative: `GET {baseURL}/models`, Ollama `/api/tags`) | cached 24 h in `model_cache`; background refresh when stale (every 15 min, and a check when a provider registers; never with `HF_OFFLINE=1` since v1.8.1: the cached listing or the seeds keep serving); last good kept on failure; forced by `POST /providers/:id/models/refresh`, the provider test and after credentials change or a created provider (also offline) |
 | models.dev | bundled `apps/server/assets/catalog/models-dev.json` (key = `ProviderDefinition.modelsDevId ?? id`) | weekly refresh into `data/cache/models-dev.json` unless `HF_OFFLINE=1`; `pnpm catalog:update` refreshes the bundled copy |
 | Seeds | `ProviderDefinition.seedModels` | static |
 | Plugin models | manifest `contributes.models`, `ctx.models.register()` | while the plugin is active (held until the provider is registered) |
@@ -5180,7 +5220,7 @@ the browser or the log, and saving a file never approves it.
 
 | Threat | Mitigation | Accepted risk |
 |---|---|---|
-| Remote code from a marketplace or GitHub | a Claude Code plugin that runs anything (a command hook, a stdio MCP server, a `!` span) needs a trust pin over its **whole file tree** (paths, modes, sizes, contents, the entry overlay), shown in a review that lists every command, with fresh auth; no automatic add, refresh or update; an update is a new review | the user trusts a plugin without reading what it runs; an edited script of a trusted plugin runs until the next load / reload / trust (the tree hash is checked then; project items are re-hashed before every spawn) |
+| Remote code from a marketplace or GitHub | a Claude Code plugin that runs anything (a command hook, a stdio MCP server, a `!` span) needs a trust pin over its **whole file tree** (paths, modes, sizes, contents, the entry overlay), shown in a review that lists every command, with fresh auth; no automatic add, refresh or update; an update is a new review | the user trusts a plugin without reading what it runs; since v1.8.1 the tree hash is also checked right before every command hook spawn, stdio MCP server connect and `!` span run (a mismatch starts nothing and untrusts the plugin), with a small window between the hash and the exec; a hook that writes into its own plugin folder untrusts the plugin (v1.8: an edited script ran until the next load / reload / trust) |
 | Supply-chain drift on a moving ref | a ref resolves to a commit sha, the archive of that commit is downloaded, relative entries come from the **stored** commit, and the review shows `owner/repo@<sha12>`; install compares the reviewed tree sha256 (409 `stale`) | an archive entry without `sha256` is trusted on first use (its sha256 is shown) |
 | Archive attacks (traversal, links, bombs, a repository too large) | the installer's guards (`checkEntryPath`, `EntryCollector`, exclusive writes, `verifyTree`), links and devices refused, caps (20 MB / 50 MB for a repository zip compressed, 100 MB and 2,000 entries for the selected subtree), the codeload top folder and archive comment checked, no redirects on codeload | a plugin with a large `node_modules` is refused (clear message) |
 | SSRF through marketplace, entry or archive URLs | every fetch through `safeFetch` (https only, no private / loopback / link-local address, DNS pinned, each redirect re-checked); GitHub hosts are constants; owner, repo and ref validated before a URL is built; `HF_TEST_REMOTE_URL` honored only with `HF_MOCK_PROVIDER=1` and only as a loopback base | npm entries use the existing npm pipeline |

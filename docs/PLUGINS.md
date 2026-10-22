@@ -547,7 +547,8 @@ Optional fields picked up when present: name <- `display_name` / `displayName` /
 `maxOutputTokens` <- `max_output_tokens` / `max_completion_tokens` / `outputTokenLimit` / `max_tokens`; `kind` <-
 `type` (`chat`, `language`, `text` -> `chat`; `embedding`, `embeddings` -> `embedding`; `image` -> `image`; `audio`,
 `tts`, `stt`, `transcribe` -> `audio`; anything else -> `other`). Listings are cached for 24 h; a failed refresh
-keeps the last good listing (see [ARCHITECTURE.md, Model catalog](./ARCHITECTURE.md#9-model-catalog)).
+keeps the last good listing; with `HF_OFFLINE=1` (v1.8.1) a listing is fetched only when the user asks (Refresh, the
+provider test, saving a key) (see [ARCHITECTURE.md, Model catalog](./ARCHITECTURE.md#9-model-catalog)).
 
 Since Phase 6 a declarative provider has no media factories, so the catalog leaves out its listed models of kind
 `image`, `transcription` or `speech` (a `type` of `image`, or an id the host classifies that way, such as `dall-e-3` or
@@ -981,7 +982,8 @@ export type ToolWorkspaceAccess = 'read' | 'write' | 'execute'               // 
 export type ToolPolicy = 'safe' | 'ask' | 'always'
 export type ReasoningEffort = 'auto' | 'off' | 'low' | 'medium' | 'high' | 'max'
 /** AI SDK v7 top-level `reasoning` values without 'provider-default':
- *  'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' */
+ *  'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+ *  ('max' comes from @ai-sdk/provider 4.0.23+, v1.8.1; the builtin mappings still send 'xhigh' for the effort 'max') */
 export type ReasoningLevel = Exclude<NonNullable<LanguageModelCallOptions['reasoning']>, 'provider-default'>
 export type ApiFormat = 'openai-chat' | 'openai-responses' | 'anthropic' | 'google'
 export type ReasoningStyle = 'openai-effort' | 'anthropic-thinking' | 'google-thinking' | 'none'
@@ -1440,7 +1442,7 @@ All `register` calls are valid during and after `setup` until the plugin is disp
 | `seedModels` | no | chat seeds are used when there is no live listing and no cached listing; seeds with a media kind (`image`, `transcription`, `speech`; 1.1) are always listed, even next to a live listing, when the provider defines the matching factory |
 | `keyUrl` | no | "Get a key" link in the key dialog |
 | `createLanguageModel(modelId, rt)` | yes | returns a provider **instance** model; called per request; must not perform network I/O; guarded (5 s); any model id may be requested (custom ids) |
-| `listModels(rt)` | no | live listing; guarded (15 s); cached 24 h; a failure keeps the last good listing |
+| `listModels(rt)` | no | live listing; guarded (15 s); cached 24 h; a failure keeps the last good listing; with `HF_OFFLINE=1` (v1.8.1) called only on an explicit refresh, the provider test or a credential save, never in the background |
 | `validate(rt)` | no | credential test; guarded (15 s). Default: `listModels(rt)` when defined, else a 1-token `generateText` on `smallModelId` (else the first chat seed, else the first visible chat model; never an image, transcription or speech model) |
 | `reasoning(effort, model)` | no | synchronous; called only when `effort !== 'auto'`, `model.capabilities.reasoning` is true and `effort` is offered for the model; returns request additions or `undefined` |
 | `mapError(err)` | no | synchronous; first chance to map an error of this provider; return `undefined` to fall back to the default mapping |
@@ -1915,8 +1917,14 @@ install), with `details.reason: 'exists'` and a message naming both; the inspect
 - `GET /api/plugins/:id/export` returns a zip of the plugin directory without `node_modules`, `.git` and build
   output (no settings, storage or secrets), installable with `POST /api/plugins/install`. Since Phase 12 a Claude Code
   plugin exports as its installed tree below `<id>/` (the same paths and bytes, the owner exec bits kept, no
-  `plugin.json` needed; a folder without files is a 400); a marketplace plugin's entry overlay is not in the zip, so
-  inspecting the export gives another hash than the installed plugin's.
+  `plugin.json` needed; a folder without files is a 400). Since v1.8.1 a plugin whose origin has a marketplace entry
+  overlay also gets `<id>/.hf-entry-overlay.json` (`hf-entry-overlay/v1`: the entry's `name`, `strict`, `version?`,
+  `description?` and `overlay`), so inspecting the export gives the installed plugin's hash (v1.8 left the overlay out);
+  a Claude Code plugin whose tree already holds that root name cannot be exported (400). A zip upload or URL archive
+  install reads the file strictly (size cap, exact keys, re-parsed like a marketplace entry; anything else is a 400),
+  removes it from the stored tree, applies it like an entry overlay (an unchanged re-import keeps an existing pin), warns
+  in the review and keeps it as a server-only origin; it grants nothing (a plugin that runs anything still needs trust
+  and fresh auth). npm, folder, GitHub, marketplace and linked sources treat it as an ordinary file.
 
 ## 13. Trust and security
 
@@ -1955,11 +1963,16 @@ ADR-017): the install and trust dialogs ask for the password first.
 | Claude Code plugin with a command hook handler, a stdio MCP server or a `!` span (1.6.0) | the **whole-tree hash** `hf-claude-plugin/v1`: every regular file's path, mode (755 / 644), size and SHA-256 in path order, plus the marketplace entry overlay (section 17); any changed file, script or exec bit makes it `untrusted` (a linked folder is pinned to its path, as above) |
 | Claude Code plugin with only markdown, prompt hooks or http / sse MCP servers (1.6.0) | no pin needed |
 
-The pin is re-checked when the plugin loads: at boot, on enable, reload, trust and hot reload, not before each run.
-Any change of the hashed bytes makes the plugin `untrusted` from that load on until it is pinned again; for a Claude
-Code plugin this means an edited script can still run until the next load, reload or trust, which then blocks it
-(the trusted items of a project, its hooks, `.mcp.json` servers and `!` command files, are instead re-hashed right
-before every spawn: [ARCHITECTURE.md 6.29](./ARCHITECTURE.md)). The pin is set again by:
+The pin is re-checked when the plugin loads: at boot, on enable, reload, trust and hot reload. Any change of the hashed
+bytes makes the plugin `untrusted` from that load on until it is pinned again. A Claude Code plugin's whole tree is
+also hashed again since v1.8.1 right before every command hook spawn (async hooks too), every stdio MCP server connect
+or reconnect and every run of a command's `` !`cmd` `` spans: a mismatch starts nothing (a hook records the error "The
+plugin's files changed after it was trusted, so this hook did not run. …", a stdio server gets a permanent `forbidden`
+error, a span run is refused with 409 `untrusted` and the plugin id) and reloads the plugin once, which leaves it
+`untrusted`; in v1.8 an edited script could still run until the next load. Harness plugins keep the load-time check
+(their pin covers `plugin.json`, which the registration holds). The trusted items of a project, its hooks, `.mcp.json`
+servers and `!` command files, are re-hashed right before every spawn too ([ARCHITECTURE.md 6.29](./ARCHITECTURE.md)).
+The pin is set again by:
 
 - the Trust action (`POST /api/plugins/:id/trust`) or trusting in the install dialog (installs and updates);
 - for plugins with source `created`: saving or deleting a file in the in-browser editor (`PUT` / `DELETE
@@ -2858,16 +2871,20 @@ body with `` !`cmd` `` spans; a plugin of markdown only, prompt hooks or http / 
 SHA-256 over the **whole file tree** (`hf-claude-plugin/v1`: every regular file's path, mode, size and content in
 path order, plus the marketplace entry's overlay): editing any file, script or exec bit makes the plugin `untrusted`
 until the user trusts it again (fresh auth). The hash is checked when the plugin loads (boot, enable, reload, trust,
-hot reload), as for every plugin (section 13): an edited script is blocked from the next load, reload or trust on, and
-can still run until then. A linked folder (`source: 'link'`) is pinned to its path instead, so its edits need no new
-trust. The review lists every command the plugin could run (`claude.executables`, as written): every `command` hook
-handler with its `args` (of any event, including handlers that never run: a shell-form one using `${user_config.*}`,
-one on an unknown event), labelled `<Event> <matcher>`; every stdio MCP command line (even of a skipped server),
-labelled with the server's name; and every `` !`cmd` `` span, labelled with its `/<plugin>:<command>`. Prompt hooks and
-http / sse servers are not executables. Archives and copied folders keep the owner **exec bit** of each file (mode
-0755 or 0644, part of the hash), so a hook can run `${CLAUDE_PLUGIN_ROOT}/scripts/x.sh` directly; nothing runs before
-the plugin is trusted and active. Write hook scripts in POSIX `sh` when you share them: the Docker image has no
-`python3` or `jq`.
+hot reload), as for every plugin (section 13), and since v1.8.1 right before every command hook spawn, stdio MCP server
+connect or reconnect and `` !`cmd` `` span run (a span refusal is 409 `untrusted` with the plugin id; a server gets a
+permanent `forbidden` error): an edited script never runs (a hook records a non-blocking error; the plugin is reloaded
+once and is `untrusted`; in v1.8 it could still run until the next load). Limits: each check reads the tree's metadata
+(a `readdir` per folder, an `lstat`, `open` and `fstat` per file, ≤ 2,000 files; unchanged files keep their cached
+digest), a small window between the hash and the exec remains, and a hook that writes into its own plugin folder
+untrusts the plugin. A linked folder (`source: 'link'`) is pinned to its path instead, so its edits need no new trust.
+The review lists every command the plugin could run (`claude.executables`, as written): every `command` hook handler
+with its `args` (of any event, including handlers that never run: a shell-form one using `${user_config.*}`, one on an
+unknown event), labelled `<Event> <matcher>`; every stdio MCP command line (even of a skipped server), labelled with the
+server's name; and every `` !`cmd` `` span, labelled with its `/<plugin>:<command>`. Prompt hooks and http / sse servers
+are not executables. Archives and copied folders keep the owner **exec bit** of each file (mode 0755 or 0644, part of
+the hash), so a hook can run `${CLAUDE_PLUGIN_ROOT}/scripts/x.sh` directly; nothing runs before the plugin is trusted
+and active. Write hook scripts in POSIX `sh` when you share them: the Docker image has no `python3` or `jq`.
 
 ### Versions and updates
 

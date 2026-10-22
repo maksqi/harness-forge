@@ -48,8 +48,9 @@ supported; they are never started.)"). A plugin that runs programs lists every c
   files (only those) with the `skill` tool.
 - **Output styles** in the composer's style menu (`review-kit:terse`).
 - **Hooks** (Claude Code's `hooks/hooks.json`, command and prompt hooks) that run in every chat while the plugin is on
-  and trusted; Settings → Customize → Hooks lists them under **From plugins** (the hooks of a Claude Code plugin you have
-  not trusted yet are listed on its plugin page instead). A hook's arguments show `${user_config.KEY}` as written: the
+  and trusted; Settings → Customize → Hooks lists them under **From plugins** (since v1.8.1 also the hooks of a Claude
+  Code plugin you have not trusted yet, marked **Plugin not trusted**, with **Open plugin** to review it on its page).
+  A hook's arguments show `${user_config.KEY}` as written: the
   option's value is filled in only when the hook process starts.
 - **MCP servers** whose tools join every chat (one server is named after the plugin: `review-kit`).
 - **Settings**: the plugin's `userConfig` options appear on its **Configuration** tab (a sensitive option is a secret
@@ -66,13 +67,19 @@ with `` !`cmd` `` lines. A plugin of Markdown only (commands, agents, skills, st
 servers needs none.
 
 Trusting pins a fingerprint of **every file** of the plugin — scripts included — and of the files' executable bits.
-The fingerprint is checked again whenever the plugin loads: at the start of the server, on a reload and when you trust
-it. A plugin whose files changed (an update, an edit of its copy in the data directory) is then **Untrusted** and runs
-nothing until you review it again and press **Trust**; a script edited on disk in between keeps running until that
-next check. A **linked** folder is different: you trust the folder itself (it is pinned by its path), so editing its
-files never asks again; link only folders you control. Executable bits from the zip or folder are kept, so a hook can run
-`${CLAUDE_PLUGIN_ROOT}/scripts/check.sh` directly; write hook scripts in POSIX `sh` if you share them (the Docker image
-has no `python3` or `jq`).
+The fingerprint is checked again whenever the plugin loads (at the start of the server, on a reload and when you trust
+it) and, since v1.8.1, right before each of its command hooks, `` !`cmd` `` lines and stdio MCP servers starts. A
+plugin whose files changed (an update, an edit of its copy in the data directory) is then **Untrusted** and runs
+nothing until you review it again and press **Trust**: a hook whose plugin changed does not start (the chat notes "The
+plugin's files changed after it was trusted, so this hook did not run."), a command with `!` lines is refused ("/{name}
+runs shell lines of a plugin that changed after you trusted it.", **Review…** opens the plugin page), an MCP server
+does not start, and the plugin is reloaded as **Untrusted**. (v1.8 checked only on load, so a
+script edited on disk kept running until the next check.) The check reads every file's metadata each time (up to
+2,000 files; unchanged files reuse their cached digest), a very short window between the check and the start remains,
+and a hook that writes into its own plugin folder untrusts the plugin. A **linked** folder is different: you trust the
+folder itself (it is pinned by its path), so editing its files never asks again; link only folders you control.
+Executable bits from the zip or folder are kept, so a hook can run `${CLAUDE_PLUGIN_ROOT}/scripts/check.sh` directly;
+write hook scripts in POSIX `sh` if you share them (the Docker image has no `python3` or `jq`).
 
 What harness-forge never runs: LSP servers (`.lsp.json`), `bin/` (it is not put on the shell's `PATH`), themes,
 monitors, workflows, the plugin's own `settings.json` and `http` / `mcp_tool` / `agent` hooks; they are listed under

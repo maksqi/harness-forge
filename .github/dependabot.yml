@@ -1,9 +1,8 @@
 # Dependency updates (ADR-027). Dependabot alerts and security updates are switched on in the repository settings
 # (Settings -> Code security); this file only schedules version updates.
 #
-# pnpm 11: Dependabot supports pnpm workspaces and catalogs, but its pnpm 11 support is recent and pnpm 11.23+ breaks
-# indirect-dependency updates. If the npm block below fails on the pnpm 11 lockfile, drop the npm block and use
-# Renovate (renovatebot, which updates pnpm catalogs) as the fallback. pnpm itself is always upgraded by hand.
+# pnpm 11: Dependabot updates the workspace's package.json files, the catalog and the lockfile (#1 to #14, pnpm 11.20).
+# pnpm itself is always upgraded by hand; check the next Dependabot run after a pnpm upgrade.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -32,7 +31,7 @@ updates:
     # A package matches the first group whose patterns and update types fit it; an update that fits no group gets a
     # pull request of its own. 0.x packages treat a minor bump as breaking, but Dependabot calls it "semver-minor",
     # so they are kept out of the minor-and-patch group: their patches share one group and each of their minor
-    # bumps gets its own pull request (this is how katex 0.16 -> 0.18 must arrive).
+    # bumps gets its own pull request.
     groups:
       # ai and @ai-sdk/vue must stay on matching versions (the web's useChat options come from ai).
       ai-sdk:

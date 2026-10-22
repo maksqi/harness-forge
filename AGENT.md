@@ -27,16 +27,16 @@ Read this file fully before doing anything. Then read the docs listed in "Where 
 9. **Keep the contract.** Request/response shapes come from `packages/shared`; plugin shapes come from
    `packages/plugin-sdk`. If the contract is wrong, file a CCR — do not fork local copies of the types.
 
-## Stack and pinned versions (verified 2026-09-27)
+## Stack and pinned versions (verified 2026-10-22)
 
 | Area | Choice |
 |---|---|
-| Runtime | Node >= 22.12 (dev machine: 26.x), pnpm 11 workspaces |
+| Runtime | Node: the built server runs on >= 22.12 (`engines`), pnpm 11 needs >= 22.13, building the web app (Nuxt 4.6) needs `^22.22.3 \|\| ^24.15.0 \|\| >= 26`; Docker and CI use Node 24 (`.nvmrc` `24`; dev machine: 26.x). pnpm **11** workspaces (`packageManager` `pnpm@11.28.6`; pnpm 12 deferred) |
 | Language | TypeScript **~6.0.3** (TS 7 breaks `.vue` prop-type imports — never upgrade), ESM everywhere, `strict: true` |
-| Web | Nuxt 4.5 SPA (`ssr: false`, `nuxt generate`), shadcn-vue 2.8 (`shadcn-nuxt`), reka-ui 2.10, Tailwind CSS 4.3 (`@tailwindcss/vite`), `@nuxtjs/color-mode` 4, Pinia 4 + `@pinia/nuxt`, `@vueuse/nuxt` 15, `@lucide/vue`, vue-sonner, `@tanstack/vue-form`, CodeMirror 6, AI Elements Vue (copied, prefix `Ai`), markstream-vue 2 |
-| Server | Hono 4.13 + `@hono/node-server` 2, `@hono/zod-validator`, Drizzle ORM 0.45 + `@libsql/client`, zod 4 |
-| LLM | Vercel AI SDK **v7** (`ai`), `@ai-sdk/vue` 4 (`useChat`), official `@ai-sdk/*` providers, `@openrouter/ai-sdk-provider`, `@ai-sdk/mcp` |
-| Tooling | tsx (dev), tsdown (server build), Vitest 4, Playwright (Chromium), ESLint with `@antfu/eslint-config` |
+| Web | Nuxt 4.6 SPA (`ssr: false`, `nuxt generate`), Vue 3.5, vue-router 5.4, shadcn-vue 2.8 (`shadcn-nuxt`), reka-ui 2.11, Tailwind CSS 4.3 (`@tailwindcss/vite`), `@nuxtjs/color-mode` 4, Pinia 4.1 + `@pinia/nuxt` 1.0, `@vueuse/nuxt` 15, `@lucide/vue`, vue-sonner, `@tanstack/vue-form`, CodeMirror 6, AI Elements Vue (copied, prefix `Ai`), markstream-vue 2.0, mermaid 12, motion-v 2.8 |
+| Server | Hono 4.13 + `@hono/node-server` 2.1, `@hono/zod-validator`, Drizzle ORM 0.45 + `@libsql/client`, zod 4.6 |
+| LLM | Vercel AI SDK **v7** (`ai` 7.0.147, `@ai-sdk/provider` 4.0.31), `@ai-sdk/vue` 4 (`useChat`), official `@ai-sdk/*` providers, `@openrouter/ai-sdk-provider`, `@ai-sdk/mcp` |
+| Tooling | tsx (dev), tsdown 0.23 (server build), Vitest 5 + happy-dom 21 (web), vue-tsc 3.3, Playwright 1.64 (Chromium), ESLint 10 with `@antfu/eslint-config` |
 | Parsing | `yaml` 2 (frontmatter of agent, command and skill files; imported only by `packages/shared/src/util/definitions.ts`) |
 | Icons | `@lobehub/icons-static-svg` (served by the server), `@lucide/vue` for UI icons |
 
@@ -49,7 +49,9 @@ Read this file fully before doing anything. Then read the docs listed in "Where 
   Server response: `createUIMessageStreamResponse({ stream: toUIMessageStream({ stream: result.stream, ... }) })`.
   Always pass provider **instances** — a plain string model id is routed to the Vercel AI Gateway.
   Custom providers implement `LanguageModelV4` from `@ai-sdk/provider`. Test models: `MockLanguageModelV4`,
-  `simulateReadableStream` from `ai/test`. Verify every name in the installed `.d.ts`.
+  `simulateReadableStream` from `ai/test`. Verify every name in the installed `.d.ts`. `ai` ≥ 7.0.130: `streamText`
+  cancels the model stream and ends with `abort` when the signal fires, so a provider ignoring the signal no longer
+  holds a run (ARCHITECTURE.md 6.3).
 - **AI SDK v7 media** (Phase 6): `generateImage`, `transcribe` and `generateSpeech` are stable (`experimental_*` names
   are deprecated aliases); specs `ImageModelV4`, `TranscriptionModelV4`, `SpeechModelV4`; test doubles
   `MockImageModelV4`, `MockTranscriptionModelV4`, `MockSpeechModelV4` from `ai/test`. Always pass model instances.
@@ -133,8 +135,9 @@ Read this file fully before doing anything. Then read the docs listed in "Where 
   is a persisted `data-hook` part (`hev_` ids, model view through `splitHooks` in
   `packages/shared/src/util/agent-state.ts`); a blocking Stop hook starts a server turn with `origin: 'hook'` (≤ 5 in a
   row). Kill switches: setting `hooksEnabled`, `HF_WORKSPACE_SHELL=0` (no shell string at all), `HF_SAFE_MODE` (no
-  command hooks, no project MCP). Output styles are the catalog kind `style` (`output-styles` folders, builtins
-  `default` / `explanatory` / `learning`; chat ?? project ?? global `outputStyle`). Migration `0008_hooks_trust`;
+  command hooks, no project MCP; since Phase 12 no prompt hooks either, `promptHooksAllowed`). Output styles are the
+  catalog kind `style` (`output-styles` folders, builtins `default` / `explanatory` / `learning`; chat ?? project ??
+  global `outputStyle`). Migration `0008_hooks_trust`;
   SSE `hooks.changed`, `project-trust.changed`, `project-mcp.changed`; mock `mock:hooks`.
 - **Plugin API 1.6.0** (Phase 12, additive): `CommandDefinition.{ syntax?: 'template' | 'markdown', argumentHint?, model?,
   allowedTools? }`, `SkillDefinition.{ baseDir?, argumentHint?, userInvocable?, modelInvocable? }`, agent fields
@@ -169,12 +172,29 @@ Read this file fully before doing anything. Then read the docs listed in "Where 
   they would configure the coordinator's own Claude Code session, and Claude Code also discovers nested `.claude/`
   folders). Test fixtures are built at test time in `realpath(mkdtemp())` folders; seeds live under `.tmp/`. The only
   committed exception is `examples/plugins/claude-review-kit/.claude-plugin/plugin.json`.
-- **vue-tsc 3.3.12** (vuejs/language-tools#6240): a `//` inside a component prop value in a template (a URL literal)
-  corrupts the generated code; put URLs into script constants (`apps/web/app/components/template-literals.test.ts`
-  guards it).
+- **v1.8.1 maintenance** (dependency updates; plugin API stays 1.6.0): `ReasoningLevel` gains `max` (the portable
+  level of `@ai-sdk/provider` 4.0.23+; the harness effort `max` still maps to `xhigh` or a provider option, PROVIDERS.md
+  4; the template mirror follows). `pnpm-workspace.yaml` `patchedDependencies` holds a `pnpm patch` of
+  `vue-stick-to-bottom` 1.0.1 (`patches/`: the runtime prop type of `initial` lacks `String`; the Dockerfile copies
+  `patches/` before `pnpm fetch`; drop it once upstream ships the fix). Overrides: `micromark-extension-math>katex`
+  `^0.18.11` (GHSA-238p-pmpm-9mq7, the last katex < 0.18.2 path; mermaid 12.2 depends on katex ^0.18) and
+  `@esbuild-kit/core-utils>esbuild` `^0.25.12` (GHSA-67mh-4wv8-2f99, drizzle-kit only; `db:generate` verified). The
+  only ignored advisories are node-forge GHSA-86w9-cpqp-85rv and braces GHSA-vfj7-8cjw-p6xm (build tooling, still
+  unpatched 2026-10-22); the simple-git ignores are gone (`@nuxt/devtools` 3.4.4 no longer depends on it).
+  `@nuxt/test-utils` is removed; Vitest 5 (catalog `vitest` / `@vitest/coverage-v8` `^5.0.5`). Every `package.json`
+  carries the app version (1.8.1). `HF_OFFLINE=1` also stops every automatic provider model listing (explicit
+  refreshes, the provider test and the checks after a credential save still list; the e2e mock models come from the
+  seeds). Every `<Switch>` needs a coarse-pointer hit area of at least 40 px (`pointer-coarse:after:-inset-y-3`,
+  `size="sm"`: `-inset-y-3.5`; `apps/web/app/components/switch-hit-areas.test.ts` guards it). The approval card
+  reads a call's hook records through the `TOOL_APPROVAL_HOOKS` injection (its props stay frozen).
+- **vue-tsc 3.3** (vuejs/language-tools#6240, found on 3.3.12): a `//` inside a component prop value in a template (a
+  URL literal) corrupts the generated code; put URLs into script constants
+  (`apps/web/app/components/template-literals.test.ts` guards it).
 - **@ai-sdk/vue 4**: use the `useChat()` composable (the `Chat` class is deprecated); `DefaultChatTransport` is
   imported from `ai`.
-- **MCP**: `createMCPClient` from `@ai-sdk/mcp`; stdio transport from `@ai-sdk/mcp/mcp-stdio`.
+- **MCP**: `createMCPClient` from `@ai-sdk/mcp`; stdio transport from `@ai-sdk/mcp/mcp-stdio`. Since `@ai-sdk/mcp` 2.0.80
+  `createMCPClient` is overloaded (an `experimental_events.adapter` returns a `ManagedMCPClient`): pass
+  `experimental_events: undefined` to get a plain `MCPClient` (`apps/server/src/mcp/index.ts`).
 - **TypeScript 6**: list `types` explicitly in tsconfig; do not use `baseUrl`.
 - **pnpm 11**: all settings live in `pnpm-workspace.yaml` (the `pnpm` field in package.json is ignored);
   dependency build scripts need `allowBuilds`.
@@ -214,7 +234,7 @@ data/                                          runtime data (gitignored)
 | `pnpm start` | production server on :8787 serving API + SPA |
 | `pnpm start:e2e` | production server with `HF_MOCK_PROVIDER=1 HF_OFFLINE=1 HF_CLAUDE_HOME=0 HF_PORT=8899 HF_DATA_DIR=.tmp/e2e` |
 | `pnpm test` | Vitest (all projects); `pnpm -F <pkg> test` for one package |
-| `pnpm test:live` | opt-in live provider suite (`*.live.test.ts`; needs `HF_LIVE=1` + provider keys; paid calls) — never in `pnpm test` |
+| `pnpm test:live` | opt-in live provider suite (`*.live.test.ts`; needs provider keys, its config sets `HF_LIVE=1`; paid calls) — never in `pnpm test` |
 | `pnpm test:e2e` | Playwright |
 | `pnpm lint` | ESLint (agents: `--fix` only on owned paths) |
 | `pnpm typecheck` | `tsc --noEmit` for packages/server + `nuxi typecheck` for web |
@@ -224,6 +244,7 @@ data/                                          runtime data (gitignored)
 | `pnpm db:generate` | drizzle-kit generate — coordinator only |
 | `pnpm catalog:update` | refresh the bundled models.dev snapshot — coordinator only |
 | `pnpm key:rotate` | offline master-key rotation (`rotate-key` CLI, ADR-034; the server must be stopped) — coordinator / user only |
+| `pnpm audit:ownership <wave.json>` | fail when a changed path of the working tree has no owner in the wave file and no `allow` glob; several owners are warnings (`scripts/audit-ownership.mjs`) — coordinator |
 
 ## Conventions
 
@@ -251,14 +272,16 @@ data/                                          runtime data (gitignored)
 
 `HF_PORT` (8787), `HF_HOST` (127.0.0.1), `HF_DATA_DIR` (`./data`, resolved against the repo root in dev),
 `HF_PASSWORD`, `HF_MASTER_KEY`, `HF_MOCK_PROVIDER`, `HF_SAFE_MODE`, `HF_PLUGIN_WATCH`, `HF_OFFLINE`, `HF_INSECURE`,
-`HF_TRUST_PROXY` (trusted reverse proxies, ADR-026), `HF_API_TARGET` (web dev proxy target), `HF_WORKSPACE_ROOTS`
+`HF_TRUST_PROXY` (trusted reverse proxies, ADR-026), `HF_API_TARGET` (web dev proxy target), `HF_WEB_DIR` (the built
+SPA served in production, default `apps/web/.output/public`), `HF_WORKSPACE_ROOTS`
 (folders that may hold projects, default `<dataDir>/workspaces`, ADR-031), `HF_WORKSPACE_SHELL` (`0` removes the
 `shell` tool, ADR-033, and since Phase 11 runs no command hook and no command `!` span), `HF_CLAUDE_HOME` (the
 Claude Code folder the import scan reads, default `~/.claude`, `0` = off, ADR-055), plus provider key
 fallbacks (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, ...). CLI-only: `HF_NEW_MASTER_KEY` (read by `rotate-key`, ADR-034). Test-only: `HF_LIVE`, `HF_LIVE_PROVIDERS`,
 `HF_LIVE_MAX_COST_USD`, `HF_LIVE_MEDIA`, `HF_TEST_REQUIRE_WEB_BUILD`, `E2E_SCREENSHOTS`, `HF_TEST_FILE_SWEEP_DELAY_MS`
 (only with `HF_MOCK_PROVIDER=1`, ADR-039), `HF_TEST_REMOTE_URL` (loopback fake for GitHub / codeload / archive hosts;
-only with `HF_MOCK_PROVIDER=1`, ADR-054). See `.env.example` and
+only with `HF_MOCK_PROVIDER=1`, ADR-054), `E2E_MOCK_OPENAI_PORT` (port of the plugin specs' mock OpenAI server,
+default 8894, `0` = any free port; `e2e/README.md`). See `.env.example` and
 `docs/DECISIONS.md` (Contract seed).
 
 **Never run `pnpm test:live` unless your task prompt says so** — it makes paid provider calls with real keys.
