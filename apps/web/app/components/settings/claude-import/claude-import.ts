@@ -334,7 +334,7 @@ export const KIND_TEXT: Readonly<Record<ClaudeImportKind, string>> = {
 export const WARNING_TEXT: Readonly<Partial<Record<ClaudeImportWarning, string>>> = {
   'prefix-broader': 'Becomes a prefix rule: longer commands that start the same way are allowed too.',
   'imports-kept': 'Its @path lines are kept as text.',
-  'model-alias': 'Claude model names use the model aliases of the settings.',
+  'model-alias': 'Claude model names run the models chosen in Settings → General → Agent.',
 }
 
 /** A hook item that asks a model (a prompt hook: imported turned on; command hooks run commands). */

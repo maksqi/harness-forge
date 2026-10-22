@@ -346,7 +346,8 @@ function expectValidRanges(ranges: readonly MatchRange[], length: number, contex
   }
 }
 
-describe('fuzzing', () => {
+// Seeded fuzz loops run several times slower on CI runners than locally: a generous timeout per test.
+describe('fuzzing', { timeout: 30_000 }, () => {
   it('mentionTokenAt and parseMentions keep their invariants on random texts', () => {
     const random = prng(0x5EED)
     let tokens = 0

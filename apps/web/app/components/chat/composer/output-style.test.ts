@@ -43,6 +43,16 @@ describe('refusalOf', () => {
     expect(refusalOf(blocked)).toEqual({ code: 'hook-blocked', reason: 'Blocked.', event: null, source: null, command: null })
     const untrusted = new HarnessError({ code: 'conflict', message: 'Approve it first.', details: { reason: 'untrusted' } })
     expect(refusalOf(untrusted)).toMatchObject({ code: 'untrusted', reason: 'Approve it first.' })
+    expect(refusalOf(untrusted)).not.toHaveProperty('pluginId')
+  })
+
+  it('keeps the plugin of an untrusted plugin command and names it in the title (v1.8.1)', () => {
+    const changed = new HarnessError({ code: 'conflict', message: 'The plugin changed.', details: { reason: 'untrusted', pluginId: 'review-kit' } })
+    const refusal = refusalOf(changed)!
+    expect(refusal).toEqual({ code: 'untrusted', reason: 'The plugin changed.', event: null, source: null, command: null, pluginId: 'review-kit' })
+    expect(refusalTitle(refusal)).toBe('This command runs shell lines of a plugin that changed after you trusted it.')
+    expect(refusalTitle({ ...refusal, command: 'review-kit:review' })).toBe('/review-kit:review runs shell lines of a plugin that changed after you trusted it.')
+    expect(refusalOf(new HarnessError({ code: 'conflict', message: 'x', details: { reason: 'untrusted', pluginId: 7 } }))).not.toHaveProperty('pluginId')
   })
 
   it('is null for other errors', () => {

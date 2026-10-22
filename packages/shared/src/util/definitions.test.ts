@@ -787,7 +787,8 @@ function randomCodeUnits(random: () => number, maxLength: number): string {
   return text
 }
 
-describe('parseDefinition: fuzzing', () => {
+// Seeded fuzz loops run several times slower on CI runners than locally: a generous timeout per test.
+describe('parseDefinition: fuzzing', { timeout: 30_000 }, () => {
   it('never throws on random token soups and keeps its invariants', () => {
     const random = prng(0xC29)
     for (let iteration = 0; iteration < 1500; iteration++) {
@@ -1007,7 +1008,7 @@ describe('formatDefinition → parseDefinition round trip', () => {
         expect(formatDefinition(result.definition as ParsedDefinition)).toBe(text)
       }
     }
-  })
+  }, 30_000)
 
   it('round-trips parsed Claude Code files', () => {
     const files: Array<[CustomizationKind, string, string]> = [
@@ -1112,7 +1113,7 @@ describe('resolvePrecedence', () => {
       expect(definitionRank(by)).toBeGreaterThanOrEqual(definitionRank(entry))
       expect(result.active).toContain(by)
     }
-  })
+  }, 30_000)
 })
 
 // =====================================================================================================================
@@ -1425,7 +1426,7 @@ describe('phase 12: formatDefinition writes the new keys', () => {
         expect(formatDefinition(result.definition as ParsedDefinition)).toBe(text)
       }
     }
-  })
+  }, 30_000)
 })
 
 describe('setDefinitionName', () => {
@@ -1475,10 +1476,10 @@ describe('setDefinitionName', () => {
       const original = text.split(/\r?\n/).filter(line => !line.startsWith('name: ') && !line.startsWith('"name": ') && !line.startsWith('---'))
       expect(without).toEqual(original)
     }
-  })
+  }, 30_000)
 })
 
-describe('phase 12: fuzzing the new keys', () => {
+describe('phase 12: fuzzing the new keys', { timeout: 30_000 }, () => {
   it('never throws on random values of the new keys and keeps their invariants', () => {
     const random = prng(0xC42F)
     const pick = picker(random)

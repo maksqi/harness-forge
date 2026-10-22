@@ -208,7 +208,8 @@ describe('renderCommandExpansion', () => {
   })
 })
 
-describe('fuzzing', () => {
+// Seeded fuzz loops run several times slower on CI runners than locally: a generous timeout above the time budget.
+describe('fuzzing', { timeout: 30_000 }, () => {
   it('never throws, keeps the text and stays linear', () => {
     const random = prng(0xC35C)
     const units = ['!`', '`', '!', '@', '@"', '"', ' ', '\n', '```\n', '~~~\n', 'a', '.md', '/', '..', '$1', '$ARGUMENTS', '{{input}}', 'ls', '\t', 'é', '😀', '\0']

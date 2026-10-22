@@ -39,6 +39,13 @@ const editingRef = ref<string | null>(null)
 /** "Rename" was picked: start editing once the menu has closed (it returns focus to its trigger first). */
 let renameAfterClose: string | null = null
 
+/**
+ * The visibility switch: a 40px tall hit area on coarse pointers (the small switch stays 14px; its `::after` counts from
+ * inside the 1px border, so 12 + 2 * 14 = 40px). It stays inside its row, which the 32px favorite button and `py-2` make
+ * at least 48px tall, and the base 12px sideways keeps it inside the 56px Visible column.
+ */
+const SWITCH_CLASS = 'pointer-coarse:after:-inset-y-3.5'
+
 async function run(task: Promise<unknown>) {
   try {
     await task
@@ -210,6 +217,7 @@ function stopEditing(value: boolean) {
             :model-value="!model.hidden"
             :aria-label="`Show ${model.name} in the model picker`"
             :data-testid="testIds.modelVisible"
+            :class="SWITCH_CLASS"
             @update:model-value="value => setVisible(model, value)"
           />
         </TableCell>

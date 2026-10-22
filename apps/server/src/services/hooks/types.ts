@@ -14,7 +14,10 @@
 // Command hooks run only through `runShellCommand` (`workspace/shell.ts`, `input` = the payload, `env` = the minimal
 // shell environment + `HARNESS_PROJECT_DIR` / `CLAUDE_PROJECT_DIR` (+ `HARNESS_PLUGIN_ROOT` / `CLAUDE_PLUGIN_ROOT`)),
 // each in its own process group, killed on timeout, abort and shutdown. Project items run only while their sha256 is
-// approved (`ProjectTrustService.approved`) and still verifies right before the spawn (`ProjectConfigService.verify`).
+// approved (`ProjectTrustService.approved`) and still verifies right before the spawn (`ProjectConfigService.verify`);
+// v1.8.1: a Claude Code plugin's command hook runs only while the plugin's whole tree still hashes to its trust pin,
+// checked right before the spawn too (`verifyClaudePluginTree`); a mismatch is a non-blocking `error` and the plugin is
+// loaded again (it turns `untrusted`).
 // Kill switches (command hooks only; plugin code hooks still run): the setting `hooksEnabled`, `HF_WORKSPACE_SHELL=0`,
 // `HF_SAFE_MODE`. Logging: `info` = event, source, a hash prefix of the label, exit code, duration, outcome; commands,
 // payloads, stdout and stderr only at `debug`, redacted.
@@ -212,7 +215,8 @@ export interface HookService {
   /**
    * `GET /hooks` (query validated by the route with `hooksQuerySchema`): every hook of the scope in run order (personal
    * rows; with `query.projectId` the project's settings-file hooks with their trust state and `project`; plugin command
-   * and code hooks), the configuration diagnostics and `switches`. Throws `not_found` for an unknown project; an
+   * and code hooks; the declared hooks of untrusted harness and (v1.8.1) Claude Code plugins as `pending`), the
+   * configuration diagnostics and `switches`. Throws `not_found` for an unknown project; an
    * unavailable folder lists no project hooks (`project.available: false`).
    */
   readonly list: (query: HooksQuery) => Promise<HookList>

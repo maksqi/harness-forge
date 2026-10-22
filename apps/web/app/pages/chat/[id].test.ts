@@ -74,7 +74,7 @@ afterEach(() => {
 })
 
 function mountPage() {
-  return mount(defineComponent({ setup: () => () => h(ChatPage) }), { attachTo: document.body })
+  return mount(defineComponent({ setup: () => () => h(ChatPage) }), { attachTo: document.body, global: { stubs: { NuxtLink: { template: '<a><slot /></a>' } } } })
 }
 
 describe('chat page: workspace frame (Phase 8)', () => {

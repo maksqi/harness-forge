@@ -2,7 +2,9 @@
 // The refusal of a submit inside the composer card, above the text (Phase 11, ADR-048, ADR-049; docs/UI.md 7.31, 10.8):
 // `role="alert"`, `hook-blocked`: `ShieldBan` "A hook blocked this message", the reason and "{event} · {source}"
 // ("UserPromptSubmit · Project hook"; left out without the hook record); `untrusted`: `ShieldQuestionMark` "/{name} runs
-// shell lines you haven't approved." with Review… (`review`, the host opens the project trust dialog); × "Dismiss"
+// shell lines you haven't approved." with Review… (`review`, the host opens the project trust dialog; v1.8.1: a Claude
+// Code plugin command whose tree changed after trust reads "/{name} runs shell lines of a plugin that changed after you
+// trusted it." and the host opens that plugin's page); × "Dismiss"
 // (`dismiss`). Renders nothing for null. It never takes focus (the textarea keeps it and points `aria-describedby` at
 // the root: ChatComposer passes the root's `id` as an attribute). Props, emits and the root test id are frozen from
 // Gate P11-0b (C39 stub); W11.10 implements it in P11-A.

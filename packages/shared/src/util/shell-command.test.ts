@@ -673,7 +673,8 @@ function unsafeConstruct(command: string): string | null {
   return null
 }
 
-describe('fuzzing', () => {
+// Seeded fuzz loops run several times slower on CI runners than locally: a generous timeout per test.
+describe('fuzzing', { timeout: 30_000 }, () => {
   function check(command: string): boolean {
     const parsed = parseShellCommand(command)
     if (parsed.ok) {

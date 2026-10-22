@@ -26,6 +26,7 @@ import {
   noHookSnapshot,
   PERMISSION_PROMPT,
   permissionPromptMessage,
+  settledRecord,
   storedDecision,
   storedDecisions,
 } from './hooks.ts'
@@ -514,6 +515,33 @@ describe('phase 12 seams (C44-T1)', () => {
     expect((other.host.injected[0]!.chunk as { data: HookData }).data).toEqual(asked)
     // An unknown call is a no-op.
     expect(() => other.hooks.settle('unknown', { harnessAsked: true })).not.toThrow()
+  })
+
+  it('settle marks an allowed PermissionRequest record harnessAsked when the call still asks (v1.8.1)', async () => {
+    // No PreToolUse decision: only the PermissionRequest hook allowed, and the harness still showed the card.
+    const allowed = fakeHookRecord('PermissionRequest', 'allowed', { toolCallId: 'call_1', toolName: 'shell' })
+    const { hooks, host } = runHooks({ results: { PermissionRequest: fakeHookResult({ decision: 'allow', record: allowed }) } })
+    expect(await hooks.permissionRequest(call, signal)).toEqual({ decision: 'allow', reason: null })
+    hooks.settle('call_1', { harnessAsked: false, asked: true })
+    const stored = (host.injected[0]!.chunk as { data: HookData }).data
+    expect(stored).toEqual({ ...allowed, harnessAsked: true })
+    expect(hookDataSchema.safeParse(stored).success).toBe(true)
+    // An allow the harness followed (the call was approved): no flag.
+    const followed = runHooks({ results: { PermissionRequest: fakeHookResult({ decision: 'allow', record: allowed }) } })
+    await followed.hooks.permissionRequest(call, signal)
+    followed.hooks.settle('call_1', { harnessAsked: false, asked: false })
+    expect((followed.host.injected[0]!.chunk as { data: HookData }).data).toEqual(allowed)
+
+    // The rule: `asked` decides the PermissionRequest record, `harnessAsked` the PreToolUse one; `asked` absent = `harnessAsked`.
+    const pre = fakeHookRecord('PreToolUse', 'allowed', { toolCallId: 'call_1', toolName: 'shell' })
+    expect(settledRecord(pre, { harnessAsked: false, asked: true })).toEqual(pre)
+    expect(settledRecord(pre, { harnessAsked: true })).toEqual({ ...pre, harnessAsked: true })
+    expect(settledRecord(allowed, { harnessAsked: true })).toEqual({ ...allowed, harnessAsked: true })
+    expect(settledRecord(allowed, { harnessAsked: false })).toEqual(allowed)
+    const deniedRequest = fakeHookRecord('PermissionRequest', 'denied', { toolCallId: 'call_1', toolName: 'shell', reason: 'no' })
+    expect(settledRecord(deniedRequest, { harnessAsked: true, asked: true })).toEqual(deniedRequest)
+    const context = fakeHookRecord('PermissionRequest', 'context', { toolCallId: 'call_1', toolName: 'shell', reason: 'maybe' })
+    expect(settledRecord(context, { harnessAsked: true, asked: true })).toEqual(context)
   })
 
   it('records nobody settled are stored at the next step boundary', async () => {

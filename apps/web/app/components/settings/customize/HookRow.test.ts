@@ -1,7 +1,8 @@
 // HookRow (docs/UI.md 9.13, 9.14, 10.8, 13.12, 13.13; W11.8-T3, W12.12-T2): the row's data attributes, event, matcher and
 // command, the state badges, the meta line, the problems of an invalid row, and the row menu per source (emitted once the
 // menu has closed); Phase 12: prompt rows, exec-form commands, the handler fields in the meta line, project Edit… and
-// Delete…, and Review plugin… for the hook of a harness plugin that waits for trust.
+// Delete…, and Review plugin… for the hook of a harness plugin that waits for trust; v1.8.1: the pending hook of a
+// plugin whose format is not known yet (an untrusted Claude Code plugin's) offers Open plugin only.
 import type { HookEntry } from '@harness-forge/shared'
 import type { VueWrapper } from '@vue/test-utils'
 import { flushPromises, mount } from '@vue/test-utils'
@@ -180,6 +181,7 @@ describe('hookRow: Phase 12 (W12.12-T2)', () => {
   }
 
   it('offers Review plugin… for the hook of a harness plugin that is not trusted', async () => {
+    usePluginsStore().items = [pluginSummary({ id: 'hook-pack', name: 'Hook pack', format: 'harness', state: 'untrusted' })]
     const pending = mountRow(hookEntry({ key: 'plugin:hook-pack:0', source: 'plugin', id: undefined, pluginId: 'hook-pack', state: 'pending' }))
     expect(pending.row().dataset).toMatchObject({ source: 'plugin', state: 'pending' })
     expect(pending.row().querySelector('[data-slot="hook-row-state"]')?.textContent?.trim()).toBe('Plugin not trusted')
@@ -195,6 +197,20 @@ describe('hookRow: Phase 12 (W12.12-T2)', () => {
     expect(row().querySelector('[data-slot="hook-row-state"]')?.textContent?.trim()).toBe('Plugin not trusted')
     await openMenu(row())
     expect(menuItems()).toEqual(['Open plugin', 'Copy as JSON'])
+  })
+
+  it('marks the pending hook of a plugin the store does not know yet and offers Open plugin, not Review plugin… (v1.8.1)', async () => {
+    // The server lists an untrusted Claude Code plugin's hooks as pending; until the plugins store loads, the format is unknown.
+    // eslint-disable-next-line no-template-curly-in-string -- a plugin variable as written in the plugin's hook file
+    const command = '${CLAUDE_PLUGIN_ROOT}/hooks/format.sh'
+    const { row, actions } = mountRow(hookEntry({ key: 'plugin:review-kit:0', source: 'plugin', id: undefined, pluginId: 'review-kit', state: 'pending', event: 'PostToolUse', matcher: 'Write|Edit', command }))
+    expect(row().dataset).toMatchObject({ source: 'plugin', state: 'pending', pluginId: 'review-kit' })
+    expect(row().querySelector('[data-slot="hook-row-state"]')?.textContent?.trim()).toBe('Plugin not trusted')
+    expect(row().querySelector('[data-slot="hook-row-command"]')?.getAttribute('title')).toBe(command)
+    await openMenu(row())
+    expect(menuItems()).toEqual(['Open plugin', 'Copy as JSON'])
+    await choose(document.body.querySelector<HTMLElement>('[data-action="open-plugin"]'))
+    expect(actions).toEqual(['open-plugin'])
   })
 
   it('offers Edit… and Delete… on a project row whose position is known', async () => {

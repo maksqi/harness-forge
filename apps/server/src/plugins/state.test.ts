@@ -84,6 +84,12 @@ describe('plugin records', () => {
     expect(await records.upsert({ id: 'review-kit', source: 'marketplace', version: '1.2.0', origin: marketplace })).toMatchObject({ format: 'claude', origin: marketplace })
     expect((await records.get('review-kit'))?.origin).toEqual(marketplace)
     expect(await records.upsert({ id: 'review-kit', source: 'zip', version: '1.2.0', format: 'harness', origin: null })).toMatchObject({ format: 'harness', origin: null })
+    // v1.8.1 (CCR-1): the server-only overlay origin of an archive reads back; one without an overlay object does not.
+    const archived = { kind: 'overlay', overlay: marketplace.overlay } as const
+    expect(await records.upsert({ id: 'review-kit', source: 'zip', version: '1.2.0', format: 'claude', origin: archived })).toMatchObject({ format: 'claude', origin: archived })
+    expect((await records.get('review-kit'))?.origin).toEqual(archived)
+    await records.upsert({ id: 'review-kit', source: 'zip', version: '1.2.0', origin: { kind: 'overlay' } as never })
+    expect((await records.get('review-kit'))?.origin).toBeNull()
   })
 
   it('creates builtin rows once and refreshes their version', async () => {

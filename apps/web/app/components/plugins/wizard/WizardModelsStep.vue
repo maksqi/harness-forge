@@ -168,6 +168,7 @@ function limitHint(text: string): string {
         <Switch
           id="wizard-list-models"
           :model-value="values.listModels"
+          class="pointer-coarse:after:-inset-y-3"
           @update:model-value="value => form.setFieldValue('listModels', value === true)"
         />
       </div>

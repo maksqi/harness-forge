@@ -49,6 +49,9 @@ vi.mock('~/components/chat/nuxt-imports', () => ({
   navigateTo: vi.fn(),
 }))
 
+/** Installed into each mounted app and set active: in dev, pinia 4 looks the active pinia up with inject() first. */
+let pinia: ReturnType<typeof createPinia>
+
 type Props = InstanceType<typeof ChatMessage>['$props']
 
 function mountMessage(props: Props) {
@@ -71,7 +74,7 @@ function mountMessage(props: Props) {
         onRewind: record('rewind'),
       }),
     }),
-  }), { attachTo: document.body })
+  }), { attachTo: document.body, global: { plugins: [pinia] } })
   return { wrapper, events, instance }
 }
 
@@ -80,7 +83,7 @@ function mountLive(initial: Props) {
   const state = ref<Props>(initial)
   const wrapper = mount(defineComponent({
     setup: () => () => h(TooltipProvider, null, { default: () => h(ChatMessage, state.value) }),
-  }), { attachTo: document.body })
+  }), { attachTo: document.body, global: { plugins: [pinia] } })
   return { wrapper, state }
 }
 
@@ -111,7 +114,8 @@ function assistant(overrides: Partial<HarnessUIMessage> = {}): HarnessUIMessage 
 
 beforeEach(() => {
   mock.api = createMockApi()
-  setActivePinia(createPinia())
+  pinia = createPinia()
+  setActivePinia(pinia)
   player.state.value = 'idle'
   player.activeId.value = null
 })
@@ -738,7 +742,7 @@ describe('chatMessage: hook records (Phase 11)', () => {
       setup: () => () => h(TooltipProvider, null, {
         default: () => h(ChatMessage, { message, isLast: true, streaming: true, showThinking: false, activity: live.value }),
       }),
-    }), { attachTo: document.body, global: { provide: { [HOOK_ACTIVITY as symbol]: current } } })
+    }), { attachTo: document.body, global: { plugins: [pinia], provide: { [HOOK_ACTIVITY as symbol]: current } } })
     return { wrapper, current, live }
   }
 

@@ -364,6 +364,7 @@ const instructionsCount = computed(() => `${instructions.draft.value.length.toLo
           :id="ids.altShortcuts"
           :model-value="resolved.altShortcuts"
           :data-testid="testIds.settingsAltShortcuts"
+          class="pointer-coarse:after:-inset-y-3"
           @update:model-value="value => save({ altShortcuts: value })"
         />
       </Field>
@@ -379,6 +380,7 @@ const instructionsCount = computed(() => `${instructions.draft.value.length.toLo
           :id="ids.shiftTabModes"
           :model-value="resolved.shiftTabModes"
           :data-testid="testIds.settingsShiftTabModes"
+          class="pointer-coarse:after:-inset-y-3"
           @update:model-value="value => save({ shiftTabModes: value })"
         />
       </Field>

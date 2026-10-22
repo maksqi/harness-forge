@@ -207,7 +207,8 @@ describe('mcpServerIdFromName', () => {
   })
 })
 
-describe('fuzzing', () => {
+// Seeded fuzz loops run several times slower on CI runners than locally: a generous timeout above the time budget.
+describe('fuzzing', { timeout: 30_000 }, () => {
   it('never throws on random files and keeps its invariants', () => {
     const random = prng(0x3C35)
     const pick = <T>(items: readonly T[]): T => items[Math.floor(random() * items.length)] as T

@@ -15,6 +15,12 @@
 // reason of a PreToolUse hook that answered `ask` (the call's `asked` hook record; '' when the hook gave none): the banner
 // "A hook asks you to confirm this call: {reason}" (`tool-approval-hook`, `Webhook`, text inside the card's group) under
 // the card's title, above the arguments and the buttons.
+// v1.8.1 (docs/UI.md 7.31, 7.34): the reason of each `PermissionRequest` record of the call (TOOL_APPROVAL_HOOKS, which
+// ToolPart provides; the props stay frozen) reads "A PermissionRequest hook answered: {reason}" below the title and the
+// banner (`data-slot="tool-approval-permission-answer"`, muted `text-xs`, text only, at most 3 lines with the full text
+// in `title`). Such a record decided nothing (the card still asks); it arrives just after the approval request (the
+// server injects the record before the stream's `finish`), so the line can appear a moment after the card. Nothing
+// shows without a record that carries a reason.
 import type { WorkspaceAccess } from '@harness-forge/shared'
 import type { ToolPartLike } from '../chat-format'
 import type { AllowRules } from '~/components/workspace/allowlist/allow-rule'
@@ -30,7 +36,9 @@ import { Checkbox } from '@/components/ui/checkbox'
 import AllowRuleOption from '~/components/workspace/allowlist/AllowRuleOption.vue'
 import { testIds } from '~/utils/testids'
 import { formatToolValue } from '../chat-format'
+import { permissionRequestAnswers } from '../hooks/hook-notes'
 import { TOOL_APPROVAL_CONTEXT } from './tool-approval-context'
+import { TOOL_APPROVAL_HOOKS } from './tool-approval-hooks'
 import { toolApprovalLabel } from './tool-row'
 import ToolApprovalPreview from './tools/ToolApprovalPreview.vue'
 import { workspaceApprovalKind } from './tools/workspace-tools'
@@ -64,6 +72,8 @@ const emit = defineEmits<{
 }>()
 
 const context = inject(TOOL_APPROVAL_CONTEXT, null)
+/** v1.8.1: the hook records of this call (ToolPart provides them; absent elsewhere). */
+const approvalHooks = inject(TOOL_APPROVAL_HOOKS, null)
 
 const checked = ref<boolean | 'indeterminate'>(false)
 const pending = ref(false)
@@ -77,6 +87,11 @@ const label = computed(() => toolApprovalLabel(props.toolName, props.part.input)
 const hookBanner = computed(() => {
   const reason = props.hookReason?.trim()
   return reason ? `A hook asks you to confirm this call: ${reason}` : 'A hook asks you to confirm this call'
+})
+/** v1.8.1: "A PermissionRequest hook answered: {reason}" for each such record of this call with a reason. */
+const permissionAnswers = computed(() => {
+  const callId = props.part.toolCallId
+  return approvalHooks && callId ? permissionRequestAnswers(approvalHooks(), callId) : []
 })
 
 /** "Always allow commands starting with" (Phase 8): the command card of an `execute` tool (the builtin shell). */
@@ -142,6 +157,15 @@ function decide(approved: boolean) {
       >
         <WebhookIcon aria-hidden="true" class="mt-[3px] size-3.5 shrink-0 text-muted-foreground" />
         <span class="min-w-0 break-words whitespace-pre-wrap">{{ hookBanner }}</span>
+      </p>
+      <p
+        v-for="(answer, index) in permissionAnswers"
+        :key="index"
+        data-slot="tool-approval-permission-answer"
+        :title="answer"
+        class="line-clamp-3 min-w-0 text-xs break-words text-muted-foreground"
+      >
+        {{ answer }}
       </p>
       <ToolApprovalPreview v-if="previewKind" :tool-name="toolName" :input="part.input" />
       <AllowRuleOption

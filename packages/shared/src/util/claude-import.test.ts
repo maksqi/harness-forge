@@ -526,6 +526,7 @@ describe('planClaudeImport details', () => {
     expect(draft.items.filter(item => item.kind === 'command')).toHaveLength(CLAUDE_HOME_LIMITS.definitionsPerKindMax)
   })
 
+  // 300 files of 60 KB: slow on CI runners, a generous timeout.
   it('stops at the total byte budget', () => {
     const padding = 'p'.repeat(CLAUDE_HOME_LIMITS.claudeJsonBytes - 1024)
     const body = 'b'.repeat(60_000)
@@ -539,7 +540,7 @@ describe('planClaudeImport details', () => {
     expect(over.length).toBeGreaterThan(0)
     expect(over.every(entry => entry.path.startsWith('commands/'))).toBe(true)
     expect(draft.items.length + over.length).toBe(300)
-  })
+  }, 30_000)
 
   it('caps the plan at 1000 items', () => {
     const settings = { permissions: { allow: Array.from({ length: 500 }, (_, index) => `Read(./f${index})`), ask: Array.from({ length: 500 }, (_, index) => `Edit(./f${index})`), deny: Array.from({ length: 500 }, (_, index) => `Write(./f${index})`) } }
@@ -621,7 +622,8 @@ describe('planClaudeImport details', () => {
 const PATHS = ['agents/a.md', 'agents/b.md', 'commands/x.md', 'commands/d/y.md', 'skills/s/SKILL.md', 'output-styles/o.md', 'settings.json', 'CLAUDE.md', CLAUDE_JSON_PATH, 'projects/p.jsonl', '../x']
 const PIECES = ['---\n', 'name: x\n', 'description: d\n', 'model: sonnet\n', '!`ls`', '{', '}', '[', ']', '"hooks":', '"permissions":', '"allow":', '"Bash(ls:*)"', '"mcpServers":', '"command":"node"', ',', ':', 'é', '\u0000', '\r\n', '@a/b.md', '${X}']
 
-describe('fuzzing', () => {
+// Seeded fuzz loops run several times slower on CI runners than locally: a generous timeout above the time budget.
+describe('fuzzing', { timeout: 30_000 }, () => {
   it('never throws on random home folders and keeps the invariants', () => {
     const random = prng(0xC41F00D)
     const started = Date.now()

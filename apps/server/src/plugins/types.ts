@@ -69,12 +69,15 @@ export type ClaudeEntryOverlay = Pick<ClaudeMarketplaceEntry, 'name' | 'strict' 
 
 /**
  * Where a `github` or `marketplace` install came from (Phase 12, ADR-054; column `plugins.origin`): the DTO
- * `PluginOrigin` plus, for a marketplace entry, the entry overlay (`ClaudeEntryOverlay`; the DTO drops it). Null for the
- * other sources.
+ * `PluginOrigin` plus, for a marketplace entry, the entry overlay (`ClaudeEntryOverlay`; the DTO drops it). v1.8.1
+ * (CCR-1): `{ kind: 'overlay', overlay }` is server-only: a Claude Code plugin installed from a zip or URL archive that
+ * carried the entry overlay of an exported marketplace plugin (`install/overlay-file.ts`); the DTO origin is null and
+ * the source stays the archive's. Null for the other sources.
  */
 export type StoredPluginOrigin
   = | (Extract<PluginOrigin, { kind: 'marketplace' }> & { readonly overlay?: ClaudeEntryOverlay })
     | Extract<PluginOrigin, { kind: 'github' }>
+    | { readonly kind: 'overlay', readonly overlay: ClaudeEntryOverlay }
 
 /** A `plugins` row. */
 export interface PluginRecord {

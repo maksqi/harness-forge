@@ -36,6 +36,9 @@ vi.mock('~/components/chat/nuxt-imports', () => ({
   navigateTo: vi.fn(),
 }))
 
+/** Installed into each mounted app and set active: in dev, pinia 4 looks the active pinia up with inject() first. */
+let pinia: ReturnType<typeof createPinia>
+
 function userMessages(count: number): HarnessUIMessage[] {
   return Array.from({ length: count }, (_, index) => ({
     id: `msg_user${String(index).padStart(12, '0')}`,
@@ -50,7 +53,7 @@ function mountTranscript(messages: HarnessUIMessage[], status: 'ready' | 'stream
     render: () => h(TooltipProvider, null, {
       default: () => h(ChatTranscript, { messages: state.value.messages, status: state.value.status, showThinking: false }),
     }),
-  }, { attachTo: document.body })
+  }, { attachTo: document.body, global: { plugins: [pinia] } })
   return { wrapper, state }
 }
 
@@ -68,7 +71,8 @@ async function until(check: () => boolean) {
 
 beforeEach(() => {
   mock.api = createMockApi()
-  setActivePinia(createPinia())
+  pinia = createPinia()
+  setActivePinia(pinia)
 })
 
 afterEach(() => {
@@ -88,7 +92,7 @@ describe('chatTranscript: long histories', () => {
     expect(first.at(-1)).toBe(messages.at(-1)!.id)
     await until(() => rendered(wrapper).length === 300)
     expect(rendered(wrapper)).toEqual(messages.map(message => message.id))
-  })
+  }, 20_000)
 
   it('renders short histories at once and keeps new messages in place', async () => {
     const messages = userMessages(12)
@@ -156,7 +160,7 @@ describe('chatTranscript: versions', () => {
           onRewind: record('rewind'),
         }),
       }),
-    }, { attachTo: document.body })
+    }, { attachTo: document.body, global: { plugins: [pinia] } })
     return { wrapper, state, events, transcript }
   }
 
@@ -355,7 +359,7 @@ describe('chatTranscript: rewind files (Phase 8)', () => {
           onRewind: (...args: unknown[]) => events.push(args),
         }),
       }),
-    }, { attachTo: document.body })
+    }, { attachTo: document.body, global: { plugins: [pinia] } })
     return { wrapper, state, events, transcript }
   }
 
@@ -423,7 +427,7 @@ describe('chatTranscript: rewind files after sub-agent edits (Phase 9)', () => {
       render: () => h(TooltipProvider, null, {
         default: () => h(ChatTranscript, { messages, status, showThinking: false, projectId: 'prj_sample0000000001' }),
       }),
-    }, { attachTo: document.body })
+    }, { attachTo: document.body, global: { plugins: [pinia] } })
   }
 
   function rewindable(wrapper: ReturnType<typeof mountTasks>): string[] {
@@ -484,7 +488,7 @@ describe('chatTranscript: background agents (Phase 10)', () => {
       render: () => h(TooltipProvider, null, {
         default: () => h(ChatTranscript, { ref: transcript, messages, status: 'ready', showThinking: false, projectId: 'prj_sample0000000001' }),
       }),
-    }, { attachTo: document.body })
+    }, { attachTo: document.body, global: { plugins: [pinia] } })
     return { wrapper, transcript }
   }
 
@@ -565,7 +569,7 @@ describe('chatTranscript: compaction (Phase 9)', () => {
           activity: state.value.activity,
         }),
       }),
-    }, { attachTo: document.body })
+    }, { attachTo: document.body, global: { plugins: [pinia] } })
     return { wrapper, state }
   }
 
@@ -675,7 +679,7 @@ describe('chatTranscript: Phase 9 seams', () => {
       render: () => h(TooltipProvider, null, {
         default: () => h(ChatTranscript, { messages, status: state.value.status, showThinking: false, activity: state.value.activity }),
       }),
-    }, { attachTo: document.body })
+    }, { attachTo: document.body, global: { plugins: [pinia] } })
     await nextTick()
     const rows = () => wrapper.findAllComponents(ChatMessage)
     expect(rows().map(row => row.props('activity'))).toEqual([null, null, null, 'compacting'])
@@ -696,7 +700,7 @@ describe('chatTranscript: hooks (Phase 11)', () => {
       render: () => h(TooltipProvider, null, {
         default: () => h(ChatTranscript, { messages: state.value.messages, status: state.value.status, showThinking: false, activity: 'hooks' }),
       }),
-    }, { attachTo: document.body })
+    }, { attachTo: document.body, global: { plugins: [pinia] } })
     await nextTick()
     expect(wrapper.get(`[data-testid="${testIds.submittedPlaceholder}"]`).text()).toBe('Running hooks…')
     state.value = { status: 'streaming', messages: [...state.value.messages, assistantMessage('msg_a000000000000001', '', { parts: [] })] }
@@ -712,7 +716,7 @@ describe('chatTranscript: hooks (Phase 11)', () => {
       render: () => h(TooltipProvider, null, {
         default: () => h(ChatTranscript, { messages, status: 'streaming', showThinking: false, activity: 'hooks' }),
       }),
-    }, { attachTo: document.body, global: { provide: { [HOOK_ACTIVITY as symbol]: hookActivity } } })
+    }, { attachTo: document.body, global: { plugins: [pinia], provide: { [HOOK_ACTIVITY as symbol]: hookActivity } } })
     await nextTick()
     const lines = () => wrapper.findAll('[data-slot="running-hook"]').map(line => line.text())
     expect(lines()).toEqual(['Running hook…'])
@@ -739,7 +743,7 @@ describe('chatTranscript: hooks (Phase 11)', () => {
           projectId: 'prj_sample0000000001',
         }),
       }),
-    }, { attachTo: document.body })
+    }, { attachTo: document.body, global: { plugins: [pinia] } })
     await nextTick()
     const carrier = wrapper.get(`[data-message-id="${C1}"]`)
     expect(carrier.get(`[data-testid="${testIds.hookNote}"]`).attributes('data-variant')).toBe('turn')

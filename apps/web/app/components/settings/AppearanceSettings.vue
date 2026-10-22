@@ -203,6 +203,7 @@ function onDensity(value: unknown) {
         :id="ids.showThinking"
         :model-value="resolved.showThinking"
         :data-testid="testIds.appearanceShowThinking"
+        class="pointer-coarse:after:-inset-y-3"
         @update:model-value="value => save({ showThinking: value })"
       />
     </Field>

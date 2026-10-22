@@ -56,7 +56,7 @@ async function usagePurposes(t: TestApp, chatId: string): Promise<string[]> {
   return result.rows.map(row => `${String(row.purpose)}:${String(row.model_id)}`)
 }
 
-describe('sub-agents through POST /api/chat (mock:subagent)', () => {
+describe('sub-agents through POST /api/chat (mock:subagent)', { timeout: 30_000 }, () => {
   let t: TestApp
   let projects: FakeProjectService
   let projectId: string

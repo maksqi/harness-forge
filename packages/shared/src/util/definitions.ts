@@ -832,7 +832,7 @@ function readModel(kind: 'agent' | 'command' | 'skill', front: Frontmatter | nul
     const alias = claudeModelAlias(lower)
     const message = alias === null
       ? `Claude model names need a provider ("provider:model"); ${fallback}.`
-      : `Claude model names use the model aliases of the settings; without one, ${fallback}.`
+      : `Claude model names run the model chosen under Settings → General → Agent → Claude model names; without one, ${fallback}.`
     diagnostics.push(diagnostic('info', 'model-alias', message, field.line))
     return { model: null, alias }
   }

@@ -29,9 +29,16 @@
 // command hooks need `hooksEnabled`, the shell and no safe mode; prompt hooks need `hooksEnabled` and no safe mode.
 // `stop()` also kills the `async` hooks and the `SessionEnd` runs in flight, aborts the prompt-hook calls and stops the
 // transcript writer.
+// v1.8.1 (ADR-053): right before a plugin command hook spawns, the plugin's row is read and a Claude Code plugin's whole
+// tree is hashed again against its trust pin (`createClaudeTrustGuard`, `plugins/claude/trust.ts`; concurrent checks of
+// one plugin share one hash). A mismatch starts nothing (a non-blocking `error` in the record and the run log) and the
+// plugin is loaded again (`plugins.load`, once at a time per plugin), which leaves it `untrusted` until the user trusts
+// it again (`plugin.changed`; its registration goes, so `hooks.changed` follows). The listing also shows the hooks of an
+// untrusted Claude Code plugin (`readClaudePluginHooks`: its files as written, no option value), cached per plugin and
+// trust hash.
 // Logging: `info` = the event, the source, a hash prefix of the label, the exit code, the duration, the outcome; the
 // redacted command only at `debug`; payloads, stdout and stderr never.
-import type { Disposable } from '@harness-forge/plugin-sdk'
+import type { Disposable, HooksConfig } from '@harness-forge/plugin-sdk'
 import type { HookEvent, HookList, HookSpec, HookSwitches, PromptHookSpec, ServerEvent } from '@harness-forge/shared'
 import type { RegistryChange } from '../../registry/types.ts'
 import type { AppDeps } from '../../types.ts'
@@ -44,6 +51,7 @@ import type { HookEventResult, HookRunInput, HookRunOptions, HookScope, HookServ
 import { chmod, mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { compileMatcher, HOOK_EVENTS, isPromptHookEvent, LIMITS } from '@harness-forge/shared'
+import { createClaudeTrustGuard, readClaudePluginHooks } from '../../plugins/claude/trust.ts'
 import { projectPromptSpec } from '../project-config/hook-items.ts'
 import { onSettingsChange } from '../settings/index.ts'
 import { codeHookOf, codeHookPlugins, isListedCodeHook } from './code-hooks.ts'
@@ -147,6 +155,10 @@ export function createHookService(deps: AppDeps, options: HookServiceOptions = {
   const stopController = new AbortController()
   const inflight = new Set<Promise<unknown>>()
   const staleProjects = new Set<string>()
+  /** v1.8.1: the verify-before-spawn of Claude Code plugin hooks (shared checks, one reload per changed plugin). */
+  const trustGuard = createClaudeTrustGuard(deps.plugins, logger)
+  /** v1.8.1: the hooks of untrusted Claude Code plugins, per plugin and the trust hash of the host's last read. */
+  const claudeHooksCache = new Map<string, { readonly hash: string, readonly dir: string, readonly hooks: HooksConfig | null }>()
   const pendingChanges = new Set<string | null>()
   let subscriptions: Disposable[] | null = null
   let stopped = false
@@ -499,22 +511,55 @@ export function createHookService(deps: AppDeps, options: HookServiceOptions = {
     return { scope, hooks, codeEvents: codeEvents() }
   }
 
-  /** The harness plugins in state `untrusted` with their declared hooks (`GET /hooks`, open point 14). */
+  /**
+   * v1.8.1: the hooks an untrusted Claude Code plugin declares, read from its folder as its files say (cached per plugin
+   * while the host's trust hash and folder stay the same); null when it has none or its folder does not read.
+   */
+  async function claudePluginHooks(pluginId: string, hash: string | null): Promise<HooksConfig | null> {
+    const dir = await deps.plugins.directory(pluginId)
+    if (dir === null || hash === null)
+      return null
+    const cached = claudeHooksCache.get(pluginId)
+    if (cached !== undefined && cached.hash === hash && cached.dir === dir)
+      return cached.hooks
+    const record = await deps.plugins.record(pluginId)
+    const hooks = await readClaudePluginHooks(pluginId, dir, record, stopController.signal)
+    claudeHooksCache.set(pluginId, { hash, dir, hooks })
+    return hooks
+  }
+
+  /**
+   * The plugins in state `untrusted` with their declared hooks (`GET /hooks`, open point 14): a harness plugin's manifest
+   * `contributes.hooks`; v1.8.1: a Claude Code plugin's merged hook files.
+   */
   async function untrustedPlugins(): Promise<UntrustedPluginHooks[]> {
     const list: UntrustedPluginHooks[] = []
+    const claude = new Set<string>()
     try {
       for (const summary of await deps.plugins.list()) {
-        if (summary.state !== 'untrusted' || summary.format !== 'harness')
+        if (summary.state !== 'untrusted' || (summary.format !== 'harness' && summary.format !== 'claude'))
           continue
         try {
           const detail = await deps.plugins.get(summary.id)
-          const declared = (detail.manifest as { contributes?: { hooks?: unknown } }).contributes?.hooks
+          let declared: unknown
+          if (summary.format === 'claude') {
+            claude.add(summary.id)
+            declared = await claudePluginHooks(summary.id, detail.trust.hash)
+          }
+          else {
+            declared = (detail.manifest as { contributes?: { hooks?: unknown } }).contributes?.hooks
+          }
           if (declared !== undefined && declared !== null)
             list.push({ pluginId: summary.id, hooks: declared })
         }
         catch (error) {
           logger.debug('hooks: an untrusted plugin could not be read', { pluginId: summary.id, err: error })
         }
+      }
+      // Only the plugins that still wait for trust keep their cached hooks.
+      for (const pluginId of claudeHooksCache.keys()) {
+        if (!claude.has(pluginId))
+          claudeHooksCache.delete(pluginId)
       }
     }
     catch (error) {
@@ -531,6 +576,8 @@ export function createHookService(deps: AppDeps, options: HookServiceOptions = {
     stopSignal: stopController.signal,
     hooksDir,
     onStale,
+    verifyPlugin: (pluginId: string, root: string) => trustGuard.verify(pluginId, root),
+    onPluginStale: (pluginId: string) => trustGuard.changed(pluginId),
     track,
     runner: options.runner ?? {},
     now,
@@ -631,9 +678,10 @@ export function createHookService(deps: AppDeps, options: HookServiceOptions = {
         settingsSubscription = null
         pendingChanges.clear()
       }
-      await Promise.allSettled([...inflight])
+      await Promise.allSettled([...inflight, trustGuard.stop()])
       await transcripts?.stop()
       personal.invalidate()
+      claudeHooksCache.clear()
     },
   }
 }

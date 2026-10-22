@@ -1441,7 +1441,7 @@ function processSettings(state: PlanState, file: CollectedFile): void {
       name: 'model',
       file: file.path,
       status: 'unsupported',
-      summary: `The default model${SAFE_MODEL.test(model) ? ` ${model}` : ''} is not imported; pick a model in Settings (Claude aliases resolve through the model aliases setting).`,
+      summary: `The default model${SAFE_MODEL.test(model) ? ` ${model}` : ''} is not imported; pick a model in Settings. Claude model names such as sonnet run the models chosen under Settings → General → Agent.`,
       linked: file.linked,
     })
   }

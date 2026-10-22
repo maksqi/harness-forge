@@ -267,7 +267,7 @@ function mountView(props: { chatId: string, isNew?: boolean }) {
         ],
       }),
     }),
-  }), { attachTo: document.body, global: { stubs: { NuxtLink: { template: '<a><slot /></a>' } } } })
+  }), { attachTo: document.body, global: { plugins: [pinia], stubs: { NuxtLink: { template: '<a><slot /></a>' } } } })
   mounted.push(wrapper)
   return { wrapper, created }
 }
@@ -949,7 +949,7 @@ describe('chatView: workspace 2.0 wiring (Phase 8)', () => {
     })
     const wrapper = mount(defineComponent({
       setup: () => () => h(TooltipProvider, null, { default: () => h(ChatView, { chatId: chatId(22) }, { header: () => h(Probe) }) }),
-    }), { attachTo: document.body, global: { stubs: { NuxtLink: { template: '<a><slot /></a>' } } } })
+    }), { attachTo: document.body, global: { plugins: [pinia], stubs: { NuxtLink: { template: '<a><slot /></a>' } } } })
     mounted.push(wrapper)
     await until(() => wrapper.get('[data-testid="approval-context"]').attributes('data-project-id') === projectId(1))
     expect(wrapper.get('[data-testid="approval-context"]').attributes('data-cwd')).toBe(useChatSession(chatId(22)).cwd.value ?? 'root')
@@ -1458,7 +1458,7 @@ describe('chatView: background agents (Phase 10)', () => {
     })
     const wrapper = mount(defineComponent({
       setup: () => () => h(TooltipProvider, null, { default: () => h(ChatView, { chatId: chatId(31) }, { header: () => h(Probe) }) }),
-    }), { attachTo: document.body, global: { stubs: { NuxtLink: { template: '<a><slot /></a>' } } } })
+    }), { attachTo: document.body, global: { plugins: [pinia], stubs: { NuxtLink: { template: '<a><slot /></a>' } } } })
     mounted.push(wrapper)
     await until(() => wrapper.get('[data-testid="agent-task-context"]').attributes('data-result') === 'completed')
     // The carrier renders its result notes, not a bubble.
@@ -1528,7 +1528,7 @@ describe('chatView: background agents (Phase 10)', () => {
     onTestFinished(() => scrolled.mockRestore())
     const wrapper = mount(defineComponent({
       setup: () => () => h(TooltipProvider, null, { default: () => h(ChatView, { chatId: chatId(31) }, { header: () => h(Probe) }) }),
-    }), { attachTo: document.body, global: { stubs: { NuxtLink: { template: '<a><slot /></a>' } } } })
+    }), { attachTo: document.body, global: { plugins: [pinia], stubs: { NuxtLink: { template: '<a><slot /></a>' } } } })
     mounted.push(wrapper)
     await until(() => wrapper.find(`[data-testid="${testIds.taskResult}"]`).exists())
     expect(showResult!(backgroundTaskId(9))).toBe(false)
@@ -1616,7 +1616,7 @@ describe('chatView: hooks, project trust and output styles (Phase 11, P11-0b mou
     })
     const wrapper = mount(defineComponent({
       setup: () => () => h(TooltipProvider, null, { default: () => h(ChatView, { chatId: chatId(41) }, { header: () => h(Probe) }) }),
-    }), { attachTo: document.body, global: { stubs: { NuxtLink: { template: '<a><slot /></a>' } } } })
+    }), { attachTo: document.body, global: { plugins: [pinia], stubs: { NuxtLink: { template: '<a><slot /></a>' } } } })
     mounted.push(wrapper)
     await until(() => wrapper.findAll(`[data-testid="${testIds.messageUser}"]`).length === 1)
     expect(hookActivity).toBeNull()

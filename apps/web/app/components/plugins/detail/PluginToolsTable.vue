@@ -56,6 +56,13 @@ const POLICY_CLASS: Record<string, string> = {
 /** The label of a policy function (`policy: null`): the tool decides for each call. */
 const PER_CALL_LABEL = 'Decided per call'
 
+/**
+ * The enabled switch: a 40px tall hit area on coarse pointers (the small switch stays 14px; its `::after` counts from
+ * inside the 1px border, so 12 + 2 * 14 = 40px). It stays inside its row (`py-3` around the 32px approval select), and
+ * the 16px column gap keeps the base 12px sideways clear of the select.
+ */
+const SWITCH_CLASS = 'pointer-coarse:after:-inset-y-3.5'
+
 /** The server refuses (and the approval ignores) an `allow` override for this tool. */
 function refusesAllow(tool: ToolSummary): boolean {
   return tool.workspace === 'execute' || (tool.pluginId === CORE_AGENT_PLUGIN_ID && tool.name === PLAN_TOOL_NAME)
@@ -181,6 +188,7 @@ function onApproval(tool: ToolSummary, value: AcceptableValue) {
             :aria-label="`Enable ${row.name}`"
             :data-testid="testIds.pluginToolEnabled"
             :data-tool-name="row.name"
+            :class="SWITCH_CLASS"
             @update:model-value="(value: boolean) => row.tool && update(row.tool, { enabled: value })"
           />
         </div>

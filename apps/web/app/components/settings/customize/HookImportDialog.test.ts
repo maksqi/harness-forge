@@ -94,6 +94,20 @@ describe('hookImportDialog', () => {
     expect(byTestId<HTMLButtonElement>(testIds.hookImportSubmit)?.disabled).toBe(true)
   })
 
+  it('describes the dialog and the textarea by the help, both through ids that exist', async () => {
+    const warn = vi.spyOn(console, 'warn')
+    await mountDialog()
+    const dialog = byTestId(testIds.hookImportDialog)!
+    const help = 'Paste Claude Code settings JSON (the whole file or its "hooks" object).'
+    const describedBy = dialog.getAttribute('aria-describedby')
+    expect(describedBy).toBeTruthy()
+    expect(document.getElementById(describedBy!)?.textContent?.trim()).toBe(help)
+    const input = byTestId<HTMLTextAreaElement>(testIds.hookImportInput)!
+    expect(document.getElementById(input.getAttribute('aria-describedby')!)?.textContent?.trim()).toBe(help)
+    expect(warn.mock.calls.flat().join('\n')).not.toContain('Missing `Description`')
+    warn.mockRestore()
+  })
+
   it('previews a real Claude Code settings file: the invalid matcher unchecked, the prompt hook ready', async () => {
     await mountDialog()
     await paste(SETTINGS)

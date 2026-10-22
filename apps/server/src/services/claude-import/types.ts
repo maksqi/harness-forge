@@ -1,11 +1,10 @@
 // Frozen interface of the home-folder import (Phase 12, ADR-055; API.md 4.34 / 5.35, ARCHITECTURE.md 6.35): copy a
 // Claude Code setup (agents, commands, skills, output styles, `settings.json` hooks and permissions, `CLAUDE.md`, the MCP
 // servers of `.claude.json`) once into personal sources. Implementation: `createClaudeImportService(deps)` in
-// `services/claude-import/index.ts` (C43 stub: `home()` is real, the rest answers `not_implemented`; W12.3 implements
-// the collectors, the baseline, the plans and apply). Consumers: the `claudeImport` routes (`home` through this service
-// since P12-0b; scan, upload and apply W12.3) and shutdown (`stopDeps`: `stop()` first, the plans dropped). Test
-// double: `createFakeClaudeImportService` (`testing/fake-claude-import.ts`), installed with `createTestApp({
-// claudeImport: 'fake' })`.
+// `services/claude-import/index.ts` (W12.3: the disk and upload collectors, the baseline, the kept plans and apply).
+// Consumers: the `claudeImport` routes (home, scan, upload, apply) and shutdown (`stopDeps`: `stop()` first, the plans
+// dropped). Test double: `createFakeClaudeImportService` (`testing/fake-claude-import.ts`), installed with
+// `createTestApp({ claudeImport: 'fake' })`.
 //
 // Only an allowlist is read (`isClaudeHomeImportPath`, `util/claude-import.ts`): `agents/*.md`, `commands/**/*.md` (≤ 3
 // levels), `skills/<name>/SKILL.md`, `output-styles/*.md`, `settings.json`, `CLAUDE.md`, `.claude.json` (inside the

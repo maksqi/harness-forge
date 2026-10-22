@@ -54,7 +54,9 @@
 // - markdown plugin commands (`CommandDefinition.syntax: 'markdown'`, Claude Code plugins) take the command-file path:
 //   `argumentOptions` with the plugin variables, `!` spans as a trusted plugin source whose environment adds
 //   `CLAUDE_PLUGIN_ROOT` / `HARNESS_PLUGIN_ROOT` and `CLAUDE_PLUGIN_DATA`, `@path`, `model` and `allowedTools` that only
-//   narrow (plugin `allowed-tools` never pre-approve);
+//   narrow (plugin `allowed-tools` never pre-approve); v1.8.1: the spans run only while a Claude Code plugin's whole tree
+//   still hashes to its trust pin (`claudeSpanTrust`, checked with the other span checks and right before the spans
+//   run), else 409 `conflict` `untrusted` with `details.pluginId` and the plugin is loaded again (it turns `untrusted`);
 // - models: a definition's Claude model name (`modelAlias`, or a plugin command's `model: sonnet`) resolves through
 //   `resolveClaudeModel` (`modelAliases`); one that does not resolve runs the chat's model and the resolution carries
 //   `modelUnavailable` (the `command-model-unavailable` notice of `prepare.ts`); skills now apply their `model` and
@@ -76,6 +78,7 @@ import type {
 } from '@harness-forge/shared'
 import type { DataPaths } from '../env.ts'
 import type { Logger } from '../logger.ts'
+import type { PluginSpanTrust } from '../plugins/claude/trust.ts'
 import type { PluginHost } from '../plugins/types.ts'
 import type { ProviderService } from '../providers/types.ts'
 import type { RegisteredCommand, Registry } from '../registry/types.ts'
@@ -103,6 +106,8 @@ import {
   planCommandExpansion,
   skillInvocation,
 } from '@harness-forge/shared'
+import { createSilentLogger } from '../logger.ts'
+import { claudeSpanTrust } from '../plugins/claude/trust.ts'
 import { GUARD_TIMEOUTS } from '../plugins/guard.ts'
 import { bareAliasNames, isQualifiedName } from '../services/customizations/qualified.ts'
 import { expandCommandPlan, minimalExpansion, needsInlining, prepareCommandPlan } from './inline/index.ts'
@@ -169,8 +174,12 @@ export const HARNESS_COMMAND_SUMMARIES: readonly CommandSummary[] = Object.freez
 export interface CommandServices {
   /** Phase 12 (optional): `skills` gives a plugin skill's folder (`SkillDefinition.baseDir`, `${CLAUDE_SKILL_DIR}`). */
   registry: Pick<Registry, 'commands'> & Partial<Pick<Registry, 'skills'>>
-  /** Phase 12: `directory` (optional) is the root of a markdown plugin command or a plugin skill (`${CLAUDE_…}`). */
-  plugins: Pick<PluginHost, 'guard'> & Partial<Pick<PluginHost, 'directory'>>
+  /**
+   * Phase 12: `directory` (optional) is the root of a markdown plugin command or a plugin skill (`${CLAUDE_…}`).
+   * v1.8.1: with `record` and `load`, a markdown plugin command's `!` spans run only while the plugin's tree still has
+   * its trust pin (`claudeSpanTrust`); without them they run as before.
+   */
+  plugins: Pick<PluginHost, 'guard'> & Partial<Pick<PluginHost, 'directory' | 'record' | 'load'>>
   /** Phase 10: the bodies of command files and personal commands (`load(entry, signal)`). */
   customizations: Pick<CustomizationService, 'load'>
   /** Phase 12 (optional): the plugin data folders (`${CLAUDE_PLUGIN_DATA}` = `<pluginData>/<id>`). */
@@ -368,6 +377,8 @@ interface BodyExpansionOptions {
   readonly arguments?: ExpandArgumentsOptions
   /** Extra variables of the spans' environment (a plugin's `CLAUDE_PLUGIN_ROOT` / `CLAUDE_PLUGIN_DATA`). */
   readonly spanEnv?: Readonly<Record<string, string>>
+  /** v1.8.1: the trust re-check of a Claude Code plugin's spans (`ExpandCommandPlanInput.pluginTrust`). */
+  readonly pluginTrust?: PluginSpanTrust
 }
 
 /**
@@ -405,6 +416,7 @@ async function bodyExpansion(
     ...(context.logger === undefined ? {} : { logger: context.logger }),
     ...(options.arguments === undefined ? {} : { arguments: options.arguments }),
     ...(options.spanEnv === undefined ? {} : { spanEnv: options.spanEnv }),
+    ...(options.pluginTrust === undefined ? {} : { pluginTrust: options.pluginTrust }),
   }
   if (context.deferExpansion !== true)
     return { done: await expandCommandPlan(request) }
@@ -478,6 +490,19 @@ function pluginSpanEnv(folders: { root: string, data: string | null } | null): R
   if (folders === null)
     return undefined
   return { HARNESS_PLUGIN_ROOT: folders.root, ...pluginVars(folders) }
+}
+
+/**
+ * v1.8.1: the span trust of a markdown plugin command (a Claude Code plugin: its tree is hashed again against its pin
+ * before the spans run; other formats pass); undefined without the plugin's folder or the host's `record` / `load`.
+ */
+function spanTrustOf(services: CommandServices, pluginId: string, folders: { root: string } | null, context: CommandContext): PluginSpanTrust | undefined {
+  const plugins = services.plugins
+  const record = plugins.record?.bind(plugins)
+  const load = plugins.load?.bind(plugins)
+  if (folders === null || record === undefined || load === undefined)
+    return undefined
+  return claudeSpanTrust({ record, load }, context.logger ?? createSilentLogger(), pluginId, folders.root)
 }
 
 /** The model a definition's turn runs on (Phase 12): its model ref, a resolved Claude model name, or the name that did not resolve. */
@@ -673,6 +698,7 @@ async function markdownResolution(services: CommandServices, registered: Registe
   const folders = await pluginFolders(services, registered.pluginId)
   const options = argumentOptions({ body, names: stringArray(extras.arguments), vars: await bodyVars(context, body, pluginVars(folders)) })
   const spanEnv = pluginSpanEnv(folders)
+  const pluginTrust = spanTrustOf(services, registered.pluginId, folders, context)
   const model = modelExtras(await definitionModel(services, context, definition.model, typeof extras.modelAlias === 'string' ? extras.modelAlias : null))
   const fork = extras.context === 'fork'
   const declared = commandAllowedTools(definition.allowedTools)
@@ -680,6 +706,7 @@ async function markdownResolution(services: CommandServices, registered: Registe
   const expansion = await bodyExpansion(name, body, input, 'plugin', context, () => expandArguments(body, input, options).text, {
     arguments: options,
     ...(spanEnv === undefined ? {} : { spanEnv }),
+    ...(pluginTrust === undefined ? {} : { pluginTrust }),
   })
   const invocation: InvocationExtras = { ...model.invocation, ...(allowedTools === undefined ? {} : { allowedTools }) }
   if (!fork)

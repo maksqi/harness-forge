@@ -401,6 +401,22 @@ describe('provider test', () => {
     expect((await t.deps.catalog.list({ providerId: 'acme' })).map(model => [model.id, model.source])).toEqual([['a', 'live'], ['b', 'live']])
   })
 
+  it('still lists models with HF_OFFLINE=1 (the user asked for the test) and stores the listing', async () => {
+    const t = await setup({ builtins: [], env: { HF_OFFLINE: '1' } })
+    let calls = 0
+    t.registry.providers.register('acme-plugin', testProvider({
+      listModels: async () => {
+        calls++
+        return [{ id: 'a' }]
+      },
+    }))
+    await t.credentials.set('acme', { apiKey: 'stored-key' })
+    expect(await t.deps.providers.test('acme')).toMatchObject({ ok: true, modelCount: 1 })
+    expect(await t.deps.providers.test('acme', { apiKey: 'candidate-key' })).toMatchObject({ ok: true, modelCount: 1 })
+    expect(calls).toBe(2)
+    expect((await t.deps.catalog.list({ providerId: 'acme' })).map(model => [model.id, model.source])).toEqual([['a', 'live']])
+  })
+
   it('reports and stores a rejected key', async () => {
     const t = await setup({ builtins: [] })
     t.registry.providers.register('acme-plugin', testProvider({

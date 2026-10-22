@@ -328,7 +328,7 @@ describe('customize import (W10.8)', () => {
     expect(draft).toMatchObject({ name: 'reviewer', tools: ['read_file', 'search_files'], model: null, body: 'Review.' })
     expect(notes[0]).toBe('Imported from reviewer.md. Check the fields, then save.')
     expect(notes).toContain('Ignored: effort')
-    expect(notes.some(note => note.includes('model alias'))).toBe(true)
+    expect(notes.some(note => note.includes('Claude model names run the model chosen'))).toBe(true)
   })
 
   it('keeps the fields of a SKILL.md without a name and leaves the name to the user', async () => {

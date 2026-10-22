@@ -15,6 +15,7 @@ import {
   hookSourceText,
   hookStillAsks,
   isHookCarrierMessage,
+  permissionRequestAnswers,
   PROMPT_HOOK_UNREADABLE_TEXT,
   toolHookDecision,
   toolHooksOf,
@@ -229,5 +230,36 @@ describe('phase 12 records (W12.13-T3)', () => {
     expect(toolHookDecision([{ ...pre, outcome: 'rewritten', harnessAsked: undefined }])).toEqual({ outcome: 'rewritten', stillAsks: false, event: 'PreToolUse' })
     expect(toolHookDecision([{ ...pre, outcome: 'asked' }, post])).toBeNull()
     expect(toolHookDecision([])).toBeNull()
+  })
+})
+
+describe('permissionRequestAnswers (v1.8.1)', () => {
+  const answer = (overrides: Parameters<typeof hookData>[0] = {}) => hookData({
+    id: hookRecordId(2),
+    event: 'PermissionRequest',
+    outcome: 'context',
+    toolCallId: 'call_shell_1',
+    toolName: 'shell',
+    reason: 'Deleting files needs a person.',
+    ...overrides,
+  })
+
+  it('reads each PermissionRequest record of the call with a reason as the note does, the reason on one line', () => {
+    const pre = hookData({ id: hookRecordId(1), event: 'PreToolUse', outcome: 'asked', toolCallId: 'call_shell_1', reason: 'Touches production.' })
+    const allowed = answer({ id: hookRecordId(3), outcome: 'allowed', reason: '  Read-only\n  command. ' })
+    expect(permissionRequestAnswers([pre, answer(), allowed], 'call_shell_1')).toEqual([
+      'A PermissionRequest hook answered: Deleting files needs a person.',
+      'A PermissionRequest hook answered: Read-only command.',
+    ])
+    // The row's note reads the same line.
+    expect(hookOutcomeText(answer())).toBe(permissionRequestAnswers([answer()], 'call_shell_1')[0])
+  })
+
+  it('is empty without a PermissionRequest record of the call, or when its reason is missing or blank', () => {
+    expect(permissionRequestAnswers([], 'call_shell_1')).toEqual([])
+    expect(permissionRequestAnswers([answer({ reason: undefined })], 'call_shell_1')).toEqual([])
+    expect(permissionRequestAnswers([answer({ reason: ' \n ' })], 'call_shell_1')).toEqual([])
+    expect(permissionRequestAnswers([answer({ toolCallId: 'call_other' })], 'call_shell_1')).toEqual([])
+    expect(permissionRequestAnswers([answer({ event: 'PreToolUse', outcome: 'asked' })], 'call_shell_1')).toEqual([])
   })
 })

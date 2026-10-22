@@ -1,7 +1,8 @@
 // The Phase 12 fields of plugin DTOs as the plugin routes answer them (ADR-053 / ADR-054; API.md 4.10). Owner: W12.2.
 // The host builds `PluginDetail` / `PluginSummary`; the routes make sure that, whatever the host fills in:
 // - `format` is the row's format (`plugins.format`);
-// - `origin` is the row's origin without the server-side entry overlay (`pluginOriginSchema`), null for other sources;
+// - `origin` is the row's origin without the server-side entry overlay (`pluginOriginSchema`), null for other sources
+//   (v1.8.1: also for the server-only `overlay` origin of an archive that carried an exported entry overlay);
 // - `claude` is the Claude Code plugin info of a `format: 'claude'` plugin (read through `inspectDirectory` with the
 //   stored overlay when the host left it empty; null when it cannot be read);
 // - `editable` is false for a Claude Code plugin (its files are not editable in v1.8).
@@ -13,7 +14,7 @@ import { createPluginRecordStore } from '../../plugins/state.ts'
 
 /** The DTO origin of a stored origin (the entry overlay dropped); null when absent or not a valid origin. */
 export function originDto(origin: StoredPluginOrigin | null): PluginOrigin | null {
-  if (origin === null)
+  if (origin === null || origin.kind === 'overlay')
     return null
   const { overlay: _overlay, ...rest } = origin as StoredPluginOrigin & { overlay?: unknown }
   const parsed = pluginOriginSchema.safeParse(rest)
@@ -37,7 +38,7 @@ export async function completeDetail(deps: AppDeps, detail: PluginDetail): Promi
   if (format === 'claude' && claude === null) {
     try {
       const dir = await deps.plugins.directory(detail.id)
-      const overlay = record?.origin?.kind === 'marketplace' ? record.origin.overlay : undefined
+      const overlay = record?.origin?.kind === 'marketplace' || record?.origin?.kind === 'overlay' ? record.origin.overlay : undefined
       if (dir !== null)
         claude = (await deps.plugins.inspectDirectory(dir, { format: 'claude', ...(overlay === undefined ? {} : { overlay }) })).claude
     }

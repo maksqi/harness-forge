@@ -293,10 +293,10 @@ export function createPluginHost(deps: AppDeps, options: PluginHostOptions = {})
     return declaredContributions(entry.valid && entry.builtin === null ? entry.manifest : null)
   }
 
-  /** The DTO origin of a row (the stored marketplace entry overlay left out). */
+  /** The DTO origin of a row (the stored marketplace entry overlay left out; v1.8.1: none for a server-only `overlay`). */
   function originOf(record: PluginRecord | null): PluginOrigin | null {
     const origin = record?.origin ?? null
-    if (origin === null)
+    if (origin === null || origin.kind === 'overlay')
       return null
     if (origin.kind === 'marketplace') {
       const { overlay: _overlay, ...rest } = origin
@@ -715,7 +715,8 @@ export function createPluginHost(deps: AppDeps, options: PluginHostOptions = {})
   async function readUserPlugin(id: string, record: PluginRecord | null): Promise<FormatRead> {
     const dir = pluginDirOf(id, record)
     const format = record?.format ?? await detectFolderFormat(dir) ?? 'harness'
-    const overlay = record?.origin?.kind === 'marketplace' ? record.origin.overlay : undefined
+    // v1.8.1: also the overlay an exported marketplace plugin's archive carried (origin kind `overlay`).
+    const overlay = record?.origin?.kind === 'marketplace' || record?.origin?.kind === 'overlay' ? record.origin.overlay : undefined
     const versionHint = versionHintOf(record)
     return readPluginDirectoryFor(format, dir, {
       expectedId: id,

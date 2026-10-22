@@ -1025,3 +1025,88 @@ describe('toolPart: Phase 12 (W12.13)', () => {
     expect(row(wrapper).get('button').attributes('aria-label')).toBe('Loaded skill review-kit:pdf, Review kit')
   })
 })
+
+describe('toolPart: PermissionRequest answers on the approval card (v1.8.1)', () => {
+  const request = () => part({ state: 'approval-requested', approval: { id: 'appr_1' } })
+  /** A prompt hook's "no" on PermissionRequest that changed nothing (W12.5): outcome `context`, the answer in `reason`. */
+  const answer = (overrides: Parameters<typeof hookData>[0] = {}) => ({
+    id: hookRecordId(2),
+    toolCallId: 'call_1',
+    toolName: 'web_fetch',
+    event: 'PermissionRequest' as const,
+    outcome: 'context' as const,
+    reason: 'Fetching unknown sites needs a person.',
+    hooks: [{ source: 'project' as const, label: 'Is this fetch safe?', exitCode: null, durationMs: 700, kind: 'prompt' as const, model: 'mock:prompt-hook' }],
+    ...overrides,
+  })
+  function mountCard(hooks: Parameters<typeof hookData>[0][]) {
+    return mount({
+      render: () => h(TooltipProvider, null, { default: () => h(ToolPart, { part: request(), streaming: true, hooks: hooks.map(overrides => hookData(overrides)) }) }),
+    }, { attachTo: document.body })
+  }
+  const answers = (wrapper: ReturnType<typeof mountCard>) => wrapper.get(`[data-testid="${testIds.toolApproval}"]`).findAll('[data-slot="tool-approval-permission-answer"]')
+
+  it('shows the reason of the call\'s PermissionRequest record on the card, muted, clamped, with the full text as its title', async () => {
+    const wrapper = mountCard([answer()])
+    const [line, ...rest] = answers(wrapper)
+    expect(rest).toHaveLength(0)
+    expect(line!.text()).toBe('A PermissionRequest hook answered: Fetching unknown sites needs a person.')
+    expect(line!.attributes('title')).toBe('A PermissionRequest hook answered: Fetching unknown sites needs a person.')
+    expect(line!.classes()).toEqual(expect.arrayContaining(['line-clamp-3', 'text-xs', 'text-muted-foreground', 'break-words']))
+    // Text only, inside the card's group; the PreToolUse banner stays absent without an `asked` record.
+    expect(line!.element.children).toHaveLength(0)
+    expect(wrapper.find(`[data-testid="${testIds.toolApprovalHook}"]`).exists()).toBe(false)
+    expect(wrapper.getComponent(ToolApprovalCard).props('hookReason')).toBeNull()
+    // The row's note (in the opened body) reads the same line.
+    await row(wrapper).get('button').trigger('click')
+    await flushPromises()
+    expect(wrapper.get(`[data-testid="${testIds.hookNote}"]`).get('[data-slot="hook-note-line"]').text()).toBe(line!.text())
+  })
+
+  it('puts the answer below the PreToolUse banner and keeps a long reason whole in the DOM (one line, clamped by CSS)', () => {
+    const long = `${'Deleting build output is risky. '.repeat(40)}Ask the user.`
+    const wrapper = mountCard([
+      { id: hookRecordId(1), toolCallId: 'call_1', outcome: 'asked', reason: 'Touches production.' },
+      answer({ reason: long.replace(/\. /g, '.\n') }),
+    ])
+    const card = wrapper.get(`[data-testid="${testIds.toolApproval}"]`)
+    const banner = card.get(`[data-testid="${testIds.toolApprovalHook}"]`)
+    const line = answers(wrapper)[0]!
+    expect(banner.element.compareDocumentPosition(line.element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(line.text()).toBe(`A PermissionRequest hook answered: ${long.trim()}`)
+    expect(line.classes()).toContain('line-clamp-3')
+  })
+
+  it('shows nothing new without a PermissionRequest record of the call', () => {
+    const none = mountCard([])
+    expect(none.find(`[data-testid="${testIds.toolApproval}"]`).exists()).toBe(true)
+    expect(answers(none)).toHaveLength(0)
+    const preOnly = mountCard([{ id: hookRecordId(1), toolCallId: 'call_1', outcome: 'asked', reason: 'Touches production.' }])
+    expect(answers(preOnly)).toHaveLength(0)
+    expect(preOnly.get(`[data-testid="${testIds.toolApprovalHook}"]`).text()).toBe('A hook asks you to confirm this call: Touches production.')
+    // A record of another call (never passed by ChatMessage, but the card checks the call id).
+    expect(answers(mountCard([answer({ toolCallId: 'call_other' })]))).toHaveLength(0)
+  })
+
+  it('shows nothing for a PermissionRequest record without a reason', () => {
+    const silent = mountCard([answer({ reason: undefined, hooks: [{ source: 'personal', label: 'sh notify.sh', exitCode: 0, durationMs: 4, systemMessage: 'Asked the team.' }] })])
+    expect(answers(silent)).toHaveLength(0)
+    expect(answers(mountCard([answer({ reason: '   ' })]))).toHaveLength(0)
+  })
+
+  it('adds the line once the record arrives after the card (the server injects it before the stream\'s finish)', async () => {
+    const hooks = ref<Parameters<typeof hookData>[0][]>([])
+    const wrapper = mount({
+      render: () => h(TooltipProvider, null, { default: () => h(ToolPart, { part: request(), streaming: true, hooks: hooks.value.map(overrides => hookData(overrides)) }) }),
+    }, { attachTo: document.body })
+    expect(answers(wrapper)).toHaveLength(0)
+    hooks.value = [answer()]
+    await flushPromises()
+    expect(answers(wrapper).map(line => line.text())).toEqual(['A PermissionRequest hook answered: Fetching unknown sites needs a person.'])
+  })
+
+  it('shows no answer on a card outside a tool row (no records provided: TaskBlock\'s card)', () => {
+    const wrapper = mount(ToolApprovalCard, { props: { part: request(), toolName: 'web_fetch' }, attachTo: document.body })
+    expect(wrapper.find('[data-slot="tool-approval-permission-answer"]').exists()).toBe(false)
+  })
+})

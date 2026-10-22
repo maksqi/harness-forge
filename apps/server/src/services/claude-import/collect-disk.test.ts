@@ -157,4 +157,17 @@ describe('collectDiskHome', () => {
     controller.abort()
     await expect(collectDiskHome({ root: claudeHome, dataDir: await tempFolder('hf-data-'), signal: controller.signal })).rejects.toMatchObject({ code: 'conflict' })
   })
+
+  it('a deadline that passed before the first file ends the scan with the timeout warning, never an error', async () => {
+    const { claudeHome } = await writeFakeHome()
+    const watched = watchedFs()
+    let clock = 0
+    // The clock jumps past the deadline right after it was computed (before the root is resolved).
+    const now = (): number => (clock += 5000) - 5000
+    const collected = await collectDiskHome({ root: claudeHome, dataDir: await tempFolder('hf-data-'), timeoutMs: 1000, now, fs: watched.fs })
+    expect(collected.files).toEqual([])
+    expect(collected.diagnostics).toEqual([expect.objectContaining({ level: 'warning', code: 'timeout' })])
+    expect(watched.opened).toEqual([])
+    expect(watched.listed).toEqual([])
+  })
 })

@@ -10,6 +10,8 @@
 // {model}", the label's first line, "The model's answer could not be read." for an unreadable answer), the record that
 // decides a tool row's badge (`toolHookDecision`: a `PermissionRequest` decision over the `PreToolUse` one), and a
 // `context` record without a context (a prompt hook's reason, or system messages only: `PostCompact`).
+// v1.8.1: `permissionRequestAnswers`, the lines of an approval card for the call's `PermissionRequest` records that carry
+// a reason (the card still asks), in the note's wording ("A PermissionRequest hook answered: {reason}").
 import type { HarnessUIMessage, HookData } from '@harness-forge/shared'
 import { HOOK_PART_TYPE, hookDataSchema, isHookCarrier, safeParseModelRef } from '@harness-forge/shared'
 
@@ -103,7 +105,7 @@ export function hookOutcomeText(data: HookData): string {
       // messages (`PostCompact` and the other observe-only events).
       if (hasContext(data))
         return `Hook added context · ${event}`
-      return reason ? `A ${event} hook answered: ${reason}` : `A ${event} hook sent a message`
+      return reason ? hookAnsweredText(event, reason) : `A ${event} hook sent a message`
     case 'denied':
       return withReason(`Blocked by a ${event} hook`)
     case 'asked':
@@ -157,6 +159,26 @@ export function hookSourceText(hook: HookData['hooks'][number], pluginName: stri
 /** The record has a model-visible context (not only system messages or a reason). */
 function hasContext(data: HookData): boolean {
   return (data.context?.trim() ?? '') !== ''
+}
+
+/** "A {event} hook answered: {reason}" (a hook's answer that decided nothing; the reason already on one line). */
+function hookAnsweredText(event: HookData['event'], reason: string): string {
+  return `A ${event} hook answered: ${reason}`
+}
+
+/**
+ * v1.8.1: the lines an approval card shows for the `PermissionRequest` records of its call (`toolCallId`) that carry a
+ * reason, in part order: "A PermissionRequest hook answered: {reason}" (the reason on one line, as the row's note reads
+ * it). While the card asks, such a record decided nothing: a prompt hook's "no" (outcome `context`) or an answer
+ * harness-forge did not follow. Empty without such a record (a blank reason counts as none).
+ */
+export function permissionRequestAnswers(hooks: readonly HookData[], toolCallId: string): string[] {
+  return hooks.flatMap((data) => {
+    if (data.event !== 'PermissionRequest' || data.toolCallId !== toolCallId)
+      return []
+    const reason = data.reason ? oneLine(data.reason) : ''
+    return reason ? [hookAnsweredText(data.event, reason)] : []
+  })
 }
 
 /** A hook allowed the call but harness-forge still asked (`harnessAsked`; `data-state="still-asks"`). */

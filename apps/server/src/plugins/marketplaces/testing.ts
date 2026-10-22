@@ -155,12 +155,12 @@ export function withFakeClaudeReader(host: PluginHost, deps: AppDeps): PluginHos
 
   async function detailOf(record: PluginRecord): Promise<PluginDetail> {
     const dir = join(deps.env.paths.plugins, record.id)
-    const overlay = record.origin?.kind === 'marketplace' ? record.origin.overlay : undefined
+    const overlay = record.origin?.kind === 'marketplace' || record.origin?.kind === 'overlay' ? record.origin.overlay : undefined
     const read = await fakeClaudeInspection(dir, overlay === undefined ? {} : { overlay })
     const trusted = !read.requiresTrust || record.trustedHash === read.sha256
     const state: PluginState = !record.enabled ? 'disabled' : trusted ? 'active' : 'untrusted'
     states.set(record.id, state)
-    const origin = record.origin === null ? null : (({ overlay: _overlay, ...rest }) => rest)(record.origin as typeof record.origin & { overlay?: unknown })
+    const origin = record.origin === null || record.origin.kind === 'overlay' ? null : (({ overlay: _overlay, ...rest }) => rest)(record.origin as typeof record.origin & { overlay?: unknown })
     return {
       id: record.id,
       name: read.manifest.name,

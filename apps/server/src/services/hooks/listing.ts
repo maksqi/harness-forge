@@ -11,7 +11,8 @@
 // hooks are `hooksEnabled` and `HF_SAFE_MODE` only (`HF_WORKSPACE_SHELL=0` runs no shell, so it does not block them).
 // The `contributes.hooks` of a harness plugin in state `untrusted` (which registers nothing) are listed from its
 // manifest as `source: 'plugin'`, `state: 'pending'` entries (open point 14; the web labels them "Plugin not trusted");
-// an untrusted Claude Code plugin's hooks show on its plugin page only. W12.16: a Claude Code plugin's exec-form
+// v1.8.1: so are the hooks of an untrusted Claude Code plugin, read from its hook files as written (the plugin folders
+// and every `${user_config.KEY}` stay references: no option value is listed). W12.16: a Claude Code plugin's exec-form
 // `command` / `args` are listed as registered: the plugin folders substituted, every `${user_config.KEY}` as written
 // (the runner substitutes the option values at spawn), so no option value, a sensitive one above all, is ever listed.
 import type { HookDiagnostic, HookEntry, HookList, HookProjectScan, HookSpec, HooksQuery, HookState, HookSwitches, PromptHookSpec } from '@harness-forge/shared'
@@ -179,7 +180,10 @@ export function pluginCommandEntries(registration: RegisteredHookCommands, activ
   })
 }
 
-/** A harness plugin in state `untrusted` and its manifest's `contributes.hooks` (open point 14). */
+/**
+ * A plugin in state `untrusted` and the hooks it declares (open point 14): a harness plugin's manifest
+ * `contributes.hooks`; v1.8.1: a Claude Code plugin's merged hook files (`readClaudePluginHooks`).
+ */
 export interface UntrustedPluginHooks {
   readonly pluginId: string
   readonly hooks: unknown
@@ -262,7 +266,7 @@ export interface HookListInput {
   readonly plugins: readonly RegisteredHookCommands[]
   readonly isActive: (pluginId: string) => boolean
   readonly code: readonly HookEntry[]
-  /** Phase 12: the harness plugins in state `untrusted` with their declared hooks (listed `pending`). */
+  /** Phase 12: the harness plugins (v1.8.1: and Claude Code plugins) in state `untrusted` with their declared hooks (listed `pending`). */
   readonly untrusted?: readonly UntrustedPluginHooks[]
   /** With `query.projectId`: the scan and the approved hashes. */
   readonly project?: { readonly scan: ProjectConfigSnapshot, readonly approved: ReadonlySet<string> }

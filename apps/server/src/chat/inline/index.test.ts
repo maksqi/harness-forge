@@ -2,7 +2,9 @@
 // `expandCommandPlan` (W11.5-T2 – T4): the checks of `!` spans in their order (a project chat, the shell, the folder, a
 // trusted source: a personal command, a plugin template, or a project command file whose trust hash is approved — the
 // hash the trust listing computes, re-read right before the spans run), the spans and `@path` files of a trusted body,
-// the rendered text and `inlined`. Real shells in `realpath(mkdtemp())` projects, POSIX `sh` only; skipped on Windows.
+// the rendered text and `inlined`; v1.8.1: a Claude Code plugin's spans only while its tree has its pin. Real shells in `realpath(mkdtemp())` projects, POSIX `sh` only; skipped on Windows.
+import type { PluginDetail } from '@harness-forge/shared'
+import type { PluginRecord } from '../../plugins/types.ts'
 import type { OpenWorkspace } from '../../services/projects/types.ts'
 import type { CommandExpansionHost } from '../commands.ts'
 import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
@@ -11,9 +13,13 @@ import { join } from 'node:path'
 import process from 'node:process'
 import { HarnessError, planCommandExpansion } from '@harness-forge/shared'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { createSilentLogger } from '../../logger.ts'
+import { clearTreeHashCache, hashPluginTree, scanPluginTree } from '../../plugins/claude/tree-hash.ts'
+import { claudeSpanTrust } from '../../plugins/claude/trust.ts'
 import { commandTrustSubject } from '../../services/project-config/index.ts'
+import { claudePluginFiles, writeFileTree } from '../../testing/claude-fixtures.ts'
 import { killLiveShellGroups } from '../../workspace/shell.ts'
-import { expandCommandPlan, isSpanRefusal, minimalExpansion, needsInlining, renderExpansion, spansFolderUnavailable, spansNeedProject, spansShellDisabled, spansUntrusted } from './index.ts'
+import { expandCommandPlan, isSpanRefusal, minimalExpansion, needsInlining, prepareCommandPlan, renderExpansion, spansFolderUnavailable, spansNeedProject, spansPluginChanged, spansShellDisabled, spansUntrusted } from './index.ts'
 
 const posix = process.platform !== 'win32'
 const PROJECT = 'prj_0123456789abcdef'
@@ -118,6 +124,45 @@ describe.skipIf(!posix)('expandCommandPlan', () => {
       expect(host.asked).toEqual(['workspace'])
     }
     expect(await exists(join(root, 'pwned'))).toBe(false)
+  })
+
+  it('runs a Claude Code plugin\'s spans only while its tree has its pin, checked again before they run (v1.8.1)', async () => {
+    const pluginRoot = await realpath(await mkdtemp(join(tmpdir(), 'hf-span-plugin-')))
+    try {
+      await writeFileTree(pluginRoot, claudePluginFiles('uid-mark'))
+      clearTreeHashCache()
+      const tree = await scanPluginTree(pluginRoot)
+      const record = { id: 'uid-mark', format: 'claude', source: 'copy', trustedHash: await hashPluginTree(tree), origin: null } as unknown as PluginRecord
+      const loads: string[] = []
+      const plugins = {
+        record: async () => record,
+        load: async (id: string) => {
+          loads.push(id)
+          return { state: 'untrusted' } as PluginDetail
+        },
+      }
+      const pluginTrust = claudeSpanTrust(plugins, createSilentLogger(), 'uid-mark', pluginRoot)
+      const plan = planCommandExpansion('Mark: !`echo marked >> plugin-spans.txt; echo ok`')
+      const request = { name: 'uid-mark:mark', input: '', plan, source: 'plugin' as const, signal, pluginTrust }
+      expect(await expandCommandPlan({ ...request, host: hostOf(root) })).toEqual({ text: 'Mark: ok', inlined: { shell: 1, files: [] } })
+      expect(await readFile(join(root, 'plugin-spans.txt'), 'utf8')).toBe('marked\n')
+
+      // Checked when prepared, edited before the runner runs: the runner checks again and runs nothing.
+      const run = await prepareCommandPlan({ ...request, host: hostOf(root) })
+      await writeFile(join(pluginRoot, 'scripts', 'mark.sh'), '#!/bin/sh\necho edited\n')
+      const refused = await run().catch((error: HarnessError) => error)
+      expect((refused as HarnessError).toJSON().error).toEqual({ code: 'conflict', message: spansPluginChanged('uid-mark:mark', 'uid-mark').message, details: { reason: 'untrusted', pluginId: 'uid-mark' } })
+      expect(isSpanRefusal(refused)).toBe(true)
+      expect(await readFile(join(root, 'plugin-spans.txt'), 'utf8')).toBe('marked\n')
+      // The plugin is loaded again once (it turns untrusted); a later send is refused at check 4 already.
+      await expect(expandCommandPlan({ ...request, host: hostOf(root) })).rejects.toMatchObject({ code: 'conflict', details: { reason: 'untrusted', pluginId: 'uid-mark' } })
+      expect(loads.length).toBeGreaterThanOrEqual(1)
+      expect(await readFile(join(root, 'plugin-spans.txt'), 'utf8')).toBe('marked\n')
+    }
+    finally {
+      await rm(pluginRoot, { recursive: true, force: true })
+      clearTreeHashCache()
+    }
   })
 
   it('inlines @path files in project chats only, after the spans; references alone need no shell and no trust', async () => {

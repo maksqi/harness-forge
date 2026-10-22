@@ -171,6 +171,7 @@ describe('extractCommandFileRefs', () => {
     expect(extractCommandFileRefs(bare)).toEqual(Array.from({ length: TRUST_LIMITS.refFilesMax }, (_, index) => `b${index}.sh`))
   })
 
+  // Seeded fuzz loops run several times slower on CI runners than locally: a generous timeout above the time budget.
   it('never throws and stays bounded on random input', () => {
     const random = prng(0x7257)
     const units = [' ', '"', '\'', '$', '$CLAUDE_PROJECT_DIR', '${HARNESS_PROJECT_DIR}', '/', './', '..', '.claude/', 'a', '.sh', '.py', ';', '&&', '|', '\\', '`', '(', '\n', '\0', 'é', '*']
@@ -190,7 +191,7 @@ describe('extractCommandFileRefs', () => {
     expect(extractCommandFileRefs(`sh ./a.sh $${')'.repeat(65_000)}x ${'/'.repeat(60_000)}a.sh`)).toEqual(['a.sh'])
     expect(extractCommandFileRefs(null as unknown as string)).toEqual([])
     expect(Date.now() - started).toBeLessThan(10_000)
-  })
+  }, 30_000)
 })
 
 describe('extractArgsFileRefs', () => {

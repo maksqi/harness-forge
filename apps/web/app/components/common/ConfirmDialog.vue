@@ -2,6 +2,7 @@
 // AlertDialog wrapper for destructive confirmations (e.g. "Uninstall {name}?"). The caller owns `open` and
 // closes the dialog after its action; while `pending`, the dialog cannot be dismissed.
 // Non-prop attributes (e.g. data-testid="plugin-uninstall-confirm") go to the confirm button.
+import { computed } from 'vue'
 import {
   AlertDialog,
   AlertDialogCancel,
@@ -41,6 +42,12 @@ defineSlots<{
   default?: () => any
 }>()
 
+/**
+ * Without a description the dialog is described by nothing: reka points `aria-describedby` at its description id by
+ * default, which would dangle (and warn) when the description is not rendered.
+ */
+const contentAttrs = computed(() => (props.description ? {} : { 'aria-describedby': undefined }))
+
 function onOpenChange(value: boolean) {
   if (!value && props.pending)
     return
@@ -50,7 +57,7 @@ function onOpenChange(value: boolean) {
 
 <template>
   <AlertDialog :open="open" @update:open="onOpenChange">
-    <AlertDialogContent data-slot="confirm-dialog">
+    <AlertDialogContent data-slot="confirm-dialog" v-bind="contentAttrs">
       <AlertDialogHeader>
         <AlertDialogTitle>{{ title }}</AlertDialogTitle>
         <AlertDialogDescription v-if="description">

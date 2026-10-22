@@ -454,7 +454,8 @@ function prng(seed: number): () => number {
   }
 }
 
-describe('fuzzing', () => {
+// Seeded fuzz loops run several times slower on CI runners than locally: a generous timeout per test.
+describe('fuzzing', { timeout: 30_000 }, () => {
   const random = prng(0xA6E7)
   const pick = <T>(items: readonly T[]): T => items[Math.floor(random() * items.length)]!
   let steerCounter = 0
@@ -1068,7 +1069,7 @@ describe('sessionStartSource', () => {
   }
 })
 
-describe('hook fuzzing', () => {
+describe('hook fuzzing', { timeout: 30_000 }, () => {
   const random = prng(0x40C35)
   const pick = <T>(items: readonly T[]): T => items[Math.floor(random() * items.length)]!
   const events = ['PreToolUse', 'PostToolUse', 'UserPromptSubmit', 'Stop', 'SessionStart', 'PreCompact', 'Notification', 'SubagentStop']

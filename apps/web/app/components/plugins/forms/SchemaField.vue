@@ -144,7 +144,7 @@ function onToggleOption(option: string, checked: boolean | 'indeterminate') {
       :disabled="disabled"
       :aria-describedby="describedBy"
       :aria-invalid="invalid"
-      class="mt-0.5"
+      class="mt-0.5 pointer-coarse:after:-inset-y-3"
       @update:model-value="value => emit('update:modelValue', value)"
     />
 

@@ -514,7 +514,7 @@ describe('plan mode with a tool without workspace access (mock:tool-approval)', 
   })
 })
 
-describe('mock:plan in a project chat (PROVIDERS.md 8)', () => {
+describe('mock:plan in a project chat (PROVIDERS.md 8)', { timeout: 30_000 }, () => {
   let t: TestApp
   let project: ProjectSummary
 

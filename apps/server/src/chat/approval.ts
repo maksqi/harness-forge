@@ -39,8 +39,9 @@
 // `PreToolUse` `allow` (`allowApproves`: never in plan mode, never for an `execute` tool or a policy other than `safe` /
 // `ask`; otherwise the card stays), its `deny` → denied "Blocked by hook: <reason>", its `updatedInput` is applied like
 // `PreToolUse`'s (the tool wrapper reads it; the call only runs in this run when the allow approved it). Then, whatever
-// happened (the catch path included), `ToolHooks.settle(callId, { harnessAsked })` stores the call's pending hook
-// records: `harnessAsked` = a `PreToolUse` `allow` whose call still asks the user.
+// happened (the catch path included), `ToolHooks.settle(callId, { harnessAsked, asked })` stores the call's pending
+// hook records: `harnessAsked` = a `PreToolUse` `allow` whose call still asks the user; v1.8.1: `asked` = the call still
+// asks the user, whoever decided (an `allowed` `PermissionRequest` record the harness did not follow is flagged too).
 import type { ToolCallContext, ToolDefinition, ToolWorkspace, ToolWorkspaceAccess } from '@harness-forge/plugin-sdk'
 import type { ToolMode, ToolOverride, ToolPolicy } from '@harness-forge/shared'
 import type { ModelMessage, ToolApprovalStatus, ToolSet } from 'ai'
@@ -388,11 +389,12 @@ export function createToolApproval(context: ToolApprovalContext) {
     }
     finally {
       // Phase 12: the call's pending hook records are stored whatever happened (`harnessAsked`: a `PreToolUse` allow
-      // whose call still asks the user).
+      // whose call still asks the user; v1.8.1 `asked`: the call still asks, which flags a `PermissionRequest` allow).
       if (hooks !== null) {
         const allowed = seen.hook?.decision === 'allow'
         try {
-          hooks.settle(toolCall.toolCallId, { harnessAsked: allowed && statusType(status) === 'user-approval' })
+          const asked = statusType(status) === 'user-approval'
+          hooks.settle(toolCall.toolCallId, { harnessAsked: allowed && asked, asked })
         }
         catch (error) {
           context.logger.warn('the hook records of a tool call could not be stored', { tool: toolCall.toolName, err: error })

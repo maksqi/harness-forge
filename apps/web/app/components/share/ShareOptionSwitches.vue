@@ -3,6 +3,8 @@
 // generated images; option key `attachments`), Reasoning and Tool details switches of a link card and of the new-link
 // form. Presentational: emits the changed key; the card sends it as an options-only update, the form keeps it until
 // "Create link".
+// On coarse pointers every switch has a 40px tall hit area (`::after`, counted from inside its 1px border: 16.4 + 2 * 12)
+// and every option is a 40px row, so the hit areas of options that wrap onto a second line (`gap-y-2`) never overlap.
 import type { ShareOptions } from '@harness-forge/shared'
 import type { ShareOptionKey } from './share-links'
 import { useId } from 'vue'
@@ -27,13 +29,14 @@ const baseId = useId()
 
 <template>
   <div data-slot="share-options" class="flex flex-wrap items-center gap-x-4 gap-y-2">
-    <div v-for="field in SHARE_OPTION_FIELDS" :key="field.key" class="flex items-center gap-2">
+    <div v-for="field in SHARE_OPTION_FIELDS" :key="field.key" class="flex items-center gap-2 pointer-coarse:min-h-10">
       <Switch
         :id="`${baseId}-${field.value}`"
         :model-value="options[field.key]"
         :disabled="disabled"
         :data-testid="testIds.shareOption"
         :data-value="field.value"
+        class="pointer-coarse:after:-inset-y-3"
         @update:model-value="(value: boolean) => emit('change', field.key, value)"
       />
       <Label :for="`${baseId}-${field.value}`" class="text-sm font-normal">

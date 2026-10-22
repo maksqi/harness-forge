@@ -2,6 +2,8 @@
 // schemas, call the plugin host, map DTOs. `plugins.reload` of a code plugin requires fresh auth (ADR-017). Phase 12
 // (ADR-053 / ADR-054): every detail carries the row's `format`, its `origin` (without the entry overlay), the `claude`
 // info of a Claude Code plugin and `editable: false` for one (`plugins-detail.ts`); the list carries the formats.
+// v1.8.1: removing a plugin installed from a marketplace entry also emits `marketplace.changed` for its marketplace
+// (`emitInstalledChange`).
 import type { AppDeps } from '../../types.ts'
 import type { AppEnv } from '../types.ts'
 import {
@@ -12,6 +14,7 @@ import {
   pluginSettingsUpdateSchema,
 } from '@harness-forge/shared'
 import { Hono } from 'hono'
+import { emitInstalledChange } from '../../plugins/marketplaces/index.ts'
 import { requireFreshAuth } from '../middleware/fresh-auth.ts'
 import { validate } from '../validate.ts'
 import { completeDetail, completeSummaries } from './plugins-detail.ts'
@@ -36,7 +39,9 @@ export function createPluginsRoutes(deps: AppDeps): Hono<AppEnv> {
   app.delete(apiRoutes['plugins.remove'].path, validate('param', pluginParamsSchema), validate('query', pluginRemoveQuerySchema), async (c) => {
     const { id } = c.req.valid('param')
     const { keepData } = c.req.valid('query')
+    const origin = (await deps.plugins.record(id))?.origin ?? null
     await deps.plugins.uninstall(id, { keepData: keepData ?? false })
+    await emitInstalledChange(deps, origin)
     return c.body(null, 204)
   })
 
@@ -52,7 +57,10 @@ export function createPluginsRoutes(deps: AppDeps): Hono<AppEnv> {
 
   app.post(apiRoutes['plugins.reload'].path, validate('param', pluginParamsSchema), async (c) => {
     const { id } = c.req.valid('param')
-    // Reloading re-runs the plugin's code from disk: fresh auth for code plugins (builtins are part of the server).
+    // Reloading re-runs the plugin's code from disk: fresh auth for code plugins (builtins are part of the server). A
+    // declarative or Claude Code plugin runs no code of its own in the server: a reload re-reads its files and re-checks
+    // the trust pin (an edited plugin that runs commands stays `untrusted` until a fresh-auth trust; a linked folder is
+    // pinned by its path), so it needs none, like enable (ADR-017, ARCHITECTURE.md 10.13).
     const plugin = await deps.plugins.summary(id)
     if (plugin.kind === 'code' && !plugin.builtin)
       requireFreshAuth(c)

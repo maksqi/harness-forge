@@ -1,6 +1,6 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { h } from 'vue'
+import { h, ref } from 'vue'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { isAllowedMarkdownLink } from '~/components/chat/parts/markdown/markdown-options'
 import Markdown from './Markdown.vue'
@@ -11,6 +11,9 @@ vi.mock('~/components/chat/nuxt-imports', () => ({
   useRouter: () => ({ replace: vi.fn(), push: vi.fn() }),
   navigateTo: vi.fn(),
 }))
+
+const workers = vi.hoisted(() => ({ ensureMermaidWorker: vi.fn() }))
+vi.mock('~/components/chat/parts/markdown/markdown-workers', () => workers)
 
 async function settle(rounds = 8) {
   for (let i = 0; i < rounds; i++) {
@@ -165,6 +168,26 @@ describe('markdown: code blocks', () => {
     if (block.exists())
       expect(block.attributes('data-highlighted')).toBe('false')
     expect(wrapper.text()).toContain('{ "a":')
+    wrapper.unmount()
+  })
+})
+
+describe('markdown: mermaid parser worker', () => {
+  it('hands the content and the final flag of every change to the worker registration', async () => {
+    workers.ensureMermaidWorker.mockClear()
+    const content = ref('A reply')
+    const final = ref(false)
+    const wrapper = mount({
+      render: () => h(TooltipProvider, null, { default: () => h(Markdown, { content: content.value, final: final.value }) }),
+    }, { attachTo: document.body })
+    expect(workers.ensureMermaidWorker).toHaveBeenLastCalledWith('A reply', false)
+    content.value = 'A reply, then more'
+    await flushPromises()
+    expect(workers.ensureMermaidWorker).toHaveBeenLastCalledWith('A reply, then more', false)
+    final.value = true
+    await flushPromises()
+    expect(workers.ensureMermaidWorker).toHaveBeenLastCalledWith('A reply, then more', true)
+    expect(workers.ensureMermaidWorker).toHaveBeenCalledTimes(3)
     wrapper.unmount()
   })
 })

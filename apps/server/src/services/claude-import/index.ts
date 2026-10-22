@@ -1,5 +1,5 @@
 // The home-folder import (Phase 12, ADR-055; API.md 5.35, ARCHITECTURE.md 6.35) behind `ClaudeImportService`
-// (./types.ts). W12.3 implements the C43 stub:
+// (./types.ts). Owner: W12.3.
 //
 // - `home()`: one `stat` of `env.claudeHome` (never a file read);
 // - `scan()` (fresh auth): `HF_CLAUDE_HOME=0` → 409 `disabled`; ./collect-disk.ts reads the allowlist (10 s deadline;

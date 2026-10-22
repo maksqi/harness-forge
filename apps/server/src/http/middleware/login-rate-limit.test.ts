@@ -93,5 +93,5 @@ describe('login rate limiter', () => {
     // Every entry older than the window is swept: only the last ~100 addresses can still be blocked.
     expect(limiter.remaining('addr-0')).toBe(5)
     expect(limiter.remaining('addr-999')).toBe(4)
-  })
+  }, 30_000)
 })

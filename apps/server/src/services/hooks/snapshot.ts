@@ -25,6 +25,11 @@
 //   the service's `stop()`, never by the run; their outcome only reaches the run log, never the result);
 // - a project item is verified right before its spawn or model call (`projectConfig.verify`: the item and its referenced
 //   files are hashed again); a mismatch skips it as pending, drops the project's config cache and announces the change;
+// - v1.8.1 (ADR-053): a plugin command hook is verified right before its spawn too (`SnapshotRuntime.verifyPlugin`: a
+//   Claude Code plugin's whole tree is hashed again and compared with its trust pin; other formats pass); a mismatch
+//   starts nothing, records a non-blocking `error` (`PLUGIN_CHANGED_ERROR`) and reports the plugin
+//   (`onPluginStale`: the service loads it again, so it turns `untrusted`). Prompt hooks run no file, so they are not
+//   re-checked;
 // - when a command or prompt hook runs, the chat's transcript is written first (`transcripts.ts`) and its path joins the
 //   payload (`transcript_path`); the stdin payload is `buildHookPayload` (one per source: `harness.source` differs), the
 //   working folder the project root, else `<dataDir>/hooks` (0700);
@@ -128,6 +133,14 @@ export interface SnapshotRuntime {
   readonly hooksDir: () => Promise<string>
   /** A project item no longer matches its approval (verify-before-run failed). */
   readonly onStale: (projectId: string) => void
+  /**
+   * v1.8.1: the plugin a command hook comes from may still run files from `root` (a Claude Code plugin: its whole tree
+   * still hashes to its trust pin; any other format: true). Resolves false on any failure (fail closed); never rejects
+   * (the snapshot races it with the run's signal). Absent = no check.
+   */
+  readonly verifyPlugin?: (pluginId: string, root: string) => Promise<boolean>
+  /** v1.8.1: a plugin's files changed since it was trusted (`verifyPlugin` answered false). */
+  readonly onPluginStale?: (pluginId: string) => void
   /** Keeps `stop()` waiting for a run until it settled. */
   readonly track: <T>(promise: Promise<T>) => Promise<T>
   readonly runner: CommandHookOptions
@@ -146,6 +159,12 @@ export interface SnapshotSources {
   /** Events with code hooks of an active plugin (at snapshot time). */
   readonly codeEvents: ReadonlySet<HookEvent>
 }
+
+/**
+ * The error of a plugin command hook that did not start because its plugin's files changed since the plugin was trusted
+ * (v1.8.1; safe to show: it names nothing).
+ */
+export const PLUGIN_CHANGED_ERROR = 'The plugin\'s files changed after it was trusted, so this hook did not run. Review and trust the plugin again.'
 
 /** First 12 hex characters of the sha256 of a label: what `info` logs instead of the command. */
 export function labelHash(label: string): string {
@@ -338,12 +357,29 @@ export function createSnapshot(runtime: SnapshotRuntime, sources: SnapshotSource
     return false
   }
 
+  /**
+   * v1.8.1: verify-before-spawn of a plugin command hook (a Claude Code plugin's whole-tree pin); a changed plugin is
+   * reported and its hook does not start.
+   */
+  async function pluginStillTrusted(event: HookEvent, hook: SnapshotCommandHook, signal: AbortSignal): Promise<boolean> {
+    const verify = runtime.verifyPlugin
+    if (hook.source !== 'plugin' || hook.pluginId === undefined || hook.pluginRoot === undefined || verify === undefined)
+      return true
+    if (await untilAborted(verify(hook.pluginId, hook.pluginRoot), signal))
+      return true
+    log.info('hooks: a plugin hook did not run: the plugin files changed after it was trusted', { event, pluginId: hook.pluginId, hook: labelHash(hook.label) })
+    runtime.onPluginStale?.(hook.pluginId)
+    return false
+  }
+
   /** One command hook process (`signal` = the run's, or the service's stop for an `async` hook). */
   async function runCommand(event: HookEvent, hook: SnapshotCommandHook, cwd: string | null, payload: (source: HookSource) => string, signal: AbortSignal): Promise<RanHook | null> {
     const release = await runtime.semaphore.acquire(signal)
     try {
       if (!await stillApproved(event, hook, signal))
         return null
+      if (!await pluginStillTrusted(event, hook, signal))
+        return { ...ranBase(hook), exitCode: null, timedOut: false, durationMs: 0, outcome: startFailure(event), error: PLUGIN_CHANGED_ERROR }
       const line = cwd === null ? null : commandHookLine(hook, cwd)
       if (cwd === null || line === null) {
         const error = cwd === null ? 'The hook folder could not be created.' : HOOK_START_ERROR

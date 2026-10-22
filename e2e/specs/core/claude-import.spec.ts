@@ -132,7 +132,7 @@ test.describe('import from Claude Code', () => {
     ])
     for (const name of FAKE_HOME.agents)
       await expectStatus(preview, 'agent', name, 'New')
-    await expect(claudeImportItem(preview, 'agent', 'reviewer')).toContainText('Claude model names use the model aliases of the settings.')
+    await expect(claudeImportItem(preview, 'agent', 'reviewer')).toContainText('Claude model names run the models chosen in Settings → General → Agent.')
     await expectStatus(preview, 'hook', FAKE_HOME.hooks.http, 'Unsupported')
     const unsupported = claudeImportGroup(preview, 'unsupported')
     await expect(unsupported).toHaveAttribute('data-count', '4')

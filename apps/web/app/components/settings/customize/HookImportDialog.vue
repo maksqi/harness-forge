@@ -185,8 +185,9 @@ async function submit(): Promise<void> {
     >
       <DialogHeader class="border-b p-4 pr-12">
         <DialogTitle>{{ HOOK_COPY.importTitle }}</DialogTitle>
-        <DialogDescription :id="ids.help">
-          {{ HOOK_COPY.importHelp }}
+        <!-- The description keeps reka's id (the dialog's aria-describedby); the textarea points at the inner span. -->
+        <DialogDescription>
+          <span :id="ids.help">{{ HOOK_COPY.importHelp }}</span>
         </DialogDescription>
       </DialogHeader>
 

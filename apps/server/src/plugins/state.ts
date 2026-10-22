@@ -32,13 +32,19 @@ export function isAllowedTransition(from: PluginState, to: PluginState): boolean
 
 /**
  * The stored origin of a row (Phase 12, ADR-054; C43): the JSON the installer wrote (`StoredPluginOrigin`), or null for a
- * row without one or with an unknown `kind` (the column is written only by this store).
+ * row without one or with an unknown `kind` (the column is written only by this store). v1.8.1 (CCR-1): also the
+ * server-only `{ kind: 'overlay', overlay }` of an archive that carried an exported entry overlay (with an object
+ * `overlay`, else null).
  */
 function originOf(value: unknown): StoredPluginOrigin | null {
   if (value === null || typeof value !== 'object' || Array.isArray(value))
     return null
-  const kind = (value as { kind?: unknown }).kind
-  return kind === 'marketplace' || kind === 'github' ? value as StoredPluginOrigin : null
+  const { kind, overlay } = value as { kind?: unknown, overlay?: unknown }
+  if (kind === 'marketplace' || kind === 'github')
+    return value as StoredPluginOrigin
+  if (kind === 'overlay')
+    return overlay !== null && typeof overlay === 'object' && !Array.isArray(overlay) ? value as StoredPluginOrigin : null
+  return null
 }
 
 function toRecord(row: typeof plugins.$inferSelect): PluginRecord {

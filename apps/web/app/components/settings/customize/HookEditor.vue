@@ -1,7 +1,8 @@
 <script setup lang="ts">
 // The hook editor of the Customize Hooks tab (Phase 11, ADR-048; docs/UI.md 2.18, 2.19, 9.13, 9.14, 10.8, 10.9, 14): a
 // right Sheet (`w-full sm:max-w-2xl`, full width on phones) whose body scrolls under a sticky footer, titled "New hook" /
-// "Edit hook" / "Copy hook" / "Edit project hook" / "New project hook". The warning (`hook-warning`; the prompt hook's
+// "Edit hook" / "Copy hook" / "Edit project hook" / "New project hook" (a new hook whose Where is a settings file, or a
+// project hook that is gone and is saved as a new handler). The warning (`hook-warning`; the prompt hook's
 // own text for the Prompt type), Where (new hooks while a project is selected: Personal or one of the project's four
 // settings files, `data-field="hook-where"`), Type (`hook-type`, Command | Prompt), Event (`hook-event`, a Select of the
 // 13 events with their descriptions from `HOOK_EVENT_INFO`; a prompt hook on an event that takes none shows "Prompt hooks
@@ -232,6 +233,8 @@ const isProject = computed(() => writeTarget.value !== null)
 const title = computed(() => {
   if (props.mode === 'project')
     return projectTarget.value?.groupIndex === null ? 'New project hook' : 'Edit project hook'
+  if (props.mode === 'new' && isProject.value)
+    return 'New project hook'
   return ({ new: 'New hook', edit: 'Edit hook', copy: 'Copy hook' } as const)[props.mode]
 })
 

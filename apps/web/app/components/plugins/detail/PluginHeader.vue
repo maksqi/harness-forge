@@ -230,6 +230,7 @@ defineExpose({ reload, openTrust })
             :model-value="plugin.enabled"
             :disabled="switching"
             :data-testid="testIds.pluginEnabled"
+            class="pointer-coarse:after:-inset-y-3"
             @update:model-value="setEnabled"
           />
         </Label>

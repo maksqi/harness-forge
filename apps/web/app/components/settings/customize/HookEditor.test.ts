@@ -508,9 +508,13 @@ describe('hookEditor: project mode (W12.12-T1)', () => {
     await mountEditor({ mode: 'new', target: { projectId: projectId(1), path: '', event: 'PreToolUse', groupIndex: null, handlerIndex: null } })
     expect(field('hook-where')?.dataset.value).toBe('personal')
     expect(byTestId(testIds.hookEditorEnabled)).not.toBeNull()
+    expect(byTestId(testIds.hookEditor)?.textContent).toContain('New hook')
+    expect(byTestId(testIds.hookEditor)?.textContent).not.toContain('New project hook')
     await chooseIn('hook-where', '.harness/settings.json', 'data-field')
     expect(field('hook-where')?.dataset.value).toBe('.harness/settings.json')
     expect(byTestId(testIds.hookEditorEnabled)).toBeNull()
+    // Where = a settings file: the title says where the hook goes.
+    expect(byTestId(testIds.hookEditor)?.textContent).toContain('New project hook')
     await type(testIds.hookMatcher, 'Write')
     await type(testIds.hookCommand, 'sh fmt.sh')
     await save()

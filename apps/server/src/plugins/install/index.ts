@@ -21,7 +21,12 @@
 //                the staged directory is renamed to `plugins/<id>`, the row is saved (`trusted_hash` only with `trust`;
 //                Phase 12: `format` and `origin`; a fresh Claude Code plugin with `defaultEnabled: false` is saved
 //                disabled unless the request sets `enable`), the host loads it; a load that ends in `error` restores the
-//                previous version (or forgets a fresh install).
+//                previous version (or forgets a fresh install). v1.8.1: a successful install from a marketplace entry
+//                also emits `marketplace.changed` for its marketplace (`emitInstalledChange`).
+// v1.8.1 (CCR-1, `overlay-file.ts`): a Claude Code plugin in a zip upload or URL archive whose root holds
+// `.hf-entry-overlay.json` (written by the export of a marketplace plugin) is read with that entry overlay, strictly
+// validated, never part of the stored tree, and kept as the origin `{ kind: 'overlay' }`; so its hash is the exported
+// plugin's. It grants nothing: the review, the trust approval and the pins work as for any install.
 // `HF_OFFLINE=1` refuses the GitHub source and marketplace entries that need the network (409 `offline`, one message:
 // `offlineError` of `marketplaces/sources.ts`); a relative entry of a folder marketplace, npm and URL installs from the
 // install dialog, zip uploads and local folders are unchanged. The staging directory is removed in every case;
@@ -55,6 +60,7 @@ import { detectPluginLayout } from '../claude/detect.ts'
 import { isInside, pathPin } from '../loader.ts'
 import { resolveHostFolder } from '../marketplaces/fetch.ts'
 import { githubBases, shortSha } from '../marketplaces/github.ts'
+import { emitInstalledChange } from '../marketplaces/index.ts'
 import { offlineError, planEntryInstall } from '../marketplaces/sources.ts'
 import { createMarketplaceStore } from '../marketplaces/store.ts'
 import { EntryCollector, MANIFEST_NAME, verifyTree, writeEntries } from './archive.ts'
@@ -67,6 +73,7 @@ import { buildInspection, sourceLabel } from './inspection.ts'
 import { layoutOf } from './layout.ts'
 import { createMutex, createSemaphore } from './lock.ts'
 import { downloadNpmPackage, NPM_REGISTRY_URL } from './npm.ts'
+import { OVERLAY_FILE_NAME, OVERLAY_FILE_NOTE, readEntryOverlayFile } from './overlay-file.ts'
 import { checkReviewedHash, createReviewLog, reviewedHashOf } from './reviews.ts'
 import { createStagingArea } from './staging.ts'
 import { looksLikeGzip, readTarGz } from './tar.ts'
@@ -152,6 +159,8 @@ interface StageInit {
   origin?: StoredPluginOrigin | null
   /** The entry overlay (kept only for the Claude Code format). */
   overlay?: ClaudeEntryOverlay
+  /** v1.8.1: a root `.hf-entry-overlay.json` of a Claude Code plugin is its entry overlay (zip uploads, URL archives). */
+  overlayFile?: boolean
   /** The name a Claude Code plugin's id is derived from when it has none (wins over the plugin folder's name). */
   nameHint?: string
   /** Used when neither `nameHint` nor a plugin folder name exists (a zip file's or URL's stem). */
@@ -297,9 +306,25 @@ export function createInstaller(deps: AppDeps, options: InstallerOptions = {}): 
         : `The folder has no ${MANIFEST_NAME} at its top level.`, init.issuePath)
     }
     const preserveExec = layout.format === 'claude'
+    let written = entries
+    let overlay = init.overlay
+    let origin = init.origin ?? null
+    const notes = [...(init.notes ?? [])]
+    if (layout.format === 'claude' && init.overlayFile === true) {
+      const path = `${layout.prefix}${OVERLAY_FILE_NAME}`
+      const found = entries.find(entry => entry.path === path)
+      if (found !== undefined) {
+        if (found.type !== 'file' || found.data === null)
+          throw invalid(`${quoteName(OVERLAY_FILE_NAME)} must be a file.`, init.issuePath)
+        overlay = readEntryOverlayFile(found.data, init.issuePath)
+        written = entries.filter(entry => entry !== found)
+        origin = { kind: 'overlay', overlay }
+        notes.push(OVERLAY_FILE_NOTE)
+      }
+    }
     const dir = await staging.create()
     try {
-      await writeEntries(dir, entries, layout.prefix, { preserveExec })
+      await writeEntries(dir, written, layout.prefix, { preserveExec })
       await verifyTree(dir, limits, { preserveExec })
     }
     catch (error) {
@@ -309,22 +334,21 @@ export function createInstaller(deps: AppDeps, options: InstallerOptions = {}): 
     const folder = lastSegment(layout.prefix.slice(base.length))
     const nameHint = init.nameHint ?? folder ?? init.fallbackHint
     const claude = layout.format === 'claude'
-    let origin = init.origin ?? null
-    if (claude && origin?.kind === 'marketplace' && init.overlay !== undefined)
-      origin = { ...origin, overlay: init.overlay }
+    if (claude && origin?.kind === 'marketplace' && overlay !== undefined)
+      origin = { ...origin, overlay }
     return {
       source: init.source,
       sourceRef: init.sourceRef,
       displayRef: init.displayRef ?? init.sourceRef,
       dir,
       staging: dir,
-      notes: init.notes ?? [],
+      notes,
       format: layout.format,
       origin,
       originKey: originKeyOf(init.source, origin),
       read: claude
         ? {
-            ...(init.overlay === undefined ? {} : { overlay: init.overlay }),
+            ...(overlay === undefined ? {} : { overlay }),
             ...(nameHint === undefined ? {} : { nameHint }),
             ...(init.versionHint === undefined ? {} : { versionHint: init.versionHint }),
           }
@@ -338,7 +362,7 @@ export function createInstaller(deps: AppDeps, options: InstallerOptions = {}): 
     const entries = await readZip(data, new EntryCollector(limits, ['file']))
     const name = sanitizeFileName(fileName, 'application/zip')
     const fallbackHint = stemOf(name)
-    return materialize(entries, { source: 'zip', sourceRef: name, issuePath: ['file'], format, ...(fallbackHint === undefined ? {} : { fallbackHint }) })
+    return materialize(entries, { source: 'zip', sourceRef: name, issuePath: ['file'], format, overlayFile: true, ...(fallbackHint === undefined ? {} : { fallbackHint }) })
   }
 
   async function downloadNpm(spec: string): Promise<{ entries: ArchiveEntry[], name: string, version: string, warnings: string[] }> {
@@ -367,7 +391,7 @@ export function createInstaller(deps: AppDeps, options: InstallerOptions = {}): 
       ? await readZip(download.data, collector)
       : await readTarGz(download.data, collector, limits, ['url'])
     const fallbackHint = stemOf(lastSegment(new URL(url).pathname) ?? '')
-    return materialize(entries, { source: 'url', sourceRef: url, issuePath: ['url'], format, ...(fallbackHint === undefined ? {} : { fallbackHint }) })
+    return materialize(entries, { source: 'url', sourceRef: url, issuePath: ['url'], format, overlayFile: true, ...(fallbackHint === undefined ? {} : { fallbackHint }) })
   }
 
   /** The relative paths of a linked folder (bounded, without following links) for the layout detection. */
@@ -807,6 +831,8 @@ export function createInstaller(deps: AppDeps, options: InstallerOptions = {}): 
           ? commitLink(staged, examined, options)
           : commitStaged(staged, examined, options))
         reviews.forget(input)
+        // The entry's install (and update) state changed: the marketplace views follow (after the host's plugin.changed).
+        await emitInstalledChange(deps, staged.origin)
         return detail
       }
       finally {
@@ -821,8 +847,11 @@ export function createInstaller(deps: AppDeps, options: InstallerOptions = {}): 
       const dir = await deps.plugins.directory(id)
       if (dir === null)
         throw new HarnessError({ code: 'not_found', message: `The files of the plugin "${id}" are missing.` })
-      // Phase 12 (W12.18-T1): a Claude Code plugin is exported as its installed tree, exec bits kept.
-      return exportPluginDirectory(id, detail.version, dir, limits, { format: detail.format })
+      // Phase 12 (W12.18-T1): a Claude Code plugin is exported as its installed tree, exec bits kept; v1.8.1: with the
+      // entry overlay of its origin (`overlay-file.ts`).
+      const origin = detail.format === 'claude' ? (await deps.plugins.record(id))?.origin ?? null : null
+      const overlay = origin?.kind === 'marketplace' || origin?.kind === 'overlay' ? origin.overlay : undefined
+      return exportPluginDirectory(id, detail.version, dir, limits, { format: detail.format, ...(overlay === undefined ? {} : { overlay }) })
     },
   }
 }

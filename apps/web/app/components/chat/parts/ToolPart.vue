@@ -43,6 +43,8 @@
 // `statusMessage` instead (the activity `label`, through HOOK_ACTIVITY); a plugin skill with a qualified name
 // (`review-kit:pdf`) reads its plugin's name from the name's plugin id; SKILL_FORK_CHECK (the catalog of the chat's
 // scope) lets SkillToolBody show a `context: fork` skill's content as its report.
+// v1.8.1: TOOL_APPROVAL_HOOKS gives the approval card the call's records (`hooks`), so it shows the reason of a
+// `PermissionRequest` record ("A PermissionRequest hook answered: {reason}"; the card's props stay frozen).
 import type { HookData, TodoItem } from '@harness-forge/shared'
 import type { ToolPartLike } from '../chat-format'
 import type { WorkspaceRowSummary } from './tools/workspace-tools'
@@ -106,6 +108,7 @@ import {
 import { hookPluginId, toolHookDecision } from '../hooks/hook-notes'
 import HookNote from '../hooks/HookNote.vue'
 import { TOOL_APPROVAL_CONTEXT } from './tool-approval-context'
+import { TOOL_APPROVAL_HOOKS } from './tool-approval-hooks'
 import { toolRowArgument } from './tool-row'
 import ToolApprovalCard from './ToolApprovalCard.vue'
 import ToolHookBadge from './tools/ToolHookBadge.vue'
@@ -176,6 +179,8 @@ const serverName = computed(() => {
 const displayName = computed(() => mcp.value?.tool ?? name.value)
 /** + Phase 12: SkillToolBody reads a fork skill's content as its report (the catalog of the chat's scope says which). */
 provide(SKILL_FORK_CHECK, skillName => isForkSkill(customizations.entriesOf(projectId.value, 'skill'), skillName))
+/** v1.8.1: the approval card reads the call's `PermissionRequest` answers from these records. */
+provide(TOOL_APPROVAL_HOOKS, () => props.hooks)
 // The badge names the server; a transcript opened after a reload may be the first place that needs the MCP list.
 watch(serverId, (id) => {
   if (id && !plugins.mcpLoaded)

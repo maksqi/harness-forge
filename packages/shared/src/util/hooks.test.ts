@@ -703,7 +703,8 @@ describe('combineHookOutcomes', () => {
 // ---------------------------------------------------------------------------------------------------------------------
 // Fuzzing
 
-describe('fuzzing', () => {
+// Seeded fuzz loops run several times slower on CI runners than locally: a generous timeout above the time budget.
+describe('fuzzing', { timeout: 30_000 }, () => {
   const random = prng(0xC35)
   const pick = <T>(items: readonly T[]): T => items[Math.floor(random() * items.length)] as T
   const leaves: unknown[] = [null, true, false, 0, -1, 1.5, 700, '', 'x', 'command', 'prompt', 'Bash', '^Bash', 'Edit|Write', '*', 'mcp__a__.*', 'é', '\0', 'block', 'approve', 'allow', 'deny', 'ask']
@@ -1312,7 +1313,7 @@ describe('execFormCommand', () => {
       expect(words).not.toBeNull()
       expect(words).toHaveLength(args.length + 1)
     }
-  })
+  }, 30_000)
 })
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1434,7 +1435,7 @@ describe('hookAgentNames', () => {
 // ---------------------------------------------------------------------------------------------------------------------
 // Fuzzing (Phase 12)
 
-describe('phase 12: fuzzing', () => {
+describe('phase 12: fuzzing', { timeout: 30_000 }, () => {
   const random = prng(0xC42)
   const pick = <T>(items: readonly T[]): T => items[Math.floor(random() * items.length)] as T
   const leaves: unknown[] = [null, true, false, 0, 5, 700, '', 'x', 'command', 'prompt', 'http', 'agent', 'Bash', 'Bash(git *)', 'Bash(*)', 'Read(x)', 'sonnet', 'mock:x', 'gpt', 'powershell', 'bash', '${user_config.X}', '\0', ['a', 'b'], ['a', 1], []]

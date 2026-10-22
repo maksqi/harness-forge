@@ -323,9 +323,15 @@ const shownRefusal = computed<ComposerRefusalData | null>(() => {
 
 /**
  * Review… of an `untrusted` refusal: the project trust dialog of the chat's project, focused on the command's pending
- * trust item when the project's trust list is loaded.
+ * trust item when the project's trust list is loaded; v1.8.1: a plugin's refusal (`pluginId`) opens the plugin's page,
+ * where it is reviewed and trusted again.
  */
 function onRefusalReview() {
+  const pluginId = shownRefusal.value?.pluginId
+  if (pluginId) {
+    void navigateTo(`/plugins/${encodeURIComponent(pluginId)}`)
+    return
+  }
   const command = shownRefusal.value?.command ?? null
   const list = props.projectId ? projectTrust.trust(props.projectId) : null
   const item = command

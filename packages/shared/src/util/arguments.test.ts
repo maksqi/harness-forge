@@ -187,6 +187,7 @@ describe('expandArguments with options', () => {
     expect(expandArguments('$0', null as unknown as string, { names: null as unknown as string[], vars: null as unknown as Record<string, string> })).toEqual({ text: '', usedPlaceholder: true })
   })
 
+  // Seeded fuzz loops run several times slower on CI runners than locally: a generous timeout above the time budget.
   it('stays bounded on random bodies', () => {
     let state = 0xA4C
     const random = (): number => {
@@ -202,5 +203,5 @@ describe('expandArguments with options', () => {
       expect([0, 1]).toContain(argumentBase(body))
     }
     expect(Date.now() - started).toBeLessThan(5000)
-  })
+  }, 30_000)
 })

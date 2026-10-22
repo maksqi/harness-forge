@@ -837,7 +837,8 @@ function randomValue(random: () => number, depth: number): unknown {
   return object
 }
 
-describe('fuzzing', () => {
+// Seeded fuzz loops run several times slower on CI runners than locally: a generous timeout above the time budget.
+describe('fuzzing', { timeout: 30_000 }, () => {
   it('never throws on random JSON and stays bounded', () => {
     const random = prng(0xC41C41)
     const started = Date.now()

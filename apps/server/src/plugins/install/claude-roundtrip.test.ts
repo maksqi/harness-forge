@@ -2,10 +2,11 @@
 // W12.1's `readClaudePluginDirectory` behind `PluginHost.inspectDirectory`): zip, copied folder, GitHub and marketplace
 // sources. What the review shows is what gets pinned: the inspection's sha256 is the whole-tree hash the installed
 // plugin reports as `trust.hash` (so an unchanged update reads "up to date"), exec bits are kept, and a changed file
-// gives another hash.
+// gives another hash. v1.8.1 (CCR-1): the export of a marketplace plugin carries its entry overlay, so its re-import on
+// another server hashes and behaves like the original (a fresh install still asks for trust; an update keeps the pin).
 import type { SourcesTestApp } from '../marketplaces/testing.ts'
-import type { PluginInstallInput } from '../types.ts'
-import { statSync } from 'node:fs'
+import type { ClaudeEntryOverlay, PluginInstallInput } from '../types.ts'
+import { existsSync, statSync } from 'node:fs'
 import { mkdtemp, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -14,7 +15,11 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { CLAUDE_MARKETPLACE, claudeMarketplaceFiles, claudePluginFiles, registerClaudeMarketplaceRemote, writeFileTree } from '../../testing/claude-fixtures.ts'
 import { createFakeRemoteRoutes, githubZipOf } from '../../testing/fake-remote.ts'
 import { createSourcesTestApp } from '../marketplaces/testing.ts'
+import { EntryCollector } from './archive.ts'
+import { INSTALL_LIMITS } from './errors.ts'
+import { OVERLAY_FILE_NAME, OVERLAY_FILE_NOTE, readEntryOverlayFile } from './overlay-file.ts'
 import { allowAll } from './testing.ts'
+import { readZip } from './zip.ts'
 
 const apps: SourcesTestApp[] = []
 const folders: string[] = []
@@ -102,5 +107,60 @@ describe('claude Code plugins with the real reader', () => {
     await app.t.deps.marketplaces.remove(github.id)
     const local = await app.t.deps.marketplaces.add({ source: { type: 'path', path: folder } })
     await roundTrip(app, { source: 'marketplace', marketplaceId: local.id, plugin: 'notes-only' })
+  })
+})
+
+describe('the entry overlay of a marketplace plugin in its export (v1.8.1, CCR-1)', () => {
+  it('export, then a zip install on another server: the same overlay and tree hash; trust as for any install', async () => {
+    const routes = createFakeRemoteRoutes()
+    registerClaudeMarketplaceRemote(routes)
+    const app = await realApp(routes)
+    const marketplace = await app.t.deps.marketplaces.add({ source: { type: 'github', repo: CLAUDE_MARKETPLACE.repo } })
+    const original = await roundTrip(app, { source: 'marketplace', marketplaceId: marketplace.id, plugin: 'review-kit' })
+    const origin = (await app.t.deps.plugins.record('review-kit'))?.origin
+    expect(origin?.kind).toBe('marketplace')
+    const overlay = (origin as { overlay: ClaudeEntryOverlay }).overlay
+    expect(overlay).toMatchObject({ name: 'review-kit', strict: true, version: '1.2.0' })
+
+    // The export holds the overlay file next to the installed tree.
+    const exported = await app.t.deps.installer.export('review-kit')
+    const entries = await readZip(exported.data, new EntryCollector(INSTALL_LIMITS))
+    const file = entries.find(entry => entry.path === `review-kit/${OVERLAY_FILE_NAME}`)
+    expect(file?.executable).not.toBe(true)
+    expect(readEntryOverlayFile(file!.data!)).toEqual(overlay)
+
+    // Another server: the inspection is the original's hash (with a note) and still requires trust.
+    const other = await realApp()
+    const input: PluginInstallInput = { source: 'zip', fileName: exported.fileName, data: exported.data }
+    const inspection = await other.t.deps.installer.inspect(input)
+    expect(inspection).toMatchObject({ format: 'claude', source: 'zip', manifest: { id: 'review-kit' }, sha256: original.sha256, requiresTrust: true })
+    expect(inspection.warnings).toContain(OVERLAY_FILE_NOTE)
+    // Without trust nothing runs; trusting pins the original's hash.
+    const untrusted = await other.t.deps.installer.install(input, { sha256: inspection.sha256, authorize: allowAll })
+    expect(untrusted).toMatchObject({ state: 'untrusted', origin: null, trust: { hash: original.sha256, trustedHash: null } })
+    const trusted = await other.t.deps.installer.install(input, { trust: true, sha256: inspection.sha256, authorize: allowAll })
+    expect(trusted).toMatchObject({ source: 'zip', state: 'active', origin: null, trust: { trusted: true, hash: original.sha256, trustedHash: original.sha256 } })
+    // The overlay is kept as the server-only origin, never as a file of the plugin.
+    expect((await other.t.deps.plugins.record('review-kit'))?.origin).toEqual({ kind: 'overlay', overlay })
+    expect(existsSync(join(other.t.env.paths.plugins, 'review-kit', OVERLAY_FILE_NAME))).toBe(false)
+    // A reload reads it again (still trusted), an update without trust keeps the pin, a second export carries it.
+    expect(await other.t.deps.plugins.reload('review-kit')).toMatchObject({ state: 'active', trust: { hash: original.sha256 } })
+    expect(await other.t.deps.installer.install(input, { sha256: inspection.sha256, authorize: allowAll })).toMatchObject({ state: 'active', trust: { trustedHash: original.sha256 } })
+    const again = await readZip((await other.t.deps.installer.export('review-kit')).data, new EntryCollector(INSTALL_LIMITS))
+    expect(readEntryOverlayFile(again.find(entry => entry.path === `review-kit/${OVERLAY_FILE_NAME}`)!.data!)).toEqual(overlay)
+  })
+
+  it('a strict: false entry (the entry is the manifest) keeps its components through the export', async () => {
+    const routes = createFakeRemoteRoutes()
+    registerClaudeMarketplaceRemote(routes)
+    const app = await realApp(routes)
+    const marketplace = await app.t.deps.marketplaces.add({ source: { type: 'github', repo: CLAUDE_MARKETPLACE.repo } })
+    const original = await roundTrip(app, { source: 'marketplace', marketplaceId: marketplace.id, plugin: 'inline-tools' })
+    const installed = await app.t.deps.plugins.get(original.id)
+    const exported = await app.t.deps.installer.export(original.id)
+    const other = await realApp()
+    const inspection = await other.t.deps.installer.inspect({ source: 'zip', fileName: exported.fileName, data: exported.data })
+    expect(inspection).toMatchObject({ manifest: { id: original.id, version: installed.manifest.version }, sha256: original.sha256 })
+    expect(inspection.claude?.components).toEqual(installed.claude?.components)
   })
 })

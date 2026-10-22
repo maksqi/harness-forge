@@ -29,6 +29,13 @@ const emit = defineEmits<{
 
 const subtitle = computed(() => providerSubtitle(props.provider, props.pluginName))
 const actionLabel = computed(() => configureLabel(props.provider))
+
+/**
+ * The switch: a 40px tall hit area on coarse pointers (the small switch stays 14px; its `::after` counts from inside the
+ * 1px border, so 12 + 2 * 14 = 40px). Below `sm` the row gap is 12px on coarse pointers, so the area stays clear of the
+ * Configure button on the second line even when there is no subtitle.
+ */
+const SWITCH_CLASS = 'pointer-coarse:after:-inset-y-3.5'
 </script>
 
 <template>
@@ -37,7 +44,7 @@ const actionLabel = computed(() => configureLabel(props.provider))
     :data-testid="testIds.providerRow"
     :data-provider-id="provider.id"
     :data-enabled="provider.enabled"
-    class="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 px-4 py-3 sm:grid-cols-[auto_minmax(0,1fr)_7.5rem_5.5rem_auto]"
+    class="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 px-4 py-3 pointer-coarse:gap-y-3 sm:grid-cols-[auto_minmax(0,1fr)_7.5rem_5.5rem_auto]"
   >
     <ProviderIcon
       :id="provider.id"
@@ -80,7 +87,7 @@ const actionLabel = computed(() => configureLabel(props.provider))
       :disabled="pending"
       :aria-label="`Enable ${provider.name}`"
       :data-testid="testIds.providerEnabled"
-      class="col-start-3 row-start-1 justify-self-end sm:col-start-5"
+      :class="cn(SWITCH_CLASS, 'col-start-3 row-start-1 justify-self-end sm:col-start-5')"
       @update:model-value="value => emit('update:enabled', value)"
     />
   </div>

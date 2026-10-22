@@ -20,7 +20,10 @@ export interface CatalogQuery {
  * changes, models.dev refresh).
  */
 export interface ModelCatalog {
-  /** Boot: loads the models.dev snapshot (+ `data/cache` refresh) and `model_cache`; starts background refreshes. */
+  /**
+   * Boot: loads the models.dev snapshot (+ `data/cache` refresh) and `model_cache`; starts background refreshes (none
+   * with `HF_OFFLINE=1`: the cached listings and the snapshot keep serving, `refresh` still lists).
+   */
   readonly start: () => Promise<void>
   /** Stops background timers. */
   readonly stop: () => Promise<void>
@@ -32,8 +35,9 @@ export interface ModelCatalog {
   /** One entry (hidden included), or null. */
   readonly get: (providerId: string, modelId: string) => Promise<CatalogModel | null>
   /**
-   * Forces a live listing now (TTL bypassed; the last good listing is kept on failure) and returns the provider's
-   * models, hidden included. `not_found`, `provider_not_configured`, mapped upstream errors.
+   * Forces a live listing now (TTL bypassed; the last good listing is kept on failure; also with `HF_OFFLINE=1`, as
+   * the user asked for it) and returns the provider's models, hidden included. `not_found`,
+   * `provider_not_configured`, mapped upstream errors.
    */
   readonly refresh: (providerId: string) => Promise<CatalogModel[]>
   /** Favorite / hidden (`null` = classify default) / alias. `not_found` (unknown provider or model). */

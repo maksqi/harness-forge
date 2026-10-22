@@ -13,12 +13,15 @@
 //   Plugins whose update state changed get `plugin.changed`.
 // - `remove`: the row only; installed plugins keep their (now dangling) origin.
 // - `stop`: aborts the fetches in flight; an add whose fetch was aborted stores nothing.
+// - `emitInstalledChange` (v1.8.1): installing, updating or uninstalling a plugin from a marketplace entry also emits
+//   `marketplace.changed` for the marketplaces it belongs to (the installer after a successful install, the plugin
+//   route after an uninstall), so the summary's `updates` and the entries' install state follow without a refresh.
 // Writes are serialized (one mutex) so the name and count checks hold. Every add, refresh and remove emits
 // `marketplace.changed`. Logs carry the marketplace id, its name, the repository and a 12-character sha only.
 import type { MarketplaceDetail, MarketplaceList, MarketplaceSource, MarketplaceSummary } from '@harness-forge/shared'
 import type { SafeFetch } from '../../security/types.ts'
 import type { AppDeps } from '../../types.ts'
-import type { PluginRecord } from '../types.ts'
+import type { PluginRecord, StoredPluginOrigin } from '../types.ts'
 import type { MarketplaceFetchResult, StoredMarketplace } from './store.ts'
 import type { MarketplaceService, MarketplaceServiceOptions } from './types.ts'
 import {
@@ -88,6 +91,27 @@ export function marketplaceDetail(row: StoredMarketplace, records: readonly Plug
 export function summaryOf(detail: MarketplaceDetail): MarketplaceSummary {
   const { entries: _entries, diagnostics: _diagnostics, ...summary } = detail
   return summary
+}
+
+/**
+ * `marketplace.changed` for every stored marketplace a plugin with `origin` belongs to (by id or by name, as
+ * `installedEntries` matches), read after the plugin's row was saved or removed. Nothing for another origin. Never
+ * throws: a failure is logged (the host's `plugin.changed` still marks the web's marketplace views stale).
+ */
+export async function emitInstalledChange(deps: Pick<AppDeps, 'db' | 'events' | 'logger'>, origin: StoredPluginOrigin | null): Promise<void> {
+  if (origin === null || origin.kind !== 'marketplace')
+    return
+  try {
+    const rows = (await createMarketplaceStore(deps.db).list()).filter(row => row.id === origin.marketplaceId || row.name === origin.marketplace)
+    if (rows.length === 0)
+      return
+    const records = await createPluginRecordStore(deps.db).list()
+    for (const row of rows)
+      deps.events.emit('marketplace.changed', { id: row.id, marketplace: summaryOf(marketplaceDetail(row, records)) })
+  }
+  catch (error) {
+    deps.logger.warn('cannot emit marketplace.changed', { marketplaceId: origin.marketplaceId, err: error })
+  }
 }
 
 function reservedNameError(name: string): HarnessError {

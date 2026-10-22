@@ -235,7 +235,8 @@ describe('runs without tools against a strict provider', () => {
     const chatId = await newChat()
     await send(chatId, 'look up cats', { modelRef: 'strict:tools', toolMode: 'auto' })
     const stored = (await detailOf(chatId)).messages
-    const legacy = streamText({ model: models.get('tools')!, messages: await convertToModelMessages(stored, { ignoreIncompleteToolCalls: true }), maxRetries: 0 })
+    // The rejection is expected: a silent onError keeps the SDK's default console.error out of the test output.
+    const legacy = streamText({ model: models.get('tools')!, messages: await convertToModelMessages(stored, { ignoreIncompleteToolCalls: true }), maxRetries: 0, onError: () => {} })
     const errors: unknown[] = []
     for await (const part of legacy.stream) {
       if (part.type === 'error')

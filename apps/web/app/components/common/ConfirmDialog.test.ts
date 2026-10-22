@@ -1,5 +1,5 @@
 import { mount } from '@vue/test-utils'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { h, nextTick } from 'vue'
 import ConfirmDialog from './ConfirmDialog.vue'
 
@@ -26,6 +26,33 @@ describe('confirmDialog', () => {
     expect(confirm?.textContent?.trim()).toBe('Uninstall')
     confirm!.click()
     expect(wrapper.emitted('confirm')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('is described by its description, through an id that exists', async () => {
+    const wrapper = mount(ConfirmDialog, {
+      props: { open: true, title: 'Delete chat?', description: 'This cannot be undone.' },
+      attachTo: body(),
+    })
+    await nextTick()
+    const dialog = body().querySelector('[role="alertdialog"]')!
+    const describedBy = dialog.getAttribute('aria-describedby')
+    expect(describedBy).toBeTruthy()
+    expect(document.getElementById(describedBy!)?.textContent?.trim()).toBe('This cannot be undone.')
+    wrapper.unmount()
+  })
+
+  it('has no aria-describedby (and no reka warning) without a description', async () => {
+    const warn = vi.spyOn(console, 'warn')
+    const wrapper = mount(ConfirmDialog, {
+      props: { open: true, title: 'Delete?' },
+      attachTo: body(),
+    })
+    await nextTick()
+    const dialog = body().querySelector('[role="alertdialog"]')!
+    expect(dialog.hasAttribute('aria-describedby')).toBe(false)
+    expect(warn.mock.calls.flat().join('\n')).not.toContain('Missing `Description`')
+    warn.mockRestore()
     wrapper.unmount()
   })
 

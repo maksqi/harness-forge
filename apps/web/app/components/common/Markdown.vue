@@ -3,14 +3,16 @@
 // HTML escaped (`html-policy="escape"`, no HTML strings are ever rendered), links limited to http(s) and mailto
 // (external links open in a new tab with rel="noopener noreferrer"), text verbatim (no typographic quotes or
 // dashes), our own code block (lazy Shiki, dual theme,
-// copy button) and image (lazy, no referrer). KaTeX and Mermaid load on demand. The renderer's stylesheet sits in a
-// cascade layer (markstream.css) so its global rules cannot leak into the app. Contract: props `content` + `final`;
-// no slots.
+// copy button) and image (lazy, no referrer). KaTeX and Mermaid load on demand; a main-thread stand-in for the Mermaid
+// parser worker is registered the first time a streaming part shows a mermaid fence (markdown-workers.ts). The
+// renderer's stylesheet sits in a cascade layer (markstream.css) so its global rules cannot leak into the app.
+// Contract: props `content` + `final`; no slots.
 import MarkdownRender from 'markstream-vue'
 import { computed, watch } from 'vue'
 import { useColorMode } from '~/components/chat/nuxt-imports'
 import { registerMarkdownComponents } from '~/components/chat/parts/markdown/components'
 import { configureMarkdownIt, ensureMathStyles, MARKDOWN_CUSTOM_ID, MARKDOWN_PARSE_OPTIONS } from '~/components/chat/parts/markdown/markdown-options'
+import { ensureMermaidWorker } from '~/components/chat/parts/markdown/markdown-workers'
 import '~/components/chat/parts/markdown/markstream.css'
 
 const props = withDefaults(defineProps<{
@@ -27,6 +29,8 @@ const colorMode = useColorMode()
 const isDark = computed(() => colorMode.value !== 'light')
 
 watch(() => props.content, ensureMathStyles, { immediate: true })
+// Pre-flush (the default): the stand-in is set before the renderer below sees the content with the fence.
+watch(() => [props.content, props.final] as const, ([content, final]) => ensureMermaidWorker(content, final), { immediate: true })
 </script>
 
 <template>

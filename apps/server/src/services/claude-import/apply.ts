@@ -19,10 +19,11 @@
 //
 // Exactly one `customization.changed {}` and one `hooks.changed { projectId: null }` follow every apply (the services
 // emit them for their batch; when a batch changed nothing, or there was none, the apply emits the event itself). Never
-// throws for an item; messages and warnings name kinds, names and variable NAMES only (never a content, a command, a
-// prompt or a value). What arrived turned off is not repeated in `warnings`: the browser knows it from the plan
-// (`executable`, the `project-server` warning) and the `enable` it sent; `warnings` holds only what it cannot derive.
-// Logs: counts and the duration at `info`.
+// throws for an item; messages name kinds, names and variable NAMES only (never a content, a command, a prompt or a
+// value). `warnings` of the result is always empty (API.md 5.35): every item's outcome and reason is in `results`, and
+// what arrived turned off follows from the plan (`executable`, the `project-server` warning) and the `enable` sent.
+// The body's `instructions` never decides: the `CLAUDE.md` item offers only `append` / `replace` / `skip`
+// (`checkApplyBody` refuses any other action), so its own action wins. Logs: counts and the duration at `info`.
 import type {
   ClaudeHomeFile,
   ClaudeImportAction,
@@ -73,7 +74,6 @@ const RENAMABLE_STATUSES: ReadonlySet<string> = new Set(['new', 'update', 'confl
 
 const CHANGED = 'The item changed since the folder was read. Read the folder again.'
 const MESSAGE_MAX_CHARS = 500
-const WARNING_MAX_CHARS = 300
 
 function invalid(message: string, path: Array<string | number>): HarnessError {
   return new HarnessError({ code: 'validation_error', message, details: { issues: [{ path, message, code: 'custom' }] } })
@@ -273,7 +273,6 @@ export async function applyClaudeImport(deps: AppDeps, input: ApplyClaudeImportI
   const draft = planClaudeImport(input.files, baseline)
   const fresh = new Map(draft.items.map(item => [item.key, item]))
   const results = new Map<string, ItemResult>()
-  const warnings: string[] = []
   const set = (key: string, outcome: ClaudeImportOutcome, extra: { id?: string, message?: string } = {}): void => {
     results.set(key, { key, outcome, ...(extra.id === undefined ? {} : { id: extra.id }), ...(extra.message === undefined ? {} : { message: cut(extra.message, MESSAGE_MAX_CHARS) }) })
   }
@@ -434,6 +433,7 @@ export async function applyClaudeImport(deps: AppDeps, input: ApplyClaudeImportI
         break
       }
       case 'instructions': {
+        // The item's own action decides (`body.instructions` is only a fallback that no offered action reaches).
         const mode = action === 'replace' ? 'replace' : action === 'append' ? 'append' : body.instructions ?? 'append'
         instructionsBefore ??= baseline.instructions
         const current = instructionsBefore
@@ -483,5 +483,5 @@ export async function applyClaudeImport(deps: AppDeps, input: ApplyClaudeImportI
   for (const result of ordered)
     counts[result.outcome] += 1
   deps.logger.info('claude import applied', { ...counts, durationMs: Date.now() - started })
-  return { results: ordered, counts, warnings: warnings.map(warning => cut(warning, WARNING_MAX_CHARS)) }
+  return { results: ordered, counts, warnings: [] }
 }

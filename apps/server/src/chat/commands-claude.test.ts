@@ -2,20 +2,24 @@
 // Phase 12 slash commands (W12.7-T3 – T6, T8, T9; ADR-053 / ADR-058): qualified names and the bare alias, markdown
 // plugin commands (Claude Code plugins: the command-file path, the plugin variables, `!` spans with the plugin's folder
 // in their environment), the argument options, Claude model names on `/name`, skills with `allowed-tools` / `model`, fork
-// definitions (a delegation directive) and the restrict-only `disallowed-tools`. The catalog is the fake service (its
+// definitions (a delegation directive) and the restrict-only `disallowed-tools`; v1.8.1: a Claude Code plugin's spans only
+// while its tree has its trust pin. The catalog is the fake service (its
 // snapshot uses the real getters of `snapshot.ts`); spans run real POSIX shells in `realpath(mkdtemp())` folders.
 import type { CommandDefinition, SkillDefinition } from '@harness-forge/plugin-sdk'
-import type { CommandInvocation, CustomizationEntry, HarnessUIMessage } from '@harness-forge/shared'
+import type { CommandInvocation, CustomizationEntry, HarnessUIMessage, PluginDetail } from '@harness-forge/shared'
+import type { PluginRecord } from '../plugins/types.ts'
 import type { ResolvedModel } from '../providers/types.ts'
 import type { FakeCustomizationService } from '../testing/fake-customizations.ts'
 import type { AppDeps } from '../types.ts'
 import type { CommandContext, CommandExpansionHost, CommandResolution, CommandServices } from './commands.ts'
-import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import process from 'node:process'
 import { commandInvocationSchema, HarnessError } from '@harness-forge/shared'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { hashPluginTree, scanPluginTree } from '../plugins/claude/tree-hash.ts'
+import { claudePluginFiles, writeFileTree } from '../testing/claude-fixtures.ts'
 import { catalogEntryKey, createFakeCustomizationService, fakeCatalogEntry } from '../testing/fake-customizations.ts'
 import { killLiveShellGroups } from '../workspace/shell.ts'
 import {
@@ -343,6 +347,37 @@ describe.skipIf(process.platform === 'win32')('markdown plugin commands with spa
     })
     // An untrusted or disabled Claude plugin registers nothing: the name is no command, nothing runs.
     expect(await resolveIn(fake, '/review-kit:where x', [], { expansion: host() }, extra)).toBeNull()
+  })
+
+  it('v1.8.1: the spans run while the plugin\'s tree has its trust pin; after an edit: 409 untrusted with the plugin id, nothing runs', async () => {
+    const fake = createFakeCustomizationService()
+    const trustedRoot = join(folder, 'trusted-plugin')
+    await writeFileTree(trustedRoot, claudePluginFiles('uid-mark'))
+    const record = { id: 'uid-mark', format: 'claude', source: 'copy', trustedHash: await hashPluginTree(await scanPluginTree(trustedRoot)), origin: null } as unknown as PluginRecord
+    const loads: string[] = []
+    const span: Registered = { pluginId: 'uid-mark', definition: { name: 'uid-mark:mark', description: 'Mark.', syntax: 'markdown', template: 'Mark: !`echo run >> plugin-span-runs.txt; echo ok`' } }
+    const extra: Partial<CommandServices> = {
+      plugins: {
+        guard: async (_pluginId, fn) => fn(new AbortController().signal),
+        directory: async () => trustedRoot,
+        record: async () => record,
+        load: async (id) => {
+          loads.push(id)
+          return { state: 'untrusted' } as PluginDetail
+        },
+      },
+      env: { paths: { pluginData: join(folder, 'data') } },
+    }
+    const runs = join(root, 'plugin-span-runs.txt')
+    expect(expansionOf(await resolveIn(fake, '/uid-mark:mark', [span], { expansion: host() }, extra))).toBe('Mark: ok')
+    expect(await readFile(runs, 'utf8')).toBe('run\n')
+
+    await writeFile(join(trustedRoot, 'scripts', 'mark.sh'), '#!/bin/sh\necho edited\n')
+    const refused = await resolveIn(fake, '/uid-mark:mark', [span], { expansion: host() }, extra).catch((error: unknown) => error)
+    expect(refused).toBeInstanceOf(HarnessError)
+    expect((refused as HarnessError).toJSON().error).toMatchObject({ code: 'conflict', details: { reason: 'untrusted', pluginId: 'uid-mark' } })
+    expect(await readFile(runs, 'utf8')).toBe('run\n')
+    expect(loads).toEqual(['uid-mark'])
   })
 })
 

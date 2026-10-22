@@ -67,7 +67,7 @@ async function exportBackup(): Promise<void> {
         <Switch
           :id="ids.files"
           v-model="includeFiles"
-          class="mt-0.5"
+          class="mt-0.5 pointer-coarse:after:-inset-y-3"
           :disabled="exporting"
           :data-testid="testIds.dataExportFiles"
         />
@@ -84,7 +84,7 @@ async function exportBackup(): Promise<void> {
         <Switch
           :id="ids.settings"
           v-model="includeSettings"
-          class="mt-0.5"
+          class="mt-0.5 pointer-coarse:after:-inset-y-3"
           :disabled="exporting"
           :data-testid="testIds.dataExportSettings"
         />

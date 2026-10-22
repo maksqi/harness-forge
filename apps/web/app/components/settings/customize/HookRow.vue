@@ -11,8 +11,10 @@
 // Props, emits and the root test id are frozen from Gate P11-0b (C39 stub); implementation W11.8.
 // Phase 12 (ADR-056, ADR-057; C46, W12.12): the hook of a plugin that waits for trust (the server's `pending` state of a
 // plugin row, or the plugin's `untrusted` state) reads "Plugin not trusted" and offers Review plugin…
-// (`data-action="trust-plugin"`, the plugin's TrustDialog; harness-format plugins only: a Claude Code plugin is reviewed
-// on its page); a project row whose settings file can be edited here (`HOOK_ROW_CONTEXT`, a known `position`) offers
+// (`data-action="trust-plugin"`, the plugin's TrustDialog; harness-format plugins only: a Claude Code plugin, whose
+// pending hooks the server lists since v1.8.1, is reviewed on its page through Open plugin; a plugin the plugins store
+// does not know yet offers Open plugin only); a project row whose settings file can be edited here (`HOOK_ROW_CONTEXT`,
+// a known `position`) offers
 // Edit… (`hook-edit`, the hook editor in project mode) and Delete… (`hook-delete`, removes the handler from the file);
 // prompt rows carry `data-kind="prompt"`, show `MessageSquareText` and the prompt's first line
 // (`data-slot="hook-row-prompt"`) instead of the command; an exec-form command shows its arguments; the meta line adds
@@ -78,11 +80,13 @@ const pluginUntrusted = computed(() => {
 })
 /**
  * + Phase 12: the plugin of a plugin row waits for trust (the server lists its hooks as `pending`); only a harness-format
- * plugin is trusted through TrustDialog (a Claude Code plugin is reviewed on its page).
+ * plugin is trusted through TrustDialog (a Claude Code plugin is reviewed on its page). v1.8.1: the server lists the
+ * pending hooks of untrusted Claude Code plugins too, so the format must be known (the plugins store loaded) before the
+ * row offers it; until then Open plugin leads to the review.
  */
 const canTrustPlugin = computed(() => props.entry.source === 'plugin' && !!props.entry.pluginId
   && (pluginUntrusted.value || props.entry.state === 'pending')
-  && plugins.byId(props.entry.pluginId)?.format !== 'claude')
+  && plugins.byId(props.entry.pluginId)?.format === 'harness')
 /** + Phase 12: a project row whose settings file can be edited here (its handler's position is known). */
 const canEditProject = computed(() => props.entry.source === 'project' && props.entry.kind === 'command' && !!props.entry.path
   && !!props.entry.position && context?.editProjectHooks.value === true)

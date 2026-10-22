@@ -11,11 +11,16 @@
 // same paths and contents below `<id>/` (the folder name keeps the id when its `plugin.json` has no name), each file's
 // owner exec bit kept in the Unix external attributes (0755, else 0644, as the installer writes them), no root
 // `plugin.json` needed, the same skip rules and caps. Inspecting the exported zip gives the whole-tree hash the installed
-// plugin reports as `trust.hash` (unless a skipped file was part of the tree, or the plugin came from a marketplace
-// entry: its overlay is not a file, so the hash of the files alone differs). A harness plugin stays 0644 and needs its
+// plugin reports as `trust.hash` (unless a skipped file was part of the tree). A harness plugin stays 0644 and needs its
 // `plugin.json`.
+//
+// v1.8.1 (CCR-1): the entry overlay of a Claude Code plugin from a marketplace entry (or from an archive that carried
+// one) is written as `<id>/.hf-entry-overlay.json` (`overlay-file.ts`, 0644, the newest file time), so a zip upload of
+// the export applies it again and hashes like the installed plugin; a plugin whose tree holds that name at its root, or
+// whose overlay file would pass the import cap, is refused (400).
 import type { PluginFormat } from '@harness-forge/shared'
 import type { Zippable } from 'fflate'
+import type { ClaudeEntryOverlay } from '../types.ts'
 import type { InstallLimits } from './errors.ts'
 import { lstat, readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -23,6 +28,7 @@ import { zipSync } from 'fflate'
 import { compareUtf8 } from '../claude/tree-hash.ts'
 import { invalid, megabytes, quoteName, tooLarge } from './errors.ts'
 import { SKIPPED_FOLDERS } from './folder.ts'
+import { entryOverlayFile, OVERLAY_FILE_MAX_BYTES, OVERLAY_FILE_NAME } from './overlay-file.ts'
 import { checkEntryPath } from './paths.ts'
 
 /** Zip timestamps must lie in 1980-2099 (DOS dates). */
@@ -50,6 +56,8 @@ export interface PluginExport {
 export interface ExportOptions {
   /** The plugin's format (default `harness`); `claude` keeps exec bits and needs no root `plugin.json`. */
   format?: PluginFormat
+  /** v1.8.1: the entry overlay of a Claude Code plugin's origin, written as `.hf-entry-overlay.json` (ignored otherwise). */
+  overlay?: ClaudeEntryOverlay
 }
 
 /** One exported file. */
@@ -84,6 +92,8 @@ export async function exportPluginDirectory(id: string, version: string, dir: st
         continue
       if (info.isFile() && isCredentialFile(name))
         continue
+      if (claude && relative === '' && name === OVERLAY_FILE_NAME)
+        throw invalid(`The plugin has its own ${quoteName(OVERLAY_FILE_NAME)}, a name harness-forge keeps for the entry overlay of an export, so it cannot be exported.`)
       const checked = checkEntryPath(shown)
       if (!checked.ok)
         throw invalid(`The plugin cannot be exported: ${checked.reason}`)
@@ -104,6 +114,18 @@ export async function exportPluginDirectory(id: string, version: string, dir: st
   await walk(dir, '')
   if (claude && files.length === 0)
     throw invalid('The plugin folder has no files, so it cannot be exported.')
+  if (claude && options.overlay !== undefined) {
+    const data = entryOverlayFile(options.overlay)
+    if (data.byteLength > OVERLAY_FILE_MAX_BYTES)
+      throw invalid(`The entry overlay of the plugin is larger than ${Math.round(OVERLAY_FILE_MAX_BYTES / 1024)} KB, so it cannot be exported.`)
+    if (++entries > limits.entries)
+      throw invalid(`The plugin has more than ${limits.entries} files and folders, so it cannot be exported.`)
+    bytes += data.byteLength
+    if (bytes > limits.expandedBytes)
+      throw tooLarge(`The plugin is larger than ${megabytes(limits.expandedBytes)}, so it cannot be exported.`, limits.expandedBytes)
+    const newest = Math.max(...files.map(file => file.mtime.getTime()))
+    files.push({ path: OVERLAY_FILE_NAME, data, mtime: new Date(newest), executable: false })
+  }
   if (!claude && !files.some(file => file.path === 'plugin.json'))
     throw invalid(`The plugin directory has no ${quoteName('plugin.json')}, so it cannot be exported.`)
   // The order of the tree hash (UTF-8 bytes of the whole path), not the order of the walk.

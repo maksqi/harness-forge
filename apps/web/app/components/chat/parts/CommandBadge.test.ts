@@ -13,12 +13,15 @@ import CommandBadge from './CommandBadge.vue'
 const mock = vi.hoisted(() => ({ api: null as unknown }))
 vi.mock('~/composables/useApi', () => ({ useApi: () => mock.api, useApiFetch: () => vi.fn() }))
 
+/** Installed into each mounted app and set active: in dev, pinia 4 looks the active pinia up with inject() first. */
+let pinia: ReturnType<typeof createPinia>
+
 function badge(command: CommandInvocation | null, resolve = true) {
   return mount({
     render: () => h(TooltipProvider, { delayDuration: 0 }, { default: () => h(CommandBadge, { name: command?.name ?? 'review', command, class: 'mb-1.5' }) }),
   }, {
     attachTo: document.body,
-    global: { provide: resolve ? { [MODEL_LABEL_RESOLVER as symbol]: (ref: string) => (ref === 'openai:gpt-6' ? { name: 'GPT-6' } : null) } : {} },
+    global: { plugins: [pinia], provide: resolve ? { [MODEL_LABEL_RESOLVER as symbol]: (ref: string) => (ref === 'openai:gpt-6' ? { name: 'GPT-6' } : null) } : {} },
   })
 }
 
@@ -28,7 +31,8 @@ function invocation(overrides: Partial<CommandInvocation> = {}): CommandInvocati
 
 beforeEach(() => {
   mock.api = createMockApi()
-  setActivePinia(createPinia())
+  pinia = createPinia()
+  setActivePinia(pinia)
 })
 
 afterEach(() => {

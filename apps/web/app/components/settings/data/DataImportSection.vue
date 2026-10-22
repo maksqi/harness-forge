@@ -223,7 +223,7 @@ async function runImport(): Promise<void> {
         <Switch
           :id="ids.restore"
           :model-value="kind !== 'chat' && restoreSettings"
-          class="mt-0.5"
+          class="mt-0.5 pointer-coarse:after:-inset-y-3"
           :disabled="kind === 'chat' || importing"
           :data-testid="testIds.dataImportRestoreSettings"
           @update:model-value="value => restoreSettings = value"

@@ -13,8 +13,9 @@
 // - Symbolic links are followed (dotfile managers link these files and folders); a file reached through a link is
 //   marked `linked` and must be a regular file outside `HF_DATA_DIR` (the realpath of the file must be the opened file:
 //   same device and inode).
-// - A deadline (10 s, `LIMITS.claudeImportScanTimeoutMs`) is checked before every file system call: past it the scan
-//   ends with what it read and a `timeout` warning. An abort (shutdown) rejects.
+// - A deadline (10 s, `LIMITS.claudeImportScanTimeoutMs`) is checked before every file system call after the root was
+//   resolved: past it the scan ends with what it read and a `timeout` warning (so a scan never fails for time; the
+//   root's `realpath` and `stat` are not checked). An abort (shutdown) rejects.
 // Never logs (the service logs counts; the root path only at `debug`).
 import type { Dirent, Stats } from 'node:fs'
 import type { FileHandle } from 'node:fs/promises'
@@ -103,9 +104,12 @@ export async function collectDiskHome(options: CollectDiskOptions): Promise<Coll
       throw new DeadlineError()
   }
 
+  // The deadline is not checked here: one that passed meanwhile ends the scan at its first file with the `timeout`
+  // warning (an empty plan), never with an error.
+  if (options.signal?.aborted === true)
+    throw stoppedError()
   let realRoot: string
   try {
-    check()
     realRoot = await fs.realpath(options.root)
     const info = await fs.stat(realRoot)
     if (!info.isDirectory())
@@ -114,8 +118,6 @@ export async function collectDiskHome(options: CollectDiskOptions): Promise<Coll
   catch (error) {
     if (error instanceof HarnessError)
       throw error
-    if (error instanceof DeadlineError)
-      throw new HarnessError({ code: 'conflict', message: 'The Claude Code folder could not be read in time.', details: { reason: 'busy' } })
     if (MISSING_CODES.has(errorCode(error) ?? ''))
       throw missingRoot()
     throw new HarnessError({ code: 'not_found', message: 'The Claude Code folder on the server cannot be read.' })

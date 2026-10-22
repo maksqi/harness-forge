@@ -204,7 +204,7 @@ test.describe('customize', () => {
     await expect(notes).toContainText(`Imported from ${name}.md. Check the fields, then save.`)
     // Phase 12 (ADR-058): `color` is read now; a Claude model alias resolves through the `modelAliases` setting.
     await expect(notes).toContainText('Ignored: permissionMode')
-    await expect(notes).toContainText('Claude model names use the model aliases of the settings')
+    await expect(notes).toContainText('Claude model names run the model chosen under Settings → General → Agent → Claude model names')
     await expect(notes).toHaveAttribute('data-count', '3')
     await expect(editor.getByTestId(testIds.customizationName)).toHaveValue(name)
     await expect(editor.getByTestId(testIds.customizationDescription)).toHaveValue('Imported from a Claude Code file.')
@@ -237,7 +237,7 @@ test.describe('customize', () => {
     await expect(editor).toHaveAttribute('data-mode', 'import')
     // Phase 12 (ADR-058): the editor keeps the Claude model name (`model: sonnet`), so its alias note comes back.
     await expect(editor.getByTestId(testIds.customizationImportNotes)).toHaveAttribute('data-count', '2')
-    await expect(editor.getByTestId(testIds.customizationImportNotes)).toContainText('Claude model names use the model aliases of the settings')
+    await expect(editor.getByTestId(testIds.customizationImportNotes)).toContainText('Claude model names run the model chosen under Settings → General → Agent → Claude model names')
     await expect(editor.getByTestId(testIds.customizationName)).toHaveValue(name)
     await expect(editor.getByTestId(testIds.customizationDescription)).toHaveValue(stored.description)
     for (const tool of ['read_file', 'search_files'])

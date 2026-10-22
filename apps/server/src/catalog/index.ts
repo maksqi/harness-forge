@@ -12,8 +12,14 @@
 //
 // Background work (off under Vitest unless enabled through `createModelCatalogWith`): a refresh cycle shortly after
 // `start()` and every 15 minutes (listings of enabled, configured providers that are stale or whose credentials
-// changed; the models.dev snapshot when older than a week, never with `HF_OFFLINE=1`) and a check when a provider is
-// registered. After a credential save the credentials route runs `providers.test()` + `catalog.refresh()` itself.
+// changed; the models.dev snapshot when older than a week) and a check when a provider is registered. After a credential
+// save the credentials route runs `providers.test()` + `catalog.refresh()` itself.
+//
+// `HF_OFFLINE=1` (v1.8.1): no automatic refresh at all, so the server never calls a provider or models.dev on its own
+// (no cycle, no check of a registered provider; loopback providers included, the host cannot tell where provider code
+// connects). The cached listings (`model_cache`, else the seeds) and the snapshot keep serving. A refresh the user asks
+// for still lists: `refresh()` (`POST /providers/:id/models/refresh`, the check after a credential save or a created
+// provider) and the provider test, which reach the same provider endpoints as the user's chats.
 import type { CatalogModel, CustomModelInput, CustomModelKey, ModelInfo, ModelPrefsUpdate, ModelSource } from '@harness-forge/shared'
 import type { ModelPrefRow } from '../db/schema.ts'
 import type { RegisteredProvider } from '../registry/types.ts'
@@ -72,7 +78,10 @@ export interface ModelCatalogOptions {
   bundledSnapshotPath?: string
   /** Default: `<data>/cache/models-dev.json`. */
   cacheSnapshotPath?: string
-  /** Background refreshes (timers, checks of newly registered providers). Default: on, except under Vitest. */
+  /**
+   * Background refreshes (timers, checks of newly registered providers). Default: on, except under Vitest. With
+   * `HF_OFFLINE=1` nothing is refreshed automatically whatever this says.
+   */
   background?: boolean
   initialDelayMs?: number
   intervalMs?: number
@@ -539,10 +548,10 @@ export function createModelCatalogWith(deps: AppDeps, options: ModelCatalogOptio
    * Refreshes a provider's listing in the background when due: enabled, `listModels`, credentials complete, and either
    * the credentials changed since the last attempt of this process or the listing is stale (not retried within
    * `LISTING_RETRY_MS` of a failure). A provider configured only by defaults (a local server nobody set up) does not get
-   * a provider error for a failed background listing.
+   * a provider error for a failed background listing. Never with `HF_OFFLINE=1`.
    */
   async function considerRefresh(providerId: string): Promise<void> {
-    if (stopped)
+    if (stopped || deps.env.offline)
       return
     const registered = registeredProvider(providerId)
     if (registered?.definition.listModels === undefined || inFlight.has(providerId))
@@ -568,7 +577,7 @@ export function createModelCatalogWith(deps: AppDeps, options: ModelCatalogOptio
   }
 
   function scheduleProviderCheck(providerId: string): void {
-    if (!background || stopped)
+    if (!background || stopped || deps.env.offline)
       return
     clearTimeout(providerCheckTimers.get(providerId))
     const timer = setTimeout(() => {
@@ -710,7 +719,8 @@ export function createModelCatalogWith(deps: AppDeps, options: ModelCatalogOptio
       catch (error) {
         logger.warn('cannot observe the registry', { err: error })
       }
-      if (background)
+      // Offline the cycle has nothing to do (no listing, no models.dev), so no timer runs at all.
+      if (background && !deps.env.offline)
         scheduleCycle(options.initialDelayMs ?? BACKGROUND_INITIAL_DELAY_MS)
     },
 

@@ -47,6 +47,13 @@ const pending = ref<Record<string, RowAction>>({})
 /** Optimistic switch values while a toggle is saved. */
 const switching = ref<Record<string, boolean>>({})
 
+/**
+ * The enabled switch: a 40px tall hit area on coarse pointers (the small switch stays 14px; its `::after` counts from
+ * inside the 1px border, so 12 + 2 * 14 = 40px). It stays inside its row (`py-3`), and `mr-2` keeps the base 12px
+ * sideways clear of Restart.
+ */
+const SWITCH_CLASS = 'pointer-coarse:after:-inset-y-3.5'
+
 const servers = computed(() => plugins.mcp.filter(server => server.pluginId === props.pluginId))
 const canAdd = computed(() => props.pluginId === CORE_MCP_PLUGIN_ID)
 const showSkeleton = computed(() => !plugins.mcpLoaded && !loadError.value)
@@ -309,7 +316,7 @@ function onDeleteOpenChange(value: boolean) {
             :aria-label="`Enable ${server.name}`"
             :data-testid="testIds.mcpEnabled"
             :data-server-id="server.id"
-            class="mr-2"
+            :class="cn(SWITCH_CLASS, 'mr-2')"
             @update:model-value="value => setEnabled(server, value)"
           />
           <Button

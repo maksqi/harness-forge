@@ -3,7 +3,7 @@
 // off (no password) and on (fresh auth), copy as JSON, delete with the confirmation and focus, review (the trust dialog)
 // and open plugin; the exposes open the editor and the import. Phase 12: project rows edited and deleted in their
 // settings file, Where for a new hook, Review plugin…, the unknown-event / unsupported-type notices and the
-// `workspace.changed` refetch.
+// `workspace.changed` refetch; v1.8.1: the pending rows of an untrusted Claude Code plugin.
 import type { HookEntry } from '@harness-forge/shared'
 import type { VueWrapper } from '@vue/test-utils'
 import type { MockApi } from '~/utils/testing/mock-api'
@@ -378,5 +378,26 @@ describe('hooksPanel: Phase 12 (W12.12-T2)', () => {
     expect(pending.textContent).toContain('Plugin not trusted')
     await chooseFromMenu(pending, '[data-action="trust-plugin"]')
     expect(wrapper!.findComponent({ name: 'TrustDialog' }).props('pluginId')).toBe('hook-pack')
+  })
+
+  it('lists an untrusted Claude Code plugin\'s hooks under From plugins as not trusted; Open plugin reviews it on its page (v1.8.1)', async () => {
+    api.plugins.list.mockResolvedValue({ items: [pluginSummary({ id: 'review-kit', name: 'Review kit', format: 'claude', state: 'untrusted' })] })
+    // eslint-disable-next-line no-template-curly-in-string -- a plugin variable as written in the plugin's hook file
+    const command = '${CLAUDE_PLUGIN_ROOT}/hooks/format.sh'
+    const claudeHook = hookEntry({ key: 'plugin:review-kit:0', source: 'plugin', id: undefined, pluginId: 'review-kit', state: 'pending', event: 'PostToolUse', matcher: 'Write|Edit', command })
+    api.hooks.list.mockResolvedValue(hookList({ items: [claudeHook], project: undefined }))
+    await usePluginsStore().fetchAll()
+    await mountPanel()
+    const section = document.body.querySelector<HTMLElement>(`[data-testid="${testIds.hooksSection}"][data-source="plugin"]`)!
+    expect(section.dataset.count).toBe('1')
+    const pending = row(element => element.dataset.pluginId === 'review-kit')
+    expect(section.contains(pending)).toBe(true)
+    expect(pending.dataset.state).toBe('pending')
+    expect(pending.textContent).toContain('Review kit')
+    expect(pending.textContent).toContain('Plugin not trusted')
+    expect(pending.querySelector('[data-slot="hook-row-command"]')?.getAttribute('title')).toBe(command)
+    await chooseFromMenu(pending, '[data-action="open-plugin"]')
+    expect(mocks.router.push).toHaveBeenCalledWith('/plugins/review-kit')
+    expect(wrapper!.findComponent({ name: 'TrustDialog' }).exists()).toBe(false)
   })
 })

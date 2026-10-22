@@ -280,8 +280,9 @@ export const hookDataSchema = z.object({
     .refine(value => value === undefined || isJsonWithin(value, LIMITS.hookUpdatedInputBytes), 'The updated input is limited to 64 KB of JSON.')
     .optional(),
   /**
-   * Phase 12 (ADR-057): a `PreToolUse` hook allowed the call (`outcome: 'allowed'`) but the harness still asked (plan
-   * mode, an `always` tool, a sub-agent rule); the web labels it "Allowed by hook · still asks". Absent = false.
+   * Phase 12 (ADR-057): a `PreToolUse` hook (v1.8.1: or a `PermissionRequest` hook) allowed the call (`outcome:
+   * 'allowed'`) but the harness still asked (plan mode, an `always` or `execute` tool, a sub-agent rule); the web labels
+   * it "Allowed by hook · still asks". Absent = false.
    */
   harnessAsked: z.literal(true).optional(),
 })

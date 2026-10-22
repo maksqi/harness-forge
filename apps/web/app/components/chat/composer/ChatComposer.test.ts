@@ -1970,6 +1970,19 @@ describe('chatComposer', () => {
       wrapper.unmount()
     })
 
+    it('an untrusted refusal of a plugin command: Review… opens the plugin page, not the project trust dialog (v1.8.1)', async () => {
+      const { wrapper, composer } = mountComposer({ projectId: projectId(1) })
+      const exposed = composer().vm as unknown as ChatComposerExposed
+      exposed.restoreInput({ text: '/review-kit:review now', files: [] })
+      exposed.showRefusal({ code: 'untrusted', reason: 'The plugin changed.', event: null, source: null, command: null, pluginId: 'review-kit' })
+      await flushPromises()
+      expect(wrapper.get(byTestId(testIds.composerRefusal)).text()).toContain('/review-kit:review runs shell lines of a plugin that changed after you trusted it.')
+      await wrapper.get(byTestId(testIds.composerRefusalReview)).trigger('click')
+      expect(mock.navigateTo).toHaveBeenCalledWith('/plugins/review-kit')
+      expect(chatViewActions.openProjectTrust).not.toHaveBeenCalled()
+      wrapper.unmount()
+    })
+
     it('a refusal clears when the chat changes', async () => {
       const { wrapper, state, composer } = mountComposer()
       const exposed = composer().vm as unknown as ChatComposerExposed

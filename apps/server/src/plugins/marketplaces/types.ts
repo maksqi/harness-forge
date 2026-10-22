@@ -60,7 +60,9 @@ export interface StoredMarketplaceCatalog {
 /**
  * Marketplaces (ADR-054). Errors are `HarnessError`s the routes pass through (API.md 2 / 5.34). Every add, refresh and
  * remove emits `marketplace.changed { id, marketplace }` (`marketplace: null` after a remove); a refresh that changes
- * the update state of installed plugins also emits `plugin.changed` for them.
+ * the update state of installed plugins also emits `plugin.changed` for them. v1.8.1: installing, updating or removing
+ * a plugin from one of its entries emits `marketplace.changed` too (`emitInstalledChange` of ./index.ts, called by the
+ * installer and the plugin route, not by this service).
  */
 export interface MarketplaceService {
   /**

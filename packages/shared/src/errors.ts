@@ -140,6 +140,11 @@ export const conflictDetailsSchema = z.object({
    * sets it.
    */
   hook: z.custom<HookData>(value => typeof value === 'object' && value !== null && !Array.isArray(value), 'Expected a hook record.').optional(),
+  /**
+   * `untrusted` only (v1.8.1): the Claude Code plugin whose tree changed after trust (a plugin command's `!` spans); the
+   * web opens that plugin's page instead of the project trust dialog. No other reason sets it.
+   */
+  pluginId: z.string().optional(),
 })
 export type ConflictDetails = z.infer<typeof conflictDetailsSchema>
 

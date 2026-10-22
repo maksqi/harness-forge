@@ -29,8 +29,14 @@
 // part, also to a part without an argument placeholder (its variables and `\$` escapes; `renderExpansion`); `spanEnv`
 // adds a plugin's variables to the spans' environment (`spanEnvironment(root, spanEnv)`: `CLAUDE_PLUGIN_ROOT`,
 // `CLAUDE_PLUGIN_DATA` of a markdown plugin command, a trusted plugin source).
+// v1.8.1 (ADR-053): a plugin source with `pluginTrust` (a Claude Code plugin command: `claudeSpanTrust` of
+// `plugins/claude/trust.ts`) is trusted only while the plugin's whole tree still hashes to its trust pin: checked with
+// check 4 and again right before the spans run (time passed since the check); a mismatch runs nothing and refuses the
+// command with 409 `conflict` `untrusted` (`spansPluginChanged`, `details.pluginId`), and the plugin is loaded again,
+// which leaves it `untrusted`.
 import type { CommandTemplatePlan, ExpandArgumentsOptions, FileBlock, ShellSpanResult } from '@harness-forge/shared'
 import type { Logger } from '../../logger.ts'
+import type { PluginSpanTrust } from '../../plugins/claude/trust.ts'
 import type { OpenWorkspace } from '../../services/projects/types.ts'
 import type { CommandExpansionHost } from '../commands.ts'
 import { argumentBase, expandArguments, formatShellSpanOutput, HarnessError, renderCommandExpansion } from '@harness-forge/shared'
@@ -70,6 +76,11 @@ export interface ExpandCommandPlanInput {
   readonly arguments?: ExpandArgumentsOptions
   /** Phase 12: extra variables of the spans' environment (a plugin's `CLAUDE_PLUGIN_ROOT` / `CLAUDE_PLUGIN_DATA`). */
   readonly spanEnv?: Readonly<Record<string, string>>
+  /**
+   * v1.8.1: a plugin source's trust re-check (a Claude Code plugin command: its tree still has its pin), with check 4
+   * and right before the spans run; absent = a trusted source as before (harness plugin templates, personal commands).
+   */
+  readonly pluginTrust?: PluginSpanTrust
 }
 
 function issue(message: string): HarnessError {
@@ -120,6 +131,15 @@ export function spansUntrusted(name: string): HarnessError {
   }))
 }
 
+/** v1.8.1: spans of a plugin whose files changed after it was trusted (409 `untrusted`, `details.pluginId`). */
+export function spansPluginChanged(name: string, pluginId: string): HarnessError {
+  return refusal(new HarnessError({
+    code: 'conflict',
+    message: `/${name} runs shell lines of a plugin whose files changed after it was trusted. Review and trust the plugin again to run it.`,
+    details: { reason: 'untrusted', pluginId },
+  }))
+}
+
 /** True when the plan has something to inline: spans, or references in a project chat. */
 export function needsInlining(plan: CommandTemplatePlan, host: CommandExpansionHost): boolean {
   return plan.shellCommands.length > 0 || (plan.filePaths.length > 0 && host.projectId !== null)
@@ -134,8 +154,16 @@ export function minimalExpansion(plan: CommandTemplatePlan, input: string): stri
   return renderCommandExpansion(plan, { shell, files: [] }, input).text
 }
 
-/** Check 4 of the module comment: a project command file's trust item is approved (else 409 `untrusted`). */
+/**
+ * Check 4 of the module comment: a project command file's trust item is approved; v1.8.1: a plugin source with
+ * `pluginTrust` still has its pin (else 409 `untrusted`).
+ */
 async function assertTrusted(request: ExpandCommandPlanInput, workspace: OpenWorkspace, projectId: string): Promise<void> {
+  if (request.source === 'plugin' && request.pluginTrust !== undefined) {
+    if (!await request.pluginTrust.verify(request.signal))
+      throw spansPluginChanged(request.name, request.pluginTrust.pluginId)
+    return
+  }
   if (request.source !== 'project')
     return
   const subject = await commandTrustSubject(workspace.root, request.name, request.plan.shellCommands, request.signal)

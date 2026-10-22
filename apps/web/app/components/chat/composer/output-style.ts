@@ -34,6 +34,11 @@ export interface ComposerRefusalData {
   source: string | null
   /** `untrusted`: the command name (`/name` without the slash), when the host knows it. */
   command: string | null
+  /**
+   * v1.8.1, `untrusted`: the plugin whose files changed after it was trusted (`details.pluginId` of a Claude Code plugin
+   * command's refusal); Review… opens its plugin page instead of the project trust dialog. Absent = a project command.
+   */
+  pluginId?: string
 }
 
 const SOURCE_ORDER: readonly CustomizationSource[] = ['builtin', 'user', 'project', 'plugin']
@@ -120,9 +125,11 @@ export function refusalOf(error: unknown): ComposerRefusalData | null {
   const harness = toHarnessError(error)
   if (harness.code !== 'conflict')
     return null
-  const details = harness.details as { reason?: unknown, hook?: unknown } | undefined
-  if (details?.reason === 'untrusted')
-    return { code: 'untrusted', reason: harness.message, event: null, source: null, command: null }
+  const details = harness.details as { reason?: unknown, hook?: unknown, pluginId?: unknown } | undefined
+  if (details?.reason === 'untrusted') {
+    const pluginId = typeof details.pluginId === 'string' && details.pluginId !== '' ? details.pluginId : null
+    return { code: 'untrusted', reason: harness.message, event: null, source: null, command: null, ...(pluginId === null ? {} : { pluginId }) }
+  }
   if (details?.reason !== 'hook-blocked')
     return null
   const parsed = hookDataSchema.safeParse(details.hook)
@@ -225,6 +232,9 @@ export function refusalSourceLine(refusal: ComposerRefusalData): string | null {
 export function refusalTitle(refusal: ComposerRefusalData): string {
   if (refusal.code === 'hook-blocked')
     return 'A hook blocked this message'
+  // v1.8.1: a plugin's spans (its files changed after it was trusted).
+  if (refusal.pluginId)
+    return refusal.command ? `/${refusal.command} runs shell lines of a plugin that changed after you trusted it.` : 'This command runs shell lines of a plugin that changed after you trusted it.'
   return refusal.command
     ? `/${refusal.command} runs shell lines you haven't approved.`
     : 'This command runs shell lines you haven\'t approved.'

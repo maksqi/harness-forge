@@ -45,6 +45,12 @@ function onViewLogs() {
 
 /** Controls that sit above the stretched link. */
 const ABOVE_LINK = 'relative z-10'
+
+/**
+ * The enable switch: a 40px tall hit area on coarse pointers (the small switch stays 14px; its `::after` counts from
+ * inside the 1px border, so 12 + 2 * 14 = 40px), inside the card's padding and above the stretched link.
+ */
+const SWITCH_CLASS = 'pointer-coarse:after:-inset-y-3.5'
 </script>
 
 <template>
@@ -96,7 +102,7 @@ const ABOVE_LINK = 'relative z-10'
         :model-value="plugin.enabled"
         :aria-label="`Enable ${plugin.name}`"
         :data-testid="testIds.pluginCardSwitch"
-        :class="cn(ABOVE_LINK, 'mt-1.5')"
+        :class="cn(ABOVE_LINK, SWITCH_CLASS, 'mt-1.5')"
         @update:model-value="value => emit('update:enabled', value)"
       />
     </div>

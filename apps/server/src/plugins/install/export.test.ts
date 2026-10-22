@@ -1,7 +1,9 @@
 // Export of a Claude Code plugin (W12.18-T1; `GET /plugins/:id/export`): the installed tree below `<id>/` with the same
 // paths and contents, the owner exec bits as Unix external attributes, the UTF-8 path order, `<id>-<version>.zip`, the
 // skip rules and caps of the harness export. Round trip with the real host and reader: inspecting the exported zip
-// gives the installed plugin's `trust.hash`, and installing it again keeps the exec bits on disk.
+// gives the installed plugin's `trust.hash`, and installing it again keeps the exec bits on disk. v1.8.1 (CCR-1): an
+// entry overlay is one more file, `.hf-entry-overlay.json`, of a Claude Code export only (a harness export is unchanged);
+// a Claude Code tree that holds that name cannot be exported.
 import type { SourcesTestApp } from '../marketplaces/testing.ts'
 import { Buffer } from 'node:buffer'
 import { lstatSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
@@ -17,7 +19,8 @@ import { createSourcesTestApp } from '../marketplaces/testing.ts'
 import { EntryCollector } from './archive.ts'
 import { INSTALL_LIMITS } from './errors.ts'
 import { exportPluginDirectory } from './export.ts'
-import { allowAll } from './testing.ts'
+import { entryOverlayFile, OVERLAY_FILE_NAME, readEntryOverlayFile } from './overlay-file.ts'
+import { allowAll, declarativePlugin, writeFileSet } from './testing.ts'
 import { readZip } from './zip.ts'
 
 const apps: SourcesTestApp[] = []
@@ -139,5 +142,39 @@ describe('export of a Claude Code plugin', () => {
     const empty = await tempFolder()
     expect(await rejection(exportPluginDirectory('empty', '1.0.0', empty, INSTALL_LIMITS, { format: 'claude' })))
       .toMatchObject({ code: 'validation_error', message: 'The plugin folder has no files, so it cannot be exported.' })
+  })
+})
+
+describe('the entry overlay in an export (v1.8.1, CCR-1)', () => {
+  const overlay = { name: 'notes-only', strict: true, version: '0.3.0', description: 'Two note commands.', overlay: { version: '0.3.0', description: 'Two note commands.' } }
+
+  it('a Claude Code export adds the overlay file in path order; a tree holding that name is refused', async () => {
+    const dir = join(await tempFolder(), 'notes-only')
+    await writeFileTree(dir, claudePluginFiles('notes-only'))
+    const exported = await exportPluginDirectory('notes-only', '0.3.0', dir, INSTALL_LIMITS, { format: 'claude', overlay })
+    const entries = await readZip(exported.data, new EntryCollector(INSTALL_LIMITS))
+    expect(entries.map(entry => entry.path)).toEqual([`notes-only/${OVERLAY_FILE_NAME}`, 'notes-only/commands/note.md', 'notes-only/commands/summarize.md'])
+    expect(Buffer.from(entries[0]!.data!).equals(Buffer.from(entryOverlayFile(overlay)))).toBe(true)
+    expect(readEntryOverlayFile(entries[0]!.data!)).toEqual(overlay)
+    // The overlay file counts against the caps: the tree alone (a folder and two files) fits in 3 entries, not with it.
+    const caps = { entries: 3, expandedBytes: INSTALL_LIMITS.expandedBytes }
+    await exportPluginDirectory('notes-only', '0.3.0', dir, caps, { format: 'claude' })
+    expect(await rejection(exportPluginDirectory('notes-only', '0.3.0', dir, caps, { format: 'claude', overlay })))
+      .toMatchObject({ code: 'validation_error', message: 'The plugin has more than 3 files and folders, so it cannot be exported.' })
+
+    writeFileSync(join(dir, OVERLAY_FILE_NAME), '{}')
+    for (const options of [{ format: 'claude' as const }, { format: 'claude' as const, overlay }]) {
+      expect(await rejection(exportPluginDirectory('notes-only', '0.3.0', dir, INSTALL_LIMITS, options)))
+        .toMatchObject({ code: 'validation_error', message: `The plugin has its own "${OVERLAY_FILE_NAME}", a name harness-forge keeps for the entry overlay of an export, so it cannot be exported.` })
+    }
+  })
+
+  it('a harness plugin export is unchanged (no overlay file, a file of that name is exported as it is)', async () => {
+    const dir = join(await tempFolder(), 'exported')
+    writeFileSet(dir, { ...declarativePlugin('exported'), [OVERLAY_FILE_NAME]: '{}' })
+    const plain = await exportPluginDirectory('exported', '1.0.0', dir, INSTALL_LIMITS)
+    const asked = await exportPluginDirectory('exported', '1.0.0', dir, INSTALL_LIMITS, { format: 'harness', overlay })
+    expect(Buffer.from(asked.data).equals(Buffer.from(plain.data))).toBe(true)
+    expect((await readZip(plain.data, new EntryCollector(INSTALL_LIMITS))).map(entry => entry.path)).toEqual([`exported/${OVERLAY_FILE_NAME}`, 'exported/plugin.json'])
   })
 })

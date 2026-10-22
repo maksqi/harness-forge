@@ -427,6 +427,66 @@ describe('background refresh (fake clock)', () => {
     expect(await t.deps.providers.get('local')).toMatchObject({ status: 'error', lastError: { code: 'provider_unreachable' } })
   })
 
+  it('never lists in the background with HF_OFFLINE=1; the cached listing keeps serving and a refresh still lists', async () => {
+    const clock = { now: T0 }
+    const { t, control, catalog } = await setup({ env: { HF_OFFLINE: '1' }, clock, catalog: { background: true } })
+    control.listing = [{ id: 'acme-live' }]
+    await t.credentials.set('acme', { apiKey: 'acme-key-000000000001' })
+    await catalog.runBackgroundCycle()
+    expect(control.calls).toBe(0)
+    expect((await t.deps.catalog.list({ providerId: 'acme' })).map(model => model.source)).toEqual(['seed', 'seed'])
+    // An explicit refresh (Refresh models, a provider test, the check after a credential save) still lists.
+    expect((await t.deps.catalog.refresh('acme')).map(model => [model.id, model.source])).toEqual([['acme-live', 'live']])
+    expect(control.calls).toBe(1)
+    // Stale, then other credentials: online both would list again in the next cycle.
+    clock.now = T0 + 3 * LISTING_TTL_MS
+    control.listing = [{ id: 'acme-newer' }]
+    await catalog.runBackgroundCycle()
+    await t.credentials.set('acme', { apiKey: 'acme-key-000000000002' })
+    await catalog.runBackgroundCycle()
+    expect(control.calls).toBe(1)
+    expect((await t.deps.catalog.list({ providerId: 'acme' })).map(model => [model.id, model.source])).toEqual([['acme-live', 'live']])
+    expect(await t.deps.catalog.stats('acme')).toEqual({ modelCount: 1, fetchedAt: T0 })
+  })
+
+  it('serves a listing cached before a restart with HF_OFFLINE=1 without listing again', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'hf-catalog-offline-'))
+    const databasePath = join(dataDir, 'harness.db')
+    try {
+      const first = await setup({ dataDir, databasePath })
+      await first.t.credentials.set('acme', { apiKey: 'acme-key-000000000001' })
+      first.control.listing = [{ id: 'acme-live' }]
+      await first.t.deps.catalog.refresh('acme')
+      await first.t.close()
+      app = undefined
+
+      const second = await setup({ dataDir, databasePath, env: { HF_OFFLINE: '1' }, clock: { now: T0 + 30 * LISTING_TTL_MS }, catalog: { background: true } })
+      await second.t.credentials.set('acme', { apiKey: 'acme-key-000000000001' })
+      await second.catalog.runBackgroundCycle()
+      expect(second.control.calls).toBe(0)
+      expect((await second.t.deps.catalog.list({ providerId: 'acme' })).map(model => [model.id, model.source])).toEqual([['acme-live', 'live']])
+      expect(await second.t.deps.catalog.stats('acme')).toEqual({ modelCount: 1, fetchedAt: T0 })
+    }
+    finally {
+      await app?.close()
+      app = undefined
+      rmSync(dataDir, { recursive: true, force: true })
+    }
+  })
+
+  it('does not check a newly registered provider with HF_OFFLINE=1', async () => {
+    const { t, catalog } = await setup({ env: { HF_OFFLINE: '1' }, catalog: { background: true, initialDelayMs: 0, intervalMs: 50 } })
+    await catalog.start()
+    const late: AcmeControl = { calls: 0, listing: [{ id: 'late-1' }] }
+    t.registry.providers.register('late-plugin', acmeProvider(late, { id: 'late', modelsDevId: 'late', credentials: [] }))
+    // Longer than the check debounce (250 ms) and several cycle intervals.
+    await new Promise(resolve => setTimeout(resolve, 600))
+    expect(late.calls).toBe(0)
+    expect((await t.deps.catalog.list({ providerId: 'late' })).map(model => model.source)).toEqual(['seed', 'seed'])
+    expect((await t.deps.catalog.refresh('late')).map(model => model.id)).toEqual(['late-1'])
+    expect(late.calls).toBe(1)
+  })
+
   it('reuses a listing made seconds ago with the same credentials for a forced refresh', async () => {
     const clock = { now: T0 }
     const { t, control } = await setup({ clock, catalog: { refreshDedupeMs: 3000 } })

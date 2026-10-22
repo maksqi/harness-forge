@@ -810,4 +810,22 @@ describe('createToolApproval: PermissionRequest and the allow record (Phase 12, 
     expect(failing.injected).toHaveLength(1)
     expect(failing.injected[0]).toMatchObject({ harnessAsked: true })
   })
+
+  it('flags an allowed PermissionRequest record the harness did not follow, without a PreToolUse decision (v1.8.1)', async () => {
+    const requestRecord = () => fakeHookRecord('PermissionRequest', 'allowed', { toolCallId: 'call_1', toolName: 'demo_tool' })
+    // An execute tool: the PermissionRequest allow cannot approve it, the card stays.
+    const keptRecord = requestRecord()
+    const kept = hooked({ results: { PermissionRequest: fakeHookResult({ decision: 'allow', record: keptRecord }) } })
+    expect(await createToolApproval(context({ tool: { pluginId: 'demo', definition: definition('ask', 'execute') }, hooks: kept.hooks }))(call)).toBe('user-approval')
+    expect(kept.injected).toEqual([{ ...keptRecord, harnessAsked: true }])
+    // Plan mode keeps the card too.
+    const plan = hooked({ results: { PermissionRequest: fakeHookResult({ decision: 'allow', record: requestRecord() }) } })
+    expect(await createToolApproval(context({ toolMode: 'plan', tool: { pluginId: 'demo', definition: definition('ask') }, hooks: plan.hooks }))(call)).toBe('user-approval')
+    expect(plan.injected[0]).toMatchObject({ event: 'PermissionRequest', outcome: 'allowed', harnessAsked: true })
+    // An allow that approved the call: no flag.
+    const followedRecord = requestRecord()
+    const followed = hooked({ results: { PermissionRequest: fakeHookResult({ decision: 'allow', record: followedRecord }) } })
+    expect(await createToolApproval(context({ tool: { pluginId: 'demo', definition: definition('ask') }, hooks: followed.hooks }))(call)).toBe('approved')
+    expect(followed.injected).toEqual([followedRecord])
+  })
 })

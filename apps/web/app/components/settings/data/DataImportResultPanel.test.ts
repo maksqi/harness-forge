@@ -19,7 +19,14 @@ function result(overrides: Partial<DataImportResult> = {}): DataImportResult {
   }
 }
 
-const line = (r: DataImportResult) => mount(DataImportResultPanel, { props: { result: r } }).find('[data-slot="data-import-customizations"]')
+/** NuxtLink outside Nuxt: a plain anchor (the rows of imported chats link to them). */
+const NuxtLink = { props: ['to'], template: '<a :href="to"><slot /></a>' }
+
+function panel(r: DataImportResult) {
+  return mount(DataImportResultPanel, { props: { result: r }, global: { stubs: { NuxtLink } } })
+}
+
+const line = (r: DataImportResult) => panel(r).find('[data-slot="data-import-customizations"]')
 
 describe('dataImportResultPanel customizations line', () => {
   it('is absent when nothing was restored', () => {
@@ -36,7 +43,7 @@ describe('dataImportResultPanel customizations line', () => {
 })
 
 describe('dataImportResultPanel turned-off line (Phase 12, W12.10-T4)', () => {
-  const turnedOff = (r: DataImportResult) => mount(DataImportResultPanel, { props: { result: r } }).find('[data-slot="data-import-turned-off"]')
+  const turnedOff = (r: DataImportResult) => panel(r).find('[data-slot="data-import-turned-off"]')
 
   it('counts the commands a restore turned off', () => {
     expect(turnedOff(result({ customizations: { imported: 3, skipped: 0, failed: 0, turnedOff: 2 } })).text()).toBe('2 commands turned off (they run shell lines)')

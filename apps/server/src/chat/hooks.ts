@@ -47,8 +47,9 @@
 //   `allow` may approve (`allowApproves`).
 // - Records of a tool call (`PreToolUse`, `PermissionRequest`) stay pending until `approval.ts` settles the call
 //   (`settle(callId, { harnessAsked })`, also from its catch path): the `PreToolUse` record of an `allowed` call the
-//   harness still asks for gets `harnessAsked: true` (the web shows "Allowed by hook · still asks"); the replay map
-//   `OUTCOME_DECISIONS` is unchanged. Records still pending at the next step boundary are stored as they are.
+//   harness still asks for gets `harnessAsked: true` (the web shows "Allowed by hook · still asks"); v1.8.1: so does an
+//   `allowed` `PermissionRequest` record of a call that still asks (`ToolCallSettlement.asked`, `settledRecord`); the
+//   replay map `OUTCOME_DECISIONS` is unchanged. Records still pending at the next step boundary are stored as they are.
 // - `PostToolUseFailure` (`postToolUseFailure(call, error, signal)`, `tools.ts`, the catch paths of a call that failed
 //   after its approval; never on an abort): like `PostToolUse`, the model text of its record is queued for the next step
 //   (its `context`; a block reason through `hookModelText`) and `continue: false` asks the run to stop. `error` is cut
@@ -242,6 +243,13 @@ export interface ToolCallSettlement {
    * an `always` policy, a sub-agent rule): its pending record is stored with `harnessAsked: true`.
    */
   readonly harnessAsked: boolean
+  /**
+   * v1.8.1: the call's final approval asks the user (`user-approval`), whoever decided it: a `PermissionRequest` record
+   * whose `allow` the harness did not follow (plan mode, an `execute` tool, an `always` policy) is stored with
+   * `harnessAsked: true` too. Absent = `harnessAsked` (enough when a `PreToolUse` allow was not followed: both allows
+   * pass the same gate, so the `PermissionRequest` allow was not followed either).
+   */
+  readonly asked?: boolean
 }
 
 /**
@@ -272,8 +280,9 @@ export interface ToolHooks {
   readonly postToolUseFailure: (call: HookToolCall, error: string, signal: AbortSignal) => Promise<void>
   /**
    * Phase 12: stores the pending records of the call (`PreToolUse`, then `PermissionRequest`), the `PreToolUse` one
-   * with `harnessAsked: true` when `settlement.harnessAsked` and its outcome is `allowed`. A call without pending
-   * records is a no-op. Synchronous; never throws.
+   * with `harnessAsked: true` when `settlement.harnessAsked` and its outcome is `allowed` (v1.8.1: an `allowed`
+   * `PermissionRequest` one when the call still asks, `settledRecord`). A call without pending records is a no-op.
+   * Synchronous; never throws.
    */
   readonly settle: (toolCallId: string, settlement: ToolCallSettlement) => void
 }
@@ -430,6 +439,20 @@ export function storedDecisions(continued: HarnessUIMessage | null): Map<string,
       decisions.set(data.toolCallId, storedDecision(data))
   }
   return decisions
+}
+
+/**
+ * A pending record of a tool call as `settle` stores it: an `allowed` record the harness did not follow gets
+ * `harnessAsked: true` (`PreToolUse` with `settlement.harnessAsked`; v1.8.1: `PermissionRequest` when the call still asks,
+ * `settlement.asked ?? settlement.harnessAsked`); every other record as it is. The replay (`storedDecision`) is unchanged.
+ */
+export function settledRecord(data: HookData, settlement: ToolCallSettlement): HookData {
+  if (data.outcome !== 'allowed')
+    return data
+  const stillAsks = data.event === 'PreToolUse'
+    ? settlement.harnessAsked === true
+    : data.event === 'PermissionRequest' && (settlement.asked ?? settlement.harnessAsked) === true
+  return stillAsks ? { ...data, harnessAsked: true } : data
 }
 
 const MCP_PREFIX = 'mcp__'
@@ -651,8 +674,7 @@ class ToolHookRuntime implements ToolHooks {
     this.#pending.delete(toolCallId)
     for (const data of held) {
       try {
-        const asked = settlement.harnessAsked === true && data.event === 'PreToolUse' && data.outcome === 'allowed'
-        this.record(asked ? { ...data, harnessAsked: true } : data)
+        this.record(settledRecord(data, settlement))
       }
       catch (error) {
         this.logger.warn('a hook record could not be stored', { event: data.event, err: error })

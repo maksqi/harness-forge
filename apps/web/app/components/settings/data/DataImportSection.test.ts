@@ -22,6 +22,8 @@ vi.mock('vue-sonner', () => ({ toast: Object.assign(vi.fn(), { success: vi.fn(),
 let api: MockApi
 let pinia: ReturnType<typeof createPinia>
 let wrapper: VueWrapper | null = null
+/** NuxtLink outside Nuxt: a plain anchor. */
+const NuxtLink = { props: ['to'], template: '<a :href="to"><slot /></a>' }
 
 function result(overrides: Partial<DataImportResult> = {}): DataImportResult {
   return {
@@ -64,7 +66,7 @@ describe('dataImportSection (Phase 10)', () => {
   it('restores the personal definitions together with the settings and says so', async () => {
     const refreshLoaded = vi.spyOn(useCustomizationsStore(), 'refreshLoaded').mockResolvedValue()
     api.data.import.mockResolvedValue(result({ customizations: { imported: 3, skipped: 1, failed: 0 } }))
-    wrapper = mount(DataImportSection, { attachTo: document.body, global: { plugins: [pinia] } })
+    wrapper = mount(DataImportSection, { attachTo: document.body, global: { plugins: [pinia], stubs: { NuxtLink } } })
     await chooseBackup()
     const restore = byTestId(testIds.dataImportRestoreSettings)!
     expect(restore.closest('[data-slot="field"]')?.textContent)
@@ -83,7 +85,7 @@ describe('dataImportSection (Phase 10)', () => {
   it('sends false for both flags when the switch is off and leaves the customizations alone', async () => {
     const refreshLoaded = vi.spyOn(useCustomizationsStore(), 'refreshLoaded').mockResolvedValue()
     api.data.import.mockResolvedValue(result({ settingsRestored: false }))
-    wrapper = mount(DataImportSection, { attachTo: document.body, global: { plugins: [pinia] } })
+    wrapper = mount(DataImportSection, { attachTo: document.body, global: { plugins: [pinia], stubs: { NuxtLink } } })
     await chooseBackup()
     byTestId(testIds.dataImport)!.click()
     await flushPromises()
@@ -96,7 +98,6 @@ describe('dataImportSection (Phase 10)', () => {
 
 describe('dataImportSection: Import from Claude Code (Phase 12, W12.10-T3)', () => {
   it('links to the import dialog of Customize with its line', () => {
-    const NuxtLink = { props: ['to'], template: '<a :href="to"><slot /></a>' }
     wrapper = mount(DataImportSection, { attachTo: document.body, global: { plugins: [pinia], stubs: { NuxtLink } } })
     const link = byTestId(testIds.dataImportClaude)!
     expect(link.textContent?.trim()).toBe('Import from Claude Code…')
@@ -107,7 +108,7 @@ describe('dataImportSection: Import from Claude Code (Phase 12, W12.10-T3)', () 
   it('shows how many commands a restore turned off', async () => {
     api.data.import.mockResolvedValue(result({ customizations: { imported: 3, skipped: 0, failed: 0, turnedOff: 2 } }))
     vi.spyOn(useCustomizationsStore(), 'refreshLoaded').mockResolvedValue()
-    wrapper = mount(DataImportSection, { attachTo: document.body, global: { plugins: [pinia] } })
+    wrapper = mount(DataImportSection, { attachTo: document.body, global: { plugins: [pinia], stubs: { NuxtLink } } })
     await chooseBackup()
     byTestId(testIds.dataImport)!.click()
     await flushPromises()
