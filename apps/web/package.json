@@ -29,7 +29,7 @@
     "@fontsource-variable/source-serif-4": "^5.3.1",
     "@harness-forge/plugin-sdk": "workspace:*",
     "@harness-forge/shared": "workspace:*",
-    "@lucide/vue": "^1.60.0",
+    "@lucide/vue": "^1.61.0",
     "@nuxtjs/color-mode": "^4.0.1",
     "@pinia/nuxt": "^1.0.3",
     "@tailwindcss/vite": "^4.3.3",
